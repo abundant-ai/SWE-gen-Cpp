@@ -1,0 +1,372 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index a3e5b53d..9e5db746 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -77,6 +77,7 @@ set(INTERNAL_HEADERS
+     ${SOURCES_DIR}/catch_matchers_floating.h
+     ${SOURCES_DIR}/catch_matchers_generic.hpp
+     ${SOURCES_DIR}/catch_matchers_string.h
++    ${SOURCES_DIR}/catch_matchers_templates.hpp
+     ${SOURCES_DIR}/catch_matchers_vector.h
+     ${SOURCES_DIR}/catch_message.h
+     ${SOURCES_DIR}/catch_meta.hpp
+@@ -159,6 +160,7 @@ set(IMPL_SOURCES
+     ${SOURCES_DIR}/catch_matchers_floating.cpp
+     ${SOURCES_DIR}/catch_matchers_generic.cpp
+     ${SOURCES_DIR}/catch_matchers_string.cpp
++    ${SOURCES_DIR}/catch_matchers_templates.cpp
+     ${SOURCES_DIR}/catch_message.cpp
+     ${SOURCES_DIR}/catch_output_redirect.cpp
+     ${SOURCES_DIR}/catch_registry_hub.cpp
+diff --git a/src/catch2/catch_capture_matchers.cpp b/src/catch2/catch_capture_matchers.cpp
+index ad51baca..7ce35ef6 100644
+--- a/src/catch2/catch_capture_matchers.cpp
++++ b/src/catch2/catch_capture_matchers.cpp
+@@ -17,7 +17,7 @@ namespace Catch {
+     // the Equals matcher (so the header does not mention matchers)
+     void handleExceptionMatchExpr( AssertionHandler& handler, StringMatcher const& matcher, StringRef const& matcherString  ) {
+         std::string exceptionMessage = Catch::translateActiveException();
+-        MatchExpr<std::string, StringMatcher const&> expr( exceptionMessage, matcher, matcherString );
++        MatchExpr<std::string, StringMatcher const&> expr( std::move(exceptionMessage), matcher, matcherString );
+         handler.handleExpr( expr );
+     }
+ 
+diff --git a/src/catch2/catch_capture_matchers.h b/src/catch2/catch_capture_matchers.h
+index 3f883a39..7ff23628 100644
+--- a/src/catch2/catch_capture_matchers.h
++++ b/src/catch2/catch_capture_matchers.h
+@@ -16,13 +16,13 @@ namespace Catch {
+ 
+     template<typename ArgT, typename MatcherT>
+     class MatchExpr : public ITransientExpression {
+-        ArgT const& m_arg;
++        ArgT && m_arg;
+         MatcherT m_matcher;
+         StringRef m_matcherString;
+     public:
+-        MatchExpr( ArgT const& arg, MatcherT const& matcher, StringRef const& matcherString )
+-        :   ITransientExpression{ true, matcher.match( arg ) },
+-            m_arg( arg ),
++        MatchExpr( ArgT && arg, MatcherT const& matcher, StringRef const& matcherString )
++        :   ITransientExpression{ true, matcher.match( arg ) }, // not forwarding arg here on purpose
++            m_arg( std::forward<ArgT>(arg) ),
+             m_matcher( matcher ),
+             m_matcherString( matcherString )
+         {}
+@@ -42,8 +42,8 @@ namespace Catch {
+     void handleExceptionMatchExpr( AssertionHandler& handler, StringMatcher const& matcher, StringRef const& matcherString  );
+ 
+     template<typename ArgT, typename MatcherT>
+-    auto makeMatchExpr( ArgT const& arg, MatcherT const& matcher, StringRef const& matcherString  ) -> MatchExpr<ArgT, MatcherT> {
+-        return MatchExpr<ArgT, MatcherT>( arg, matcher, matcherString );
++    auto makeMatchExpr( ArgT && arg, MatcherT const& matcher, StringRef const& matcherString  ) -> MatchExpr<ArgT, MatcherT> {
++        return MatchExpr<ArgT, MatcherT>( std::forward<ArgT>(arg), matcher, matcherString );
+     }
+ 
+ } // namespace Catch
+diff --git a/src/catch2/catch_matchers_templates.cpp b/src/catch2/catch_matchers_templates.cpp
+new file mode 100644
+index 00000000..16b4a685
+--- /dev/null
++++ b/src/catch2/catch_matchers_templates.cpp
+@@ -0,0 +1,32 @@
++#include <catch2/catch_matchers_templates.hpp>
++
++namespace Catch {
++namespace Matchers {
++    namespace Impl {
++        MatcherGenericBase::~MatcherGenericBase() {}
++
++        std::string describe_multi_matcher(StringRef combine, std::string const* descriptions_begin, std::string const* descriptions_end) {
++            std::string description;
++            std::size_t combined_size = 4;
++            for ( auto desc = descriptions_begin; desc != descriptions_end; ++desc ) {
++                combined_size += desc->size();
++            }
++            combined_size += (descriptions_end - descriptions_begin - 1) * combine.size();
++
++            description.reserve(combined_size);
++
++            description += "( ";
++            bool first = true;
++            for( auto desc = descriptions_begin; desc != descriptions_end; ++desc ) {
++                if( first )
++                    first = false;
++                else
++                    description += combine;
++                description += *desc;
++            }
++            description += " )";
++            return description;
++        }
++    }
++} // namespace Matchers
++} // namespace Catch
+diff --git a/src/catch2/catch_matchers_templates.hpp b/src/catch2/catch_matchers_templates.hpp
+new file mode 100644
+index 00000000..e1387db6
+--- /dev/null
++++ b/src/catch2/catch_matchers_templates.hpp
+@@ -0,0 +1,262 @@
++#ifndef TWOBLUECUBES_CATCH_MATCHERS_TEMPLATES_HPP_INCLUDED
++#define TWOBLUECUBES_CATCH_MATCHERS_TEMPLATES_HPP_INCLUDED
++
++#include <catch2/catch_common.h>
++#include <catch2/catch_matchers.h>
++#include <catch2/catch_stringref.h>
++
++#include <array>
++#include <algorithm>
++#include <memory>
++#include <string>
++#include <type_traits>
++#include <utility>
++
++namespace Catch {
++namespace Matchers {
++    namespace Impl {
++
++        template<typename... MatcherTs> struct MatchAllOfGeneric;
++        template<typename... MatcherTs> struct MatchAnyOfGeneric;
++        template<typename MatcherT> struct MatchNotOfGeneric;
++
++        struct MatcherGenericBase : MatcherUntypedBase {
++            virtual ~MatcherGenericBase();
++        };
++
++        template<std::size_t N, std::size_t M>
++        std::array<void const*, N + M> array_cat(std::array<void const*, N> && lhs, std::array<void const*, M> && rhs) {
++            std::array<void const*, N + M> arr{};
++            std::copy_n(lhs.begin(), N, arr.begin());
++            std::copy_n(rhs.begin(), M, arr.begin() + N);
++            return arr;
++        }
++
++        template<std::size_t N>
++        std::array<void const*, N+1> array_cat(std::array<void const*, N> && lhs, void const* rhs) {
++            std::array<void const*, N+1> arr{};
++            std::copy_n(lhs.begin(), N, arr.begin());
++            arr[N] = rhs;
++            return arr;
++        }
++
++        template<std::size_t N>
++        std::array<void const*, N+1> array_cat(void const* lhs, std::array<void const*, N> && rhs) {
++            std::array<void const*, N+1> arr{lhs};
++            std::copy_n(rhs.begin(), N, arr.begin() + 1);
++            return arr;
++        }
++
++        #ifdef CATCH_CPP17_OR_GREATER
++
++        using std::conjunction;
++
++        #else // CATCH_CPP17_OR_GREATER
++
++        template<typename... Cond>
++        struct conjunction : std::true_type {};
++
++        template<typename Cond, typename... Rest>
++        struct conjunction<Cond, Rest...> : std::integral_constant<bool, Cond::value && conjunction<Rest...>::value> {};
++
++        #endif // CATCH_CPP17_OR_GREATER
++
++        template<typename T>
++        using is_generic_matcher = std::is_base_of<
++            Catch::Matchers::Impl::MatcherGenericBase,
++            typename std::remove_cv<typename std::remove_reference<T>::type>::type
++        >;
++
++        template<typename... Ts>
++        using are_generic_matchers = conjunction<is_generic_matcher<Ts>...>;
++
++        template<typename T>
++        using is_matcher = std::is_base_of<
++            Catch::Matchers::Impl::MatcherUntypedBase,
++            typename std::remove_cv<typename std::remove_reference<T>::type>::type
++        >;
++
++
++        template<std::size_t N, typename Arg>
++        bool match_all_of(Arg&&, std::array<void const*, N> const&, std::index_sequence<>) {
++            return true;
++        }
++
++        template<typename T, typename... MatcherTs, std::size_t N, typename Arg, std::size_t Idx, std::size_t... Indices>
++        bool match_all_of(Arg&& arg, std::array<void const*, N> const& matchers, std::index_sequence<Idx, Indices...>) {
++            return static_cast<T const*>(matchers[Idx])->match(arg) && match_all_of<MatcherTs...>(arg, matchers, std::index_sequence<Indices...>{});
++        }
++
++
++        template<std::size_t N, typename Arg>
++        bool match_any_of(Arg&&, std::array<void const*, N> const&, std::index_sequence<>) {
++            return false;
++        }
++
++        template<typename T, typename... MatcherTs, std::size_t N, typename Arg, std::size_t Idx, std::size_t... Indices>
++        bool match_any_of(Arg&& arg, std::array<void const*, N> const& matchers, std::index_sequence<Idx, Indices...>) {
++            return static_cast<T const*>(matchers[Idx])->match(arg) || match_any_of<MatcherTs...>(arg, matchers, std::index_sequence<Indices...>{});
++        }
++
++        std::string describe_multi_matcher(StringRef combine, std::string const* descriptions_begin, std::string const* descriptions_end);
++
++        template<typename... MatcherTs, std::size_t... Idx>
++        std::string describe_multi_matcher(StringRef combine, std::array<void const*, sizeof...(MatcherTs)> const& matchers, std::index_sequence<Idx...>) {
++            std::array<std::string, sizeof...(MatcherTs)> descriptions {{
++                static_cast<MatcherTs const*>(matchers[Idx])->toString()...
++            }};
++
++            return describe_multi_matcher(combine, descriptions.data(), descriptions.data() + descriptions.size());
++        }
++
++
++        template<typename... MatcherTs>
++        struct MatchAllOfGeneric : MatcherGenericBase {
++            MatchAllOfGeneric(MatcherTs const&... matchers) : m_matchers{std::addressof(matchers)...} {}
++            explicit MatchAllOfGeneric(std::array<void const*, sizeof...(MatcherTs)> matchers) : m_matchers{matchers} {}
++
++            template<typename Arg>
++            bool match(Arg&& arg) const {
++                return match_all_of<MatcherTs...>(arg, m_matchers, std::index_sequence_for<MatcherTs...>{});
++            }
++
++            std::string describe() const override {
++                return describe_multi_matcher<MatcherTs...>(" and "_sr, m_matchers, std::index_sequence_for<MatcherTs...>{});
++            }
++
++            std::array<void const*, sizeof...(MatcherTs)> m_matchers;
++        };
++
++
++        template<typename... MatcherTs>
++        struct MatchAnyOfGeneric : MatcherGenericBase {
++            MatchAnyOfGeneric(MatcherTs const&... matchers) : m_matchers{std::addressof(matchers)...} {}
++            explicit MatchAnyOfGeneric(std::array<void const*, sizeof...(MatcherTs)> matchers) : m_matchers{matchers} {}
++
++            template<typename Arg>
++            bool match(Arg&& arg) const {
++                return match_any_of<MatcherTs...>(arg, m_matchers, std::index_sequence_for<MatcherTs...>{});
++            }
++
++            std::string describe() const override {
++                return describe_multi_matcher<MatcherTs...>(" or "_sr, m_matchers, std::index_sequence_for<MatcherTs...>{});
++            }
++
++            std::array<void const*, sizeof...(MatcherTs)> m_matchers;
++        };
++
++
++        template<typename MatcherT>
++        struct MatchNotOfGeneric : MatcherGenericBase {
++            explicit MatchNotOfGeneric(MatcherT const& matcher) : m_matcher{matcher} {}
++
++            template<typename Arg>
++            bool match(Arg&& arg) const {
++                return !m_matcher.match(arg);
++            }
++
++            std::string describe() const override {
++                return "not " + m_matcher.toString();
++            }
++
++            MatcherT const& m_matcher;
++        };
++
++        // compose only generic matchers
++        template<typename MatcherLHS, typename MatcherRHS>
++        typename std::enable_if<are_generic_matchers<MatcherLHS, MatcherRHS>::value, MatchAllOfGeneric<MatcherLHS, MatcherRHS>>::type
++        operator && (MatcherLHS const& lhs, MatcherRHS const& rhs) {
++            return {lhs, rhs};
++        }
++
++        template<typename MatcherLHS, typename MatcherRHS>
++        typename std::enable_if<are_generic_matchers<MatcherLHS, MatcherRHS>::value, MatchAnyOfGeneric<MatcherLHS, MatcherRHS>>::type
++        operator || (MatcherLHS const& lhs, MatcherRHS const& rhs) {
++            return {lhs, rhs};
++        }
++
++        template<typename MatcherT>
++        typename std::enable_if<is_generic_matcher<MatcherT>::value, MatchNotOfGeneric<MatcherT>>::type
++        operator ! (MatcherT const& matcher) {
++            return MatchNotOfGeneric<MatcherT>{matcher};
++        }
++
++
++        // compose mixed generic and non-generic matchers
++        template<typename MatcherLHS, typename ArgRHS>
++        typename std::enable_if<is_generic_matcher<MatcherLHS>::value, MatchAllOfGeneric<MatcherLHS, MatcherBase<ArgRHS>>>::type
++        operator && (MatcherLHS const& lhs, MatcherBase<ArgRHS> const& rhs) {
++            return {lhs, rhs};
++        }
++
++        template<typename ArgLHS, typename MatcherRHS>
++        typename std::enable_if<is_generic_matcher<MatcherRHS>::value, MatchAllOfGeneric<MatcherBase<ArgLHS>, MatcherRHS>>::type
++        operator && (MatcherBase<ArgLHS> const& lhs, MatcherRHS const& rhs) {
++            return {lhs, rhs};
++        }
++
++        template<typename MatcherLHS, typename ArgRHS>
++        typename std::enable_if<is_generic_matcher<MatcherLHS>::value, MatchAnyOfGeneric<MatcherLHS, MatcherBase<ArgRHS>>>::type
++        operator || (MatcherLHS const& lhs, MatcherBase<ArgRHS> const& rhs) {
++            return {lhs, rhs};
++        }
++
++        template<typename ArgLHS, typename MatcherRHS>
++        typename std::enable_if<is_generic_matcher<MatcherRHS>::value, MatchAnyOfGeneric<MatcherBase<ArgLHS>, MatcherRHS>>::type
++        operator || (MatcherBase<ArgLHS> const& lhs, MatcherRHS const& rhs) {
++            return {lhs, rhs};
++        }
++
++
++        // avoid deep nesting of matcher templates
++        template<typename... MatchersLHS, typename... MatchersRHS>
++        MatchAllOfGeneric<MatchersLHS..., MatchersRHS...>
++        operator && (MatchAllOfGeneric<MatchersLHS...> && lhs, MatchAllOfGeneric<MatchersRHS...> && rhs) {
++            return MatchAllOfGeneric<MatchersLHS..., MatchersRHS...>{array_cat(std::move(lhs.m_matchers), std::move(rhs.m_matchers))};
++        }
++
++        template<typename... MatchersLHS, typename MatcherRHS>
++        typename std::enable_if<is_matcher<MatcherRHS>::value, MatchAllOfGeneric<MatchersLHS..., MatcherRHS>>::type
++        operator && (MatchAllOfGeneric<MatchersLHS...> && lhs, MatcherRHS const& rhs) {
++            return MatchAllOfGeneric<MatchersLHS..., MatcherRHS>{array_cat(std::move(lhs.m_matchers), static_cast<void const*>(&rhs))};
++        }
++
++        template<typename MatcherLHS, typename... MatchersRHS>
++        typename std::enable_if<is_matcher<MatcherLHS>::value, MatchAllOfGeneric<MatcherLHS, MatchersRHS...>>::type
++        operator && (MatcherLHS const& lhs, MatchAllOfGeneric<MatchersRHS...> && rhs) {
++            return MatchAllOfGeneric<MatcherLHS, MatchersRHS...>{array_cat(static_cast<void const*>(std::addressof(lhs)), std::move(rhs.m_matchers))};
++        }
++
++        template<typename... MatchersLHS, typename... MatchersRHS>
++        MatchAnyOfGeneric<MatchersLHS..., MatchersRHS...>
++        operator || (MatchAnyOfGeneric<MatchersLHS...> && lhs, MatchAnyOfGeneric<MatchersRHS...> && rhs) {
++            return MatchAnyOfGeneric<MatchersLHS..., MatchersRHS...>{array_cat(std::move(lhs.m_matchers), std::move(rhs.m_matchers))};
++        }
++
++        template<typename... MatchersLHS, typename MatcherRHS>
++        typename std::enable_if<is_matcher<MatcherRHS>::value, MatchAnyOfGeneric<MatchersLHS..., MatcherRHS>>::type
++        operator || (MatchAnyOfGeneric<MatchersLHS...> && lhs, MatcherRHS const& rhs) {
++            return MatchAnyOfGeneric<MatchersLHS..., MatcherRHS>{array_cat(std::move(lhs.m_matchers), static_cast<void const*>(std::addressof(rhs)))};
++        }
++
++        template<typename MatcherLHS, typename... MatchersRHS>
++        typename std::enable_if<is_matcher<MatcherLHS>::value, MatchAnyOfGeneric<MatcherLHS, MatchersRHS...>>::type
++        operator || (MatcherLHS const& lhs, MatchAnyOfGeneric<MatchersRHS...> && rhs) {
++            return MatchAnyOfGeneric<MatcherLHS, MatchersRHS...>{array_cat(static_cast<void const*>(std::addressof(lhs)), std::move(rhs.m_matchers))};
++        }
++
++        template<typename MatcherT>
++        MatcherT const& operator ! (MatchNotOfGeneric<MatcherT> const& matcher) {
++            return matcher.m_matcher;
++        }
++
++    } // namespace Impl
++
++} // namespace Matchers
++
++using namespace Matchers;
++using Matchers::Impl::MatcherGenericBase;
++
++} // namespace Catch
++
++#endif //TWOBLUECUBES_CATCH_MATCHERS_TEMPLATES_HPP_INCLUDED

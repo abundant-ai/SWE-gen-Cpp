@@ -1,0 +1,846 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 16efa3fe..78d95956 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -157,7 +157,6 @@ set(INTERNAL_HEADERS
+     ${SOURCES_DIR}/internal/catch_wildcard_pattern.hpp
+     ${SOURCES_DIR}/internal/catch_windows_h_proxy.hpp
+     ${SOURCES_DIR}/internal/catch_xmlwriter.hpp
+-    ${SOURCES_DIR}/internal/catch_test_case_info_hasher.hpp
+ )
+ set(IMPL_SOURCES
+     ${SOURCES_DIR}/catch_approx.cpp
+@@ -214,7 +213,6 @@ set(IMPL_SOURCES
+     ${SOURCES_DIR}/catch_version.cpp
+     ${SOURCES_DIR}/internal/catch_wildcard_pattern.cpp
+     ${SOURCES_DIR}/internal/catch_xmlwriter.cpp
+-    ${SOURCES_DIR}/internal/catch_test_case_info_hasher.cpp
+ )
+ set(INTERNAL_FILES ${IMPL_SOURCES} ${INTERNAL_HEADERS})
+ 
+diff --git a/src/catch2/catch_all.hpp b/src/catch2/catch_all.hpp
+index 656417f4..92cdc205 100644
+--- a/src/catch2/catch_all.hpp
++++ b/src/catch2/catch_all.hpp
+@@ -95,7 +95,6 @@
+ #include <catch2/internal/catch_stringref.hpp>
+ #include <catch2/internal/catch_tag_alias_registry.hpp>
+ #include <catch2/internal/catch_template_test_registry.hpp>
+-#include <catch2/internal/catch_test_case_info_hasher.hpp>
+ #include <catch2/internal/catch_test_case_registry_impl.hpp>
+ #include <catch2/internal/catch_test_case_tracker.hpp>
+ #include <catch2/internal/catch_test_failure_exception.hpp>
+diff --git a/src/catch2/internal/catch_test_case_info_hasher.cpp b/src/catch2/internal/catch_test_case_info_hasher.cpp
+deleted file mode 100644
+index 75acc978..00000000
+--- a/src/catch2/internal/catch_test_case_info_hasher.cpp
++++ /dev/null
+@@ -1,31 +0,0 @@
+-#include <catch2/catch_test_case_info.hpp>
+-#include <catch2/internal/catch_test_case_info_hasher.hpp>
+-
+-namespace Catch {
+-    TestCaseInfoHasher::TestCaseInfoHasher( hash_t seed ): m_seed( seed ) {}
+-
+-    uint32_t TestCaseInfoHasher::operator()( TestCaseInfo const& t ) const {
+-        // FNV-1a hash algorithm that is designed for uniqueness:
+-        const hash_t prime = 1099511628211u;
+-        hash_t hash = 14695981039346656037u;
+-        for ( const char c : t.name ) {
+-            hash ^= c;
+-            hash *= prime;
+-        }
+-        for ( const char c : t.className ) {
+-            hash ^= c;
+-            hash *= prime;
+-        }
+-        for ( const Tag& tag : t.tags ) {
+-            for ( const char c : tag.original ) {
+-                hash ^= c;
+-                hash *= prime;
+-            }
+-        }
+-        hash ^= m_seed;
+-        hash *= prime;
+-        const uint32_t low{ static_cast<uint32_t>( hash ) };
+-        const uint32_t high{ static_cast<uint32_t>( hash >> 32 ) };
+-        return low * high;
+-    }
+-} // namespace Catch
+diff --git a/src/catch2/internal/catch_test_case_info_hasher.hpp b/src/catch2/internal/catch_test_case_info_hasher.hpp
+deleted file mode 100644
+index 954bdcde..00000000
+--- a/src/catch2/internal/catch_test_case_info_hasher.hpp
++++ /dev/null
+@@ -1,22 +0,0 @@
+-#ifndef CATCH_TEST_CASE_INFO_HASHER_HPP_INCLUDED
+-#define CATCH_TEST_CASE_INFO_HASHER_HPP_INCLUDED
+-
+-#include <cstdint>
+-
+-namespace Catch {
+-
+-    struct TestCaseInfo;
+-
+-    class TestCaseInfoHasher {
+-    public:
+-        using hash_t = std::uint64_t;
+-        TestCaseInfoHasher( hash_t seed );
+-        uint32_t operator()( TestCaseInfo const& t ) const;
+-
+-    private:
+-        hash_t m_seed;
+-    };
+-
+-} // namespace Catch
+-
+-#endif /* CATCH_TEST_CASE_INFO_HASHER_HPP_INCLUDED */
+diff --git a/src/catch2/internal/catch_test_case_registry_impl.cpp b/src/catch2/internal/catch_test_case_registry_impl.cpp
+index 6c491a95..3c1ab54b 100644
+--- a/src/catch2/internal/catch_test_case_registry_impl.cpp
++++ b/src/catch2/internal/catch_test_case_registry_impl.cpp
+@@ -16,13 +16,38 @@
+ #include <catch2/catch_test_case_info.hpp>
+ #include <catch2/catch_test_spec.hpp>
+ #include <catch2/internal/catch_move_and_forward.hpp>
+-#include <catch2/internal/catch_test_case_info_hasher.hpp>
+ 
+ #include <algorithm>
+ #include <set>
+ 
+ namespace Catch {
+ 
++namespace {
++    struct TestHasher {
++        using hash_t = uint64_t;
++
++        explicit TestHasher( hash_t hashSuffix ):
++            m_hashSuffix( hashSuffix ) {}
++
++        uint64_t m_hashSuffix;
++
++        uint32_t operator()( TestCaseInfo const& t ) const {
++            // FNV-1a hash with multiplication fold.
++            const hash_t prime = 1099511628211u;
++            hash_t hash = 14695981039346656037u;
++            for (const char c : t.name) {
++                hash ^= c;
++                hash *= prime;
++            }
++            hash ^= m_hashSuffix;
++            hash *= prime;
++            const uint32_t low{ static_cast<uint32_t>(hash) };
++            const uint32_t high{ static_cast<uint32_t>(hash >> 32) };
++            return low * high;
++        }
++    };
++} // end anonymous namespace
++
+     std::vector<TestCaseHandle> sortTests( IConfig const& config, std::vector<TestCaseHandle> const& unsortedTestCases ) {
+         switch (config.runOrder()) {
+         case TestRunOrder::Declared:
+@@ -41,9 +66,9 @@ namespace Catch {
+         }
+         case TestRunOrder::Randomized: {
+             seedRng(config);
+-            using TestWithHash = std::pair<TestCaseInfoHasher::hash_t, TestCaseHandle>;
++            using TestWithHash = std::pair<TestHasher::hash_t, TestCaseHandle>;
+ 
+-            TestCaseInfoHasher h{ config.rngSeed() };
++            TestHasher h{ config.rngSeed() };
+             std::vector<TestWithHash> indexed_tests;
+             indexed_tests.reserve(unsortedTestCases.size());
+ 
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 1c520120..ef1b13ea 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -88,7 +88,6 @@ set(TEST_SOURCES
+         ${SELF_TEST_DIR}/IntrospectiveTests/RandomNumberGeneration.tests.cpp
+         ${SELF_TEST_DIR}/IntrospectiveTests/Reporters.tests.cpp
+         ${SELF_TEST_DIR}/IntrospectiveTests/Tag.tests.cpp
+-        ${SELF_TEST_DIR}/IntrospectiveTests/TestCaseInfoHasher.tests.cpp
+         ${SELF_TEST_DIR}/IntrospectiveTests/TestSpecParser.tests.cpp
+         ${SELF_TEST_DIR}/IntrospectiveTests/TextFlow.tests.cpp
+         ${SELF_TEST_DIR}/IntrospectiveTests/Sharding.tests.cpp
+diff --git a/tests/SelfTest/Baselines/automake.sw.approved.txt b/tests/SelfTest/Baselines/automake.sw.approved.txt
+index 9df8be0d..fadb2747 100644
+--- a/tests/SelfTest/Baselines/automake.sw.approved.txt
++++ b/tests/SelfTest/Baselines/automake.sw.approved.txt
+@@ -255,8 +255,6 @@ Message from section two
+ :test-result: PASS Test case with one argument
+ :test-result: PASS Test enum bit values
+ :test-result: PASS Test with special, characters "in name
+-:test-result: PASS TestCaseInfoHasher produces different hashes.
+-:test-result: PASS TestCaseInfoHasher produces equal hashes.
+ :test-result: PASS Testing checked-if
+ :test-result: XFAIL Testing checked-if 2
+ :test-result: XFAIL Testing checked-if 3
+diff --git a/tests/SelfTest/Baselines/automake.sw.multi.approved.txt b/tests/SelfTest/Baselines/automake.sw.multi.approved.txt
+index 10db54cd..f05de0ab 100644
+--- a/tests/SelfTest/Baselines/automake.sw.multi.approved.txt
++++ b/tests/SelfTest/Baselines/automake.sw.multi.approved.txt
+@@ -248,8 +248,6 @@
+ :test-result: PASS Test case with one argument
+ :test-result: PASS Test enum bit values
+ :test-result: PASS Test with special, characters "in name
+-:test-result: PASS TestCaseInfoHasher produces different hashes.
+-:test-result: PASS TestCaseInfoHasher produces equal hashes.
+ :test-result: PASS Testing checked-if
+ :test-result: XFAIL Testing checked-if 2
+ :test-result: XFAIL Testing checked-if 3
+diff --git a/tests/SelfTest/Baselines/compact.sw.approved.txt b/tests/SelfTest/Baselines/compact.sw.approved.txt
+index 8b404c58..4688a228 100644
+--- a/tests/SelfTest/Baselines/compact.sw.approved.txt
++++ b/tests/SelfTest/Baselines/compact.sw.approved.txt
+@@ -1868,21 +1868,6 @@ Tag.tests.cpp:<line number>: passed: testCase.tags[0] == Tag( "tag1" ) for: {?}
+ VariadicMacros.tests.cpp:<line number>: passed: with 1 message: 'no assertions'
+ Tricky.tests.cpp:<line number>: passed: 0x<hex digits> == bit30and31 for: 3221225472 (0x<hex digits>) == 3221225472
+ CmdLine.tests.cpp:<line number>: passed:
+-TestCaseInfoHasher.tests.cpp:<line number>: passed: hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 764519552 (0x<hex digits>)
+-!=
+-3472848544 (0x<hex digits>)
+-TestCaseInfoHasher.tests.cpp:<line number>: passed: hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 869111496 (0x<hex digits>)
+-!=
+-2870097333 (0x<hex digits>)
+-TestCaseInfoHasher.tests.cpp:<line number>: passed: hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 1172537240 (0x<hex digits>)
+-!=
+-1403724645 (0x<hex digits>)
+-TestCaseInfoHasher.tests.cpp:<line number>: passed: h1(testCase1) != h2(testCase2) for: 1836497244 (0x<hex digits>)
+-!=
+-430288597 (0x<hex digits>)
+-TestCaseInfoHasher.tests.cpp:<line number>: passed: hasherWithCustomSeed(testCase1) == hasherWithCustomSeed(testCase2) for: 764519552 (0x<hex digits>)
+-==
+-764519552 (0x<hex digits>)
+ Misc.tests.cpp:<line number>: passed: true
+ Misc.tests.cpp:<line number>: passed:
+ Misc.tests.cpp:<line number>: failed - but was ok: false
+diff --git a/tests/SelfTest/Baselines/compact.sw.multi.approved.txt b/tests/SelfTest/Baselines/compact.sw.multi.approved.txt
+index 3b3e1eef..c571b0c9 100644
+--- a/tests/SelfTest/Baselines/compact.sw.multi.approved.txt
++++ b/tests/SelfTest/Baselines/compact.sw.multi.approved.txt
+@@ -1861,21 +1861,6 @@ Tag.tests.cpp:<line number>: passed: testCase.tags[0] == Tag( "tag1" ) for: {?}
+ VariadicMacros.tests.cpp:<line number>: passed: with 1 message: 'no assertions'
+ Tricky.tests.cpp:<line number>: passed: 0x<hex digits> == bit30and31 for: 3221225472 (0x<hex digits>) == 3221225472
+ CmdLine.tests.cpp:<line number>: passed:
+-TestCaseInfoHasher.tests.cpp:<line number>: passed: hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 764519552 (0x<hex digits>)
+-!=
+-3472848544 (0x<hex digits>)
+-TestCaseInfoHasher.tests.cpp:<line number>: passed: hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 869111496 (0x<hex digits>)
+-!=
+-2870097333 (0x<hex digits>)
+-TestCaseInfoHasher.tests.cpp:<line number>: passed: hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 1172537240 (0x<hex digits>)
+-!=
+-1403724645 (0x<hex digits>)
+-TestCaseInfoHasher.tests.cpp:<line number>: passed: h1(testCase1) != h2(testCase2) for: 1836497244 (0x<hex digits>)
+-!=
+-430288597 (0x<hex digits>)
+-TestCaseInfoHasher.tests.cpp:<line number>: passed: hasherWithCustomSeed(testCase1) == hasherWithCustomSeed(testCase2) for: 764519552 (0x<hex digits>)
+-==
+-764519552 (0x<hex digits>)
+ Misc.tests.cpp:<line number>: passed: true
+ Misc.tests.cpp:<line number>: passed:
+ Misc.tests.cpp:<line number>: failed - but was ok: false
+diff --git a/tests/SelfTest/Baselines/console.std.approved.txt b/tests/SelfTest/Baselines/console.std.approved.txt
+index 61b1a112..ca0a77e5 100644
+--- a/tests/SelfTest/Baselines/console.std.approved.txt
++++ b/tests/SelfTest/Baselines/console.std.approved.txt
+@@ -1395,6 +1395,6 @@ due to unexpected exception with message:
+   Why would you throw a std::string?
+ 
+ ===============================================================================
+-test cases:  388 |  312 passed |  69 failed |  7 failed as expected
+-assertions: 2224 | 2069 passed | 128 failed | 27 failed as expected
++test cases:  386 |  310 passed |  69 failed |  7 failed as expected
++assertions: 2219 | 2064 passed | 128 failed | 27 failed as expected
+ 
+diff --git a/tests/SelfTest/Baselines/console.sw.approved.txt b/tests/SelfTest/Baselines/console.sw.approved.txt
+index 148a3b53..5655f50a 100644
+--- a/tests/SelfTest/Baselines/console.sw.approved.txt
++++ b/tests/SelfTest/Baselines/console.sw.approved.txt
+@@ -13286,76 +13286,6 @@ CmdLine.tests.cpp:<line number>
+ 
+ CmdLine.tests.cpp:<line number>: PASSED:
+ 
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher produces different hashes.
+-  class names are equal, names are equal but tags are different.
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher.tests.cpp:<line number>
+-...............................................................................
+-
+-TestCaseInfoHasher.tests.cpp:<line number>: PASSED:
+-  CHECK( hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) )
+-with expansion:
+-  764519552 (0x<hex digits>)
+-  !=
+-  3472848544 (0x<hex digits>)
+-
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher produces different hashes.
+-  class names are equal, tags are equal but names are different
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher.tests.cpp:<line number>
+-...............................................................................
+-
+-TestCaseInfoHasher.tests.cpp:<line number>: PASSED:
+-  CHECK( hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) )
+-with expansion:
+-  869111496 (0x<hex digits>)
+-  !=
+-  2870097333 (0x<hex digits>)
+-
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher produces different hashes.
+-  names are equal, tags are equal but class names are different
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher.tests.cpp:<line number>
+-...............................................................................
+-
+-TestCaseInfoHasher.tests.cpp:<line number>: PASSED:
+-  CHECK( hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) )
+-with expansion:
+-  1172537240 (0x<hex digits>)
+-  !=
+-  1403724645 (0x<hex digits>)
+-
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher produces different hashes.
+-  class names and names and tags are equal but hashers are seeded differently.
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher.tests.cpp:<line number>
+-...............................................................................
+-
+-TestCaseInfoHasher.tests.cpp:<line number>: PASSED:
+-  CHECK( h1(testCase1) != h2(testCase2) )
+-with expansion:
+-  1836497244 (0x<hex digits>)
+-  !=
+-  430288597 (0x<hex digits>)
+-
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher produces equal hashes.
+-  class names and names and tags are equal.
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher.tests.cpp:<line number>
+-...............................................................................
+-
+-TestCaseInfoHasher.tests.cpp:<line number>: PASSED:
+-  CHECK( hasherWithCustomSeed(testCase1) == hasherWithCustomSeed(testCase2) )
+-with expansion:
+-  764519552 (0x<hex digits>)
+-  ==
+-  764519552 (0x<hex digits>)
+-
+ -------------------------------------------------------------------------------
+ Testing checked-if
+ -------------------------------------------------------------------------------
+@@ -17941,6 +17871,6 @@ Misc.tests.cpp:<line number>
+ Misc.tests.cpp:<line number>: PASSED:
+ 
+ ===============================================================================
+-test cases:  388 |  298 passed |  83 failed |  7 failed as expected
+-assertions: 2239 | 2069 passed | 143 failed | 27 failed as expected
++test cases:  386 |  296 passed |  83 failed |  7 failed as expected
++assertions: 2234 | 2064 passed | 143 failed | 27 failed as expected
+ 
+diff --git a/tests/SelfTest/Baselines/console.sw.multi.approved.txt b/tests/SelfTest/Baselines/console.sw.multi.approved.txt
+index 412303da..32fa0689 100644
+--- a/tests/SelfTest/Baselines/console.sw.multi.approved.txt
++++ b/tests/SelfTest/Baselines/console.sw.multi.approved.txt
+@@ -13279,76 +13279,6 @@ CmdLine.tests.cpp:<line number>
+ 
+ CmdLine.tests.cpp:<line number>: PASSED:
+ 
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher produces different hashes.
+-  class names are equal, names are equal but tags are different.
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher.tests.cpp:<line number>
+-...............................................................................
+-
+-TestCaseInfoHasher.tests.cpp:<line number>: PASSED:
+-  CHECK( hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) )
+-with expansion:
+-  764519552 (0x<hex digits>)
+-  !=
+-  3472848544 (0x<hex digits>)
+-
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher produces different hashes.
+-  class names are equal, tags are equal but names are different
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher.tests.cpp:<line number>
+-...............................................................................
+-
+-TestCaseInfoHasher.tests.cpp:<line number>: PASSED:
+-  CHECK( hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) )
+-with expansion:
+-  869111496 (0x<hex digits>)
+-  !=
+-  2870097333 (0x<hex digits>)
+-
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher produces different hashes.
+-  names are equal, tags are equal but class names are different
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher.tests.cpp:<line number>
+-...............................................................................
+-
+-TestCaseInfoHasher.tests.cpp:<line number>: PASSED:
+-  CHECK( hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) )
+-with expansion:
+-  1172537240 (0x<hex digits>)
+-  !=
+-  1403724645 (0x<hex digits>)
+-
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher produces different hashes.
+-  class names and names and tags are equal but hashers are seeded differently.
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher.tests.cpp:<line number>
+-...............................................................................
+-
+-TestCaseInfoHasher.tests.cpp:<line number>: PASSED:
+-  CHECK( h1(testCase1) != h2(testCase2) )
+-with expansion:
+-  1836497244 (0x<hex digits>)
+-  !=
+-  430288597 (0x<hex digits>)
+-
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher produces equal hashes.
+-  class names and names and tags are equal.
+--------------------------------------------------------------------------------
+-TestCaseInfoHasher.tests.cpp:<line number>
+-...............................................................................
+-
+-TestCaseInfoHasher.tests.cpp:<line number>: PASSED:
+-  CHECK( hasherWithCustomSeed(testCase1) == hasherWithCustomSeed(testCase2) )
+-with expansion:
+-  764519552 (0x<hex digits>)
+-  ==
+-  764519552 (0x<hex digits>)
+-
+ -------------------------------------------------------------------------------
+ Testing checked-if
+ -------------------------------------------------------------------------------
+@@ -17933,6 +17863,6 @@ Misc.tests.cpp:<line number>
+ Misc.tests.cpp:<line number>: PASSED:
+ 
+ ===============================================================================
+-test cases:  388 |  298 passed |  83 failed |  7 failed as expected
+-assertions: 2239 | 2069 passed | 143 failed | 27 failed as expected
++test cases:  386 |  296 passed |  83 failed |  7 failed as expected
++assertions: 2234 | 2064 passed | 143 failed | 27 failed as expected
+ 
+diff --git a/tests/SelfTest/Baselines/junit.sw.approved.txt b/tests/SelfTest/Baselines/junit.sw.approved.txt
+index 7c82e5b3..3a099b4f 100644
+--- a/tests/SelfTest/Baselines/junit.sw.approved.txt
++++ b/tests/SelfTest/Baselines/junit.sw.approved.txt
+@@ -1,7 +1,7 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+ <testsuitesloose text artifact
+ >
+-  <testsuite name="<exe-name>" errors="17" failures="126" tests="2239" hostname="tbd" time="{duration}" timestamp="{iso8601-timestamp}">
++  <testsuite name="<exe-name>" errors="17" failures="126" tests="2234" hostname="tbd" time="{duration}" timestamp="{iso8601-timestamp}">
+     <properties>
+       <property name="random-seed" value="1"/>
+       <property name="filters" value="~[!nonportable]~[!benchmark]~[approvals] *"/>
+@@ -1355,11 +1355,6 @@ Misc.tests.cpp:<line number>
+     <testcase classname="<exe-name>.global" name="Test case with one argument" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Test enum bit values" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Test with special, characters &quot;in name" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="TestCaseInfoHasher produces different hashes./class names are equal, names are equal but tags are different." time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="TestCaseInfoHasher produces different hashes./class names are equal, tags are equal but names are different" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="TestCaseInfoHasher produces different hashes./names are equal, tags are equal but class names are different" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="TestCaseInfoHasher produces different hashes./class names and names and tags are equal but hashers are seeded differently." time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="TestCaseInfoHasher produces equal hashes./class names and names and tags are equal." time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Testing checked-if" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Testing checked-if 2" time="{duration}" status="run">
+       <skipped message="TEST_CASE tagged with !mayfail"/>
+diff --git a/tests/SelfTest/Baselines/junit.sw.multi.approved.txt b/tests/SelfTest/Baselines/junit.sw.multi.approved.txt
+index d850f16a..527f7ba0 100644
+--- a/tests/SelfTest/Baselines/junit.sw.multi.approved.txt
++++ b/tests/SelfTest/Baselines/junit.sw.multi.approved.txt
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+ <testsuites>
+-  <testsuite name="<exe-name>" errors="17" failures="126" tests="2239" hostname="tbd" time="{duration}" timestamp="{iso8601-timestamp}">
++  <testsuite name="<exe-name>" errors="17" failures="126" tests="2234" hostname="tbd" time="{duration}" timestamp="{iso8601-timestamp}">
+     <properties>
+       <property name="random-seed" value="1"/>
+       <property name="filters" value="~[!nonportable]~[!benchmark]~[approvals] *"/>
+@@ -1354,11 +1354,6 @@ Misc.tests.cpp:<line number>
+     <testcase classname="<exe-name>.global" name="Test case with one argument" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Test enum bit values" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Test with special, characters &quot;in name" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="TestCaseInfoHasher produces different hashes./class names are equal, names are equal but tags are different." time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="TestCaseInfoHasher produces different hashes./class names are equal, tags are equal but names are different" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="TestCaseInfoHasher produces different hashes./names are equal, tags are equal but class names are different" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="TestCaseInfoHasher produces different hashes./class names and names and tags are equal but hashers are seeded differently." time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="TestCaseInfoHasher produces equal hashes./class names and names and tags are equal." time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Testing checked-if" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Testing checked-if 2" time="{duration}" status="run">
+       <skipped message="TEST_CASE tagged with !mayfail"/>
+diff --git a/tests/SelfTest/Baselines/sonarqube.sw.approved.txt b/tests/SelfTest/Baselines/sonarqube.sw.approved.txt
+index 1a9d215d..92db65df 100644
+--- a/tests/SelfTest/Baselines/sonarqube.sw.approved.txt
++++ b/tests/SelfTest/Baselines/sonarqube.sw.approved.txt
+@@ -273,13 +273,6 @@
+     <testCase name="shortened hide tags are split apart" duration="{duration}"/>
+     <testCase name="tags with dots in later positions are not parsed as hidden" duration="{duration}"/>
+   </file>
+-  <file path="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp">
+-    <testCase name="TestCaseInfoHasher produces different hashes./class names are equal, names are equal but tags are different." duration="{duration}"/>
+-    <testCase name="TestCaseInfoHasher produces different hashes./class names are equal, tags are equal but names are different" duration="{duration}"/>
+-    <testCase name="TestCaseInfoHasher produces different hashes./names are equal, tags are equal but class names are different" duration="{duration}"/>
+-    <testCase name="TestCaseInfoHasher produces different hashes./class names and names and tags are equal but hashers are seeded differently." duration="{duration}"/>
+-    <testCase name="TestCaseInfoHasher produces equal hashes./class names and names and tags are equal." duration="{duration}"/>
+-  </file>
+   <file path="tests/<exe-name>/IntrospectiveTests/TestSpecParser.tests.cpp">
+     <testCase name="Parsed tags are matched case insensitive" duration="{duration}"/>
+     <testCase name="Parsing tags with non-alphabetical characters is pass-through" duration="{duration}"/>
+diff --git a/tests/SelfTest/Baselines/sonarqube.sw.multi.approved.txt b/tests/SelfTest/Baselines/sonarqube.sw.multi.approved.txt
+index cbefb063..c9074bf0 100644
+--- a/tests/SelfTest/Baselines/sonarqube.sw.multi.approved.txt
++++ b/tests/SelfTest/Baselines/sonarqube.sw.multi.approved.txt
+@@ -272,13 +272,6 @@
+     <testCase name="shortened hide tags are split apart" duration="{duration}"/>
+     <testCase name="tags with dots in later positions are not parsed as hidden" duration="{duration}"/>
+   </file>
+-  <file path="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp">
+-    <testCase name="TestCaseInfoHasher produces different hashes./class names are equal, names are equal but tags are different." duration="{duration}"/>
+-    <testCase name="TestCaseInfoHasher produces different hashes./class names are equal, tags are equal but names are different" duration="{duration}"/>
+-    <testCase name="TestCaseInfoHasher produces different hashes./names are equal, tags are equal but class names are different" duration="{duration}"/>
+-    <testCase name="TestCaseInfoHasher produces different hashes./class names and names and tags are equal but hashers are seeded differently." duration="{duration}"/>
+-    <testCase name="TestCaseInfoHasher produces equal hashes./class names and names and tags are equal." duration="{duration}"/>
+-  </file>
+   <file path="tests/<exe-name>/IntrospectiveTests/TestSpecParser.tests.cpp">
+     <testCase name="Parsed tags are matched case insensitive" duration="{duration}"/>
+     <testCase name="Parsing tags with non-alphabetical characters is pass-through" duration="{duration}"/>
+diff --git a/tests/SelfTest/Baselines/tap.sw.approved.txt b/tests/SelfTest/Baselines/tap.sw.approved.txt
+index 67ceddfc..456e80ee 100644
+--- a/tests/SelfTest/Baselines/tap.sw.approved.txt
++++ b/tests/SelfTest/Baselines/tap.sw.approved.txt
+@@ -3297,16 +3297,6 @@ ok {test-number} - with 1 message: 'no assertions'
+ ok {test-number} - 0x<hex digits> == bit30and31 for: 3221225472 (0x<hex digits>) == 3221225472
+ # Test with special, characters "in name
+ ok {test-number} -
+-# TestCaseInfoHasher produces different hashes.
+-ok {test-number} - hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 764519552 (0x<hex digits>) != 3472848544 (0x<hex digits>)
+-# TestCaseInfoHasher produces different hashes.
+-ok {test-number} - hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 869111496 (0x<hex digits>) != 2870097333 (0x<hex digits>)
+-# TestCaseInfoHasher produces different hashes.
+-ok {test-number} - hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 1172537240 (0x<hex digits>) != 1403724645 (0x<hex digits>)
+-# TestCaseInfoHasher produces different hashes.
+-ok {test-number} - h1(testCase1) != h2(testCase2) for: 1836497244 (0x<hex digits>) != 430288597 (0x<hex digits>)
+-# TestCaseInfoHasher produces equal hashes.
+-ok {test-number} - hasherWithCustomSeed(testCase1) == hasherWithCustomSeed(testCase2) for: 764519552 (0x<hex digits>) == 764519552 (0x<hex digits>)
+ # Testing checked-if
+ ok {test-number} - true
+ # Testing checked-if
+@@ -4480,5 +4470,5 @@ ok {test-number} - q3 == 23. for: 23.0 == 23.0
+ ok {test-number} -
+ # xmlentitycheck
+ ok {test-number} -
+-1..2239
++1..2234
+ 
+diff --git a/tests/SelfTest/Baselines/tap.sw.multi.approved.txt b/tests/SelfTest/Baselines/tap.sw.multi.approved.txt
+index d369326e..534005df 100644
+--- a/tests/SelfTest/Baselines/tap.sw.multi.approved.txt
++++ b/tests/SelfTest/Baselines/tap.sw.multi.approved.txt
+@@ -3290,16 +3290,6 @@ ok {test-number} - with 1 message: 'no assertions'
+ ok {test-number} - 0x<hex digits> == bit30and31 for: 3221225472 (0x<hex digits>) == 3221225472
+ # Test with special, characters "in name
+ ok {test-number} -
+-# TestCaseInfoHasher produces different hashes.
+-ok {test-number} - hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 764519552 (0x<hex digits>) != 3472848544 (0x<hex digits>)
+-# TestCaseInfoHasher produces different hashes.
+-ok {test-number} - hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 869111496 (0x<hex digits>) != 2870097333 (0x<hex digits>)
+-# TestCaseInfoHasher produces different hashes.
+-ok {test-number} - hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2) for: 1172537240 (0x<hex digits>) != 1403724645 (0x<hex digits>)
+-# TestCaseInfoHasher produces different hashes.
+-ok {test-number} - h1(testCase1) != h2(testCase2) for: 1836497244 (0x<hex digits>) != 430288597 (0x<hex digits>)
+-# TestCaseInfoHasher produces equal hashes.
+-ok {test-number} - hasherWithCustomSeed(testCase1) == hasherWithCustomSeed(testCase2) for: 764519552 (0x<hex digits>) == 764519552 (0x<hex digits>)
+ # Testing checked-if
+ ok {test-number} - true
+ # Testing checked-if
+@@ -4472,5 +4462,5 @@ ok {test-number} - q3 == 23. for: 23.0 == 23.0
+ ok {test-number} -
+ # xmlentitycheck
+ ok {test-number} -
+-1..2239
++1..2234
+ 
+diff --git a/tests/SelfTest/Baselines/teamcity.sw.approved.txt b/tests/SelfTest/Baselines/teamcity.sw.approved.txt
+index d9b98f70..43324e06 100644
+--- a/tests/SelfTest/Baselines/teamcity.sw.approved.txt
++++ b/tests/SelfTest/Baselines/teamcity.sw.approved.txt
+@@ -615,10 +615,6 @@ Misc.tests.cpp:<line number>|nexpression failed|n  CHECK( s1 == s2 )|nwith expan
+ ##teamcity[testFinished name='Test enum bit values' duration="{duration}"]
+ ##teamcity[testStarted name='Test with special, characters "in name']
+ ##teamcity[testFinished name='Test with special, characters "in name' duration="{duration}"]
+-##teamcity[testStarted name='TestCaseInfoHasher produces different hashes.']
+-##teamcity[testFinished name='TestCaseInfoHasher produces different hashes.' duration="{duration}"]
+-##teamcity[testStarted name='TestCaseInfoHasher produces equal hashes.']
+-##teamcity[testFinished name='TestCaseInfoHasher produces equal hashes.' duration="{duration}"]
+ ##teamcity[testStarted name='Testing checked-if']
+ ##teamcity[testFinished name='Testing checked-if' duration="{duration}"]
+ ##teamcity[testStarted name='Testing checked-if 2']
+diff --git a/tests/SelfTest/Baselines/teamcity.sw.multi.approved.txt b/tests/SelfTest/Baselines/teamcity.sw.multi.approved.txt
+index ffdae89c..3bc028a4 100644
+--- a/tests/SelfTest/Baselines/teamcity.sw.multi.approved.txt
++++ b/tests/SelfTest/Baselines/teamcity.sw.multi.approved.txt
+@@ -615,10 +615,6 @@ Misc.tests.cpp:<line number>|nexpression failed|n  CHECK( s1 == s2 )|nwith expan
+ ##teamcity[testFinished name='Test enum bit values' duration="{duration}"]
+ ##teamcity[testStarted name='Test with special, characters "in name']
+ ##teamcity[testFinished name='Test with special, characters "in name' duration="{duration}"]
+-##teamcity[testStarted name='TestCaseInfoHasher produces different hashes.']
+-##teamcity[testFinished name='TestCaseInfoHasher produces different hashes.' duration="{duration}"]
+-##teamcity[testStarted name='TestCaseInfoHasher produces equal hashes.']
+-##teamcity[testFinished name='TestCaseInfoHasher produces equal hashes.' duration="{duration}"]
+ ##teamcity[testStarted name='Testing checked-if']
+ ##teamcity[testFinished name='Testing checked-if' duration="{duration}"]
+ ##teamcity[testStarted name='Testing checked-if 2']
+diff --git a/tests/SelfTest/Baselines/xml.sw.approved.txt b/tests/SelfTest/Baselines/xml.sw.approved.txt
+index 4facaec2..f9518c3d 100644
+--- a/tests/SelfTest/Baselines/xml.sw.approved.txt
++++ b/tests/SelfTest/Baselines/xml.sw.approved.txt
+@@ -15579,77 +15579,6 @@ Message from section two
+   <TestCase name="Test with special, characters &quot;in name" tags="[cli][regression]" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+     <OverallResult success="true"/>
+   </TestCase>
+-  <TestCase name="TestCaseInfoHasher produces different hashes." filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-    <Section name="class names are equal, names are equal but tags are different." filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-        <Original>
+-          hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2)
+-        </Original>
+-        <Expanded>
+-          764519552 (0x<hex digits>)
+-!=
+-3472848544 (0x<hex digits>)
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="1" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="class names are equal, tags are equal but names are different" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-        <Original>
+-          hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2)
+-        </Original>
+-        <Expanded>
+-          869111496 (0x<hex digits>)
+-!=
+-2870097333 (0x<hex digits>)
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="1" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="names are equal, tags are equal but class names are different" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-        <Original>
+-          hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2)
+-        </Original>
+-        <Expanded>
+-          1172537240 (0x<hex digits>)
+-!=
+-1403724645 (0x<hex digits>)
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="1" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="class names and names and tags are equal but hashers are seeded differently." filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-        <Original>
+-          h1(testCase1) != h2(testCase2)
+-        </Original>
+-        <Expanded>
+-          1836497244 (0x<hex digits>)
+-!=
+-430288597 (0x<hex digits>)
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="1" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <OverallResult success="true"/>
+-  </TestCase>
+-  <TestCase name="TestCaseInfoHasher produces equal hashes." filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-    <Section name="class names and names and tags are equal." filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-        <Original>
+-          hasherWithCustomSeed(testCase1) == hasherWithCustomSeed(testCase2)
+-        </Original>
+-        <Expanded>
+-          764519552 (0x<hex digits>)
+-==
+-764519552 (0x<hex digits>)
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="1" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <OverallResult success="true"/>
+-  </TestCase>
+   <TestCase name="Testing checked-if" tags="[checked-if]" filename="tests/<exe-name>/UsageTests/Misc.tests.cpp" >
+     <Expression success="true" type="CHECKED_IF" filename="tests/<exe-name>/UsageTests/Misc.tests.cpp" >
+       <Original>
+@@ -21062,6 +20991,6 @@ loose text artifact
+     </Section>
+     <OverallResult success="true"/>
+   </TestCase>
+-  <OverallResults successes="2069" failures="143" expectedFailures="27"/>
+-  <OverallResultsCases successes="298" failures="83" expectedFailures="7"/>
++  <OverallResults successes="2064" failures="143" expectedFailures="27"/>
++  <OverallResultsCases successes="296" failures="83" expectedFailures="7"/>
+ </Catch2TestRun>
+diff --git a/tests/SelfTest/Baselines/xml.sw.multi.approved.txt b/tests/SelfTest/Baselines/xml.sw.multi.approved.txt
+index f6b172f5..6617afe3 100644
+--- a/tests/SelfTest/Baselines/xml.sw.multi.approved.txt
++++ b/tests/SelfTest/Baselines/xml.sw.multi.approved.txt
+@@ -15579,77 +15579,6 @@ Message from section two
+   <TestCase name="Test with special, characters &quot;in name" tags="[cli][regression]" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+     <OverallResult success="true"/>
+   </TestCase>
+-  <TestCase name="TestCaseInfoHasher produces different hashes." filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-    <Section name="class names are equal, names are equal but tags are different." filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-        <Original>
+-          hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2)
+-        </Original>
+-        <Expanded>
+-          764519552 (0x<hex digits>)
+-!=
+-3472848544 (0x<hex digits>)
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="1" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="class names are equal, tags are equal but names are different" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-        <Original>
+-          hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2)
+-        </Original>
+-        <Expanded>
+-          869111496 (0x<hex digits>)
+-!=
+-2870097333 (0x<hex digits>)
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="1" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="names are equal, tags are equal but class names are different" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-        <Original>
+-          hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2)
+-        </Original>
+-        <Expanded>
+-          1172537240 (0x<hex digits>)
+-!=
+-1403724645 (0x<hex digits>)
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="1" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="class names and names and tags are equal but hashers are seeded differently." filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-        <Original>
+-          h1(testCase1) != h2(testCase2)
+-        </Original>
+-        <Expanded>
+-          1836497244 (0x<hex digits>)
+-!=
+-430288597 (0x<hex digits>)
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="1" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <OverallResult success="true"/>
+-  </TestCase>
+-  <TestCase name="TestCaseInfoHasher produces equal hashes." filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-    <Section name="class names and names and tags are equal." filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" >
+-        <Original>
+-          hasherWithCustomSeed(testCase1) == hasherWithCustomSeed(testCase2)
+-        </Original>
+-        <Expanded>
+-          764519552 (0x<hex digits>)
+-==
+-764519552 (0x<hex digits>)
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="1" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <OverallResult success="true"/>
+-  </TestCase>
+   <TestCase name="Testing checked-if" tags="[checked-if]" filename="tests/<exe-name>/UsageTests/Misc.tests.cpp" >
+     <Expression success="true" type="CHECKED_IF" filename="tests/<exe-name>/UsageTests/Misc.tests.cpp" >
+       <Original>
+@@ -21061,6 +20990,6 @@ There is no extra whitespace here
+     </Section>
+     <OverallResult success="true"/>
+   </TestCase>
+-  <OverallResults successes="2069" failures="143" expectedFailures="27"/>
+-  <OverallResultsCases successes="298" failures="83" expectedFailures="7"/>
++  <OverallResults successes="2064" failures="143" expectedFailures="27"/>
++  <OverallResultsCases successes="296" failures="83" expectedFailures="7"/>
+ </Catch2TestRun>
+diff --git a/tests/SelfTest/IntrospectiveTests/TestCaseInfoHasher.tests.cpp b/tests/SelfTest/IntrospectiveTests/TestCaseInfoHasher.tests.cpp
+deleted file mode 100644
+index 45007360..00000000
+--- a/tests/SelfTest/IntrospectiveTests/TestCaseInfoHasher.tests.cpp
++++ /dev/null
+@@ -1,51 +0,0 @@
+-#include <catch2/catch_test_macros.hpp>
+-#include <catch2/catch_test_case_info.hpp>
+-#include <catch2/internal/catch_test_case_info_hasher.hpp>
+-
+-static constexpr Catch::SourceLineInfo dummySourceLineInfo = CATCH_INTERNAL_LINEINFO;
+-
+-TEST_CASE( "TestCaseInfoHasher produces equal hashes." ) {
+-    SECTION( "class names and names and tags are equal." ) {
+-        Catch::TestCaseInfo testCase1("", {"name", "[.magic-tag1]"}, dummySourceLineInfo);
+-        Catch::TestCaseInfo testCase2("", {"name", "[.magic-tag1]"}, dummySourceLineInfo);
+-
+-        Catch::TestCaseInfoHasher hasherWithCustomSeed(123456789u);
+-        CHECK(hasherWithCustomSeed(testCase1) == hasherWithCustomSeed(testCase2));
+-    }
+-}
+-
+-TEST_CASE( "TestCaseInfoHasher produces different hashes." ) {
+-    SECTION( "class names are equal, names are equal but tags are different." ) {
+-        Catch::TestCaseInfo testCase1("", {"name", "[.magic-tag1]"}, dummySourceLineInfo);
+-        Catch::TestCaseInfo testCase2("", {"name", "[.magic-tag2]"}, dummySourceLineInfo);
+-
+-        Catch::TestCaseInfoHasher hasherWithCustomSeed(123456789u);
+-        CHECK(hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2));
+-    }
+-
+-    SECTION( "class names are equal, tags are equal but names are different" ) {
+-        Catch::TestCaseInfo testCase1("", {"name1", "[.magic-tag]"}, dummySourceLineInfo);
+-        Catch::TestCaseInfo testCase2("", {"name2", "[.magic-tag]"}, dummySourceLineInfo);
+-
+-        Catch::TestCaseInfoHasher hasherWithCustomSeed(123456789u);
+-        CHECK(hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2));
+-    }
+-
+-    SECTION( "names are equal, tags are equal but class names are different" ) {
+-        Catch::TestCaseInfo testCase1("class1", {"name", "[.magic-tag]"}, dummySourceLineInfo);
+-        Catch::TestCaseInfo testCase2("class2", {"name", "[.magic-tag]"}, dummySourceLineInfo);
+-
+-        Catch::TestCaseInfoHasher hasherWithCustomSeed(123456789u);
+-        CHECK(hasherWithCustomSeed(testCase1) != hasherWithCustomSeed(testCase2));
+-    }
+-
+-    SECTION( "class names and names and tags are equal but hashers are seeded differently." ) {
+-        Catch::TestCaseInfo testCase1("", {"name", "[.magic-tag1]"}, dummySourceLineInfo);
+-        Catch::TestCaseInfo testCase2("", {"name", "[.magic-tag1]"}, dummySourceLineInfo);
+-
+-        Catch::TestCaseInfoHasher h1(14695981039346656037u);
+-        Catch::TestCaseInfoHasher h2(14695981039346656038u);
+-
+-        CHECK(h1(testCase1) != h2(testCase2));
+-    }
+-}

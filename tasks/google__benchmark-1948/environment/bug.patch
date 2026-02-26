@@ -1,0 +1,486 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4f67ff5..fd69060 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -306,11 +306,17 @@ if (BENCHMARK_USE_LIBCXX)
+   endif()
+ endif(BENCHMARK_USE_LIBCXX)
+ 
++set(EXTRA_CXX_FLAGS "")
++if (WIN32 AND "${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
++  # Clang on Windows fails to compile the regex feature check under C++11
++  set(EXTRA_CXX_FLAGS "-DCMAKE_CXX_STANDARD=14")
++endif()
++
+ # C++ feature checks
+ # Determine the correct regular expression engine to use
+-cxx_feature_check(STD_REGEX)
+-cxx_feature_check(GNU_POSIX_REGEX)
+-cxx_feature_check(POSIX_REGEX)
++cxx_feature_check(STD_REGEX ${EXTRA_CXX_FLAGS})
++cxx_feature_check(GNU_POSIX_REGEX ${EXTRA_CXX_FLAGS})
++cxx_feature_check(POSIX_REGEX ${EXTRA_CXX_FLAGS})
+ if(NOT HAVE_STD_REGEX AND NOT HAVE_GNU_POSIX_REGEX AND NOT HAVE_POSIX_REGEX)
+   message(FATAL_ERROR "Failed to determine the source files for the regular expression backend")
+ endif()
+diff --git a/README.md b/README.md
+index 4e73025..b30e57c 100644
+--- a/README.md
++++ b/README.md
+@@ -50,7 +50,7 @@ IRC channels:
+ 
+ ## Requirements
+ 
+-The library can be used with C++11. However, it requires C++17 to build,
++The library can be used with C++03. However, it requires C++14 to build,
+ including compiler and standard library support.
+ 
+ _See [dependencies.md](docs/dependencies.md) for more details regarding supported
+@@ -190,7 +190,7 @@ be under the build directory you created.
+ ```bash
+ # Example on linux after running the build steps above. Assumes the
+ # `benchmark` and `build` directories are under the current directory.
+-$ g++ mybenchmark.cc -std=c++11 -isystem benchmark/include \
++$ g++ mybenchmark.cc -std=c++14 -isystem benchmark/include \
+   -Lbenchmark/build/src -lbenchmark -lpthread -o mybenchmark
+ ```
+ 
+diff --git a/docs/user_guide.md b/docs/user_guide.md
+index b3c1cce..3152762 100644
+--- a/docs/user_guide.md
++++ b/docs/user_guide.md
+@@ -462,7 +462,7 @@ BENCHMARK(BM_SetInsert)->Apply(CustomArguments);
+ 
+ ### Passing Arbitrary Arguments to a Benchmark
+ 
+-It is possible to define a benchmark that takes an arbitrary number
++In C++11 it is possible to define a benchmark that takes an arbitrary number
+ of extra arguments. The `BENCHMARK_CAPTURE(func, test_case_name, ...args)`
+ macro creates a benchmark that invokes `func`  with the `benchmark::State` as
+ the first argument followed by the specified `args...`.
+@@ -563,19 +563,22 @@ template <class Q> void BM_Sequential(benchmark::State& state) {
+   state.SetBytesProcessed(
+       static_cast<int64_t>(state.iterations())*state.range(0));
+ }
++// C++03
++BENCHMARK_TEMPLATE(BM_Sequential, WaitQueue<int>)->Range(1<<0, 1<<10);
+ 
+-// You can use the BENCHMARK macro with template parameters:
++// C++11 or newer, you can use the BENCHMARK macro with template parameters:
+ BENCHMARK(BM_Sequential<WaitQueue<int>>)->Range(1<<0, 1<<10);
+ 
+-// Old, legacy verbose C++03 syntax:
+-BENCHMARK_TEMPLATE(BM_Sequential, WaitQueue<int>)->Range(1<<0, 1<<10);
+-
+ ```
+ 
+ Three macros are provided for adding benchmark templates.
+ 
+ ```c++
++#ifdef BENCHMARK_HAS_CXX11
+ #define BENCHMARK(func<...>) // Takes any number of parameters.
++#else // C++ < C++11
++#define BENCHMARK_TEMPLATE(func, arg1)
++#endif
+ #define BENCHMARK_TEMPLATE1(func, arg1)
+ #define BENCHMARK_TEMPLATE2(func, arg1, arg2)
+ ```
+@@ -737,10 +740,12 @@ is 1k a 1000 (default, `benchmark::Counter::OneK::kIs1000`), or 1024
+   state.counters["BytesProcessed"] = Counter(state.range(0), benchmark::Counter::kIsIterationInvariantRate, benchmark::Counter::OneK::kIs1024);
+ ```
+ 
+-You can use `insert()` with `std::initializer_list`:
++When you're compiling in C++11 mode or later you can use `insert()` with
++`std::initializer_list`:
+ 
+ <!-- {% raw %} -->
+ ```c++
++  // With C++11, this can be done:
+   state.counters.insert({{"Foo", numFoos}, {"Bar", numBars}, {"Baz", numBazs}});
+   // ... instead of:
+   state.counters["Foo"] = numFoos;
+@@ -1244,7 +1249,7 @@ static void BM_test_ranged_fo(benchmark::State & state) {
+ 
+ ## A Faster KeepRunning Loop
+ 
+-A ranged-based for loop should be used in preference to
++In C++11 mode, a ranged-based for loop should be used in preference to
+ the `KeepRunning` loop for running the benchmarks. For example:
+ 
+ ```c++
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index c9a758b..663953d 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -191,14 +191,6 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+   TypeName(const TypeName&) = delete;                \
+   TypeName& operator=(const TypeName&) = delete
+ 
+-#ifdef BENCHMARK_HAS_CXX17
+-#define BENCHMARK_UNUSED [[maybe_unused]]
+-#elif defined(__GNUC__) || defined(__clang__)
+-#define BENCHMARK_UNUSED __attribute__((unused))
+-#else
+-#define BENCHMARK_UNUSED
+-#endif
+-
+ // Used to annotate functions, methods and classes so they
+ // are not optimized by the compiler. Useful for tests
+ // where you expect loops to stay in place churning cycles
+@@ -311,18 +303,6 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ #endif  // _MSC_VER_
+ 
+ namespace benchmark {
+-
+-namespace internal {
+-#if (__cplusplus < 201402L || (defined(_MSC_VER) && _MSVC_LANG < 201402L))
+-template <typename T, typename... Args>
+-std::unique_ptr<T> make_unique(Args&&... args) {
+-  return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
+-}
+-#else
+-using ::std::make_unique;
+-#endif
+-}  // namespace internal
+-
+ class BenchmarkReporter;
+ class State;
+ 
+@@ -492,7 +472,7 @@ BENCHMARK_EXPORT Benchmark* RegisterBenchmarkInternal(
+ 
+ // Ensure that the standard streams are properly initialized in every TU.
+ BENCHMARK_EXPORT int InitializeStreams();
+-BENCHMARK_UNUSED static int stream_init_anchor = InitializeStreams();
++[[maybe_unused]] static int stream_init_anchor = InitializeStreams();
+ 
+ }  // namespace internal
+ 
+@@ -1046,7 +1026,7 @@ inline BENCHMARK_ALWAYS_INLINE bool State::KeepRunningInternal(IterationCount n,
+ }
+ 
+ struct State::StateIterator {
+-  struct BENCHMARK_UNUSED Value {};
++  struct [[maybe_unused]] Value {};
+   typedef std::forward_iterator_tag iterator_category;
+   typedef Value value_type;
+   typedef Value reference;
+@@ -1391,7 +1371,7 @@ class LambdaBenchmark : public Benchmark {
+ inline internal::Benchmark* RegisterBenchmark(const std::string& name,
+                                               internal::Function* fn) {
+   return internal::RegisterBenchmarkInternal(
+-      benchmark::internal::make_unique<internal::FunctionBenchmark>(name, fn));
++      std::make_unique<internal::FunctionBenchmark>(name, fn));
+ }
+ 
+ template <class Lambda>
+@@ -1399,16 +1379,19 @@ internal::Benchmark* RegisterBenchmark(const std::string& name, Lambda&& fn) {
+   using BenchType =
+       internal::LambdaBenchmark<typename std::decay<Lambda>::type>;
+   return internal::RegisterBenchmarkInternal(
+-      benchmark::internal::make_unique<BenchType>(name,
+-                                                  std::forward<Lambda>(fn)));
++      std::make_unique<BenchType>(name, std::forward<Lambda>(fn)));
+ }
+ 
++#if (!defined(BENCHMARK_GCC_VERSION) || BENCHMARK_GCC_VERSION >= 409)
+ template <class Lambda, class... Args>
+ internal::Benchmark* RegisterBenchmark(const std::string& name, Lambda&& fn,
+                                        Args&&... args) {
+   return benchmark::RegisterBenchmark(
+       name, [=](benchmark::State& st) { fn(st, args...); });
+ }
++#else
++#define BENCHMARK_HAS_NO_VARIADIC_REGISTER_BENCHMARK
++#endif
+ 
+ // The base class for all fixture tests.
+ class Fixture : public internal::Benchmark {
+@@ -1459,14 +1442,13 @@ class Fixture : public internal::Benchmark {
+ #define BENCHMARK_PRIVATE_DECLARE(n)                                           \
+   /* NOLINTNEXTLINE(misc-use-anonymous-namespace) */                           \
+   static ::benchmark::internal::Benchmark const* const BENCHMARK_PRIVATE_NAME( \
+-      n) BENCHMARK_UNUSED
++      n) [[maybe_unused]]
+ 
+ #define BENCHMARK(...)                                                \
+   BENCHMARK_PRIVATE_DECLARE(_benchmark_) =                            \
+       (::benchmark::internal::RegisterBenchmarkInternal(              \
+-          benchmark::internal::make_unique<                           \
+-              ::benchmark::internal::FunctionBenchmark>(#__VA_ARGS__, \
+-                                                        __VA_ARGS__)))
++          std::make_unique<::benchmark::internal::FunctionBenchmark>( \
++              #__VA_ARGS__, __VA_ARGS__)))
+ 
+ // Old-style macros
+ #define BENCHMARK_WITH_ARG(n, a) BENCHMARK(n)->Arg((a))
+@@ -1487,12 +1469,11 @@ class Fixture : public internal::Benchmark {
+ //}
+ // /* Registers a benchmark named "BM_takes_args/int_string_test` */
+ // BENCHMARK_CAPTURE(BM_takes_args, int_string_test, 42, std::string("abc"));
+-#define BENCHMARK_CAPTURE(func, test_case_name, ...)     \
+-  BENCHMARK_PRIVATE_DECLARE(_benchmark_) =               \
+-      (::benchmark::internal::RegisterBenchmarkInternal( \
+-          benchmark::internal::make_unique<              \
+-              ::benchmark::internal::FunctionBenchmark>( \
+-              #func "/" #test_case_name,                 \
++#define BENCHMARK_CAPTURE(func, test_case_name, ...)                  \
++  BENCHMARK_PRIVATE_DECLARE(_benchmark_) =                            \
++      (::benchmark::internal::RegisterBenchmarkInternal(              \
++          std::make_unique<::benchmark::internal::FunctionBenchmark>( \
++              #func "/" #test_case_name,                              \
+               [](::benchmark::State& st) { func(st, __VA_ARGS__); })))
+ 
+ // This will register a benchmark for a templatized function.  For example:
+@@ -1503,24 +1484,22 @@ class Fixture : public internal::Benchmark {
+ // BENCHMARK_TEMPLATE(BM_Foo, 1);
+ //
+ // will register BM_Foo<1> as a benchmark.
+-#define BENCHMARK_TEMPLATE1(n, a)                        \
+-  BENCHMARK_PRIVATE_DECLARE(n) =                         \
+-      (::benchmark::internal::RegisterBenchmarkInternal( \
+-          benchmark::internal::make_unique<              \
+-              ::benchmark::internal::FunctionBenchmark>(#n "<" #a ">", n<a>)))
+-
+-#define BENCHMARK_TEMPLATE2(n, a, b)                                          \
+-  BENCHMARK_PRIVATE_DECLARE(n) =                                              \
+-      (::benchmark::internal::RegisterBenchmarkInternal(                      \
+-          benchmark::internal::make_unique<                                   \
+-              ::benchmark::internal::FunctionBenchmark>(#n "<" #a "," #b ">", \
+-                                                        n<a, b>)))
+-
+-#define BENCHMARK_TEMPLATE(n, ...)                       \
+-  BENCHMARK_PRIVATE_DECLARE(n) =                         \
+-      (::benchmark::internal::RegisterBenchmarkInternal( \
+-          benchmark::internal::make_unique<              \
+-              ::benchmark::internal::FunctionBenchmark>( \
++#define BENCHMARK_TEMPLATE1(n, a)                                     \
++  BENCHMARK_PRIVATE_DECLARE(n) =                                      \
++      (::benchmark::internal::RegisterBenchmarkInternal(              \
++          std::make_unique<::benchmark::internal::FunctionBenchmark>( \
++              #n "<" #a ">", n<a>)))
++
++#define BENCHMARK_TEMPLATE2(n, a, b)                                  \
++  BENCHMARK_PRIVATE_DECLARE(n) =                                      \
++      (::benchmark::internal::RegisterBenchmarkInternal(              \
++          std::make_unique<::benchmark::internal::FunctionBenchmark>( \
++              #n "<" #a "," #b ">", n<a, b>)))
++
++#define BENCHMARK_TEMPLATE(n, ...)                                    \
++  BENCHMARK_PRIVATE_DECLARE(n) =                                      \
++      (::benchmark::internal::RegisterBenchmarkInternal(              \
++          std::make_unique<::benchmark::internal::FunctionBenchmark>( \
+               #n "<" #__VA_ARGS__ ">", n<__VA_ARGS__>)))
+ 
+ // This will register a benchmark for a templatized function,
+@@ -1538,13 +1517,12 @@ class Fixture : public internal::Benchmark {
+ #define BENCHMARK_TEMPLATE1_CAPTURE(func, a, test_case_name, ...) \
+   BENCHMARK_CAPTURE(func<a>, test_case_name, __VA_ARGS__)
+ 
+-#define BENCHMARK_TEMPLATE2_CAPTURE(func, a, b, test_case_name, ...) \
+-  BENCHMARK_PRIVATE_DECLARE(func) =                                  \
+-      (::benchmark::internal::RegisterBenchmarkInternal(             \
+-          benchmark::internal::make_unique<                          \
+-              ::benchmark::internal::FunctionBenchmark>(             \
+-              #func "<" #a "," #b ">"                                \
+-                    "/" #test_case_name,                             \
++#define BENCHMARK_TEMPLATE2_CAPTURE(func, a, b, test_case_name, ...)  \
++  BENCHMARK_PRIVATE_DECLARE(func) =                                   \
++      (::benchmark::internal::RegisterBenchmarkInternal(              \
++          std::make_unique<::benchmark::internal::FunctionBenchmark>( \
++              #func "<" #a "," #b ">"                                 \
++                    "/" #test_case_name,                              \
+               [](::benchmark::State& st) { func<a, b>(st, __VA_ARGS__); })))
+ 
+ #define BENCHMARK_PRIVATE_DECLARE_F(BaseClass, Method)        \
+@@ -1613,7 +1591,7 @@ class Fixture : public internal::Benchmark {
+ #define BENCHMARK_PRIVATE_REGISTER_F(TestName)           \
+   BENCHMARK_PRIVATE_DECLARE(TestName) =                  \
+       (::benchmark::internal::RegisterBenchmarkInternal( \
+-          benchmark::internal::make_unique<TestName>()))
++          std::make_unique<TestName>()))
+ 
+ // This macro will define and register a benchmark within a fixture class.
+ #define BENCHMARK_F(BaseClass, Method)           \
+diff --git a/test/BUILD b/test/BUILD
+index 9a26970..e3558a9 100644
+--- a/test/BUILD
++++ b/test/BUILD
+@@ -102,27 +102,11 @@ cc_library(
+         ["*_test.cc"],
+         exclude = [
+             "*_assembly_test.cc",
+-            "cxx11_test.cc",
+             "link_main_test.cc",
+         ],
+     )
+ ]
+ 
+-cc_test(
+-    name = "cxx11_test",
+-    size = "small",
+-    srcs = ["cxx11_test.cc"],
+-    copts = TEST_COPTS + ["-std=c++11"],
+-    target_compatible_with = select({
+-        "//:windows": ["@platforms//:incompatible"],
+-        "//conditions:default": [],
+-    }),
+-    deps = [
+-        ":output_test_helper",
+-        "//:benchmark_main",
+-    ],
+-)
+-
+ cc_test(
+     name = "link_main_test",
+     size = "small",
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index df575d9..a7e7122 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -73,18 +73,6 @@ macro(benchmark_add_test)
+ endmacro(benchmark_add_test)
+ 
+ # Demonstration executable
+-
+-compile_benchmark_test_with_main(cxx11_test)
+-if(DEFINED MSVC)
+-  # MSVC does not really support C++11.
+-  set_property(TARGET cxx11_test PROPERTY CXX_STANDARD 14)
+-else()
+-  set_property(TARGET cxx11_test PROPERTY CXX_STANDARD 11)
+-endif()
+-set_property(TARGET cxx11_test PROPERTY CXX_STANDARD_REQUIRED ON)
+-set_property(TARGET cxx11_test PROPERTY CXX_EXTENSIONS OFF)
+-benchmark_add_test(NAME cxx11_test COMMAND cxx11_test --benchmark_min_time=0.01s)
+-
+ compile_benchmark_test(benchmark_test)
+ benchmark_add_test(NAME benchmark COMMAND benchmark_test --benchmark_min_time=0.01s)
+ 
+diff --git a/test/basic_test.cc b/test/basic_test.cc
+index b51494b..c3ac494 100644
+--- a/test/basic_test.cc
++++ b/test/basic_test.cc
+@@ -143,6 +143,7 @@ void BM_RangedFor(benchmark::State& state) {
+ }
+ BENCHMARK(BM_RangedFor);
+ 
++#ifdef BENCHMARK_HAS_CXX11
+ template <typename T>
+ void BM_OneTemplateFunc(benchmark::State& state) {
+   auto arg = state.range(0);
+@@ -167,6 +168,8 @@ void BM_TwoTemplateFunc(benchmark::State& state) {
+ BENCHMARK(BM_TwoTemplateFunc<int, double>)->Arg(1);
+ BENCHMARK(BM_TwoTemplateFunc<double, int>)->Arg(1);
+ 
++#endif  // BENCHMARK_HAS_CXX11
++
+ // Ensure that StateIterator provides all the necessary typedefs required to
+ // instantiate std::iterator_traits.
+ static_assert(
+diff --git a/test/benchmark_test.cc b/test/benchmark_test.cc
+index 141f286..e00f153 100644
+--- a/test/benchmark_test.cc
++++ b/test/benchmark_test.cc
+@@ -131,7 +131,9 @@ BENCHMARK_TEMPLATE2(BM_Sequential, std::vector<int>, int)
+     ->Range(1 << 0, 1 << 10);
+ BENCHMARK_TEMPLATE(BM_Sequential, std::list<int>)->Range(1 << 0, 1 << 10);
+ // Test the variadic version of BENCHMARK_TEMPLATE in C++11 and beyond.
++#ifdef BENCHMARK_HAS_CXX11
+ BENCHMARK_TEMPLATE(BM_Sequential, std::vector<int>, int)->Arg(512);
++#endif
+ 
+ static void BM_StringCompare(benchmark::State& state) {
+   size_t len = static_cast<size_t>(state.range(0));
+@@ -223,6 +225,8 @@ static void BM_ManualTiming(benchmark::State& state) {
+ BENCHMARK(BM_ManualTiming)->Range(1, 1 << 14)->UseRealTime();
+ BENCHMARK(BM_ManualTiming)->Range(1, 1 << 14)->UseManualTime();
+ 
++#ifdef BENCHMARK_HAS_CXX11
++
+ template <class... Args>
+ void BM_with_args(benchmark::State& state, Args&&...) {
+   for (auto _ : state) {
+@@ -263,6 +267,8 @@ void BM_template1_capture(benchmark::State& state, ExtraArgs&&... extra_args) {
+ BENCHMARK_TEMPLATE1_CAPTURE(BM_template1_capture, void, foo, 24UL);
+ BENCHMARK_CAPTURE(BM_template1_capture<void>, foo, 24UL);
+ 
++#endif  // BENCHMARK_HAS_CXX11
++
+ static void BM_DenseThreadRanges(benchmark::State& st) {
+   switch (st.range(0)) {
+     case 1:
+diff --git a/test/cxx11_test.cc b/test/cxx11_test.cc
+deleted file mode 100644
+index db1a993..0000000
+--- a/test/cxx11_test.cc
++++ /dev/null
+@@ -1,12 +0,0 @@
+-#include "benchmark/benchmark.h"
+-
+-#if defined(_MSC_VER)
+-#if _MSVC_LANG != 201402L
+-// MSVC, even in C++11 mode, dooes not claim to be in C++11 mode.
+-#error "Trying to compile C++11 test with wrong C++ standard"
+-#endif  //  _MSVC_LANG
+-#else   // Non-MSVC
+-#if __cplusplus != 201103L
+-#error "Trying to compile C++11 test with wrong C++ standard"
+-#endif  // Non-MSVC
+-#endif
+diff --git a/test/donotoptimize_test.cc b/test/donotoptimize_test.cc
+index 5c9a458..75db934 100644
+--- a/test/donotoptimize_test.cc
++++ b/test/donotoptimize_test.cc
+@@ -62,6 +62,8 @@ int main(int /*unused*/, char* /*unused*/[]) {
+   BitRef lval = BitRef::Make();
+   benchmark::DoNotOptimize(lval);
+ 
++#ifdef BENCHMARK_HAS_CXX11
+   // Check that accept rvalue.
+   benchmark::DoNotOptimize(BitRef::Make());
++#endif
+ }
+diff --git a/test/register_benchmark_test.cc b/test/register_benchmark_test.cc
+index 1a18814..e443ab7 100644
+--- a/test/register_benchmark_test.cc
++++ b/test/register_benchmark_test.cc
+@@ -77,6 +77,7 @@ ADD_CASES({"BM_function"}, {"BM_function_manual_registration"});
+ // Note: GCC <= 4.8 do not support this form of RegisterBenchmark because they
+ //       reject the variadic pack expansion of lambda captures.
+ //----------------------------------------------------------------------------//
++#ifndef BENCHMARK_HAS_NO_VARIADIC_REGISTER_BENCHMARK
+ 
+ void BM_extra_args(benchmark::State& st, const char* label) {
+   for (auto _ : st) {
+@@ -94,6 +95,8 @@ int RegisterFromFunction() {
+ const int dummy2 = RegisterFromFunction();
+ ADD_CASES({"test1", "One"}, {"test2", "Two"}, {"test3", "Three"});
+ 
++#endif  // BENCHMARK_HAS_NO_VARIADIC_REGISTER_BENCHMARK
++
+ //----------------------------------------------------------------------------//
+ // Test RegisterBenchmark with DISABLED_ benchmark
+ //----------------------------------------------------------------------------//
+@@ -118,11 +121,14 @@ struct CustomFixture {
+ };
+ 
+ void TestRegistrationAtRuntime() {
++#ifdef BENCHMARK_HAS_CXX11
+   {
+     CustomFixture fx;
+     benchmark::RegisterBenchmark("custom_fixture", fx);
+     AddCases({std::string("custom_fixture")});
+   }
++#endif
++#ifndef BENCHMARK_HAS_NO_VARIADIC_REGISTER_BENCHMARK
+   {
+     const char* x = "42";
+     auto capturing_lam = [=](benchmark::State& st) {
+@@ -133,6 +139,7 @@ void TestRegistrationAtRuntime() {
+     benchmark::RegisterBenchmark("lambda_benchmark", capturing_lam);
+     AddCases({{"lambda_benchmark", x}});
+   }
++#endif
+ }
+ 
+ // Test that all benchmarks, registered at either during static init or runtime,

@@ -1,0 +1,433 @@
+diff --git a/bindings/python/google_benchmark/__init__.py b/bindings/python/google_benchmark/__init__.py
+index 41517b2..e666513 100644
+--- a/bindings/python/google_benchmark/__init__.py
++++ b/bindings/python/google_benchmark/__init__.py
+@@ -137,8 +137,6 @@ def main(argv=None):
+     return app.run(_run_benchmarks, argv=argv, flags_parser=_flags_parser)
+ 
+ 
+-# FIXME: can we rerun with disabled ASLR?
+-
+ # Methods for use with custom main function.
+ initialize = _benchmark.Initialize
+ run_benchmarks = _benchmark.RunSpecifiedBenchmarks
+diff --git a/docs/reducing_variance.md b/docs/reducing_variance.md
+index e604c66..acc1421 100644
+--- a/docs/reducing_variance.md
++++ b/docs/reducing_variance.md
+@@ -50,17 +50,6 @@ If you see this error:
+ you might want to disable the ASLR security hardening feature while running the
+ benchmark.
+ 
+-The simplest way is to add
+-```
+-benchmark::MaybeReenterWithoutASLR(argc, argv);
+-```
+-as the first line of your `main()` function. It will try to disable ASLR
+-for the current processor, and, if successful, re-execute the binary.
+-Note that `personality(2)` may be forbidden by e.g. seccomp (which happens
+-by default if you are running in a Docker container).
+-
+-Note that if you link to `benchmark_main` already does that for you.
+-
+ To globally disable ASLR on Linux, run
+ ```
+ echo 0 > /proc/sys/kernel/randomize_va_space
+diff --git a/docs/user_guide.md b/docs/user_guide.md
+index ae8e125..3b8f9d5 100644
+--- a/docs/user_guide.md
++++ b/docs/user_guide.md
+@@ -1268,7 +1268,6 @@ For Example:
+ auto BM_test = [](benchmark::State& st, auto Inputs) { /* ... */ };
+ 
+ int main(int argc, char** argv) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   for (auto& test_input : { /* ... */ })
+       benchmark::RegisterBenchmark(test_input.name(), BM_test, test_input);
+   benchmark::Initialize(&argc, argv);
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index f455e05..9e4347b 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -40,7 +40,6 @@ BENCHMARK(BM_StringCopy);
+ //       my_unittest --benchmark_filter=String
+ //       my_unittest --benchmark_filter='Copy|Creation'
+ int main(int argc, char** argv) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   benchmark::Initialize(&argc, argv);
+   benchmark::RunSpecifiedBenchmarks();
+   benchmark::Shutdown();
+@@ -335,8 +334,6 @@ using callback_function = std::function<void(const benchmark::State&)>;
+ // Default number of minimum benchmark running time in seconds.
+ const char kDefaultMinTimeStr[] = "0.5s";
+ 
+-BENCHMARK_EXPORT void MaybeReenterWithoutASLR(int, char**);
+-
+ // Returns the version of the library.
+ BENCHMARK_EXPORT std::string GetBenchmarkVersion();
+ 
+@@ -1690,7 +1687,6 @@ class Fixture : public internal::Benchmark {
+ // Note the workaround for Hexagon simulator passing argc != 0, argv = NULL.
+ #define BENCHMARK_MAIN()                                                \
+   int main(int argc, char** argv) {                                     \
+-    benchmark::MaybeReenterWithoutASLR(argc, argv);                     \
+     char arg0_default[] = "benchmark";                                  \
+     char* args_default = reinterpret_cast<char*>(arg0_default);         \
+     if (!argv) {                                                        \
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 48a2acc..925a38f 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -26,10 +26,6 @@
+ #include <unistd.h>
+ #endif
+ 
+-#ifdef BENCHMARK_OS_LINUX
+-#include <sys/personality.h>
+-#endif
+-
+ #include <algorithm>
+ #include <atomic>
+ #include <condition_variable>
+@@ -817,35 +813,6 @@ int InitializeStreams() {
+ 
+ }  // end namespace internal
+ 
+-void MaybeReenterWithoutASLR(int /*argc*/, char** argv) {
+-  // On e.g. Hexagon simulator, argv may be NULL.
+-  if (!argv) return;
+-
+-#ifdef BENCHMARK_OS_LINUX
+-  const auto curr_personality = personality(0xffffffff);
+-
+-  // We should never fail to read-only query the current personality,
+-  // but let's be cautious.
+-  if (curr_personality == -1) return;
+-
+-  // If ASLR is already disabled, we have nothing more to do.
+-  if (curr_personality & ADDR_NO_RANDOMIZE) return;
+-
+-  // Try to change the personality to disable ASLR.
+-  const auto prev_personality = personality(
+-      static_cast<unsigned long>(curr_personality) | ADDR_NO_RANDOMIZE);
+-
+-  // Have we failed to change the personality? That may happen.
+-  if (prev_personality == -1) return;
+-
+-  execv(argv[0], argv);
+-  // The exec() functions return only if an error has occurred,
+-  // in which case we want to just continue as-is.
+-#else
+-  return;
+-#endif
+-}
+-
+ std::string GetBenchmarkVersion() {
+ #ifdef BENCHMARK_VERSION
+   return {BENCHMARK_VERSION};
+diff --git a/test/benchmark_min_time_flag_iters_test.cc b/test/benchmark_min_time_flag_iters_test.cc
+index 5e25aa9..a5964f1 100644
+--- a/test/benchmark_min_time_flag_iters_test.cc
++++ b/test/benchmark_min_time_flag_iters_test.cc
+@@ -44,8 +44,6 @@ static void BM_MyBench(benchmark::State& state) {
+ BENCHMARK(BM_MyBench);
+ 
+ int main(int argc, char** argv) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-
+   // Make a fake argv and append the new --benchmark_min_time=<foo> to it.
+   int fake_argc = argc + 1;
+   std::vector<const char*> fake_argv(static_cast<size_t>(fake_argc));
+diff --git a/test/benchmark_min_time_flag_time_test.cc b/test/benchmark_min_time_flag_time_test.cc
+index 8d221e4..0a136fa 100644
+--- a/test/benchmark_min_time_flag_time_test.cc
++++ b/test/benchmark_min_time_flag_time_test.cc
+@@ -69,8 +69,6 @@ static void BM_MyBench(benchmark::State& state) {
+ BENCHMARK(BM_MyBench);
+ 
+ int main(int argc, char** argv) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-
+   // Make a fake argv and append the new --benchmark_min_time=<foo> to it.
+   int fake_argc = argc + 1;
+   std::vector<const char*> fake_argv(static_cast<size_t>(fake_argc));
+diff --git a/test/benchmark_setup_teardown_test.cc b/test/benchmark_setup_teardown_test.cc
+index 53695e9..bf45fd1 100644
+--- a/test/benchmark_setup_teardown_test.cc
++++ b/test/benchmark_setup_teardown_test.cc
+@@ -134,8 +134,6 @@ BENCHMARK(BM_WithRep)
+     ->Repetitions(4);
+ 
+ int main(int argc, char** argv) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-
+   benchmark::Initialize(&argc, argv);
+ 
+   size_t ret = benchmark::RunSpecifiedBenchmarks(".");
+diff --git a/test/complexity_test.cc b/test/complexity_test.cc
+index 23c5f3e..f208cb3 100644
+--- a/test/complexity_test.cc
++++ b/test/complexity_test.cc
+@@ -269,7 +269,4 @@ ADD_COMPLEXITY_CASES(complexity_capture_name, complexity_capture_name + "_BigO",
+ // --------------------------- TEST CASES END ------------------------------ //
+ // ========================================================================= //
+ 
+-int main(int argc, char *argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-  RunOutputTests(argc, argv);
+-}
++int main(int argc, char *argv[]) { RunOutputTests(argc, argv); }
+diff --git a/test/diagnostics_test.cc b/test/diagnostics_test.cc
+index e930f02..61de286 100644
+--- a/test/diagnostics_test.cc
++++ b/test/diagnostics_test.cc
+@@ -94,7 +94,6 @@ int main(int argc, char* argv[]) {
+   (void)argc;
+   (void)argv;
+ #else
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   benchmark::internal::GetAbortHandler() = &TestHandler;
+   benchmark::Initialize(&argc, argv);
+   benchmark::RunSpecifiedBenchmarks();
+diff --git a/test/display_aggregates_only_test.cc b/test/display_aggregates_only_test.cc
+index 1d3b6cd..6ad65e7 100644
+--- a/test/display_aggregates_only_test.cc
++++ b/test/display_aggregates_only_test.cc
+@@ -17,8 +17,6 @@ void BM_SummaryRepeat(benchmark::State& state) {
+ BENCHMARK(BM_SummaryRepeat)->Repetitions(3)->DisplayAggregatesOnly();
+ 
+ int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-
+   const std::string output = GetFileReporterOutput(argc, argv);
+ 
+   if (SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3") != 7 ||
+diff --git a/test/donotoptimize_test.cc b/test/donotoptimize_test.cc
+index 7571cf4..5c9a458 100644
+--- a/test/donotoptimize_test.cc
++++ b/test/donotoptimize_test.cc
+@@ -26,9 +26,7 @@ struct BitRef {
+   BitRef(int i, unsigned char& b) : index(i), byte(b) {}
+ };
+ 
+-int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-
++int main(int /*unused*/, char* /*unused*/[]) {
+   // this test verifies compilation of DoNotOptimize() for some types
+ 
+   char buffer1[1] = "";
+diff --git a/test/filter_test.cc b/test/filter_test.cc
+index 0a4a1df..a931a68 100644
+--- a/test/filter_test.cc
++++ b/test/filter_test.cc
+@@ -70,8 +70,6 @@ static void BM_FooBa(benchmark::State& state) {
+ BENCHMARK(BM_FooBa);
+ 
+ int main(int argc, char** argv) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-
+   bool list_only = false;
+   for (int i = 0; i < argc; ++i) {
+     list_only |= std::string(argv[i]).find("--benchmark_list_tests") !=
+diff --git a/test/internal_threading_test.cc b/test/internal_threading_test.cc
+index d2897e7..6984ff8 100644
+--- a/test/internal_threading_test.cc
++++ b/test/internal_threading_test.cc
+@@ -183,8 +183,4 @@ BENCHMARK(BM_MainThreadAndWorkerThread)
+ // ---------------------------- TEST CASES END ----------------------------- //
+ // ========================================================================= //
+ 
+-int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-
+-  RunOutputTests(argc, argv);
+-}
++int main(int argc, char* argv[]) { RunOutputTests(argc, argv); }
+diff --git a/test/manual_threading_test.cc b/test/manual_threading_test.cc
+index b3252ec..e85d495 100644
+--- a/test/manual_threading_test.cc
++++ b/test/manual_threading_test.cc
+@@ -167,7 +167,6 @@ BENCHMARK(BM_ManualThreading)
+ // ========================================================================= //
+ 
+ int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   benchmark::Initialize(&argc, argv);
+   benchmark::RunSpecifiedBenchmarks();
+   benchmark::Shutdown();
+diff --git a/test/memory_manager_test.cc b/test/memory_manager_test.cc
+index f9b9021..ebb72b0 100644
+--- a/test/memory_manager_test.cc
++++ b/test/memory_manager_test.cc
+@@ -40,7 +40,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_empty\",$"},
+ ADD_CASES(TC_CSVOut, {{"^\"BM_empty\",%csv_report$"}});
+ 
+ int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   std::unique_ptr<benchmark::MemoryManager> mm(new TestMemoryManager());
+ 
+   benchmark::RegisterMemoryManager(mm.get());
+diff --git a/test/perf_counters_test.cc b/test/perf_counters_test.cc
+index 8aa3a7b..3cc593e 100644
+--- a/test/perf_counters_test.cc
++++ b/test/perf_counters_test.cc
+@@ -79,7 +79,6 @@ CHECK_BENCHMARK_RESULTS("BM_WithoutPauseResume", &SaveInstrCountWithoutResume);
+ CHECK_BENCHMARK_RESULTS("BM_WithPauseResume", &SaveInstrCountWithResume);
+ 
+ int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   if (!benchmark::internal::PerfCounters::kSupported) {
+     return 0;
+   }
+diff --git a/test/profiler_manager_iterations_test.cc b/test/profiler_manager_iterations_test.cc
+index af1052f..407d33b 100644
+--- a/test/profiler_manager_iterations_test.cc
++++ b/test/profiler_manager_iterations_test.cc
+@@ -35,7 +35,6 @@ static void BM_MyBench(benchmark::State& state) {
+ BENCHMARK(BM_MyBench);
+ 
+ int main(int argc, char** argv) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   // Make a fake argv and append the new --benchmark_profiler_iterations=<foo>
+   // to it.
+   int fake_argc = argc + 1;
+diff --git a/test/profiler_manager_test.cc b/test/profiler_manager_test.cc
+index 75a2aaa..21f2f1d 100644
+--- a/test/profiler_manager_test.cc
++++ b/test/profiler_manager_test.cc
+@@ -40,7 +40,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_empty\",$"},
+ ADD_CASES(TC_CSVOut, {{"^\"BM_empty\",%csv_report$"}});
+ 
+ int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   std::unique_ptr<TestProfilerManager> pm(new TestProfilerManager());
+ 
+   benchmark::RegisterProfilerManager(pm.get());
+diff --git a/test/register_benchmark_test.cc b/test/register_benchmark_test.cc
+index e91ba97..1a18814 100644
+--- a/test/register_benchmark_test.cc
++++ b/test/register_benchmark_test.cc
+@@ -184,7 +184,6 @@ void RunTestTwo() {
+ }
+ 
+ int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   benchmark::Initialize(&argc, argv);
+ 
+   RunTestOne();
+diff --git a/test/repetitions_test.cc b/test/repetitions_test.cc
+index 9a7dcc3..569777d 100644
+--- a/test/repetitions_test.cc
++++ b/test/repetitions_test.cc
+@@ -211,7 +211,4 @@ ADD_CASES(TC_CSVOut, {{"^\"BM_ImplicitRepetitions_stddev\",%csv_report$"}});
+ // --------------------------- TEST CASES END ------------------------------ //
+ // ========================================================================= //
+ 
+-int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-  RunOutputTests(argc, argv);
+-}
++int main(int argc, char* argv[]) { RunOutputTests(argc, argv); }
+diff --git a/test/report_aggregates_only_test.cc b/test/report_aggregates_only_test.cc
+index d907559..47da503 100644
+--- a/test/report_aggregates_only_test.cc
++++ b/test/report_aggregates_only_test.cc
+@@ -17,7 +17,6 @@ void BM_SummaryRepeat(benchmark::State& state) {
+ BENCHMARK(BM_SummaryRepeat)->Repetitions(3)->ReportAggregatesOnly();
+ 
+ int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   const std::string output = GetFileReporterOutput(argc, argv);
+ 
+   if (SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3") != 4 ||
+diff --git a/test/reporter_output_test.cc b/test/reporter_output_test.cc
+index 58860ca..bd50a25 100644
+--- a/test/reporter_output_test.cc
++++ b/test/reporter_output_test.cc
+@@ -1133,7 +1133,4 @@ ADD_CASES(TC_CSVOut, {{"^\"BM_CSV_Format\",,,,,,,,true,\"\"\"freedom\"\"\"$"}});
+ // --------------------------- TEST CASES END ------------------------------ //
+ // ========================================================================= //
+ 
+-int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-  RunOutputTests(argc, argv);
+-}
++int main(int argc, char* argv[]) { RunOutputTests(argc, argv); }
+diff --git a/test/skip_with_error_test.cc b/test/skip_with_error_test.cc
+index 7553eba..1056f86 100644
+--- a/test/skip_with_error_test.cc
++++ b/test/skip_with_error_test.cc
+@@ -183,7 +183,6 @@ ADD_CASES("BM_error_while_paused", {{"/1/threads:1", true, "error message"},
+                                     {"/2/threads:8", false, ""}});
+ 
+ int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   benchmark::Initialize(&argc, argv);
+ 
+   TestReporter test_reporter;
+diff --git a/test/spec_arg_test.cc b/test/spec_arg_test.cc
+index cec5c32..06aafbe 100644
+--- a/test/spec_arg_test.cc
++++ b/test/spec_arg_test.cc
+@@ -55,8 +55,6 @@ static void BM_Chosen(benchmark::State& state) {
+ BENCHMARK(BM_Chosen);
+ 
+ int main(int argc, char** argv) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-
+   const std::string flag = "BM_NotChosen";
+ 
+   // Verify that argv specify --benchmark_filter=BM_NotChosen.
+diff --git a/test/spec_arg_verbosity_test.cc b/test/spec_arg_verbosity_test.cc
+index 43dfda9..8f8eb6d 100644
+--- a/test/spec_arg_verbosity_test.cc
++++ b/test/spec_arg_verbosity_test.cc
+@@ -12,8 +12,6 @@ static void BM_Verbosity(benchmark::State& state) {
+ BENCHMARK(BM_Verbosity);
+ 
+ int main(int argc, char** argv) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-
+   const int32_t flagv = 42;
+ 
+   // Verify that argv specify --v=42.
+diff --git a/test/user_counters_tabular_test.cc b/test/user_counters_tabular_test.cc
+index 0046210..d26120e 100644
+--- a/test/user_counters_tabular_test.cc
++++ b/test/user_counters_tabular_test.cc
+@@ -560,7 +560,4 @@ CHECK_BENCHMARK_RESULTS("BM_CounterSet2_Tabular", &CheckSet2);
+ // --------------------------- TEST CASES END ------------------------------ //
+ // ========================================================================= //
+ 
+-int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-  RunOutputTests(argc, argv);
+-}
++int main(int argc, char* argv[]) { RunOutputTests(argc, argv); }
+diff --git a/test/user_counters_test.cc b/test/user_counters_test.cc
+index 910f930..d3fd4a6 100644
+--- a/test/user_counters_test.cc
++++ b/test/user_counters_test.cc
+@@ -565,7 +565,4 @@ CHECK_BENCHMARK_RESULTS("BM_Counters_kAvgIterationsRate",
+ // --------------------------- TEST CASES END ------------------------------ //
+ // ========================================================================= //
+ 
+-int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-  RunOutputTests(argc, argv);
+-}
++int main(int argc, char* argv[]) { RunOutputTests(argc, argv); }
+diff --git a/test/user_counters_thousands_test.cc b/test/user_counters_thousands_test.cc
+index 4f341db..dd4efd4 100644
+--- a/test/user_counters_thousands_test.cc
++++ b/test/user_counters_thousands_test.cc
+@@ -184,7 +184,4 @@ CHECK_BENCHMARK_RESULTS("BM_Counters_Thousands", &CheckThousands);
+ // --------------------------- TEST CASES END ------------------------------ //
+ // ========================================================================= //
+ 
+-int main(int argc, char* argv[]) {
+-  benchmark::MaybeReenterWithoutASLR(argc, argv);
+-  RunOutputTests(argc, argv);
+-}
++int main(int argc, char* argv[]) { RunOutputTests(argc, argv); }

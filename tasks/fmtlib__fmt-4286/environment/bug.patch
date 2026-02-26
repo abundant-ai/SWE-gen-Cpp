@@ -1,0 +1,114 @@
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index 2fb85fef..d1b83d18 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -3654,17 +3654,6 @@ void vformat_to(buffer<Char>& buf, basic_string_view<Char> fmt,
+   parse_format_string(
+       fmt, format_handler<Char>{parse_context<Char>(fmt), {out, args, loc}});
+ }
+-
+-template <typename Char>
+-void basic_specs_copy_fill(basic_specs& dst, const basic_specs& src) {
+-  if (src.fill_size() == 1 && const_check(!std::is_same<Char, char>::value)) {
+-    Char fill = src.fill_unit<Char>();
+-    dst.set_fill(basic_string_view<Char>(&fill, 1));
+-    return;
+-  }
+-  dst.set_fill(basic_string_view<char>(src.fill<char>(), src.fill_size()));
+-}
+-
+ }  // namespace detail
+ 
+ FMT_BEGIN_EXPORT
+@@ -3971,7 +3960,8 @@ template <typename T, typename Char = char> struct nested_formatter {
+     write(basic_appender<Char>(buf));
+     auto specs = format_specs();
+     specs.width = width_;
+-    detail::basic_specs_copy_fill<Char>(specs, specs_);
++    specs.set_fill(
++        basic_string_view<Char>(specs_.fill<Char>(), specs_.fill_size()));
+     specs.set_align(specs_.align());
+     return detail::write<Char>(
+         ctx.out(), basic_string_view<Char>(buf.data(), buf.size()), specs);
+diff --git a/include/fmt/std.h b/include/fmt/std.h
+index bc277d64..b00e4022 100644
+--- a/include/fmt/std.h
++++ b/include/fmt/std.h
+@@ -184,8 +184,7 @@ FMT_END_NAMESPACE
+ FMT_BEGIN_NAMESPACE
+ FMT_EXPORT
+ template <std::size_t N, typename Char>
+-struct formatter<std::bitset<N>, Char>
+-    : nested_formatter<basic_string_view<Char>, Char> {
++struct formatter<std::bitset<N>, Char> : nested_formatter<string_view> {
+  private:
+   // Functor because C++11 doesn't support generic lambdas.
+   struct writer {
+@@ -205,7 +204,7 @@ struct formatter<std::bitset<N>, Char>
+   template <typename FormatContext>
+   auto format(const std::bitset<N>& bs, FormatContext& ctx) const
+       -> decltype(ctx.out()) {
+-    return this->write_padded(ctx, writer{bs});
++    return write_padded(ctx, writer{bs});
+   }
+ };
+ 
+@@ -696,7 +695,9 @@ template <typename T, typename Char> struct formatter<std::complex<T>, Char> {
+ 
+     auto outer_specs = format_specs();
+     outer_specs.width = specs.width;
+-    detail::basic_specs_copy_fill<Char>(outer_specs, specs);
++    auto fill = specs.template fill<Char>();
++    if (fill)
++      outer_specs.set_fill(basic_string_view<Char>(fill, specs.fill_size()));
+     outer_specs.set_align(specs.align());
+ 
+     specs.width = 0;
+diff --git a/test/std-test.cc b/test/std-test.cc
+index 2c57b3f6..ab458ae8 100644
+--- a/test/std-test.cc
++++ b/test/std-test.cc
+@@ -91,9 +91,6 @@ TEST(std_test, complex) {
+   EXPECT_EQ(fmt::format("{: }", std::complex<double>(1, 2.2)), "( 1+2.2i)");
+   EXPECT_EQ(fmt::format("{: }", std::complex<double>(1, -2.2)), "( 1-2.2i)");
+ 
+-  EXPECT_EQ(fmt::format("{:8}", std::complex<double>(1, 2)), "(1+2i)  ");
+-  EXPECT_EQ(fmt::format("{:-<8}", std::complex<double>(1, 2)), "(1+2i)--");
+-
+   EXPECT_EQ(fmt::format("{:>20.2f}", std::complex<double>(1, 2.2)),
+             "        (1.00+2.20i)");
+   EXPECT_EQ(fmt::format("{:<20.2f}", std::complex<double>(1, 2.2)),
+diff --git a/test/xchar-test.cc b/test/xchar-test.cc
+index fd613e82..0f91aa31 100644
+--- a/test/xchar-test.cc
++++ b/test/xchar-test.cc
+@@ -79,7 +79,7 @@ TEST(xchar_test, format) {
+   EXPECT_THROW(fmt::format(fmt::runtime(L"{:*\x343E}"), 42), fmt::format_error);
+   EXPECT_EQ(fmt::format(L"{}", true), L"true");
+   EXPECT_EQ(fmt::format(L"{0}", L'a'), L"a");
+-  EXPECT_EQ(fmt::format(L"Letter {}", L'\x40e'), L"Letter \x40e");  // Ў
++  EXPECT_EQ(fmt::format(L"Letter {}", L'\x40e'), L"Letter \x40e"); // Ў
+   if (sizeof(wchar_t) == 4)
+     EXPECT_EQ(fmt::format(fmt::runtime(L"{:𓀨>3}"), 42), L"𓀨42");
+   EXPECT_EQ(fmt::format(L"{}c{}", L"ab", 1), L"abc1");
+@@ -491,20 +491,12 @@ TEST(locale_test, sign) {
+   EXPECT_EQ(fmt::format(std::locale(), L"{:L}", -50), L"-50");
+ }
+ 
+-TEST(std_test_xchar, format_bitset) {
+-  auto bs = std::bitset<6>(42);
+-  EXPECT_EQ(fmt::format(L"{}", bs), L"101010");
+-  EXPECT_EQ(fmt::format(L"{:0>8}", bs), L"00101010");
+-  EXPECT_EQ(fmt::format(L"{:-^12}", bs), L"---101010---");
+-}
+-
+ TEST(std_test_xchar, complex) {
+   auto s = fmt::format(L"{}", std::complex<double>(1, 2));
+   EXPECT_EQ(s, L"(1+2i)");
+   EXPECT_EQ(fmt::format(L"{:.2f}", std::complex<double>(1, 2)),
+             L"(1.00+2.00i)");
+   EXPECT_EQ(fmt::format(L"{:8}", std::complex<double>(1, 2)), L"(1+2i)  ");
+-  EXPECT_EQ(fmt::format(L"{:-<8}", std::complex<double>(1, 2)), L"(1+2i)--");
+ }
+ 
+ TEST(std_test_xchar, optional) {

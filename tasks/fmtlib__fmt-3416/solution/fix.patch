@@ -1,0 +1,251 @@
+diff --git a/include/fmt/chrono.h b/include/fmt/chrono.h
+index cdf72849..bbee4aaf 100644
+--- a/include/fmt/chrono.h
++++ b/include/fmt/chrono.h
+@@ -377,37 +377,11 @@ auto write_encoded_tm_str(OutputIt out, string_view in, const std::locale& loc)
+     unit_t unit;
+     write_codecvt(unit, in, loc);
+     // In UTF-8 is used one to four one-byte code units.
+-    auto&& buf = basic_memory_buffer<char, unit_t::max_size * 4>();
+-    for (code_unit* p = unit.buf; p != unit.end; ++p) {
+-      uint32_t c = static_cast<uint32_t>(*p);
+-      if (sizeof(code_unit) == 2 && c >= 0xd800 && c <= 0xdfff) {
+-        // surrogate pair
+-        ++p;
+-        if (p == unit.end || (c & 0xfc00) != 0xd800 ||
+-            (*p & 0xfc00) != 0xdc00) {
+-          FMT_THROW(format_error("failed to format time"));
+-        }
+-        c = (c << 10) + static_cast<uint32_t>(*p) - 0x35fdc00;
+-      }
+-      if (c < 0x80) {
+-        buf.push_back(static_cast<char>(c));
+-      } else if (c < 0x800) {
+-        buf.push_back(static_cast<char>(0xc0 | (c >> 6)));
+-        buf.push_back(static_cast<char>(0x80 | (c & 0x3f)));
+-      } else if ((c >= 0x800 && c <= 0xd7ff) || (c >= 0xe000 && c <= 0xffff)) {
+-        buf.push_back(static_cast<char>(0xe0 | (c >> 12)));
+-        buf.push_back(static_cast<char>(0x80 | ((c & 0xfff) >> 6)));
+-        buf.push_back(static_cast<char>(0x80 | (c & 0x3f)));
+-      } else if (c >= 0x10000 && c <= 0x10ffff) {
+-        buf.push_back(static_cast<char>(0xf0 | (c >> 18)));
+-        buf.push_back(static_cast<char>(0x80 | ((c & 0x3ffff) >> 12)));
+-        buf.push_back(static_cast<char>(0x80 | ((c & 0xfff) >> 6)));
+-        buf.push_back(static_cast<char>(0x80 | (c & 0x3f)));
+-      } else {
+-        FMT_THROW(format_error("failed to format time"));
+-      }
+-    }
+-    return copy_str<char>(buf.data(), buf.data() + buf.size(), out);
++    unicode_to_utf8<code_unit, basic_memory_buffer<char, unit_t::max_size * 4>>
++        u;
++    if (!u.convert({unit.buf, to_unsigned(unit.end - unit.buf)}))
++      FMT_THROW(format_error("failed to format time"));
++    return copy_str<char>(u.c_str(), u.c_str() + u.size(), out);
+   }
+   return copy_str<char>(in.data(), in.data() + in.size(), out);
+ }
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index 87b67948..692ed921 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -1416,6 +1416,68 @@ class utf8_to_utf16 {
+   auto str() const -> std::wstring { return {&buffer_[0], size()}; }
+ };
+ 
++// A converter from UTF-16/UTF-32 (host endian) to UTF-8.
++template <typename WChar, typename Buffer = memory_buffer>
++class unicode_to_utf8 {
++ private:
++  Buffer buffer_;
++
++ public:
++  unicode_to_utf8() {}
++  explicit unicode_to_utf8(basic_string_view<WChar> s) {
++    static_assert(sizeof(WChar) == 2 || sizeof(WChar) == 4,
++                  "Expect utf16 or utf32");
++
++    if (!convert(s))
++      FMT_THROW(std::runtime_error(sizeof(WChar) == 2 ? "invalid utf16"
++                                                      : "invalid utf32"));
++  }
++  operator string_view() const { return string_view(&buffer_[0], size()); }
++  size_t size() const { return buffer_.size() - 1; }
++  const char* c_str() const { return &buffer_[0]; }
++  std::string str() const { return std::string(&buffer_[0], size()); }
++
++  // Performs conversion returning a bool instead of throwing exception on
++  // conversion error. This method may still throw in case of memory allocation
++  // error.
++  bool convert(basic_string_view<WChar> s) {
++    if (!convert(buffer_, s)) return false;
++    buffer_.push_back(0);
++    return true;
++  }
++  static bool convert(Buffer& buf, basic_string_view<WChar> s) {
++    for (auto p = s.begin(); p != s.end(); ++p) {
++      uint32_t c = static_cast<uint32_t>(*p);
++      if (sizeof(WChar) == 2 && c >= 0xd800 && c <= 0xdfff) {
++        // surrogate pair
++        ++p;
++        if (p == s.end() || (c & 0xfc00) != 0xd800 || (*p & 0xfc00) != 0xdc00) {
++          return false;
++        }
++        c = (c << 10) + static_cast<uint32_t>(*p) - 0x35fdc00;
++      }
++      if (c < 0x80) {
++        buf.push_back(static_cast<char>(c));
++      } else if (c < 0x800) {
++        buf.push_back(static_cast<char>(0xc0 | (c >> 6)));
++        buf.push_back(static_cast<char>(0x80 | (c & 0x3f)));
++      } else if ((c >= 0x800 && c <= 0xd7ff) || (c >= 0xe000 && c <= 0xffff)) {
++        buf.push_back(static_cast<char>(0xe0 | (c >> 12)));
++        buf.push_back(static_cast<char>(0x80 | ((c & 0xfff) >> 6)));
++        buf.push_back(static_cast<char>(0x80 | (c & 0x3f)));
++      } else if (c >= 0x10000 && c <= 0x10ffff) {
++        buf.push_back(static_cast<char>(0xf0 | (c >> 18)));
++        buf.push_back(static_cast<char>(0x80 | ((c & 0x3ffff) >> 12)));
++        buf.push_back(static_cast<char>(0x80 | ((c & 0xfff) >> 6)));
++        buf.push_back(static_cast<char>(0x80 | (c & 0x3f)));
++      } else {
++        return false;
++      }
++    }
++    return true;
++  }
++};
++
+ // Computes 128-bit result of multiplication of two 64-bit unsigned integers.
+ inline uint128_fallback umul128(uint64_t x, uint64_t y) noexcept {
+ #if FMT_USE_INT128
+diff --git a/include/fmt/os.h b/include/fmt/os.h
+index dea86557..ec290402 100644
+--- a/include/fmt/os.h
++++ b/include/fmt/os.h
+@@ -124,26 +124,6 @@ using wcstring_view = basic_cstring_view<wchar_t>;
+ FMT_API const std::error_category& system_category() noexcept;
+ 
+ FMT_BEGIN_DETAIL_NAMESPACE
+-// A converter from UTF-16 to UTF-8.
+-// It is only provided for Windows since other systems support UTF-8 natively.
+-class utf16_to_utf8 {
+- private:
+-  memory_buffer buffer_;
+-
+- public:
+-  utf16_to_utf8() {}
+-  FMT_API explicit utf16_to_utf8(basic_string_view<wchar_t> s);
+-  operator string_view() const { return string_view(&buffer_[0], size()); }
+-  size_t size() const { return buffer_.size() - 1; }
+-  const char* c_str() const { return &buffer_[0]; }
+-  std::string str() const { return std::string(&buffer_[0], size()); }
+-
+-  // Performs conversion returning a system error code instead of
+-  // throwing exception on conversion error. This method may still throw
+-  // in case of memory allocation error.
+-  FMT_API int convert(basic_string_view<wchar_t> s);
+-};
+-
+ FMT_API void format_windows_error(buffer<char>& out, int error_code,
+                                   const char* message) noexcept;
+ FMT_END_DETAIL_NAMESPACE
+diff --git a/include/fmt/std.h b/include/fmt/std.h
+index 762a7657..4c2a28cf 100644
+--- a/include/fmt/std.h
++++ b/include/fmt/std.h
+@@ -60,19 +60,9 @@ inline void write_escaped_path<char>(memory_buffer& quoted,
+                                      const std::filesystem::path& p) {
+   auto buf = basic_memory_buffer<wchar_t>();
+   write_escaped_string<wchar_t>(std::back_inserter(buf), p.native());
+-  for (unsigned c : buf) {
+-    // Convert UTF-16 to UTF-8.
+-    if (c < 0x80) {
+-      quoted.push_back(static_cast<unsigned char>(c));
+-    } else if (c < 0x800) {
+-      quoted.push_back(0b1100'0000 | ((c >> 6) & 0b01'1111));
+-      quoted.push_back(0b1000'0000 | (c & 0b11'1111));
+-    } else {
+-      quoted.push_back(0b1110'0000 | ((c >> 12) & 0b01'1111));
+-      quoted.push_back(0b1000'0000 | ((c >> 6) & 0b11'1111));
+-      quoted.push_back(0b1000'0000 | (c & 0b11'1111));
+-    }
+-  }
++  // Convert UTF-16 to UTF-8.
++  if (!unicode_to_utf8<wchar_t>::convert(quoted, {buf.data(), buf.size()}))
++    FMT_THROW(std::runtime_error("invalid utf16"));
+ }
+ #  endif
+ template <>
+diff --git a/src/os.cc b/src/os.cc
+index f294ea86..01732b38 100644
+--- a/src/os.cc
++++ b/src/os.cc
+@@ -72,34 +72,6 @@ inline std::size_t convert_rwcount(std::size_t count) { return count; }
+ FMT_BEGIN_NAMESPACE
+ 
+ #ifdef _WIN32
+-detail::utf16_to_utf8::utf16_to_utf8(basic_string_view<wchar_t> s) {
+-  if (int error_code = convert(s)) {
+-    FMT_THROW(windows_error(error_code,
+-                            "cannot convert string from UTF-16 to UTF-8"));
+-  }
+-}
+-
+-int detail::utf16_to_utf8::convert(basic_string_view<wchar_t> s) {
+-  if (s.size() > INT_MAX) return ERROR_INVALID_PARAMETER;
+-  int s_size = static_cast<int>(s.size());
+-  if (s_size == 0) {
+-    // WideCharToMultiByte does not support zero length, handle separately.
+-    buffer_.resize(1);
+-    buffer_[0] = 0;
+-    return 0;
+-  }
+-
+-  int length = WideCharToMultiByte(CP_UTF8, 0, s.data(), s_size, nullptr, 0,
+-                                   nullptr, nullptr);
+-  if (length == 0) return GetLastError();
+-  buffer_.resize(length + 1);
+-  length = WideCharToMultiByte(CP_UTF8, 0, s.data(), s_size, &buffer_[0],
+-                               length, nullptr, nullptr);
+-  if (length == 0) return GetLastError();
+-  buffer_[length] = 0;
+-  return 0;
+-}
+-
+ namespace detail {
+ 
+ class system_message {
+@@ -140,8 +112,8 @@ class utf8_system_category final : public std::error_category {
+   std::string message(int error_code) const override {
+     system_message msg(error_code);
+     if (msg) {
+-      utf16_to_utf8 utf8_message;
+-      if (utf8_message.convert(msg) == ERROR_SUCCESS) {
++      unicode_to_utf8<wchar_t> utf8_message;
++      if (utf8_message.convert(msg)) {
+         return utf8_message.str();
+       }
+     }
+@@ -167,8 +139,8 @@ void detail::format_windows_error(detail::buffer<char>& out, int error_code,
+   FMT_TRY {
+     system_message msg(error_code);
+     if (msg) {
+-      auto utf8_message = utf16_to_utf8();
+-      if (utf8_message.convert(msg) == ERROR_SUCCESS) {
++      unicode_to_utf8<wchar_t> utf8_message;
++      if (utf8_message.convert(msg)) {
+         fmt::format_to(buffer_appender<char>(out), FMT_STRING("{}: {}"),
+                        message, string_view(utf8_message));
+         return;
+@@ -365,8 +337,9 @@ file file::open_windows_file(wcstring_view path, int oflag) {
+   int fd = -1;
+   auto err = _wsopen_s(&fd, path.c_str(), oflag, _SH_DENYNO, default_open_mode);
+   if (fd == -1) {
+-    FMT_THROW(system_error(err, FMT_STRING("cannot open file {}"),
+-                           detail::utf16_to_utf8(path.c_str()).c_str()));
++    FMT_THROW(
++        system_error(err, FMT_STRING("cannot open file {}"),
++                     detail::unicode_to_utf8<wchar_t>(path.c_str()).c_str()));
+   }
+   return file(fd);
+ }

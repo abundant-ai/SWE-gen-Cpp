@@ -1,0 +1,153 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 78d95956..16efa3fe 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -157,6 +157,7 @@ set(INTERNAL_HEADERS
+     ${SOURCES_DIR}/internal/catch_wildcard_pattern.hpp
+     ${SOURCES_DIR}/internal/catch_windows_h_proxy.hpp
+     ${SOURCES_DIR}/internal/catch_xmlwriter.hpp
++    ${SOURCES_DIR}/internal/catch_test_case_info_hasher.hpp
+ )
+ set(IMPL_SOURCES
+     ${SOURCES_DIR}/catch_approx.cpp
+@@ -213,6 +214,7 @@ set(IMPL_SOURCES
+     ${SOURCES_DIR}/catch_version.cpp
+     ${SOURCES_DIR}/internal/catch_wildcard_pattern.cpp
+     ${SOURCES_DIR}/internal/catch_xmlwriter.cpp
++    ${SOURCES_DIR}/internal/catch_test_case_info_hasher.cpp
+ )
+ set(INTERNAL_FILES ${IMPL_SOURCES} ${INTERNAL_HEADERS})
+ 
+diff --git a/src/catch2/catch_all.hpp b/src/catch2/catch_all.hpp
+index 92cdc205..656417f4 100644
+--- a/src/catch2/catch_all.hpp
++++ b/src/catch2/catch_all.hpp
+@@ -95,6 +95,7 @@
+ #include <catch2/internal/catch_stringref.hpp>
+ #include <catch2/internal/catch_tag_alias_registry.hpp>
+ #include <catch2/internal/catch_template_test_registry.hpp>
++#include <catch2/internal/catch_test_case_info_hasher.hpp>
+ #include <catch2/internal/catch_test_case_registry_impl.hpp>
+ #include <catch2/internal/catch_test_case_tracker.hpp>
+ #include <catch2/internal/catch_test_failure_exception.hpp>
+diff --git a/src/catch2/internal/catch_test_case_info_hasher.cpp b/src/catch2/internal/catch_test_case_info_hasher.cpp
+new file mode 100644
+index 00000000..75acc978
+--- /dev/null
++++ b/src/catch2/internal/catch_test_case_info_hasher.cpp
+@@ -0,0 +1,31 @@
++#include <catch2/catch_test_case_info.hpp>
++#include <catch2/internal/catch_test_case_info_hasher.hpp>
++
++namespace Catch {
++    TestCaseInfoHasher::TestCaseInfoHasher( hash_t seed ): m_seed( seed ) {}
++
++    uint32_t TestCaseInfoHasher::operator()( TestCaseInfo const& t ) const {
++        // FNV-1a hash algorithm that is designed for uniqueness:
++        const hash_t prime = 1099511628211u;
++        hash_t hash = 14695981039346656037u;
++        for ( const char c : t.name ) {
++            hash ^= c;
++            hash *= prime;
++        }
++        for ( const char c : t.className ) {
++            hash ^= c;
++            hash *= prime;
++        }
++        for ( const Tag& tag : t.tags ) {
++            for ( const char c : tag.original ) {
++                hash ^= c;
++                hash *= prime;
++            }
++        }
++        hash ^= m_seed;
++        hash *= prime;
++        const uint32_t low{ static_cast<uint32_t>( hash ) };
++        const uint32_t high{ static_cast<uint32_t>( hash >> 32 ) };
++        return low * high;
++    }
++} // namespace Catch
+diff --git a/src/catch2/internal/catch_test_case_info_hasher.hpp b/src/catch2/internal/catch_test_case_info_hasher.hpp
+new file mode 100644
+index 00000000..954bdcde
+--- /dev/null
++++ b/src/catch2/internal/catch_test_case_info_hasher.hpp
+@@ -0,0 +1,22 @@
++#ifndef CATCH_TEST_CASE_INFO_HASHER_HPP_INCLUDED
++#define CATCH_TEST_CASE_INFO_HASHER_HPP_INCLUDED
++
++#include <cstdint>
++
++namespace Catch {
++
++    struct TestCaseInfo;
++
++    class TestCaseInfoHasher {
++    public:
++        using hash_t = std::uint64_t;
++        TestCaseInfoHasher( hash_t seed );
++        uint32_t operator()( TestCaseInfo const& t ) const;
++
++    private:
++        hash_t m_seed;
++    };
++
++} // namespace Catch
++
++#endif /* CATCH_TEST_CASE_INFO_HASHER_HPP_INCLUDED */
+diff --git a/src/catch2/internal/catch_test_case_registry_impl.cpp b/src/catch2/internal/catch_test_case_registry_impl.cpp
+index 3c1ab54b..6c491a95 100644
+--- a/src/catch2/internal/catch_test_case_registry_impl.cpp
++++ b/src/catch2/internal/catch_test_case_registry_impl.cpp
+@@ -16,38 +16,13 @@
+ #include <catch2/catch_test_case_info.hpp>
+ #include <catch2/catch_test_spec.hpp>
+ #include <catch2/internal/catch_move_and_forward.hpp>
++#include <catch2/internal/catch_test_case_info_hasher.hpp>
+ 
+ #include <algorithm>
+ #include <set>
+ 
+ namespace Catch {
+ 
+-namespace {
+-    struct TestHasher {
+-        using hash_t = uint64_t;
+-
+-        explicit TestHasher( hash_t hashSuffix ):
+-            m_hashSuffix( hashSuffix ) {}
+-
+-        uint64_t m_hashSuffix;
+-
+-        uint32_t operator()( TestCaseInfo const& t ) const {
+-            // FNV-1a hash with multiplication fold.
+-            const hash_t prime = 1099511628211u;
+-            hash_t hash = 14695981039346656037u;
+-            for (const char c : t.name) {
+-                hash ^= c;
+-                hash *= prime;
+-            }
+-            hash ^= m_hashSuffix;
+-            hash *= prime;
+-            const uint32_t low{ static_cast<uint32_t>(hash) };
+-            const uint32_t high{ static_cast<uint32_t>(hash >> 32) };
+-            return low * high;
+-        }
+-    };
+-} // end anonymous namespace
+-
+     std::vector<TestCaseHandle> sortTests( IConfig const& config, std::vector<TestCaseHandle> const& unsortedTestCases ) {
+         switch (config.runOrder()) {
+         case TestRunOrder::Declared:
+@@ -66,9 +41,9 @@ namespace {
+         }
+         case TestRunOrder::Randomized: {
+             seedRng(config);
+-            using TestWithHash = std::pair<TestHasher::hash_t, TestCaseHandle>;
++            using TestWithHash = std::pair<TestCaseInfoHasher::hash_t, TestCaseHandle>;
+ 
+-            TestHasher h{ config.rngSeed() };
++            TestCaseInfoHasher h{ config.rngSeed() };
+             std::vector<TestWithHash> indexed_tests;
+             indexed_tests.reserve(unsortedTestCases.size());
+ 

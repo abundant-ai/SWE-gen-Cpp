@@ -1,0 +1,998 @@
+diff --git a/docs/command-line.md b/docs/command-line.md
+index 0154f075..f8e80270 100644
+--- a/docs/command-line.md
++++ b/docs/command-line.md
+@@ -29,7 +29,6 @@
+ [Specify the section to run](#specify-the-section-to-run)<br>
+ [Filenames as tags](#filenames-as-tags)<br>
+ [Override output colouring](#override-output-colouring)<br>
+-[Test Sharding](#test-sharding)<br>
+ 
+ Catch works quite nicely without any command line options at all - but for those times when you want greater control the following options are available.
+ Click one of the following links to take you straight to that option - or scroll on to browse the available options.
+@@ -68,8 +67,6 @@ Click one of the following links to take you straight to that option - or scroll
+ <a href="#benchmark-no-analysis">                       `    --benchmark-no-analysis`</a><br />
+ <a href="#benchmark-warmup-time">                       `    --benchmark-warmup-time`</a><br />
+ <a href="#use-colour">                                  `    --use-colour`</a><br />
+-<a href="#test-sharding">                               `    --shard-count`</a><br />
+-<a href="#test-sharding">                               `    --shard-index`</a><br />
+ 
+ </br>
+ 
+@@ -428,20 +425,6 @@ processing of output.
+ `--use-colour yes` forces coloured output, `--use-colour no` disables coloured
+ output. The default behaviour is `--use-colour auto`.
+ 
+-<a id="test-sharding"></a>
+-## Test Sharding
+-<pre>--shard-count <#number of shards>, --shard-index <#shard index to run></pre>
+-
+-> [Introduced](https://github.com/catchorg/Catch2/pull/2257) in Catch2 X.Y.Z.
+-
+-When `--shard-count <#number of shards>` is used, the tests to execute will be split evenly in to the given number of sets,
+-identified by indicies starting at 0. The tests in the set given by `--shard-index <#shard index to run>` will be executed.
+-The default shard count is `1`, and the default index to run is `0`. It is an error to specify a shard index greater than
+-the number of shards.
+-
+-This is useful when you want to split test execution across multiple processes, as is done with [Bazel test sharding](https://docs.bazel.build/versions/main/test-encyclopedia.html#test-sharding). 
+-
+-
+ ---
+ 
+ [Home](Readme.md#top)
+diff --git a/src/catch2/catch_all.hpp b/src/catch2/catch_all.hpp
+index 742d89a9..27282de5 100644
+--- a/src/catch2/catch_all.hpp
++++ b/src/catch2/catch_all.hpp
+@@ -85,7 +85,6 @@
+ #include <catch2/internal/catch_result_type.hpp>
+ #include <catch2/internal/catch_run_context.hpp>
+ #include <catch2/internal/catch_section.hpp>
+-#include <catch2/internal/catch_sharding.hpp>
+ #include <catch2/internal/catch_singletons.hpp>
+ #include <catch2/internal/catch_source_line_info.hpp>
+ #include <catch2/internal/catch_startup_exception_registry.hpp>
+diff --git a/src/catch2/catch_config.cpp b/src/catch2/catch_config.cpp
+index c9fc8eef..b79059ec 100644
+--- a/src/catch2/catch_config.cpp
++++ b/src/catch2/catch_config.cpp
+@@ -73,8 +73,6 @@ namespace Catch {
+     double Config::minDuration() const                 { return m_data.minDuration; }
+     TestRunOrder Config::runOrder() const              { return m_data.runOrder; }
+     uint32_t Config::rngSeed() const                   { return m_data.rngSeed; }
+-    unsigned int Config::shardCount() const            { return m_data.shardCount; }
+-    unsigned int Config::shardIndex() const            { return m_data.shardIndex; }
+     UseColour Config::useColour() const                { return m_data.useColour; }
+     bool Config::shouldDebugBreak() const              { return m_data.shouldDebugBreak; }
+     int Config::abortAfter() const                     { return m_data.abortAfter; }
+diff --git a/src/catch2/catch_config.hpp b/src/catch2/catch_config.hpp
+index 6aa6c4d6..7b67ba76 100644
+--- a/src/catch2/catch_config.hpp
++++ b/src/catch2/catch_config.hpp
+@@ -37,9 +37,6 @@ namespace Catch {
+         int abortAfter = -1;
+         uint32_t rngSeed = generateRandomSeed(GenerateFrom::Default);
+ 
+-        unsigned int shardCount = 1;
+-        unsigned int shardIndex = 0;
+-
+         bool benchmarkNoAnalysis = false;
+         unsigned int benchmarkSamples = 100;
+         double benchmarkConfidenceInterval = 0.95;
+@@ -102,8 +99,6 @@ namespace Catch {
+         double minDuration() const override;
+         TestRunOrder runOrder() const override;
+         uint32_t rngSeed() const override;
+-        unsigned int shardCount() const override;
+-        unsigned int shardIndex() const override;
+         UseColour useColour() const override;
+         bool shouldDebugBreak() const override;
+         int abortAfter() const override;
+diff --git a/src/catch2/catch_session.cpp b/src/catch2/catch_session.cpp
+index 3b58adbd..e7878117 100644
+--- a/src/catch2/catch_session.cpp
++++ b/src/catch2/catch_session.cpp
+@@ -16,7 +16,6 @@
+ #include <catch2/catch_version.hpp>
+ #include <catch2/interfaces/catch_interfaces_reporter.hpp>
+ #include <catch2/internal/catch_startup_exception_registry.hpp>
+-#include <catch2/internal/catch_sharding.hpp>
+ #include <catch2/internal/catch_textflow.hpp>
+ #include <catch2/internal/catch_windows_h_proxy.hpp>
+ #include <catch2/reporters/catch_reporter_listening.hpp>
+@@ -73,8 +72,6 @@ namespace Catch {
+                     for (auto const& match : m_matches)
+                         m_tests.insert(match.tests.begin(), match.tests.end());
+                 }
+-
+-                m_tests = createShard(m_tests, m_config->shardCount(), m_config->shardIndex());
+             }
+ 
+             Totals execute() {
+@@ -174,7 +171,6 @@ namespace Catch {
+             return 1;
+ 
+         auto result = m_cli.parse( Clara::Args( argc, argv ) );
+-
+         if( !result ) {
+             config();
+             getCurrentMutableContext().setConfig(m_config.get());
+@@ -257,12 +253,6 @@ namespace Catch {
+         if( m_startupExceptions )
+             return 1;
+ 
+-
+-        if( m_configData.shardIndex >= m_configData.shardCount ) {
+-            Catch::cerr() << "The shard count (" << m_configData.shardCount << ") must be greater than the shard index ("  << m_configData.shardIndex << ")\n" << std::flush;
+-            return 1;
+-        }
+-
+         if (m_configData.showHelp || m_configData.libIdentify) {
+             return 0;
+         }
+diff --git a/src/catch2/interfaces/catch_interfaces_config.hpp b/src/catch2/interfaces/catch_interfaces_config.hpp
+index bd0c8a40..e40cf702 100644
+--- a/src/catch2/interfaces/catch_interfaces_config.hpp
++++ b/src/catch2/interfaces/catch_interfaces_config.hpp
+@@ -74,8 +74,6 @@ namespace Catch {
+         virtual std::vector<std::string> const& getTestsOrTags() const = 0;
+         virtual TestRunOrder runOrder() const = 0;
+         virtual uint32_t rngSeed() const = 0;
+-        virtual unsigned int shardCount() const = 0;
+-        virtual unsigned int shardIndex() const = 0;
+         virtual UseColour useColour() const = 0;
+         virtual std::vector<std::string> const& getSectionsToRun() const = 0;
+         virtual Verbosity verbosity() const = 0;
+diff --git a/src/catch2/internal/catch_commandline.cpp b/src/catch2/internal/catch_commandline.cpp
+index 6cf71b77..ad571cc5 100644
+--- a/src/catch2/internal/catch_commandline.cpp
++++ b/src/catch2/internal/catch_commandline.cpp
+@@ -149,42 +149,6 @@ namespace Catch {
+                 return ParserResult::runtimeError( "Unrecognized reporter, '" + reporter + "'. Check available with --list-reporters" );
+             return ParserResult::ok( ParseResultType::Matched );
+         };
+-        auto const setShardCount = [&]( std::string const& shardCount ) {
+-            CATCH_TRY{
+-                std::size_t parsedTo = 0;
+-                int64_t parsedCount = std::stoll(shardCount, &parsedTo, 0);
+-                if (parsedTo != shardCount.size()) {
+-                    return ParserResult::runtimeError("Could not parse '" + shardCount + "' as shard count");
+-                }
+-                if (parsedCount <= 0) {
+-                    return ParserResult::runtimeError("Shard count must be a positive number");
+-                }
+-
+-                config.shardCount = static_cast<unsigned int>(parsedCount);
+-                return ParserResult::ok(ParseResultType::Matched);
+-            } CATCH_CATCH_ANON(std::exception const&) {
+-                return ParserResult::runtimeError("Could not parse '" + shardCount + "' as shard count");
+-            }
+-        };
+-
+-        auto const setShardIndex = [&](std::string const& shardIndex) {
+-            CATCH_TRY{
+-                std::size_t parsedTo = 0;
+-                int64_t parsedIndex = std::stoll(shardIndex, &parsedTo, 0);
+-                if (parsedTo != shardIndex.size()) {
+-                    return ParserResult::runtimeError("Could not parse '" + shardIndex + "' as shard index");
+-                }
+-                if (parsedIndex < 0) {
+-                    return ParserResult::runtimeError("Shard index must be a non-negative number");
+-                }
+-
+-                config.shardIndex = static_cast<unsigned int>(parsedIndex);
+-                return ParserResult::ok(ParseResultType::Matched);
+-            } CATCH_CATCH_ANON(std::exception const&) {
+-                return ParserResult::runtimeError("Could not parse '" + shardIndex + "' as shard index");
+-            }
+-        };
+-
+ 
+         auto cli
+             = ExeName( config.processName )
+@@ -276,12 +240,6 @@ namespace Catch {
+             | Opt( config.benchmarkWarmupTime, "benchmarkWarmupTime" )
+                 ["--benchmark-warmup-time"]
+                 ( "amount of time in milliseconds spent on warming up each test (default: 100)" )
+-            | Opt( setShardCount, "shard count" )
+-                ["--shard-count"]
+-                ( "split the tests to execute into this many groups" )
+-            | Opt( setShardIndex, "shard index" )
+-                ["--shard-index"]
+-                ( "index of the group of tests to execute (see --shard-count)" )
+             | Arg( config.testsOrTags, "test name|pattern|tags" )
+                 ( "which test or tests to use" );
+ 
+diff --git a/src/catch2/internal/catch_sharding.hpp b/src/catch2/internal/catch_sharding.hpp
+deleted file mode 100644
+index 0e8822ee..00000000
+--- a/src/catch2/internal/catch_sharding.hpp
++++ /dev/null
+@@ -1,41 +0,0 @@
+-
+-//              Copyright Catch2 Authors
+-// Distributed under the Boost Software License, Version 1.0.
+-//   (See accompanying file LICENSE_1_0.txt or copy at
+-//        https://www.boost.org/LICENSE_1_0.txt)
+-
+-// SPDX-License-Identifier: BSL-1.0
+-#ifndef CATCH_SHARDING_HPP_INCLUDED
+-#define CATCH_SHARDING_HPP_INCLUDED
+-
+-#include <catch2/catch_session.hpp>
+-
+-#include <cmath>
+-
+-namespace Catch {
+-
+-    template<typename Container>
+-    Container createShard(Container const& container, std::size_t const shardCount, std::size_t const shardIndex) {
+-        assert(shardCount > shardIndex);
+-
+-        if (shardCount == 1) {
+-            return container;
+-        }
+-
+-        const std::size_t totalTestCount = container.size();
+-
+-        const std::size_t shardSize = totalTestCount / shardCount;
+-        const std::size_t leftoverTests = totalTestCount % shardCount;
+-
+-        const std::size_t startIndex = shardIndex * shardSize + (std::min)(shardIndex, leftoverTests);
+-        const std::size_t endIndex = (shardIndex + 1) * shardSize + (std::min)(shardIndex + 1, leftoverTests);
+-
+-        auto startIterator = std::next(container.begin(), startIndex);
+-        auto endIterator = std::next(container.begin(), endIndex);
+-
+-        return Container(startIterator, endIterator);
+-    }
+-
+-}
+-
+-#endif // CATCH_SHARDING_HPP_INCLUDED
+diff --git a/src/catch2/internal/catch_test_case_registry_impl.cpp b/src/catch2/internal/catch_test_case_registry_impl.cpp
+index 3c1ab54b..dd1744a7 100644
+--- a/src/catch2/internal/catch_test_case_registry_impl.cpp
++++ b/src/catch2/internal/catch_test_case_registry_impl.cpp
+@@ -12,7 +12,6 @@
+ #include <catch2/interfaces/catch_interfaces_registry_hub.hpp>
+ #include <catch2/internal/catch_random_number_generator.hpp>
+ #include <catch2/internal/catch_run_context.hpp>
+-#include <catch2/internal/catch_sharding.hpp>
+ #include <catch2/catch_test_case_info.hpp>
+ #include <catch2/catch_test_spec.hpp>
+ #include <catch2/internal/catch_move_and_forward.hpp>
+@@ -136,7 +135,7 @@ namespace {
+                 filtered.push_back(testCase);
+             }
+         }
+-        return createShard(filtered, config.shardCount(), config.shardIndex());
++        return filtered;
+     }
+     std::vector<TestCaseHandle> const& getAllTestCasesSorted( IConfig const& config ) {
+         return getRegistryHub().getTestCaseRegistry().getAllTestsSorted( config );
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 9a46f6e2..7f7c32fe 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -87,7 +87,6 @@ set(TEST_SOURCES
+         ${SELF_TEST_DIR}/IntrospectiveTests/RandomNumberGeneration.tests.cpp
+         ${SELF_TEST_DIR}/IntrospectiveTests/Reporters.tests.cpp
+         ${SELF_TEST_DIR}/IntrospectiveTests/Tag.tests.cpp
+-        ${SELF_TEST_DIR}/IntrospectiveTests/Sharding.tests.cpp
+         ${SELF_TEST_DIR}/IntrospectiveTests/String.tests.cpp
+         ${SELF_TEST_DIR}/IntrospectiveTests/StringManip.tests.cpp
+         ${SELF_TEST_DIR}/IntrospectiveTests/Xml.tests.cpp
+@@ -311,7 +310,6 @@ set_tests_properties(TagAlias PROPERTIES
+ add_test(NAME RandomTestOrdering COMMAND ${PYTHON_EXECUTABLE}
+   ${CATCH_DIR}/tests/TestScripts/testRandomOrder.py $<TARGET_FILE:SelfTest>)
+ 
+-
+ add_test(NAME CheckConvenienceHeaders
+   COMMAND
+     ${PYTHON_EXECUTABLE} ${CATCH_DIR}/tools/scripts/checkConvenienceHeaders.py
+diff --git a/tests/ExtraTests/CMakeLists.txt b/tests/ExtraTests/CMakeLists.txt
+index f2add6d6..bce10df5 100644
+--- a/tests/ExtraTests/CMakeLists.txt
++++ b/tests/ExtraTests/CMakeLists.txt
+@@ -8,22 +8,6 @@ project( Catch2ExtraTests LANGUAGES CXX )
+ 
+ message( STATUS "Extra tests included" )
+ 
+-
+-add_test(
+-  NAME TestShardingIntegration
+-  COMMAND ${PYTHON_EXECUTABLE} ${CATCH_DIR}/tests/TestScripts/testSharding.py $<TARGET_FILE:SelfTest>
+-)
+-
+-add_test(
+-  NAME TestSharding::OverlyLargeShardIndex
+-  COMMAND $<TARGET_FILE:SelfTest>  --shard-index 5 --shard-count 5
+-)
+-set_tests_properties(
+-    TestSharding::OverlyLargeShardIndex
+-  PROPERTIES
+-    PASS_REGULAR_EXPRESSION "The shard count \\(5\\) must be greater than the shard index \\(5\\)"
+-)
+-
+ # The MinDuration reporting tests do not need separate compilation, but
+ # they have non-trivial execution time, so they are categorized as
+ # extra tests, so that they are run less.
+diff --git a/tests/SelfTest/Baselines/automake.sw.approved.txt b/tests/SelfTest/Baselines/automake.sw.approved.txt
+index 46945798..0860a79e 100644
+--- a/tests/SelfTest/Baselines/automake.sw.approved.txt
++++ b/tests/SelfTest/Baselines/automake.sw.approved.txt
+@@ -177,7 +177,6 @@ Nor would this
+ :test-result: FAIL Output from all sections is reported
+ :test-result: PASS Overloaded comma or address-of operators are not used
+ :test-result: PASS Parse test names and tags
+-:test-result: PASS Parsing sharding-related cli flags
+ :test-result: PASS Pointers can be compared to null
+ :test-result: PASS Precision of floating point stringification can be set
+ :test-result: PASS Predicate matcher can accept const char*
+diff --git a/tests/SelfTest/Baselines/compact.sw.approved.txt b/tests/SelfTest/Baselines/compact.sw.approved.txt
+index b28f9ac1..dfb08230 100644
+--- a/tests/SelfTest/Baselines/compact.sw.approved.txt
++++ b/tests/SelfTest/Baselines/compact.sw.approved.txt
+@@ -1178,18 +1178,6 @@ CmdLine.tests.cpp:<line number>: passed: !(spec.matches(*fakeTestCase("hidden an
+ CmdLine.tests.cpp:<line number>: passed: !(spec.matches(*fakeTestCase("only foo", "[foo]"))) for: !false
+ CmdLine.tests.cpp:<line number>: passed: !(spec.matches(*fakeTestCase("only hidden", "[.]"))) for: !false
+ CmdLine.tests.cpp:<line number>: passed: spec.matches(*fakeTestCase("neither foo nor hidden", "[bar]")) for: true
+-CmdLine.tests.cpp:<line number>: passed: cli.parse({ "test", "--shard-count=8" }) for: {?}
+-CmdLine.tests.cpp:<line number>: passed: config.shardCount == 8 for: 8 == 8
+-CmdLine.tests.cpp:<line number>: passed: !(result) for: !{?}
+-CmdLine.tests.cpp:<line number>: passed: result.errorMessage(), ContainsSubstring("Shard count must be a positive number") for: "Shard count must be a positive number" contains: "Shard count must be a positive number"
+-CmdLine.tests.cpp:<line number>: passed: !(result) for: !{?}
+-CmdLine.tests.cpp:<line number>: passed: result.errorMessage(), ContainsSubstring("Shard count must be a positive number") for: "Shard count must be a positive number" contains: "Shard count must be a positive number"
+-CmdLine.tests.cpp:<line number>: passed: cli.parse({ "test", "--shard-index=2" }) for: {?}
+-CmdLine.tests.cpp:<line number>: passed: config.shardIndex == 2 for: 2 == 2
+-CmdLine.tests.cpp:<line number>: passed: !(result) for: !{?}
+-CmdLine.tests.cpp:<line number>: passed: result.errorMessage(), ContainsSubstring("Shard index must be a non-negative number") for: "Shard index must be a non-negative number" contains: "Shard index must be a non-negative number"
+-CmdLine.tests.cpp:<line number>: passed: cli.parse({ "test", "--shard-index=0" }) for: {?}
+-CmdLine.tests.cpp:<line number>: passed: config.shardIndex == 0 for: 0 == 0
+ Condition.tests.cpp:<line number>: passed: p == 0 for: 0 == 0
+ Condition.tests.cpp:<line number>: passed: p == pNULL for: 0 == 0
+ Condition.tests.cpp:<line number>: passed: p != 0 for: 0x<hex digits> != 0
+diff --git a/tests/SelfTest/Baselines/console.std.approved.txt b/tests/SelfTest/Baselines/console.std.approved.txt
+index f513b37e..f7320bd7 100644
+--- a/tests/SelfTest/Baselines/console.std.approved.txt
++++ b/tests/SelfTest/Baselines/console.std.approved.txt
+@@ -1426,6 +1426,6 @@ due to unexpected exception with message:
+   Why would you throw a std::string?
+ 
+ ===============================================================================
+-test cases:  374 |  297 passed |  70 failed |  7 failed as expected
+-assertions: 2127 | 1971 passed | 129 failed | 27 failed as expected
++test cases:  373 |  296 passed |  70 failed |  7 failed as expected
++assertions: 2115 | 1959 passed | 129 failed | 27 failed as expected
+ 
+diff --git a/tests/SelfTest/Baselines/console.sw.approved.txt b/tests/SelfTest/Baselines/console.sw.approved.txt
+index e9d9d9a7..695a30ef 100644
+--- a/tests/SelfTest/Baselines/console.sw.approved.txt
++++ b/tests/SelfTest/Baselines/console.sw.approved.txt
+@@ -8602,111 +8602,6 @@ CmdLine.tests.cpp:<line number>: PASSED:
+ with expansion:
+   true
+ 
+--------------------------------------------------------------------------------
+-Parsing sharding-related cli flags
+-  shard-count
+--------------------------------------------------------------------------------
+-CmdLine.tests.cpp:<line number>
+-...............................................................................
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  CHECK( cli.parse({ "test", "--shard-count=8" }) )
+-with expansion:
+-  {?}
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  REQUIRE( config.shardCount == 8 )
+-with expansion:
+-  8 == 8
+-
+--------------------------------------------------------------------------------
+-Parsing sharding-related cli flags
+-  Negative shard count reports error
+--------------------------------------------------------------------------------
+-CmdLine.tests.cpp:<line number>
+-...............................................................................
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  CHECK_FALSE( result )
+-with expansion:
+-  !{?}
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  REQUIRE_THAT( result.errorMessage(), ContainsSubstring("Shard count must be a positive number") )
+-with expansion:
+-  "Shard count must be a positive number" contains: "Shard count must be a
+-  positive number"
+-
+--------------------------------------------------------------------------------
+-Parsing sharding-related cli flags
+-  Zero shard count reports error
+--------------------------------------------------------------------------------
+-CmdLine.tests.cpp:<line number>
+-...............................................................................
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  CHECK_FALSE( result )
+-with expansion:
+-  !{?}
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  REQUIRE_THAT( result.errorMessage(), ContainsSubstring("Shard count must be a positive number") )
+-with expansion:
+-  "Shard count must be a positive number" contains: "Shard count must be a
+-  positive number"
+-
+--------------------------------------------------------------------------------
+-Parsing sharding-related cli flags
+-  shard-index
+--------------------------------------------------------------------------------
+-CmdLine.tests.cpp:<line number>
+-...............................................................................
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  CHECK( cli.parse({ "test", "--shard-index=2" }) )
+-with expansion:
+-  {?}
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  REQUIRE( config.shardIndex == 2 )
+-with expansion:
+-  2 == 2
+-
+--------------------------------------------------------------------------------
+-Parsing sharding-related cli flags
+-  Negative shard index reports error
+--------------------------------------------------------------------------------
+-CmdLine.tests.cpp:<line number>
+-...............................................................................
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  CHECK_FALSE( result )
+-with expansion:
+-  !{?}
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  REQUIRE_THAT( result.errorMessage(), ContainsSubstring("Shard index must be a non-negative number") )
+-with expansion:
+-  "Shard index must be a non-negative number" contains: "Shard index must be a
+-  non-negative number"
+-
+--------------------------------------------------------------------------------
+-Parsing sharding-related cli flags
+-  Shard index 0 is accepted
+--------------------------------------------------------------------------------
+-CmdLine.tests.cpp:<line number>
+-...............................................................................
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  CHECK( cli.parse({ "test", "--shard-index=0" }) )
+-with expansion:
+-  {?}
+-
+-CmdLine.tests.cpp:<line number>: PASSED:
+-  REQUIRE( config.shardIndex == 0 )
+-with expansion:
+-  0 == 0
+-
+ -------------------------------------------------------------------------------
+ Pointers can be compared to null
+ -------------------------------------------------------------------------------
+@@ -17144,6 +17039,6 @@ Misc.tests.cpp:<line number>
+ Misc.tests.cpp:<line number>: PASSED:
+ 
+ ===============================================================================
+-test cases:  374 |  281 passed |  86 failed |  7 failed as expected
+-assertions: 2144 | 1971 passed | 146 failed | 27 failed as expected
++test cases:  373 |  280 passed |  86 failed |  7 failed as expected
++assertions: 2132 | 1959 passed | 146 failed | 27 failed as expected
+ 
+diff --git a/tests/SelfTest/Baselines/junit.sw.approved.txt b/tests/SelfTest/Baselines/junit.sw.approved.txt
+index 21e3dbd2..c2486391 100644
+--- a/tests/SelfTest/Baselines/junit.sw.approved.txt
++++ b/tests/SelfTest/Baselines/junit.sw.approved.txt
+@@ -1,7 +1,7 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+ <testsuitesloose text artifact
+ >
+-  <testsuite name="<exe-name>" errors="17" failures="129" tests="2144" hostname="tbd" time="{duration}" timestamp="{iso8601-timestamp}">
++  <testsuite name="<exe-name>" errors="17" failures="129" tests="2132" hostname="tbd" time="{duration}" timestamp="{iso8601-timestamp}">
+     <properties>
+       <property name="random-seed" value="1"/>
+       <property name="filters" value="~[!nonportable]~[!benchmark]~[approvals] *"/>
+@@ -1060,12 +1060,6 @@ Message.tests.cpp:<line number>
+     <testcase classname="<exe-name>.global" name="Parse test names and tags/Leading and trailing spaces in test name" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Parse test names and tags/Shortened hide tags are split apart when parsing" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Parse test names and tags/Shortened hide tags also properly handle exclusion" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="Parsing sharding-related cli flags/shard-count" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="Parsing sharding-related cli flags/Negative shard count reports error" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="Parsing sharding-related cli flags/Zero shard count reports error" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="Parsing sharding-related cli flags/shard-index" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="Parsing sharding-related cli flags/Negative shard index reports error" time="{duration}" status="run"/>
+-    <testcase classname="<exe-name>.global" name="Parsing sharding-related cli flags/Shard index 0 is accepted" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Pointers can be compared to null" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Precision of floating point stringification can be set/Floats" time="{duration}" status="run"/>
+     <testcase classname="<exe-name>.global" name="Precision of floating point stringification can be set/Double" time="{duration}" status="run"/>
+diff --git a/tests/SelfTest/Baselines/sonarqube.sw.approved.txt b/tests/SelfTest/Baselines/sonarqube.sw.approved.txt
+index e83a3532..18bca507 100644
+--- a/tests/SelfTest/Baselines/sonarqube.sw.approved.txt
++++ b/tests/SelfTest/Baselines/sonarqube.sw.approved.txt
+@@ -43,12 +43,6 @@
+     <testCase name="Parse test names and tags/Leading and trailing spaces in test name" duration="{duration}"/>
+     <testCase name="Parse test names and tags/Shortened hide tags are split apart when parsing" duration="{duration}"/>
+     <testCase name="Parse test names and tags/Shortened hide tags also properly handle exclusion" duration="{duration}"/>
+-    <testCase name="Parsing sharding-related cli flags/shard-count" duration="{duration}"/>
+-    <testCase name="Parsing sharding-related cli flags/Negative shard count reports error" duration="{duration}"/>
+-    <testCase name="Parsing sharding-related cli flags/Zero shard count reports error" duration="{duration}"/>
+-    <testCase name="Parsing sharding-related cli flags/shard-index" duration="{duration}"/>
+-    <testCase name="Parsing sharding-related cli flags/Negative shard index reports error" duration="{duration}"/>
+-    <testCase name="Parsing sharding-related cli flags/Shard index 0 is accepted" duration="{duration}"/>
+     <testCase name="Process can be configured on command line/empty args don't cause a crash" duration="{duration}"/>
+     <testCase name="Process can be configured on command line/default - no arguments" duration="{duration}"/>
+     <testCase name="Process can be configured on command line/test lists/Specify one test case using" duration="{duration}"/>
+diff --git a/tests/SelfTest/Baselines/tap.sw.approved.txt b/tests/SelfTest/Baselines/tap.sw.approved.txt
+index b306f5cb..aad246f5 100644
+--- a/tests/SelfTest/Baselines/tap.sw.approved.txt
++++ b/tests/SelfTest/Baselines/tap.sw.approved.txt
+@@ -2278,30 +2278,6 @@ ok {test-number} - !(spec.matches(*fakeTestCase("only foo", "[foo]"))) for: !fal
+ ok {test-number} - !(spec.matches(*fakeTestCase("only hidden", "[.]"))) for: !false
+ # Parse test names and tags
+ ok {test-number} - spec.matches(*fakeTestCase("neither foo nor hidden", "[bar]")) for: true
+-# Parsing sharding-related cli flags
+-ok {test-number} - cli.parse({ "test", "--shard-count=8" }) for: {?}
+-# Parsing sharding-related cli flags
+-ok {test-number} - config.shardCount == 8 for: 8 == 8
+-# Parsing sharding-related cli flags
+-ok {test-number} - !(result) for: !{?}
+-# Parsing sharding-related cli flags
+-ok {test-number} - result.errorMessage(), ContainsSubstring("Shard count must be a positive number") for: "Shard count must be a positive number" contains: "Shard count must be a positive number"
+-# Parsing sharding-related cli flags
+-ok {test-number} - !(result) for: !{?}
+-# Parsing sharding-related cli flags
+-ok {test-number} - result.errorMessage(), ContainsSubstring("Shard count must be a positive number") for: "Shard count must be a positive number" contains: "Shard count must be a positive number"
+-# Parsing sharding-related cli flags
+-ok {test-number} - cli.parse({ "test", "--shard-index=2" }) for: {?}
+-# Parsing sharding-related cli flags
+-ok {test-number} - config.shardIndex == 2 for: 2 == 2
+-# Parsing sharding-related cli flags
+-ok {test-number} - !(result) for: !{?}
+-# Parsing sharding-related cli flags
+-ok {test-number} - result.errorMessage(), ContainsSubstring("Shard index must be a non-negative number") for: "Shard index must be a non-negative number" contains: "Shard index must be a non-negative number"
+-# Parsing sharding-related cli flags
+-ok {test-number} - cli.parse({ "test", "--shard-index=0" }) for: {?}
+-# Parsing sharding-related cli flags
+-ok {test-number} - config.shardIndex == 0 for: 0 == 0
+ # Pointers can be compared to null
+ ok {test-number} - p == 0 for: 0 == 0
+ # Pointers can be compared to null
+@@ -4290,5 +4266,5 @@ ok {test-number} - q3 == 23. for: 23.0 == 23.0
+ ok {test-number} -
+ # xmlentitycheck
+ ok {test-number} -
+-1..2144
++1..2132
+ 
+diff --git a/tests/SelfTest/Baselines/teamcity.sw.approved.txt b/tests/SelfTest/Baselines/teamcity.sw.approved.txt
+index 6b3336d6..ef70e14c 100644
+--- a/tests/SelfTest/Baselines/teamcity.sw.approved.txt
++++ b/tests/SelfTest/Baselines/teamcity.sw.approved.txt
+@@ -459,8 +459,6 @@ Message.tests.cpp:<line number>|nexplicit failure with message:|n  "Message from
+ ##teamcity[testFinished name='Overloaded comma or address-of operators are not used' duration="{duration}"]
+ ##teamcity[testStarted name='Parse test names and tags']
+ ##teamcity[testFinished name='Parse test names and tags' duration="{duration}"]
+-##teamcity[testStarted name='Parsing sharding-related cli flags']
+-##teamcity[testFinished name='Parsing sharding-related cli flags' duration="{duration}"]
+ ##teamcity[testStarted name='Pointers can be compared to null']
+ ##teamcity[testFinished name='Pointers can be compared to null' duration="{duration}"]
+ ##teamcity[testStarted name='Precision of floating point stringification can be set']
+diff --git a/tests/SelfTest/Baselines/xml.sw.approved.txt b/tests/SelfTest/Baselines/xml.sw.approved.txt
+index 071b3649..419941de 100644
+--- a/tests/SelfTest/Baselines/xml.sw.approved.txt
++++ b/tests/SelfTest/Baselines/xml.sw.approved.txt
+@@ -10474,123 +10474,6 @@ Nor would this
+     </Section>
+     <OverallResult success="true"/>
+   </TestCase>
+-  <TestCase name="Parsing sharding-related cli flags" tags="[sharding]" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-    <Section name="shard-count" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          cli.parse({ "test", "--shard-count=8" })
+-        </Original>
+-        <Expanded>
+-          {?}
+-        </Expanded>
+-      </Expression>
+-      <Expression success="true" type="REQUIRE" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          config.shardCount == 8
+-        </Original>
+-        <Expanded>
+-          8 == 8
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="2" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="Negative shard count reports error" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-      <Expression success="true" type="CHECK_FALSE" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          !(result)
+-        </Original>
+-        <Expanded>
+-          !{?}
+-        </Expanded>
+-      </Expression>
+-      <Expression success="true" type="REQUIRE_THAT" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          result.errorMessage(), ContainsSubstring("Shard count must be a positive number")
+-        </Original>
+-        <Expanded>
+-          "Shard count must be a positive number" contains: "Shard count must be a positive number"
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="2" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="Zero shard count reports error" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-      <Expression success="true" type="CHECK_FALSE" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          !(result)
+-        </Original>
+-        <Expanded>
+-          !{?}
+-        </Expanded>
+-      </Expression>
+-      <Expression success="true" type="REQUIRE_THAT" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          result.errorMessage(), ContainsSubstring("Shard count must be a positive number")
+-        </Original>
+-        <Expanded>
+-          "Shard count must be a positive number" contains: "Shard count must be a positive number"
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="2" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="shard-index" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          cli.parse({ "test", "--shard-index=2" })
+-        </Original>
+-        <Expanded>
+-          {?}
+-        </Expanded>
+-      </Expression>
+-      <Expression success="true" type="REQUIRE" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          config.shardIndex == 2
+-        </Original>
+-        <Expanded>
+-          2 == 2
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="2" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="Negative shard index reports error" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-      <Expression success="true" type="CHECK_FALSE" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          !(result)
+-        </Original>
+-        <Expanded>
+-          !{?}
+-        </Expanded>
+-      </Expression>
+-      <Expression success="true" type="REQUIRE_THAT" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          result.errorMessage(), ContainsSubstring("Shard index must be a non-negative number")
+-        </Original>
+-        <Expanded>
+-          "Shard index must be a non-negative number" contains: "Shard index must be a non-negative number"
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="2" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <Section name="Shard index 0 is accepted" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-      <Expression success="true" type="CHECK" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          cli.parse({ "test", "--shard-index=0" })
+-        </Original>
+-        <Expanded>
+-          {?}
+-        </Expanded>
+-      </Expression>
+-      <Expression success="true" type="REQUIRE" filename="tests/<exe-name>/IntrospectiveTests/CmdLine.tests.cpp" >
+-        <Original>
+-          config.shardIndex == 0
+-        </Original>
+-        <Expanded>
+-          0 == 0
+-        </Expanded>
+-      </Expression>
+-      <OverallResults successes="2" failures="0" expectedFailures="0"/>
+-    </Section>
+-    <OverallResult success="true"/>
+-  </TestCase>
+   <TestCase name="Pointers can be compared to null" filename="tests/<exe-name>/UsageTests/Condition.tests.cpp" >
+     <Expression success="true" type="REQUIRE" filename="tests/<exe-name>/UsageTests/Condition.tests.cpp" >
+       <Original>
+@@ -20147,6 +20030,6 @@ loose text artifact
+     </Section>
+     <OverallResult success="true"/>
+   </TestCase>
+-  <OverallResults successes="1971" failures="146" expectedFailures="27"/>
+-  <OverallResultsCases successes="281" failures="86" expectedFailures="7"/>
++  <OverallResults successes="1959" failures="146" expectedFailures="27"/>
++  <OverallResultsCases successes="280" failures="86" expectedFailures="7"/>
+ </Catch2TestRun>
+diff --git a/tests/SelfTest/IntrospectiveTests/CmdLine.tests.cpp b/tests/SelfTest/IntrospectiveTests/CmdLine.tests.cpp
+index 332cbe50..c1fd6527 100644
+--- a/tests/SelfTest/IntrospectiveTests/CmdLine.tests.cpp
++++ b/tests/SelfTest/IntrospectiveTests/CmdLine.tests.cpp
+@@ -571,53 +571,6 @@ TEST_CASE( "Process can be configured on command line", "[config][command-line]"
+     }
+ }
+ 
+-TEST_CASE("Parsing sharding-related cli flags", "[sharding]") {
+-    using namespace Catch::Matchers;
+-
+-    Catch::ConfigData config;
+-    auto cli = Catch::makeCommandLineParser(config);
+-
+-    SECTION("shard-count") {
+-        CHECK(cli.parse({ "test", "--shard-count=8" }));
+-
+-        REQUIRE(config.shardCount == 8);
+-    }
+-
+-    SECTION("Negative shard count reports error") {
+-        auto result = cli.parse({ "test", "--shard-count=-1" });
+-
+-        CHECK_FALSE(result);
+-        REQUIRE_THAT(result.errorMessage(), ContainsSubstring("Shard count must be a positive number"));
+-    }
+-
+-    SECTION("Zero shard count reports error") {
+-        auto result = cli.parse({ "test", "--shard-count=0" });
+-
+-        CHECK_FALSE(result);
+-        REQUIRE_THAT(result.errorMessage(), ContainsSubstring("Shard count must be a positive number"));
+-    }
+-
+-    SECTION("shard-index") {
+-        CHECK(cli.parse({ "test", "--shard-index=2" }));
+-
+-        REQUIRE(config.shardIndex == 2);
+-    }
+-
+-    SECTION("Negative shard index reports error") {
+-        auto result = cli.parse({ "test", "--shard-index=-12" });
+-
+-        CHECK_FALSE(result);
+-        REQUIRE_THAT(result.errorMessage(), ContainsSubstring("Shard index must be a non-negative number"));
+-    }
+-
+-    SECTION("Shard index 0 is accepted") {
+-        CHECK(cli.parse({ "test", "--shard-index=0" }));
+-
+-        REQUIRE(config.shardIndex == 0);
+-    }
+-
+-}
+-
+ TEST_CASE("Test with special, characters \"in name", "[cli][regression]") {
+     // This test case succeeds if we can invoke it from the CLI
+     SUCCEED();
+diff --git a/tests/SelfTest/IntrospectiveTests/Sharding.tests.cpp b/tests/SelfTest/IntrospectiveTests/Sharding.tests.cpp
+deleted file mode 100644
+index 9ef80d23..00000000
+--- a/tests/SelfTest/IntrospectiveTests/Sharding.tests.cpp
++++ /dev/null
+@@ -1,41 +0,0 @@
+-/*
+- *  Distributed under the Boost Software License, Version 1.0. (See accompanying
+- *  file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+- */
+-#include <catch2/catch_test_macros.hpp>
+-#include <catch2/generators/catch_generators_all.hpp>
+-
+-#include <catch2/internal/catch_sharding.hpp>
+-
+-#include <unordered_map>
+-#include <vector>
+-
+-TEST_CASE("Sharding Function", "[approvals]") {
+-    std::vector<int> testContainer = { 0, 1, 2, 3, 4, 5, 6 };
+-    std::unordered_map<int, std::vector<std::size_t>> expectedShardSizes = {
+-        {1, {7}},
+-        {2, {4, 3}},
+-        {3, {3, 2, 2}},
+-        {4, {2, 2, 2, 1}},
+-        {5, {2, 2, 1, 1, 1}},
+-        {6, {2, 1, 1, 1, 1, 1}},
+-        {7, {1, 1, 1, 1, 1, 1, 1}},
+-    };
+-
+-    auto shardCount = GENERATE(range(1, 7));
+-    auto shardIndex = GENERATE_COPY(filter([=](int i) { return i < shardCount; }, range(0, 6)));
+-
+-    std::vector<int> result = Catch::createShard(testContainer, shardCount, shardIndex);
+-
+-    auto& sizes = expectedShardSizes[shardCount];
+-    REQUIRE(result.size() == sizes[shardIndex]);
+-
+-    std::size_t startIndex = 0;
+-    for(int i = 0; i < shardIndex; i++) {
+-        startIndex += sizes[i];
+-    }
+-
+-    for(std::size_t i = 0; i < sizes[shardIndex]; i++) {
+-        CHECK(result[i] == testContainer[i + startIndex]);
+-    }
+-}
+\ No newline at end of file
+diff --git a/tests/TestScripts/testSharding.py b/tests/TestScripts/testSharding.py
+deleted file mode 100755
+index eb3fad99..00000000
+--- a/tests/TestScripts/testSharding.py
++++ /dev/null
+@@ -1,158 +0,0 @@
+-#!/usr/bin/env python3
+-
+-"""
+-This test script verifies that sharding tests does change which tests are run.
+-This is done by running the binary multiple times, once to list all the tests,
+-once per shard to list the tests for that shard, and once again per shard to
+-execute the tests. The sharded lists are compared to the full list to ensure
+-none are skipped, duplicated, and that the order remains the same.
+-"""
+-
+-import random
+-import subprocess
+-import sys
+-import xml.etree.ElementTree as ET
+-
+-from collections import namedtuple
+-
+-from typing import List, Dict
+-
+-seed = random.randint(0, 2 ** 32 - 1)
+-number_of_shards = 5
+-
+-def make_base_commandline(self_test_exe):
+-    return [
+-        self_test_exe,
+-        '--reporter', 'xml',
+-        '--order', 'rand',
+-        '--rng-seed', str(seed),
+-        "[generators]~[benchmarks]~[.]"
+-    ]
+-
+-
+-def list_tests(self_test_exe: str, extra_args: List[str] = None):
+-    cmd = make_base_commandline(self_test_exe) + ['--list-tests']
+-    if extra_args:
+-        cmd.extend(extra_args)
+-
+-    try:
+-        ret = subprocess.run(cmd,
+-                             stdout = subprocess.PIPE,
+-                             stderr = subprocess.PIPE,
+-                             timeout = 10,
+-                             check = True,
+-                             universal_newlines = True)
+-    except subprocess.CalledProcessError as ex:
+-        print('Could not list tests:\n{}'.format(ex.stderr))
+-
+-    if ret.stderr:
+-        raise RuntimeError("Unexpected error output:\n" + ret.stderr)
+-
+-    root = ET.fromstring(ret.stdout)
+-    result = [elem.text for elem in root.findall('./TestCase/Name')]
+-
+-    if len(result) < 2:
+-        raise RuntimeError("Unexpectedly few tests listed (got {})".format(
+-            len(result)))
+-
+-
+-    return result
+-
+-
+-def execute_tests(self_test_exe: str, extra_args: List[str] = None):
+-    cmd = make_base_commandline(self_test_exe)
+-    if extra_args:
+-        cmd.extend(extra_args)
+-
+-    try:
+-        ret = subprocess.run(cmd,
+-                             stdout = subprocess.PIPE,
+-                             stderr = subprocess.PIPE,
+-                             timeout = 10,
+-                             check = True,
+-                             universal_newlines = True)
+-    except subprocess.CalledProcessError as ex:
+-        print('Could not list tests:\n{}'.format(ex.stderr))
+-
+-    if ret.stderr:
+-        raise RuntimeError("Unexpected error output:\n" + process.stderr)
+-
+-    root = ET.fromstring(ret.stdout)
+-    result = [elem.attrib["name"] for elem in root.findall('./TestCase')]
+-
+-    if len(result) < 2:
+-        raise RuntimeError("Unexpectedly few tests listed (got {})".format(
+-            len(result)))
+-
+-    return result
+-
+-
+-def test_sharded_listing(self_test_exe: str) -> Dict[int, List[str]]:
+-    """
+-    Asks the test binary for list of all tests, and also for lists of
+-    tests from shards.
+-
+-    The combination of shards is then checked whether it corresponds to
+-    the full list of all tests.
+-
+-    Returns the dictionary of shard-index => listed tests for later use.
+-    """
+-    all_tests = list_tests(self_test_exe)
+-    big_shard_tests = list_tests(self_test_exe, ['--shard-count', '1', '--shard-index', '0'])
+-
+-    assert all_tests == big_shard_tests, (
+-        "No-sharding test list does not match the listing of big shard:\nNo shard:\n{}\n\nWith shard:\n{}\n".format(
+-            '\n'.join(all_tests),
+-            '\n'.join(big_shard_tests)
+-        )
+-    )
+-
+-    shard_listings = dict()
+-    for shard_idx in range(number_of_shards):
+-        shard_listings[shard_idx] = list_tests(self_test_exe, ['--shard-count', str(number_of_shards), '--shard-index', str(shard_idx)])
+-
+-    shard_sizes = [len(v) for v in shard_listings.values()]
+-    assert len(all_tests) == sum(shard_sizes)
+-
+-    # Check that the shards have roughly the right sizes (e.g. we don't
+-    # have all tests in single shard and the others are empty)
+-    differences = [abs(x1 - x2) for x1, x2 in zip(shard_sizes, shard_sizes[1:])]
+-    assert all(diff <= 1 for diff in differences), "A shard has weird size: {}".format(shard_sizes)
+-
+-    combined_shards = [inner for outer in shard_listings.values() for inner in outer]
+-    assert all_tests == combined_shards, (
+-        "All tests and combined shards disagree.\nNo shard:\n{}\n\nCombined:\n{}\n\n".format(
+-            '\n'.join(all_tests),
+-            '\n'.join(combined_shards)
+-        )
+-    )
+-    shard_listings[-1] = all_tests
+-
+-    return shard_listings
+-
+-
+-def test_sharded_execution(self_test_exe: str, listings: Dict[int, List[str]]):
+-    """
+-    Runs the test binary and checks that the executed tests match the
+-    previously listed tests.
+-
+-    Also does this for various shard indices, and that the combination
+-    of all shards matches the full run/listing.
+-    """
+-    all_tests = execute_tests(self_test_exe)
+-    big_shard_tests = execute_tests(self_test_exe, ['--shard-count', '1', '--shard-index', '0'])
+-    assert all_tests == big_shard_tests
+-
+-    assert listings[-1] == all_tests
+-
+-    for shard_idx in range(number_of_shards):
+-        assert listings[shard_idx] == execute_tests(self_test_exe, ['--shard-count', str(number_of_shards), '--shard-index', str(shard_idx)])
+-
+-
+-def main():
+-    self_test_exe, = sys.argv[1:]
+-    listings = test_sharded_listing(self_test_exe)
+-    test_sharded_execution(self_test_exe, listings)
+-
+-if __name__ == '__main__':
+-    sys.exit(main())

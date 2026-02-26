@@ -1,0 +1,16 @@
+Catch2’s text wrapping/column formatting currently mis-handles strings that contain ANSI SGR color escape sequences (e.g. "\x1b[31m" … "\x1b[0m"). When such colored text is rendered through the text-flow/column wrapping facilities, the wrapping logic counts the bytes of the escape sequences toward the visible column width and can also split an escape sequence in the middle when inserting line breaks. This produces corrupted terminal output (broken/missing colors) and badly wrapped lines, especially in diagnostic output and matcher descriptions that include ANSI coloring.
+
+The problem shows up when diagnostic messages (or other formatted output produced by Catch2) are wrapped to a configured width: the visual width should be computed from the printable characters only, but the current implementation treats the raw string length as the width. As a result, long colored messages wrap too early/too late, and in some cases the inserted newline occurs inside an escape sequence like "\x1b[38;5;123m", producing stray characters such as "[38;5;" in the output and leaving the terminal in the wrong color state.
+
+Implement ANSI-aware wrapping for the text flow column formatter so that ANSI SGR color sequences are treated as zero-width tokens during measurement and are never split across lines. This should work when using `Catch::TextFlow::Column` to format text and when streaming a `Column` to an output stream. The existing public API should remain usable; in particular, `Catch::TextFlow::Column` must continue to support:
+
+- Preserving already-present newlines in the input.
+- Wrapping to a configured width via `Column::width(size_t)`.
+- Applying indentation via `Column::indent(size_t)` and `Column::initialIndent(size_t)`.
+- Word wrapping with hyphenation when the width is too small to fit a word, without breaking ANSI escape sequences.
+
+Add support for an ANSI-skipping string view/adapter (named `Catch::TextFlow::AnsiSkippingString`) that can be used with the column wrapper so that iterating/measuring text can skip over ANSI SGR sequences. When a `Column` is constructed from or otherwise provided an `AnsiSkippingString`, the produced output must be byte-for-byte identical to the input text except for inserted line breaks/indentation, and the inserted breaks must never occur in the middle of an ANSI escape sequence. ANSI SGR sequences should not contribute to line length calculations (i.e., they have display width 0).
+
+At minimum, handle standard ANSI color/style SGR sequences of the form `\x1b[` followed by digits/semicolons and a trailing `m` (e.g. `\x1b[0m`, `\x1b[31m`, `\x1b[38;5;196m`). Other escape sequences may be left as-is, but they must not be corrupted by wrapping (i.e., do not split them mid-sequence).
+
+Example of the required behavior: given a sentence containing embedded color start/end codes, wrapping to a narrow width should break lines based on the visible characters only, while keeping the escape sequences intact and adjacent to the characters they style. The resulting wrapped text should render correctly in a terminal (colors applied to the intended spans) and should not display fragments of escape codes.

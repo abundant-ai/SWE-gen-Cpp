@@ -1,0 +1,877 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 4e3b3566..a70eef03 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -93,6 +93,7 @@ set(IMPL_HEADERS
+   ${SOURCES_DIR}/internal/catch_getenv.hpp
+   ${SOURCES_DIR}/internal/catch_istream.hpp
+   ${SOURCES_DIR}/internal/catch_is_permutation.hpp
++  ${SOURCES_DIR}/internal/catch_jsonwriter.hpp
+   ${SOURCES_DIR}/internal/catch_lazy_expr.hpp
+   ${SOURCES_DIR}/internal/catch_leak_detector.hpp
+   ${SOURCES_DIR}/internal/catch_list.hpp
+@@ -177,6 +178,7 @@ set(IMPL_SOURCES
+   ${SOURCES_DIR}/internal/catch_floating_point_helpers.cpp
+   ${SOURCES_DIR}/internal/catch_getenv.cpp
+   ${SOURCES_DIR}/internal/catch_istream.cpp
++  ${SOURCES_DIR}/internal/catch_jsonwriter.cpp
+   ${SOURCES_DIR}/internal/catch_lazy_expr.cpp
+   ${SOURCES_DIR}/internal/catch_leak_detector.cpp
+   ${SOURCES_DIR}/internal/catch_list.cpp
+@@ -289,6 +291,7 @@ set(REPORTER_HEADERS
+   ${SOURCES_DIR}/reporters/catch_reporter_cumulative_base.hpp
+   ${SOURCES_DIR}/reporters/catch_reporter_event_listener.hpp
+   ${SOURCES_DIR}/reporters/catch_reporter_helpers.hpp
++  ${SOURCES_DIR}/reporters/catch_reporter_json.hpp
+   ${SOURCES_DIR}/reporters/catch_reporter_junit.hpp
+   ${SOURCES_DIR}/reporters/catch_reporter_multi.hpp
+   ${SOURCES_DIR}/reporters/catch_reporter_registrars.hpp
+@@ -307,6 +310,7 @@ set(REPORTER_SOURCES
+   ${SOURCES_DIR}/reporters/catch_reporter_cumulative_base.cpp
+   ${SOURCES_DIR}/reporters/catch_reporter_event_listener.cpp
+   ${SOURCES_DIR}/reporters/catch_reporter_helpers.cpp
++  ${SOURCES_DIR}/reporters/catch_reporter_json.cpp
+   ${SOURCES_DIR}/reporters/catch_reporter_junit.cpp
+   ${SOURCES_DIR}/reporters/catch_reporter_multi.cpp
+   ${SOURCES_DIR}/reporters/catch_reporter_registrars.cpp
+diff --git a/src/catch2/catch_all.hpp b/src/catch2/catch_all.hpp
+index cdef3946..a7969fef 100644
+--- a/src/catch2/catch_all.hpp
++++ b/src/catch2/catch_all.hpp
+@@ -74,6 +74,7 @@
+ #include <catch2/internal/catch_getenv.hpp>
+ #include <catch2/internal/catch_is_permutation.hpp>
+ #include <catch2/internal/catch_istream.hpp>
++#include <catch2/internal/catch_jsonwriter.hpp>
+ #include <catch2/internal/catch_lazy_expr.hpp>
+ #include <catch2/internal/catch_leak_detector.hpp>
+ #include <catch2/internal/catch_list.hpp>
+diff --git a/src/catch2/internal/catch_jsonwriter.cpp b/src/catch2/internal/catch_jsonwriter.cpp
+new file mode 100644
+index 00000000..f6c279d8
+--- /dev/null
++++ b/src/catch2/internal/catch_jsonwriter.cpp
+@@ -0,0 +1,115 @@
++
++//              Copyright Catch2 Authors
++// Distributed under the Boost Software License, Version 1.0.
++//   (See accompanying file LICENSE.txt or copy at
++//        https://www.boost.org/LICENSE_1_0.txt)
++
++// SPDX-License-Identifier: BSL-1.0
++#include <catch2/internal/catch_enforce.hpp>
++#include <catch2/internal/catch_jsonwriter.hpp>
++
++namespace Catch {
++    void JsonUtils::indent( std::ostream& os, std::uint64_t level ) {
++        for ( std::uint64_t i = 0; i < level; ++i ) {
++            os << "  ";
++        }
++    }
++    void JsonUtils::appendCommaNewline( std::ostream& os,
++                                        bool& should_comma,
++                                        std::uint64_t level ) {
++        if ( should_comma ) { os << ','; }
++        should_comma = true;
++        os << '\n';
++        indent( os, level );
++    }
++
++    JsonObjectWriter::JsonObjectWriter( std::ostream& os ):
++        JsonObjectWriter{ os, 0 } {}
++
++    JsonObjectWriter::JsonObjectWriter( std::ostream& os,
++                                        std::uint64_t indent_level ):
++        m_os{ os }, m_indent_level{ indent_level } {
++        m_os << "{";
++    }
++    JsonObjectWriter::JsonObjectWriter( JsonObjectWriter&& source ):
++        m_os{ source.m_os },
++        m_indent_level{ source.m_indent_level },
++        m_should_comma{ source.m_should_comma },
++        m_active{ source.m_active } {
++        source.m_active = false;
++    }
++
++    JsonObjectWriter::~JsonObjectWriter() {
++        if ( !m_active ) { return; }
++
++        m_os << '\n';
++        JsonUtils::indent( m_os, m_indent_level );
++        m_os << '}';
++    }
++
++    JsonValueWriter JsonObjectWriter::write( std::string const& key ) {
++        JsonUtils::appendCommaNewline(
++            m_os, m_should_comma, m_indent_level + 1 );
++
++        m_os << '"' << key << '"' << ": ";
++        return JsonValueWriter{ m_os, m_indent_level + 1 };
++    }
++
++    JsonArrayWriter::JsonArrayWriter( std::ostream& os ):
++        JsonArrayWriter{ os, 0 } {}
++    JsonArrayWriter::JsonArrayWriter( std::ostream& os,
++                                      std::uint64_t indent_level ):
++        m_os{ os }, m_indent_level{ indent_level } {
++        m_os << "[";
++    }
++    JsonArrayWriter::JsonArrayWriter( JsonArrayWriter&& source ):
++        m_os{ source.m_os },
++        m_indent_level{ source.m_indent_level },
++        m_should_comma{ source.m_should_comma },
++        m_active{ source.m_active } {
++        source.m_active = false;
++    }
++    JsonArrayWriter::~JsonArrayWriter() {
++        if ( !m_active ) { return; }
++
++        m_os << '\n';
++        JsonUtils::indent( m_os, m_indent_level );
++        m_os << ']';
++    }
++
++    JsonObjectWriter JsonArrayWriter::writeObject() {
++        JsonUtils::appendCommaNewline(
++            m_os, m_should_comma, m_indent_level + 1 );
++        return JsonObjectWriter{ m_os, m_indent_level + 1 };
++    }
++
++    JsonArrayWriter JsonArrayWriter::writeArray() {
++        JsonUtils::appendCommaNewline(
++            m_os, m_should_comma, m_indent_level + 1 );
++        return JsonArrayWriter{ m_os, m_indent_level + 1 };
++    }
++
++    JsonArrayWriter& JsonArrayWriter::write( bool value ) {
++        return writeImpl( value );
++    }
++
++    JsonValueWriter::JsonValueWriter( std::ostream& os ):
++        JsonValueWriter{ os, 0 } {}
++
++    JsonValueWriter::JsonValueWriter( std::ostream& os,
++                                      std::uint64_t indent_level ):
++        m_os{ os }, m_indent_level{ indent_level } {}
++
++    JsonObjectWriter JsonValueWriter::writeObject() && {
++        return JsonObjectWriter{ m_os, m_indent_level };
++    }
++
++    JsonArrayWriter JsonValueWriter::writeArray() && {
++        return JsonArrayWriter{ m_os, m_indent_level };
++    }
++
++    void JsonValueWriter::write( bool value ) && {
++        writeImpl( value ? "true" : "false", false );
++    }
++
++} // namespace Catch
+diff --git a/src/catch2/internal/catch_jsonwriter.hpp b/src/catch2/internal/catch_jsonwriter.hpp
+new file mode 100644
+index 00000000..9cac3de6
+--- /dev/null
++++ b/src/catch2/internal/catch_jsonwriter.hpp
+@@ -0,0 +1,123 @@
++
++//              Copyright Catch2 Authors
++// Distributed under the Boost Software License, Version 1.0.
++//   (See accompanying file LICENSE.txt or copy at
++//        https://www.boost.org/LICENSE_1_0.txt)
++
++// SPDX-License-Identifier: BSL-1.0
++#ifndef CATCH_JSONWRITER_HPP_INCLUDED
++#define CATCH_JSONWRITER_HPP_INCLUDED
++
++#include <catch2/internal/catch_reusable_string_stream.hpp>
++#include <catch2/internal/catch_stringref.hpp>
++
++#include <cstdint>
++#include <sstream>
++
++namespace Catch {
++    class JsonObjectWriter;
++    class JsonArrayWriter;
++
++    struct JsonUtils {
++        static void indent( std::ostream& os, std::uint64_t level );
++        static void appendCommaNewline( std::ostream& os,
++                                        bool& should_comma,
++                                        std::uint64_t level );
++    };
++
++    class JsonValueWriter {
++    public:
++        JsonValueWriter( std::ostream& os );
++        JsonValueWriter( std::ostream& os, std::uint64_t indent_level );
++
++        JsonObjectWriter writeObject() &&;
++        JsonArrayWriter writeArray() &&;
++
++        template <typename T>
++        void write( T const& value ) && {
++            writeImpl( value, !std::is_arithmetic<T>::value );
++        }
++
++        void write( bool value ) &&;
++
++    private:
++        template <typename T>
++        void writeImpl( T const& value, bool quote_value ) {
++            if ( quote_value ) { m_os << '"'; }
++            m_sstream << value;
++            while ( true ) {
++                char c = m_sstream.get();
++
++                if ( m_sstream.eof() ) { break; }
++                if ( c == '"' ) {
++                    m_os << '\\' << '"';
++                } else {
++                    m_os << c;
++                }
++            }
++            if ( quote_value ) { m_os << '"'; }
++        }
++
++        std::ostream& m_os;
++        std::stringstream m_sstream{};
++        std::uint64_t m_indent_level;
++    };
++
++    class JsonObjectWriter {
++    public:
++        JsonObjectWriter( std::ostream& os );
++        JsonObjectWriter( std::ostream& os, std::uint64_t indent_level );
++
++        JsonObjectWriter( JsonObjectWriter&& source );
++        JsonObjectWriter& operator=( JsonObjectWriter&& source ) = delete;
++
++        ~JsonObjectWriter();
++
++        JsonValueWriter write( std::string const& key );
++
++    private:
++        std::ostream& m_os;
++        std::uint64_t m_indent_level;
++        bool m_should_comma = false;
++        bool m_active = true;
++    };
++
++    class JsonArrayWriter {
++    public:
++        JsonArrayWriter( std::ostream& os );
++        JsonArrayWriter( std::ostream& os, std::uint64_t indent_level );
++
++        JsonArrayWriter( JsonArrayWriter&& source );
++        JsonArrayWriter& operator=( JsonArrayWriter&& source ) = delete;
++
++        ~JsonArrayWriter();
++
++        JsonObjectWriter writeObject();
++        JsonArrayWriter writeArray();
++
++        template <typename T>
++        JsonArrayWriter& write( T const& value ) {
++            return writeImpl( value );
++        }
++
++        JsonArrayWriter& write( bool value );
++
++    private:
++        template <typename T>
++        JsonArrayWriter& writeImpl( T const& value ) {
++            JsonUtils::appendCommaNewline(
++                m_os, m_should_comma, m_indent_level + 1 );
++            JsonValueWriter{ m_os }.write( value );
++
++            return *this;
++        }
++
++        std::ostream& m_os;
++        std::uint64_t m_indent_level;
++        bool m_should_comma = false;
++        bool m_active = true;
++    };
++
++} // namespace Catch
++
++#endif // CATCH_JSONWRITER_HPP_INCLUDED
+diff --git a/src/catch2/internal/catch_reporter_registry.cpp b/src/catch2/internal/catch_reporter_registry.cpp
+index b2b0cd07..cea8c4dc 100644
+--- a/src/catch2/internal/catch_reporter_registry.cpp
++++ b/src/catch2/internal/catch_reporter_registry.cpp
+@@ -6,13 +6,14 @@
+ 
+ // SPDX-License-Identifier: BSL-1.0
+ 
+-#include <catch2/internal/catch_reporter_registry.hpp>
+ #include <catch2/interfaces/catch_interfaces_reporter_factory.hpp>
+ #include <catch2/internal/catch_enforce.hpp>
+ #include <catch2/internal/catch_move_and_forward.hpp>
++#include <catch2/internal/catch_reporter_registry.hpp>
+ #include <catch2/reporters/catch_reporter_automake.hpp>
+ #include <catch2/reporters/catch_reporter_compact.hpp>
+ #include <catch2/reporters/catch_reporter_console.hpp>
++#include <catch2/reporters/catch_reporter_json.hpp>
+ #include <catch2/reporters/catch_reporter_junit.hpp>
+ #include <catch2/reporters/catch_reporter_registrars.hpp>
+ #include <catch2/reporters/catch_reporter_sonarqube.hpp>
+@@ -47,6 +48,8 @@ namespace Catch {
+             Detail::make_unique<ReporterFactory<TeamCityReporter>>();
+         m_impl->factories["XML"] =
+             Detail::make_unique<ReporterFactory<XmlReporter>>();
++        m_impl->factories["JSON"] =
++            Detail::make_unique<ReporterFactory<JsonReporter>>();
+     }
+ 
+     ReporterRegistry::~ReporterRegistry() = default;
+diff --git a/src/catch2/meson.build b/src/catch2/meson.build
+index 1f9bf45a..09a3db1b 100644
+--- a/src/catch2/meson.build
++++ b/src/catch2/meson.build
+@@ -98,6 +98,7 @@ internal_headers = [
+   'internal/catch_getenv.hpp',
+   'internal/catch_istream.hpp',
+   'internal/catch_is_permutation.hpp',
++  'internal/catch_jsonwriter.hpp',
+   'internal/catch_lazy_expr.hpp',
+   'internal/catch_leak_detector.hpp',
+   'internal/catch_list.hpp',
+@@ -214,6 +215,7 @@ internal_sources = files(
+   'internal/catch_floating_point_helpers.cpp',
+   'internal/catch_getenv.cpp',
+   'internal/catch_istream.cpp',
++  'internal/catch_jsonwriter.cpp',
+   'internal/catch_lazy_expr.cpp',
+   'internal/catch_leak_detector.cpp',
+   'internal/catch_list.cpp',
+@@ -280,6 +282,7 @@ reporter_headers = [
+   'reporters/catch_reporter_cumulative_base.hpp',
+   'reporters/catch_reporter_event_listener.hpp',
+   'reporters/catch_reporter_helpers.hpp',
++  'reporters/catch_reporter_json.hpp',
+   'reporters/catch_reporter_junit.hpp',
+   'reporters/catch_reporter_multi.hpp',
+   'reporters/catch_reporter_registrars.hpp',
+@@ -299,6 +302,7 @@ reporter_sources = files(
+   'reporters/catch_reporter_cumulative_base.cpp',
+   'reporters/catch_reporter_event_listener.cpp',
+   'reporters/catch_reporter_helpers.cpp',
++  'reporters/catch_reporter_json.cpp',
+   'reporters/catch_reporter_junit.cpp',
+   'reporters/catch_reporter_multi.cpp',
+   'reporters/catch_reporter_registrars.cpp',
+diff --git a/src/catch2/reporters/catch_reporter_json.cpp b/src/catch2/reporters/catch_reporter_json.cpp
+new file mode 100644
+index 00000000..7ddc7036
+--- /dev/null
++++ b/src/catch2/reporters/catch_reporter_json.cpp
+@@ -0,0 +1,395 @@
++
++//              Copyright Catch2 Authors
++// Distributed under the Boost Software License, Version 1.0.
++//   (See accompanying file LICENSE.txt or copy at
++//        https://www.boost.org/LICENSE_1_0.txt)
++
++// SPDX-License-Identifier: BSL-1.0
++//
++#include <catch2/catch_test_case_info.hpp>
++#include <catch2/catch_test_spec.hpp>
++#include <catch2/catch_version.hpp>
++#include <catch2/interfaces/catch_interfaces_config.hpp>
++#include <catch2/internal/catch_list.hpp>
++#include <catch2/internal/catch_string_manip.hpp>
++#include <catch2/reporters/catch_reporter_json.hpp>
++
++namespace Catch {
++    namespace {
++        void writeSourceInfo( JsonObjectWriter& writer,
++                              SourceLineInfo const& sourceInfo ) {
++            auto source_location_writer =
++                writer.write( "source-location" ).writeObject();
++            source_location_writer.write( "filename" ).write( sourceInfo.file );
++            source_location_writer.write( "line" ).write( sourceInfo.line );
++        }
++
++        void writeTags( JsonArrayWriter writer, std::vector<Tag> const& tags ) {
++            for ( auto const& tag : tags ) {
++                writer.write( tag.original );
++            }
++        }
++
++        void writeProperties( JsonArrayWriter writer,
++                              TestCaseInfo const& info ) {
++            if ( info.isHidden() ) { writer.write( "is-hidden" ); }
++            if ( info.okToFail() ) { writer.write( "ok-to-fail" ); }
++            if ( info.expectedToFail() ) { writer.write( "expected-to-fail" ); }
++            if ( info.throws() ) { writer.write( "throws" ); }
++        }
++
++        //void writeCounts( JsonObjectWriter writer, Counts const& counts ) {
++        //    writer.write( "passed" ).write( counts.passed );
++        //    writer.write( "failed" ).write( counts.failed );
++        //    writer.write( "fail-but-ok" ).write( counts.failedButOk );
++        //    writer.write( "skipped" ).write( counts.skipped );
++        //}
++
++        //void writeTestInfo( JsonObjectWriter writer,
++        //                    TestCaseInfo const& info ) {
++        //    writer.write( "name" ).write( info.name );
++        //    writeTags( writer.write( "tags" ).writeArray(), info.tags );
++        //    writeSourceInfo( writer, info.lineInfo );
++        //    writeProperties( writer.write( "properties" ).writeArray(), info );
++        //}
++
++        //void writeSection( JsonObjectWriter& writer,
++        //                   CumulativeReporterBase::SectionNode const& section,
++        //                   bool selfWrite ) {
++        //    if ( selfWrite ) {
++        //        writer.write( "name" ).write( section.stats.sectionInfo.name );
++        //        writeSourceInfo( writer, section.stats.sectionInfo.lineInfo );
++        //        writeCounts( writer.write( "assertions-stats" ).writeObject(),
++        //                     section.stats.assertions );
++        //    }
++        //    if ( section.childSections.empty() ) { return; }
++        //    auto sectionsWriter = writer.write( "sections" ).writeArray();
++        //    for ( auto const& childPtr : section.childSections ) {
++        //        auto childSectionWriter = sectionsWriter.writeObject();
++        //        writeSection( childSectionWriter, *childPtr, true );
++        //    }
++        //}
++    } // namespace
++
++    JsonReporter::JsonReporter( ReporterConfig&& config ):
++        StreamingReporterBase{ CATCH_MOVE( config ) } {
++
++        m_preferences.shouldRedirectStdOut = true;
++        // TBD: Do we want to report all assertions? XML reporter does
++        //      not, but for machine-parseable reporters I think the answer
++        //      should be yes.
++        m_preferences.shouldReportAllAssertions = true;
++
++        m_objectWriters.emplace( m_stream );
++        m_writers.emplace( Writer::Object );
++        auto& writer = m_objectWriters.top();
++
++        writer.write( "version" ).write( 1 );
++
++        {
++            auto metadata_writer = writer.write( "metadata" ).writeObject();
++            metadata_writer.write( "name" ).write( m_config->name() );
++            metadata_writer.write( "rng-seed" ).write( m_config->rngSeed() );
++            metadata_writer.write( "catch2-version" ).write( libraryVersion() );
++            if ( m_config->testSpec().hasFilters() ) {
++                metadata_writer.write( "filters" )
++                    .write( m_config->testSpec() );
++            }
++        }
++    }
++
++    JsonReporter::~JsonReporter() {
++        endListing();
++        // TODO: Ensure this closes the top level object, add asserts
++        assert( m_writers.size() == 1 && "Only the top level object should be open" );
++        assert( m_writers.top() == Writer::Object );
++        endObject();
++        m_stream << '\n' << std::flush;
++        assert( m_writers.empty() );
++    }
++
++    JsonArrayWriter& JsonReporter::startArray() {
++        m_arrayWriters.emplace( m_arrayWriters.top().writeArray() );
++        m_writers.emplace( Writer::Array );
++        return m_arrayWriters.top();
++    }
++    JsonArrayWriter& JsonReporter::startArray( std::string const& key ) {
++        m_arrayWriters.emplace(
++            m_objectWriters.top().write( key ).writeArray() );
++        m_writers.emplace( Writer::Array );
++        return m_arrayWriters.top();
++    }
++
++    JsonObjectWriter& JsonReporter::startObject() {
++        m_objectWriters.emplace( m_arrayWriters.top().writeObject() );
++        m_writers.emplace( Writer::Object );
++        return m_objectWriters.top();
++    }
++    JsonObjectWriter& JsonReporter::startObject( std::string const& key ) {
++        m_objectWriters.emplace(
++            m_objectWriters.top().write( key ).writeObject() );
++        m_writers.emplace( Writer::Object );
++        return m_objectWriters.top();
++    }
++
++    void JsonReporter::endObject() {
++        assert( isInside( Writer::Object ) );
++        m_objectWriters.pop();
++        m_writers.pop();
++    }
++    void JsonReporter::endArray() {
++        assert( isInside( Writer::Array ) );
++        m_arrayWriters.pop();
++        m_writers.pop();
++    }
++
++    bool JsonReporter::isInside( Writer writer ) {
++        return !m_writers.empty() && m_writers.top() == writer;
++    }
++
++    void JsonReporter::startListing() {
++        if ( !m_startedListing ) { startObject( "listings" ); }
++        m_startedListing = true;
++    }
++    void JsonReporter::endListing() {
++        if ( m_startedListing ) { endObject(); }
++        m_startedListing = false;
++    }
++
++    std::string JsonReporter::getDescription() {
++        return "WIP! Reports test results as a JSON document. WIP!";
++    }
++
++    void JsonReporter::testRunStarting( TestRunInfo const& testInfo ) {
++        StreamingReporterBase::testRunStarting( testInfo );
++        endListing();
++
++        assert( isInside( Writer::Object ) );
++        startObject( "test-run" );
++        startArray( "test-cases" );
++    }
++
++     static void writeCounts( JsonObjectWriter&& writer, Counts const& counts ) {
++        writer.write( "passed" ).write( counts.passed );
++        writer.write( "failed" ).write( counts.failed );
++        writer.write( "fail-but-ok" ).write( counts.failedButOk );
++        writer.write( "skipped" ).write( counts.skipped );
++    }
++
++    void JsonReporter::testRunEnded(TestRunStats const& runStats) {
++        assert( isInside( Writer::Array ) );
++        // End "test-cases"
++        endArray();
++
++        {
++            auto totals = m_objectWriters.top().write( "totals" ).writeObject();
++            writeCounts( totals.write( "assertions" ).writeObject(),
++                         runStats.totals.assertions );
++            writeCounts( totals.write( "test-cases" ).writeObject(),
++                         runStats.totals.testCases );
++        }
++
++        // End the "test-run" object
++        endObject();
++    }
++
++    void JsonReporter::testCaseStarting( TestCaseInfo const& tcInfo ) {
++        StreamingReporterBase::testCaseStarting( tcInfo );
++
++        assert( isInside( Writer::Array ) &&
++                "We should be in the 'test-cases' array" );
++        startObject();
++        // "test-info" prelude
++        {
++            auto testInfo =
++                m_objectWriters.top().write( "test-info" ).writeObject();
++            // TODO: handle testName vs className!!
++            testInfo.write( "name" ).write( tcInfo.name );
++            writeSourceInfo(testInfo, tcInfo.lineInfo);
++            writeTags( testInfo.write( "tags" ).writeArray(), tcInfo.tags );
++            writeProperties( testInfo.write( "properties" ).writeArray(),
++                             tcInfo );
++        }
++
++
++        // Start the array for individual test runs (testCasePartial pairs)
++        startArray( "runs" );
++    }
++
++    void JsonReporter::testCaseEnded( TestCaseStats const& tcStats ) {
++        StreamingReporterBase::testCaseEnded( tcStats );
++
++        // We need to close the 'runs' array before finishing the test case
++        assert( isInside( Writer::Array ) );
++        endArray();
++
++        {
++            auto totals = m_objectWriters.top().write( "totals" ).writeObject();
++            writeCounts( totals.write( "assertions" ).writeObject(),
++                         tcStats.totals.assertions );
++            // We do not write the test case totals, because there will always be just one test case here.
++            // TODO: overall "result" -> success, skip, fail here? Or in partial result?
++        }
++        // We do not write out stderr/stdout, because we instead wrote those out in partial runs
++
++        // TODO: aborting?
++
++        // And we also close this test case's object
++        assert( isInside( Writer::Object ) );
++        endObject();
++    }
++
++    void JsonReporter::testCasePartialStarting( TestCaseInfo const& /*tcInfo*/,
++                                                uint64_t index ) {
++        startObject();
++        m_objectWriters.top().write( "run-idx" ).write( index );
++        startArray( "path" );
++        //startObject( "path" );
++        // TODO: we want to delay most of the printing to the 'root' section
++        // TODO: childSection key name?
++    }
++
++    void JsonReporter::testCasePartialEnded( TestCaseStats const& tcStats,
++                                             uint64_t /*index*/ ) {
++        // Fixme: the top level section handles this.
++        //// path object
++        endArray();
++        if ( !tcStats.stdOut.empty() ) {
++            m_objectWriters.top()
++                .write( "captured-stdout" )
++                .write( tcStats.stdOut );
++        }
++        if ( !tcStats.stdErr.empty() ) {
++            m_objectWriters.top()
++                .write( "captured-stderr" )
++                .write( tcStats.stdErr );
++        }
++        {
++            auto totals = m_objectWriters.top().write( "totals" ).writeObject();
++            writeCounts( totals.write( "assertions" ).writeObject(),
++                         tcStats.totals.assertions );
++            // We do not write the test case totals, because there will
++            // always be just one test case here.
++            // TODO: overall "result" -> success, skip, fail here? Or in
++            // partial result?
++        }
++        // TODO: aborting?
++        // run object
++        endObject();
++    }
++
++    void JsonReporter::sectionStarting( SectionInfo const& sectionInfo ) {
++        assert( isInside( Writer::Array ) &&
++                "Section should always start inside an object" );
++        // We want to nest top level sections, even though it shares name
++        // and source loc with the TEST_CASE
++        auto& sectionObject = startObject();
++        sectionObject.write( "kind" ).write( "section" );
++        sectionObject.write( "name" ).write( sectionInfo.name );
++        writeSourceInfo( m_objectWriters.top(), sectionInfo.lineInfo );
++
++
++        // TBD: Do we want to create this event lazily? It would become
++        //      rather complex, but we could do it, and it would look
++        //      better for empty sections. OTOH, empty sections should
++        //      be rare.
++        startArray( "path" );
++    }
++    void JsonReporter::sectionEnded( SectionStats const& /*sectionStats */) {
++        // End the subpath array
++        endArray();
++        // TODO: metadata
++        // TODO: what info do we have here?
++
++        // End the section object
++        endObject();
++    }
++
++    void JsonReporter::assertionStarting( AssertionInfo const& /*assertionInfo*/ ) {}
++    void JsonReporter::assertionEnded( AssertionStats const& assertionStats ) {
++        // TODO: There is lot of different things to handle here, but
++        //       we can fill it in later, after we show that the basic
++        //       outline and streaming reporter impl works well enough.
++        //if ( !m_config->includeSuccessfulResults()
++        //    && assertionStats.assertionResult.isOk() ) {
++        //    return;
++        //}
++        assert( isInside( Writer::Array ) );
++        auto assertionObject = m_arrayWriters.top().writeObject();
++
++        assertionObject.write( "kind" ).write( "assertion" );
++        writeSourceInfo( assertionObject,
++                         assertionStats.assertionResult.getSourceInfo() );
++        assertionObject.write( "status" )
++            .write( assertionStats.assertionResult.isOk() );
++        // TODO: handling of result.
++        // TODO: messages
++        // TODO: totals?
++    }
++
++
++    void JsonReporter::benchmarkPreparing( StringRef name ) { (void)name; }
++    void JsonReporter::benchmarkStarting( BenchmarkInfo const& ) {}
++    void JsonReporter::benchmarkEnded( BenchmarkStats<> const& ) {}
++    void JsonReporter::benchmarkFailed( StringRef error ) { (void)error; }
++
++    void JsonReporter::listReporters(
++        std::vector<ReporterDescription> const& descriptions ) {
++        startListing();
++
++        auto writer = m_objectWriters.top().write( "reporters" ).writeArray();
++        for ( auto const& desc : descriptions ) {
++            auto desc_writer = writer.writeObject();
++            desc_writer.write( "name" ).write( desc.name );
++            desc_writer.write( "description" ).write( desc.description );
++        }
++    }
++    void JsonReporter::listListeners(
++        std::vector<ListenerDescription> const& descriptions ) {
++        startListing();
++
++        auto writer = m_objectWriters.top().write( "listeners" ).writeArray();
++
++        for ( auto const& desc : descriptions ) {
++            auto desc_writer = writer.writeObject();
++            desc_writer.write( "name" ).write( desc.name );
++            desc_writer.write( "description" ).write( desc.description );
++        }
++    }
++    void JsonReporter::listTests( std::vector<TestCaseHandle> const& tests ) {
++        startListing();
++
++        auto writer = m_objectWriters.top().write( "tests" ).writeArray();
++
++        for ( auto const& test : tests ) {
++            auto desc_writer = writer.writeObject();
++            auto const& info = test.getTestCaseInfo();
++
++            desc_writer.write( "name" ).write( info.name );
++            desc_writer.write( "class-name" ).write( info.className );
++            {
++                auto tag_writer = desc_writer.write( "tags" ).writeArray();
++                for ( auto const& tag : info.tags ) {
++                    tag_writer.write( tag.original );
++                }
++            }
++            writeSourceInfo( desc_writer, info.lineInfo );
++        }
++    }
++    void JsonReporter::listTags( std::vector<TagInfo> const& tags ) {
++        startListing();
++
++        auto writer = m_objectWriters.top().write( "tags" ).writeArray();
++        for ( auto const& tag : tags ) {
++            auto tag_writer = writer.writeObject();
++            {
++                auto aliases_writer =
++                    tag_writer.write( "aliases" ).writeArray();
++                for ( auto alias : tag.spellings ) {
++                    aliases_writer.write( alias );
++                }
++            }
++            tag_writer.write( "count" ).write( tag.count );
++        }
++    }
++} // namespace Catch
+diff --git a/src/catch2/reporters/catch_reporter_json.hpp b/src/catch2/reporters/catch_reporter_json.hpp
+new file mode 100644
+index 00000000..33a43613
+--- /dev/null
++++ b/src/catch2/reporters/catch_reporter_json.hpp
+@@ -0,0 +1,95 @@
++
++//              Copyright Catch2 Authors
++// Distributed under the Boost Software License, Version 1.0.
++//   (See accompanying file LICENSE.txt or copy at
++//        https://www.boost.org/LICENSE_1_0.txt)
++
++// SPDX-License-Identifier: BSL-1.0
++
++#ifndef CATCH_REPORTER_JSON_HPP_INCLUDED
++#define CATCH_REPORTER_JSON_HPP_INCLUDED
++
++#include <catch2/catch_timer.hpp>
++#include <catch2/internal/catch_jsonwriter.hpp>
++#include <catch2/reporters/catch_reporter_streaming_base.hpp>
++
++#include <stack>
++
++namespace Catch {
++    class JsonReporter : public StreamingReporterBase {
++    public:
++        JsonReporter( ReporterConfig&& config );
++
++        ~JsonReporter() override;
++
++        static std::string getDescription();
++
++    public: // StreamingReporterBase
++        void testRunStarting( TestRunInfo const& runInfo ) override;
++        void testRunEnded( TestRunStats const& runStats ) override;
++
++        void testCaseStarting( TestCaseInfo const& tcInfo ) override;
++        void testCaseEnded( TestCaseStats const& tcStats ) override;
++
++        void testCasePartialStarting( TestCaseInfo const& tcInfo,
++                                      uint64_t index ) override;
++        void testCasePartialEnded( TestCaseStats const& tcStats,
++                                   uint64_t index ) override;
++
++        void sectionStarting( SectionInfo const& sectionInfo ) override;
++        void sectionEnded( SectionStats const& sectionStats ) override;
++
++        void assertionStarting( AssertionInfo const& assertionInfo ) override;
++        void assertionEnded( AssertionStats const& assertionStats ) override;
++
++        //void testRunEndedCumulative() override;
++
++        void benchmarkPreparing( StringRef name ) override;
++        void benchmarkStarting( BenchmarkInfo const& ) override;
++        void benchmarkEnded( BenchmarkStats<> const& ) override;
++        void benchmarkFailed( StringRef error ) override;
++
++        void listReporters(
++            std::vector<ReporterDescription> const& descriptions ) override;
++        void listListeners(
++            std::vector<ListenerDescription> const& descriptions ) override;
++        void listTests( std::vector<TestCaseHandle> const& tests ) override;
++        void listTags( std::vector<TagInfo> const& tags ) override;
++
++    private:
++        Timer m_testCaseTimer;
++        enum class Writer {
++            Object,
++            Array
++        };
++
++        JsonArrayWriter& startArray();
++        JsonArrayWriter& startArray( std::string const& key );
++
++        JsonObjectWriter& startObject();
++        JsonObjectWriter& startObject( std::string const& key );
++
++        void endObject();
++        void endArray();
++
++        bool isInside( Writer writer );
++
++        void startListing();
++        void endListing();
++
++        // Invariant:
++        // When m_writers is not empty and its top element is
++        // - Writer::Object, then m_objectWriters is not be empty
++        // - Writer::Array,  then m_arrayWriters shall not be empty
++        std::stack<JsonObjectWriter> m_objectWriters{};
++        std::stack<JsonArrayWriter> m_arrayWriters{};
++        std::stack<Writer> m_writers{};
++
++        bool m_startedListing = false;
++
++        // std::size_t m_sectionDepth = 0;
++        // std::size_t m_sectionStarted = 0;
++    };
++} // namespace Catch
++
++#endif // CATCH_REPORTER_JSON_HPP_INCLUDED
+diff --git a/src/catch2/reporters/catch_reporters_all.hpp b/src/catch2/reporters/catch_reporters_all.hpp
+index 16f7bd70..5c713fe1 100644
+--- a/src/catch2/reporters/catch_reporters_all.hpp
++++ b/src/catch2/reporters/catch_reporters_all.hpp
+@@ -28,6 +28,7 @@
+ #include <catch2/reporters/catch_reporter_cumulative_base.hpp>
+ #include <catch2/reporters/catch_reporter_event_listener.hpp>
+ #include <catch2/reporters/catch_reporter_helpers.hpp>
++#include <catch2/reporters/catch_reporter_json.hpp>
+ #include <catch2/reporters/catch_reporter_junit.hpp>
+ #include <catch2/reporters/catch_reporter_multi.hpp>
+ #include <catch2/reporters/catch_reporter_registrars.hpp>

@@ -1,0 +1,207 @@
+diff --git a/docs/matchers.md b/docs/matchers.md
+index 8940b6ad..c702fec0 100644
+--- a/docs/matchers.md
++++ b/docs/matchers.md
+@@ -231,6 +231,10 @@ definitions to handle generic range-like types. These are:
+ * `AllTrue()`
+ * `NoneTrue()`
+ * `AnyTrue()`
++* `RangeEquals(TargetRangeLike&&, Comparator = std::equal_to<>{})`
++* `UnorderedRangeEquals(TargetRangeLike&&, Comparator = std::equal_to<>{})`
++
++> `RangeEquals` and `UnorderedRangeEquals` matchers were [introduced](https://github.com/catchorg/Catch2/pull/2377) in Catch2 X.Y.Z
+ 
+ `IsEmpty` should be self-explanatory. It successfully matches objects
+ that are empty according to either `std::empty`, or ADL-found `empty`
+@@ -257,6 +261,25 @@ all, none, or any of the contained elements are `true`, respectively.
+ It works for ranges of `bool`s and ranges of elements (explicitly)
+ convertible to `bool`.
+ 
++`RangeEquals` compares the range that the matcher is constructed with
++(the "target range") against the range to be tested, element-wise. The
++match succeeds if all elements from the two ranges compare equal (using
++`operator==` by default). The ranges do not need to be the same type,
++and the element types do not need to be the same, as long as they are
++comparable. (e.g. you may compare `std::vector<int>` to `std::array<char>`).
++
++`UnorderedRangeEquals` is similar to `RangeEquals`, but the order
++does not matter. For example "1, 2, 3" would match "3, 2, 1", but not
++"1, 1, 2, 3" As with `RangeEquals`, `UnorderedRangeEquals` compares
++the individual elements using using `operator==` by default.
++
++Both `RangeEquals` and `UnorderedRangeEquals` optionally accept a
++predicate which can be used to compare the containers element-wise.
++
++To check a container elementwise against a given matcher, use
++`AllMatch`.
++
++
+ ## Writing custom matchers (old style)
+ 
+ The old style of writing matchers has been introduced back in Catch
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 2791fa30..1e1e31b7 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -252,6 +252,7 @@ set(MATCHER_HEADERS
+   ${SOURCES_DIR}/matchers/catch_matchers_all.hpp
+   ${SOURCES_DIR}/matchers/catch_matchers_container_properties.hpp
+   ${SOURCES_DIR}/matchers/catch_matchers_contains.hpp
++  ${SOURCES_DIR}/matchers/catch_matchers_range_equals.hpp
+   ${SOURCES_DIR}/matchers/catch_matchers_exception.hpp
+   ${SOURCES_DIR}/matchers/catch_matchers_floating_point.hpp
+   ${SOURCES_DIR}/matchers/catch_matchers_predicate.hpp
+diff --git a/src/catch2/matchers/catch_matchers_all.hpp b/src/catch2/matchers/catch_matchers_all.hpp
+index eadf7082..83fe5386 100644
+--- a/src/catch2/matchers/catch_matchers_all.hpp
++++ b/src/catch2/matchers/catch_matchers_all.hpp
+@@ -27,6 +27,7 @@
+ #include <catch2/matchers/catch_matchers_floating_point.hpp>
+ #include <catch2/matchers/catch_matchers_predicate.hpp>
+ #include <catch2/matchers/catch_matchers_quantifiers.hpp>
++#include <catch2/matchers/catch_matchers_range_equals.hpp>
+ #include <catch2/matchers/catch_matchers_string.hpp>
+ #include <catch2/matchers/catch_matchers_templated.hpp>
+ #include <catch2/matchers/catch_matchers_vector.hpp>
+diff --git a/src/catch2/matchers/catch_matchers_range_equals.hpp b/src/catch2/matchers/catch_matchers_range_equals.hpp
+new file mode 100644
+index 00000000..bc94e696
+--- /dev/null
++++ b/src/catch2/matchers/catch_matchers_range_equals.hpp
+@@ -0,0 +1,136 @@
++
++//              Copyright Catch2 Authors
++// Distributed under the Boost Software License, Version 1.0.
++//   (See accompanying file LICENSE.txt or copy at
++//        https://www.boost.org/LICENSE_1_0.txt)
++
++// SPDX-License-Identifier: BSL-1.0
++#ifndef CATCH_MATCHERS_RANGE_EQUALS_HPP_INCLUDED
++#define CATCH_MATCHERS_RANGE_EQUALS_HPP_INCLUDED
++
++#include <algorithm>
++#include <catch2/matchers/catch_matchers_templated.hpp>
++#include <utility>
++
++namespace Catch {
++    namespace Matchers {
++
++        /**
++         * Matcher for checking that an element contains the same
++         * elements in the same order
++         */
++        template <typename TargetRangeLike, typename Equality>
++        class RangeEqualsMatcher final : public MatcherGenericBase {
++            TargetRangeLike m_desired;
++            Equality m_predicate;
++
++        public:
++            template <typename TargetRangeLike2, typename Equality2>
++            RangeEqualsMatcher( TargetRangeLike2&& range,
++                                Equality2&& predicate ):
++                m_desired( CATCH_FORWARD( range ) ),
++                m_predicate( CATCH_FORWARD( predicate ) ) {}
++
++            template <typename RangeLike>
++            bool match( RangeLike&& rng ) const {
++                using std::begin;
++                using std::end;
++                return std::equal( begin(m_desired),
++                                   end(m_desired),
++                                   begin(rng),
++                                   end(rng),
++                                   m_predicate );
++            }
++
++            std::string describe() const override {
++                return "elements are " + Catch::Detail::stringify( m_desired );
++            }
++        };
++
++        /**
++         * Matcher for checking that an element contains the same
++         * elements (but not necessarily in the same order)
++         */
++        template <typename TargetRangeLike, typename Equality>
++        class UnorderedRangeEqualsMatcher final : public MatcherGenericBase {
++            TargetRangeLike m_desired;
++            Equality m_predicate;
++
++        public:
++            template <typename TargetRangeLike2, typename Equality2>
++            UnorderedRangeEqualsMatcher( TargetRangeLike2&& range,
++                                         Equality2&& predicate ):
++                m_desired( CATCH_FORWARD( range ) ),
++                m_predicate( CATCH_FORWARD( predicate ) ) {}
++
++            template <typename RangeLike>
++            bool match( RangeLike&& rng ) const {
++                using std::begin;
++                using std::end;
++                return std::is_permutation( begin( m_desired ),
++                                            end( m_desired ),
++                                            begin( rng ),
++                                            end( rng ),
++                                            m_predicate );
++            }
++
++            std::string describe() const override {
++                return "unordered elements are " +
++                       ::Catch::Detail::stringify( m_desired );
++            }
++        };
++
++        /**
++         * Creates a matcher that checks if all elements in a range are equal
++         * to all elements in another range.
++         *
++         * Uses `std::equal_to` to do the comparison
++         */
++        template <typename RangeLike>
++        std::enable_if_t<!Detail::is_matcher<RangeLike>::value,
++                         RangeEqualsMatcher<RangeLike, std::equal_to<>>>
++        RangeEquals( RangeLike&& range ) {
++            return { CATCH_FORWARD( range ), std::equal_to<>{} };
++        }
++
++        /**
++         * Creates a matcher that checks if all elements in a range are equal
++         * to all elements in another range.
++         *
++         * Uses to provided predicate `predicate` to do the comparisons
++         */
++        template <typename RangeLike, typename Equality>
++        RangeEqualsMatcher<RangeLike, Equality>
++        RangeEquals( RangeLike&& range, Equality&& predicate ) {
++            return { CATCH_FORWARD( range ), CATCH_FORWARD( predicate ) };
++        }
++
++        /**
++         * Creates a matcher that checks if all elements in a range are equal
++         * to all elements in another range, in some permutation
++         *
++         * Uses `std::equal_to` to do the comparison
++         */
++        template <typename RangeLike>
++        std::enable_if_t<
++            !Detail::is_matcher<RangeLike>::value,
++            UnorderedRangeEqualsMatcher<RangeLike, std::equal_to<>>>
++        UnorderedRangeEquals( RangeLike&& range ) {
++            return { CATCH_FORWARD( range ), std::equal_to<>{} };
++        }
++
++        /**
++         * Creates a matcher that checks if all elements in a range are equal
++         * to all elements in another range, in some permuation.
++         *
++         * Uses to provided predicate `predicate` to do the comparisons
++         */
++        template <typename RangeLike, typename Equality>
++        UnorderedRangeEqualsMatcher<RangeLike, Equality>
++        UnorderedRangeEquals( RangeLike&& range, Equality&& predicate ) {
++            return { CATCH_FORWARD( range ), CATCH_FORWARD( predicate ) };
++        }
++    } // namespace Matchers
++} // namespace Catch
++
++#endif // CATCH_MATCHERS_RANGE_EQUALS_HPP_INCLUDED

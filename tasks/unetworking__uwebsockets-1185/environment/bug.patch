@@ -1,0 +1,630 @@
+diff --git a/fuzzing/TopicTree.cpp b/fuzzing/TopicTree.cpp
+index 24a91d1..8bc1897 100644
+--- a/fuzzing/TopicTree.cpp
++++ b/fuzzing/TopicTree.cpp
+@@ -9,10 +9,7 @@
+ 
+ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+     /* Create topic tree */
+-    uWS::TopicTree topicTree([](uWS::Subscriber *s, uWS::Intersection &intersection) {
+-
+-        /* For now we do not care about iterating over holes! TODO! */
+-        std::pair<std::string_view, std::string_view> message = intersection.dataChannels;
++    uWS::TopicTree topicTree([](uWS::Subscriber *s, std::pair<std::string_view, std::string_view> message) {
+ 
+         /* Subscriber must not be null, and at this point we have to have subscriptions.
+          * This assumption seems to hold true. */
+diff --git a/src/HttpResponse.h b/src/HttpResponse.h
+index dc31f4f..d91fe64 100644
+--- a/src/HttpResponse.h
++++ b/src/HttpResponse.h
+@@ -86,7 +86,7 @@ private:
+ #ifndef UWS_HTTPRESPONSE_NO_WRITEMARK
+         if (!Super::getLoopData()->noMark) {
+             /* We only expose major version */
+-            writeHeader("uWebSockets", "19");
++            writeHeader("uWebSockets", "18");
+         }
+ #endif
+     }
+diff --git a/src/TopicTree.h b/src/TopicTree.h
+index 44cb4fb..43f3db5 100644
+--- a/src/TopicTree.h
++++ b/src/TopicTree.h
+@@ -1,5 +1,5 @@
+ /*
+- * Authored by Alex Hultman, 2018-2021.
++ * Authored by Alex Hultman, 2018-2020.
+  * Intellectual property of third-party.
+ 
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -28,9 +28,6 @@
+ #include <list>
+ #include <cstring>
+ 
+-/* We use std::function here, not fu2::unique_function */
+-#include <functional>
+-
+ namespace uWS {
+ 
+ /* A Subscriber is an extension of a socket */
+@@ -67,83 +64,15 @@ struct Topic {
+     std::set<Subscriber *> subs;
+ };
+ 
+-struct Hole {
+-    std::pair<size_t, size_t> lengths;
+-    unsigned int messageId;
+-};
+-
+-struct Intersection {
+-    std::pair<std::string, std::string> dataChannels;
+-    std::vector<Hole> holes;
+-
+-    void forSubscriber(std::vector<unsigned int> &senderForMessages, std::function<void(std::pair<std::string_view, std::string_view>, bool)> cb) {
+-        /* How far we already emitted of the two dataChannels */
+-        std::pair<size_t, size_t> emitted = {};
+-
+-        /* Holes are global to the entire topic tree, so we are not guaranteed to find
+-         * holes in this intersection - they are sorted, though */
+-        unsigned int examinedHoles = 0;
+-
+-        /* This is a slow path of sorts, most subscribers will be observers, not active senders */
+-        for (unsigned int id : senderForMessages) {
+-            std::pair<size_t, size_t> toEmit = {};
+-            std::pair<size_t, size_t> toIgnore = {};
+-
+-            /* This linear search is most probably very small - it could be made log2 if every hole
+-             * knows about its previous accumulated length, which is easy to set up. However this
+-             * log2 search will most likely never be a warranted perf. gain */
+-            for (; examinedHoles < holes.size(); examinedHoles++) {
+-                if (holes[examinedHoles].messageId == id) {
+-                    toIgnore.first += holes[examinedHoles].lengths.first;
+-                    toIgnore.second += holes[examinedHoles].lengths.second;
+-                    examinedHoles++;
+-                    break;
+-                }
+-                /* We are not the sender of this message so we should emit it in this segment */
+-                toEmit.first += holes[examinedHoles].lengths.first;
+-                toEmit.second += holes[examinedHoles].lengths.second;
+-            }
+-
+-            /* Emit this segment */
+-            if (toEmit.first || toEmit.second) {
+-                std::pair<std::string_view, std::string_view> cutDataChannels = {
+-                    std::string_view(dataChannels.first.data() + emitted.first, toEmit.first),
+-                    std::string_view(dataChannels.second.data() + emitted.second, toEmit.second),
+-                };
+-
+-                /* We only need to test the first data channel for "FIN" */
+-                cb(cutDataChannels, emitted.first + toEmit.first + toIgnore.first == dataChannels.first.length());
+-            }
+-
+-            emitted.first += toEmit.first + toIgnore.first;
+-            emitted.second += toEmit.second + toIgnore.second;
+-        }
+-
+-        if (emitted.first == dataChannels.first.length() && emitted.second == dataChannels.second.length()) {
+-            return;
+-        }
+-
+-        std::pair<std::string_view, std::string_view> cutDataChannels = {
+-            std::string_view(dataChannels.first.data() + emitted.first, dataChannels.first.length() - emitted.first),
+-            std::string_view(dataChannels.second.data() + emitted.second, dataChannels.second.length() - emitted.second),
+-        };
+-
+-        cb(cutDataChannels, true);
+-    }
+-};
+-
+ struct TopicTree {
+ private:
+-    std::function<int(Subscriber *, Intersection &)> cb;
++    std::function<int(Subscriber *, std::pair<std::string_view, std::string_view>)> cb;
+ 
+     Topic *root = new Topic;
+ 
+     /* Global messageId for deduplication of overlapping topics and ordering between topics */
+     unsigned int messageId = 0;
+ 
+-    /* Sender holes */
+-    std::map<Subscriber *, std::vector<unsigned int>> senderHoles;
+-
+     /* The triggered topics */
+     Topic *triggeredTopics[64];
+     int numTriggeredTopics = 0;
+@@ -258,7 +187,7 @@ private:
+ 
+ public:
+ 
+-    TopicTree(std::function<int(Subscriber *, Intersection &)> cb) {
++    TopicTree(std::function<int(Subscriber *, std::pair<std::string_view, std::string_view>)> cb) {
+         this->cb = cb;
+     }
+ 
+@@ -266,18 +195,6 @@ public:
+         delete root;
+     }
+ 
+-    /* This is part of the fast path, so should be optimal */
+-    std::vector<unsigned int> &getSenderFor(Subscriber *s) {
+-        static thread_local std::vector<unsigned int> emptyVector;
+-
+-        auto it = senderHoles.find(s);
+-        if (it != senderHoles.end()) {
+-            return it->second;
+-        }
+-
+-        return emptyVector;
+-    }
+-
+     void subscribe(std::string_view topic, Subscriber *subscriber) {
+         /* Start iterating from the root */
+         Topic *iterator = root;
+@@ -334,14 +251,8 @@ public:
+         }
+     }
+ 
+-    void publish(std::string_view topic, std::pair<std::string_view, std::string_view> message, Subscriber *sender = nullptr) {
+-        /* Add a hole for the sender if one */
+-        if (sender) {
+-            senderHoles[sender].push_back(messageId);
+-        }
+-
++    void publish(std::string_view topic, std::pair<std::string_view, std::string_view> message) {
+         publish(root, 0, 0, topic, message);
+-        /* MessageIDs are reset on drain - this should be fine since messages itself are cleared on drain */
+         messageId++;
+     }
+ 
+@@ -429,8 +340,6 @@ public:
+         numTriggeredTopics = numFilteredTriggeredTopics;
+ 
+         if (!numTriggeredTopics) {
+-            senderHoles.clear();
+-            messageId = 0;
+             return;
+         }
+ 
+@@ -446,7 +355,7 @@ public:
+         if (min != (Subscriber *)UINTPTR_MAX) {
+ 
+             /* Up to 64 triggered Topics per batch */
+-            std::map<uint64_t, Intersection> intersectionCache;
++            std::map<uint64_t, std::pair<std::string, std::string>> intersectionCache;
+ 
+             /* Loop over these here */
+             std::set<Subscriber *>::iterator it[64];
+@@ -493,7 +402,7 @@ public:
+                 }
+ 
+                 /* Generate cache for intersection */
+-                if (intersectionCache[intersection].dataChannels.first.length() == 0) {
++                if (intersectionCache[intersection].first.length() == 0) {
+ 
+                     /* Build the union in order without duplicates */
+                     std::map<unsigned int, std::pair<std::string, std::string>> complete;
+@@ -502,19 +411,10 @@ public:
+                     }
+ 
+                     /* Create the linear cache, {inflated, deflated} */
+-                    Intersection res;
++                    std::pair<std::string, std::string> res;
+                     for (auto &p : complete) {
+-                        res.dataChannels.first.append(p.second.first);
+-                        res.dataChannels.second.append(p.second.second);
+-
+-                        /* Appends {id, length, length}
+-                         * We could possibly append byte offset also,
+-                         * if we want to use log2 search later. */
+-                        Hole h;
+-                        h.lengths.first = p.second.first.length();
+-                        h.lengths.second = p.second.second.length();
+-                        h.messageId = p.first;
+-                        res.holes.push_back(h);
++                        res.first.append(p.second.first);
++                        res.second.append(p.second.second);
+                     }
+ 
+                     cb(min, intersectionCache[intersection] = std::move(res));
+@@ -525,6 +425,7 @@ public:
+ 
+                 min = nextMin;
+             }
++
+         }
+ 
+         /* Clear messages of triggered Topics */
+@@ -533,8 +434,6 @@ public:
+             triggeredTopics[i]->triggered = false;
+         }
+         numTriggeredTopics = 0;
+-        senderHoles.clear();
+-        messageId = 0;
+     }
+ };
+ 
+diff --git a/src/WebSocket.h b/src/WebSocket.h
+index 6a69ea5..fcf40d1 100644
+--- a/src/WebSocket.h
++++ b/src/WebSocket.h
+@@ -230,15 +230,8 @@ public:
+         WebSocketContextData<SSL> *webSocketContextData = (WebSocketContextData<SSL> *) us_socket_context_ext(SSL,
+             (us_socket_context_t *) us_socket_context(SSL, (us_socket_t *) this)
+         );
+-
+-        /* Make us a subscriber if we aren't yet (important for allocating a sender address) */
+-        WebSocketData *webSocketData = (WebSocketData *) us_socket_ext(SSL, (us_socket_t *) this);
+-        if (!webSocketData->subscriber) {
+-            webSocketData->subscriber = new Subscriber(this);
+-        }
+-
+-        /* Publish as sender, does not receive its own messages even if subscribed to relevant topics */
+-        webSocketContextData->publish(topic, message, opCode, compress, webSocketData->subscriber);
++        /* Is the same as publishing per websocket context */
++        webSocketContextData->publish(topic, message, opCode, compress);
+     }
+ };
+ 
+diff --git a/src/WebSocketContextData.h b/src/WebSocketContextData.h
+index 99c2f07..db2a04f 100644
+--- a/src/WebSocketContextData.h
++++ b/src/WebSocketContextData.h
+@@ -76,111 +76,79 @@ public:
+         Loop::get()->removePreHandler(this);
+     }
+ 
+-    WebSocketContextData() : topicTree([this](Subscriber *s, Intersection &intersection) -> int {
+-
+-        /* We could potentially be called here even if we have nothing to send, since we can
+-         * be the sender of every single message in this intersection. Also "fin" of a segment is not
+-         * guaranteed to be set, in case remaining segments are all from us.
+-         * Essentially, we cannot make strict assumptions here. Also, we can even come here corked,
+-         * since publish can call drain! */
+-
++    WebSocketContextData() : topicTree([this](Subscriber *s, std::pair<std::string_view, std::string_view> data) -> int {
+         /* We rely on writing to regular asyncSockets */
+         auto *asyncSocket = (AsyncSocket<SSL> *) s->user;
+ 
+-        /* If we are corked, do not uncork - otherwise if we cork in here, uncork before leaving */
+-        bool wasCorked = asyncSocket->isCorked();
+-
+-        /* Do we even have room for potential data? */
+-        if (!maxBackpressure || asyncSocket->getBufferedAmount() < maxBackpressure) {
+-
+-            /* Roll over all our segments */
+-            intersection.forSubscriber(topicTree.getSenderFor(s), [asyncSocket, this](std::pair<std::string_view, std::string_view> data, bool fin) {
++        /* Check if we now have too much backpressure (todo: don't buffer up before check) */
++        if (!maxBackpressure || (unsigned int) asyncSocket->getBufferedAmount() < maxBackpressure) {
++            /* Pick uncompressed data track */
++            std::string_view selectedData = data.first;
+ 
+-                /* We have a segment that is not marked as last ("fin").
+-                 * Cork if not already so (purely for performance reasons). Does not touch "wasCorked". */
+-                if (!fin && !asyncSocket->isCorked() && asyncSocket->canCork()) {
+-                    asyncSocket->cork();
+-                }
++            /* Are we using compression? Fine, pick the compressed data track */
++            WebSocketData *webSocketData = (WebSocketData *) asyncSocket->getAsyncSocketData();
++            if (webSocketData->compressionStatus != WebSocketData::CompressionStatus::DISABLED) {
+ 
+-                /* Pick uncompressed data track */
+-                std::string_view selectedData = data.first;
++                /* This is used for both shared and dedicated paths */
++                selectedData = data.second;
+ 
+-                /* Are we using compression? Fine, pick the compressed data track */
+-                WebSocketData *webSocketData = (WebSocketData *) asyncSocket->getAsyncSocketData();
+-                if (webSocketData->compressionStatus != WebSocketData::CompressionStatus::DISABLED) {
++                /* However, dedicated compression has its own path */
++                if (compression != SHARED_COMPRESSOR) {
+ 
+-                    /* This is used for both shared and dedicated paths */
+-                    selectedData = data.second;
++                    WebSocket<SSL, true> *ws = (WebSocket<SSL, true> *) asyncSocket;
+ 
+-                    /* However, dedicated compression has its own path */
+-                    if (compression != SHARED_COMPRESSOR) {
++                    /* We need to handle being corked, and corking here */
++                    bool needsUncorking = false;
++                    if (!ws->isCorked() && ws->canCork()) {
++                        asyncSocket->cork();
++                        needsUncorking = true;
++                    }
+ 
+-                        WebSocket<SSL, true> *ws = (WebSocket<SSL, true> *) asyncSocket;
++                    while (selectedData.length()) {
++                        /* Interpret the data like so, because this is how we shoved it in */
++                        MessageMetadata mm;
++                        memcpy((char *) &mm, selectedData.data(), sizeof(MessageMetadata));
++                        std::string_view unframedMessage(selectedData.data() + sizeof(MessageMetadata), mm.length);
+ 
+-                        /* For performance reasons we always cork when in dedicated mode.
+-                         * Is this really the best? We already kind of cork things in Zlib?
+-                         * Right, formatting needs a cork buffer, right. Never mind. */
+-                        if (!ws->isCorked() && ws->canCork()) {
+-                            asyncSocket->cork();
++                        /* Skip this message if our backpressure is too high */
++                        if (maxBackpressure && ws->getBufferedAmount() > maxBackpressure) {
++                            break;
+                         }
+ 
+-                        while (selectedData.length()) {
+-                            /* Interpret the data like so, because this is how we shoved it in */
+-                            MessageMetadata mm;
+-                            memcpy((char *) &mm, selectedData.data(), sizeof(MessageMetadata));
+-                            std::string_view unframedMessage(selectedData.data() + sizeof(MessageMetadata), mm.length);
+-
+-                            /* Skip this message if our backpressure is too high */
+-                            if (maxBackpressure && ws->getBufferedAmount() > maxBackpressure) {
+-                                break;
+-                            }
+-
+-                            /* Here we perform the actual compression and framing */
+-                            ws->send(unframedMessage, mm.opCode, mm.compress);
++                        /* Here we perform the actual compression and framing */
++                        ws->send(unframedMessage, mm.opCode, mm.compress);
+ 
+-                            /* Advance until empty */
+-                            selectedData.remove_prefix(sizeof(MessageMetadata) + mm.length);
+-                        }
+-
+-                        /* Continue to next segment without executing below path */
+-                        return;
++                        /* Advance until empty */
++                        selectedData.remove_prefix(sizeof(MessageMetadata) + mm.length);
+                     }
+-                }
+ 
+-                /* Common path for SHARED and DISABLED. It is an invalid assumption that we always are
+-                 * uncorked here, however the following (invalid) assumption is not critically wrong either way */
+-
+-                /* Note: this assumes we are not corked, as corking will swallow things and fail later on */
+-                auto [written, failed] = asyncSocket->write(selectedData.data(), (int) selectedData.length());
+-                /* If we want strict check for success, we can ignore this check if corked and repeat below
+-                 * when uncorking - however this is too strict as we really care about PROGRESS rather than
+-                 * ENTIRE SUCCESS - we need minor API changes to support correct checks */
+-                if (!failed) {
+-                    if (this->resetIdleTimeoutOnSend) {
+-                        asyncSocket->timeout(this->idleTimeout);
++                    /* Here we need to uncork or keep it as was */
++                    if (needsUncorking) {
++                        asyncSocket->uncork();
+                     }
++
++                    /* See below */
++                    return 0;
+                 }
+-            });
+-        }
++            }
+ 
+-        /* We are done sending, for whatever reasons we ended up corked while not starting with "wasCorked",
+-         * we here need to uncork to restore the state we were called in */
+-        if (!wasCorked && asyncSocket->isCorked()) {
+-            /* Regarding timeout for writes; */
+-            auto [written, failed] = asyncSocket->uncork();
+-            /* Again, this check should be more like DID WE PROGRESS rather than DID WE SUCCEED ENTIRELY */
++            /* Note: this assumes we are not corked, as corking will swallow things and fail later on */
++            auto [written, failed] = asyncSocket->write(selectedData.data(), (int) selectedData.length());
+             if (!failed) {
+                 if (this->resetIdleTimeoutOnSend) {
+                     asyncSocket->timeout(this->idleTimeout);
+                 }
+             }
++
++            /* Failing here must not immediately close the socket, as that could result in stack overflow,
++             * iterator invalidation and other TopicTree::drain bugs. We may shutdown the reading side of the socket,
++             * causing next iteration to error-close the socket from that context instead, if we want to */
+         }
+ 
+-        /* Defer a close if we now have (or already had) too much backpressure, or simply skip */
++        /* If we have too much backpressure, simply skip sending from here */
++
++        /* Also (defer) a close if we have too much backpressure if that is what we want */
+         if (maxBackpressure && closeOnBackpressureLimit && asyncSocket->getBufferedAmount() > maxBackpressure) {
+-            /* We must not immediately close the socket, as that could result in stack overflow,
+-            * iterator invalidation and other TopicTree::drain bugs. We may shutdown the reading side of the socket,
+-            * causing next iteration to error-close the socket from that context instead, if we want to */
+             us_socket_shutdown_read(SSL, (us_socket_t *) asyncSocket);
+         }
+ 
+@@ -200,7 +168,7 @@ public:
+     }
+ 
+     /* Helper for topictree publish, common path from app and ws */
+-    void publish(std::string_view topic, std::string_view message, OpCode opCode, bool compress, Subscriber *sender = nullptr) {
++    void publish(std::string_view topic, std::string_view message, OpCode opCode, bool compress) {
+         /* We frame the message right here and only pass raw bytes to the pub/subber */
+         char *dst = (char *) malloc(protocol::messageFrameSize(message.size()));
+         size_t dst_length = protocol::formatMessage<true>(dst, message.data(), message.length(), opCode, message.length(), false);
+@@ -208,7 +176,7 @@ public:
+         /* If compression is disabled */
+         if (compression == DISABLED) {
+             /* Leave second field empty as nobody will ever read it */
+-            topicTree.publish(topic, {std::string_view(dst, dst_length), {}}, sender);
++            topicTree.publish(topic, {std::string_view(dst, dst_length), {}});
+         } else {
+             /* DEDICATED_COMPRESSOR always takes the same path as must always have MessageMetadata as head */
+             if (compress || compression != SHARED_COMPRESSOR) {
+@@ -225,7 +193,7 @@ public:
+                     size_t dst_compressed_length = protocol::formatMessage<true>(dst_compressed, compressedMessage.data(), compressedMessage.length(), opCode, compressedMessage.length(), true);
+ 
+                     /* Always publish the shortest one in any case */
+-                    topicTree.publish(topic, {std::string_view(dst, dst_length), dst_compressed_length >= dst_length ? std::string_view(dst, dst_length) : std::string_view(dst_compressed, dst_compressed_length)}, sender);
++                    topicTree.publish(topic, {std::string_view(dst, dst_length), dst_compressed_length >= dst_length ? std::string_view(dst, dst_length) : std::string_view(dst_compressed, dst_compressed_length)});
+ 
+                     /* We don't care for allocation here */
+                     ::free(dst_compressed);
+@@ -246,14 +214,14 @@ public:
+                     topicTree.publish(topic, {
+                         std::string_view(dst, dst_length),
+                         std::string_view(dst_compressed, message.length() + sizeof(MessageMetadata))
+-                    }, sender);
++                    });
+ 
+                     ::free(dst_compressed);
+                 }
+             } else {
+                 /* If not compressing, put same message on both tracks (only valid for SHARED_COMPRESSOR).
+                  * DEDICATED_COMPRESSOR_xKB must never end up here as we don't put a proper head here. */
+-                topicTree.publish(topic, {std::string_view(dst, dst_length), std::string_view(dst, dst_length)}, sender);
++                topicTree.publish(topic, {std::string_view(dst, dst_length), std::string_view(dst, dst_length)});
+             }
+         }
+ 
+diff --git a/tests/Makefile b/tests/Makefile
+index c846b03..c6ff50c 100644
+--- a/tests/Makefile
++++ b/tests/Makefile
+@@ -1,9 +1,9 @@
+ default:
+-	$(CXX) -std=c++17 -fsanitize=address TopicTree.cpp -o TopicTree
+-	./TopicTree
++	#$(CXX) -std=c++17 -fsanitize=address TopicTree.cpp -o TopicTree
++	#./TopicTree
+ 	$(CXX) -std=c++17 -fsanitize=address HttpRouter.cpp -o HttpRouter
+ 	./HttpRouter
+ 	$(CXX) -std=c++17 -fsanitize=address BloomFilter.cpp -o BloomFilter
+ 	./BloomFilter
+ 	$(CXX) -std=c++17 -fsanitize=address ExtensionsNegotiator.cpp -o ExtensionsNegotiator
+-	./ExtensionsNegotiator
++	./ExtensionsNegotiator
+\ No newline at end of file
+diff --git a/tests/TopicTree.cpp b/tests/TopicTree.cpp
+index 389d1aa..1feb436 100644
+--- a/tests/TopicTree.cpp
++++ b/tests/TopicTree.cpp
+@@ -3,40 +3,21 @@
+ #include <cassert>
+ #include <iostream>
+ 
+-/* Modifying the topicTree inside callback is not allowed, we had
+- * tests for this before but we never need this to work anyways.
+- * Closing a socket when reaching too much backpressure is done
+- * deferred to next event loop iteration so we never need to modify
+- * topicTree inside callback - removed this test */
+-
+-/* This tests pretty much all features for obvious incorrectness */
+-void testCorrectness() {
+-    std::cout << "TestCorrectness" << std::endl;
++void testUnsubscribeInside() {
++    std::cout << "TestUnsubscribeInside" << std::endl;
+ 
+     uWS::TopicTree *topicTree;
+-    std::map<void *, std::pair<std::string, std::string>> expectedResult;
+-    std::map<void *, std::pair<std::string, std::string>> actualResult;
+-
+-    topicTree = new uWS::TopicTree([&topicTree, &actualResult](uWS::Subscriber *s, uWS::Intersection &intersection) {
+-
+-        /* How many bytes we have in first data channel at time we get fin = true */
+-        unsigned int finAt = 0;
++    std::map<void *, std::string> expectedResult;
+ 
+-        intersection.forSubscriber(topicTree->getSenderFor(s), [s, &finAt, &actualResult](std::pair<std::string_view, std::string_view> dataChannels, bool fin) {
+-            actualResult[s].first += dataChannels.first;
+-            actualResult[s].second += dataChannels.second;
++    topicTree = new uWS::TopicTree([&topicTree, &expectedResult](uWS::Subscriber *s, std::string_view data) {
++        /* Check for unexpected subscribers */
++        assert(expectedResult.find(s) != expectedResult.end());
+ 
+-            /* Check that getting fin = true really is the last segment */
+-            if (!finAt && fin) {
+-                finAt = actualResult[s].first.length();
+-            }
+-        });
++        /* Check for unexpected data */
++        assert(expectedResult[s] == data);
+ 
+-        /* Assume finAt == actualResult[s].first.length() */
+-        if (actualResult[s].first.length() != finAt) {
+-            std::cout << "ERROR! FinAt mismatching!" << std::endl;
+-            exit(1);
+-        }
++        /* This one causes mess-up */
++        topicTree->unsubscribeAll(s);
+ 
+         /* We actually don't use this one */
+         return 0;
+@@ -45,60 +26,28 @@ void testCorrectness() {
+     uWS::Subscriber *s1 = new uWS::Subscriber(nullptr);
+     uWS::Subscriber *s2 = new uWS::Subscriber(nullptr);
+ 
+-    /* Make sure s1 < s2 (for debugging) */
++    /* Fill out expectedResult */
++    expectedResult = {
++        {s1, "Ett!"},
++        {s2, "Två!"}
++    };
++
++    /* Make sure s1 < s2 */
+     if (s2 < s1) {
+         uWS::Subscriber *tmp = s1;
+         s1 = s2;
+         s2 = tmp;
+     }
+ 
+-    /* Publish to topic3 - nobody should see this */
+-    topicTree->publish("topic3", {std::string_view("Nobody"), std::string_view("should see")}, nullptr);
+-
+-    /* Subscribe s1 to topic3 - s1 should not see above message */
+-    topicTree->subscribe("topic3", s1);
+-
+-    /* Publish to topic3 with s1 as sender - s1 should not get its own messages */
+-    topicTree->publish("topic3", {std::string_view("Nobody"), std::string_view("should see")}, s1);
+-
+-    /* Subscribe s2 to topic3 - should not get any message */
+-    topicTree->subscribe("topic3", s2);
++    /* This order does not matter as it fills a tree */
++    topicTree->subscribe("2", s2);
++    topicTree->subscribe("1", s1);
+ 
+-    /* Publish to topic3 without sender - both should see */
+-    topicTree->publish("topic3", {std::string_view("Both"), std::string_view("should see")}, nullptr);
++    /* This order matters, as it fills triggeredTopics array in order */
++    topicTree->publish("1", "Ett!");
++    topicTree->publish("2", "Två!");
+ 
+-    /* Publish to topic3 with s2 as sender - s1 should see */
+-    topicTree->publish("topic3", {std::string_view("s1"), std::string_view("should see, not s2")}, s2);
+-
+-    /* Publish to topic3 with s1 as sender - s2 should see */
+-    topicTree->publish("topic3", {std::string_view("s2"), std::string_view("should see, not s1")}, s1);
+-
+-    /* Publish to topic3 without sender - both should see */
+-    topicTree->publish("topic3", {std::string_view("Again, both"), std::string_view("should see this as well")}, nullptr);
+-
+-    // todo: add more cases involving more topics and duplicates, etc
+-
+-    /* Fill out expectedResult */
+-    expectedResult = {
+-        {s1, {"Boths1Again, both", "should seeshould see, not s2should see this as well"}},
+-        {s2, {"Boths2Again, both", "should seeshould see, not s1should see this as well"}}
+-    };
+-
+-    /* Compare result with expected result for every subscriber */
+     topicTree->drain();
+-    for (auto &p : expectedResult) {
+-        std::cout << "Subscriber: " << p.first << std::endl;
+-
+-        if (p.second.first != actualResult[p.first].first) {
+-            std::cout << "ERROR: <" << actualResult[p.first].first << "> should be <" << p.second.first << ">" << std::endl;
+-            exit(1);
+-        }
+-
+-        if (p.second.second != actualResult[p.first].second) {
+-            std::cout << "ERROR: <" << actualResult[p.first].second << "> should be <" << p.second.second << ">" << std::endl;
+-            exit(1);
+-        }
+-    }
+ 
+     /* Release resources */
+     topicTree->unsubscribeAll(s1);
+@@ -111,5 +60,5 @@ void testCorrectness() {
+ }
+ 
+ int main() {
+-    testCorrectness();
++    testUnsubscribeInside();
+ }
+\ No newline at end of file

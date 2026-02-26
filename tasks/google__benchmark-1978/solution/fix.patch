@@ -1,0 +1,114 @@
+diff --git a/docs/reducing_variance.md b/docs/reducing_variance.md
+index acc1421..e604c66 100644
+--- a/docs/reducing_variance.md
++++ b/docs/reducing_variance.md
+@@ -50,6 +50,17 @@ If you see this error:
+ you might want to disable the ASLR security hardening feature while running the
+ benchmark.
+ 
++The simplest way is to add
++```
++benchmark::MaybeReenterWithoutASLR(argc, argv);
++```
++as the first line of your `main()` function. It will try to disable ASLR
++for the current processor, and, if successful, re-execute the binary.
++Note that `personality(2)` may be forbidden by e.g. seccomp (which happens
++by default if you are running in a Docker container).
++
++Note that if you link to `benchmark_main` already does that for you.
++
+ To globally disable ASLR on Linux, run
+ ```
+ echo 0 > /proc/sys/kernel/randomize_va_space
+diff --git a/docs/user_guide.md b/docs/user_guide.md
+index 3b8f9d5..ae8e125 100644
+--- a/docs/user_guide.md
++++ b/docs/user_guide.md
+@@ -1268,6 +1268,7 @@ For Example:
+ auto BM_test = [](benchmark::State& st, auto Inputs) { /* ... */ };
+ 
+ int main(int argc, char** argv) {
++  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   for (auto& test_input : { /* ... */ })
+       benchmark::RegisterBenchmark(test_input.name(), BM_test, test_input);
+   benchmark::Initialize(&argc, argv);
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 9e4347b..f455e05 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -40,6 +40,7 @@ BENCHMARK(BM_StringCopy);
+ //       my_unittest --benchmark_filter=String
+ //       my_unittest --benchmark_filter='Copy|Creation'
+ int main(int argc, char** argv) {
++  benchmark::MaybeReenterWithoutASLR(argc, argv);
+   benchmark::Initialize(&argc, argv);
+   benchmark::RunSpecifiedBenchmarks();
+   benchmark::Shutdown();
+@@ -334,6 +335,8 @@ using callback_function = std::function<void(const benchmark::State&)>;
+ // Default number of minimum benchmark running time in seconds.
+ const char kDefaultMinTimeStr[] = "0.5s";
+ 
++BENCHMARK_EXPORT void MaybeReenterWithoutASLR(int, char**);
++
+ // Returns the version of the library.
+ BENCHMARK_EXPORT std::string GetBenchmarkVersion();
+ 
+@@ -1687,6 +1690,7 @@ class Fixture : public internal::Benchmark {
+ // Note the workaround for Hexagon simulator passing argc != 0, argv = NULL.
+ #define BENCHMARK_MAIN()                                                \
+   int main(int argc, char** argv) {                                     \
++    benchmark::MaybeReenterWithoutASLR(argc, argv);                     \
+     char arg0_default[] = "benchmark";                                  \
+     char* args_default = reinterpret_cast<char*>(arg0_default);         \
+     if (!argv) {                                                        \
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 925a38f..48a2acc 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -26,6 +26,10 @@
+ #include <unistd.h>
+ #endif
+ 
++#ifdef BENCHMARK_OS_LINUX
++#include <sys/personality.h>
++#endif
++
+ #include <algorithm>
+ #include <atomic>
+ #include <condition_variable>
+@@ -813,6 +817,35 @@ int InitializeStreams() {
+ 
+ }  // end namespace internal
+ 
++void MaybeReenterWithoutASLR(int /*argc*/, char** argv) {
++  // On e.g. Hexagon simulator, argv may be NULL.
++  if (!argv) return;
++
++#ifdef BENCHMARK_OS_LINUX
++  const auto curr_personality = personality(0xffffffff);
++
++  // We should never fail to read-only query the current personality,
++  // but let's be cautious.
++  if (curr_personality == -1) return;
++
++  // If ASLR is already disabled, we have nothing more to do.
++  if (curr_personality & ADDR_NO_RANDOMIZE) return;
++
++  // Try to change the personality to disable ASLR.
++  const auto prev_personality = personality(
++      static_cast<unsigned long>(curr_personality) | ADDR_NO_RANDOMIZE);
++
++  // Have we failed to change the personality? That may happen.
++  if (prev_personality == -1) return;
++
++  execv(argv[0], argv);
++  // The exec() functions return only if an error has occurred,
++  // in which case we want to just continue as-is.
++#else
++  return;
++#endif
++}
++
+ std::string GetBenchmarkVersion() {
+ #ifdef BENCHMARK_VERSION
+   return {BENCHMARK_VERSION};

@@ -1,0 +1,130 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index eec0fc5..14efec1 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -169,6 +169,7 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ #include <atomic>
+ #include <cassert>
+ #include <cstddef>
++#include <functional>
+ #include <initializer_list>
+ #include <iosfwd>
+ #include <limits>
+@@ -303,6 +304,10 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ 
+ namespace benchmark {
+ class BenchmarkReporter;
++class State;
++
++// Define alias of Setup/Teardown callback function type
++using callback_function = std::function<void(const benchmark::State&)>;
+ 
+ // Default number of minimum benchmark running time in seconds.
+ const char kDefaultMinTimeStr[] = "0.5s";
+@@ -1157,10 +1162,10 @@ class BENCHMARK_EXPORT Benchmark {
+   //
+   // The callback will be passed a State object, which includes the number
+   // of threads, thread-index, benchmark arguments, etc.
+-  //
+-  // The callback must not be NULL or self-deleting.
+-  Benchmark* Setup(void (*setup)(const benchmark::State&));
+-  Benchmark* Teardown(void (*teardown)(const benchmark::State&));
++  Benchmark* Setup(callback_function&&);
++  Benchmark* Setup(const callback_function&);
++  Benchmark* Teardown(callback_function&&);
++  Benchmark* Teardown(const callback_function&);
+ 
+   // Pass this benchmark object to *func, which can customize
+   // the benchmark by calling various methods like Arg, Args,
+@@ -1309,7 +1314,6 @@ class BENCHMARK_EXPORT Benchmark {
+   std::vector<Statistics> statistics_;
+   std::vector<int> thread_counts_;
+ 
+-  typedef void (*callback_function)(const benchmark::State&);
+   callback_function setup_;
+   callback_function teardown_;
+ 
+diff --git a/src/benchmark_api_internal.cc b/src/benchmark_api_internal.cc
+index 14d4e13..60609d3 100644
+--- a/src/benchmark_api_internal.cc
++++ b/src/benchmark_api_internal.cc
+@@ -27,7 +27,9 @@ BenchmarkInstance::BenchmarkInstance(Benchmark* benchmark, int family_idx,
+       min_time_(benchmark_.min_time_),
+       min_warmup_time_(benchmark_.min_warmup_time_),
+       iterations_(benchmark_.iterations_),
+-      threads_(thread_count) {
++      threads_(thread_count),
++      setup_(benchmark_.setup_),
++      teardown_(benchmark_.teardown_) {
+   name_.function_name = benchmark_.name_;
+ 
+   size_t arg_i = 0;
+@@ -84,9 +86,6 @@ BenchmarkInstance::BenchmarkInstance(Benchmark* benchmark, int family_idx,
+   if (!benchmark_.thread_counts_.empty()) {
+     name_.threads = StrFormat("threads:%d", threads_);
+   }
+-
+-  setup_ = benchmark_.setup_;
+-  teardown_ = benchmark_.teardown_;
+ }
+ 
+ State BenchmarkInstance::Run(
+diff --git a/src/benchmark_api_internal.h b/src/benchmark_api_internal.h
+index 9287c4e..82ab71f 100644
+--- a/src/benchmark_api_internal.h
++++ b/src/benchmark_api_internal.h
+@@ -68,9 +68,8 @@ class BenchmarkInstance {
+   IterationCount iterations_;
+   int threads_;  // Number of concurrent threads to us
+ 
+-  typedef void (*callback_function)(const benchmark::State&);
+-  callback_function setup_ = nullptr;
+-  callback_function teardown_ = nullptr;
++  callback_function setup_;
++  callback_function teardown_;
+ };
+ 
+ bool FindBenchmarksInternal(const std::string& re,
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index 28336a1..8b94540 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -224,9 +224,7 @@ Benchmark::Benchmark(const std::string& name)
+       use_real_time_(false),
+       use_manual_time_(false),
+       complexity_(oNone),
+-      complexity_lambda_(nullptr),
+-      setup_(nullptr),
+-      teardown_(nullptr) {
++      complexity_lambda_(nullptr) {
+   ComputeStatistics("mean", StatisticsMean);
+   ComputeStatistics("median", StatisticsMedian);
+   ComputeStatistics("stddev", StatisticsStdDev);
+@@ -337,13 +335,25 @@ Benchmark* Benchmark::Apply(void (*custom_arguments)(Benchmark* benchmark)) {
+   return this;
+ }
+ 
+-Benchmark* Benchmark::Setup(void (*setup)(const benchmark::State&)) {
++Benchmark* Benchmark::Setup(callback_function&& setup) {
++  BM_CHECK(setup != nullptr);
++  setup_ = std::forward<callback_function>(setup);
++  return this;
++}
++
++Benchmark* Benchmark::Setup(const callback_function& setup) {
+   BM_CHECK(setup != nullptr);
+   setup_ = setup;
+   return this;
+ }
+ 
+-Benchmark* Benchmark::Teardown(void (*teardown)(const benchmark::State&)) {
++Benchmark* Benchmark::Teardown(callback_function&& teardown) {
++  BM_CHECK(teardown != nullptr);
++  teardown_ = std::forward<callback_function>(teardown);
++  return this;
++}
++
++Benchmark* Benchmark::Teardown(const callback_function& teardown) {
+   BM_CHECK(teardown != nullptr);
+   teardown_ = teardown;
+   return this;

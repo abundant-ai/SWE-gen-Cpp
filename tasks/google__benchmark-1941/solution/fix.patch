@@ -1,0 +1,172 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 14efec1..663953d 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -306,6 +306,8 @@ namespace benchmark {
+ class BenchmarkReporter;
+ class State;
+ 
++using IterationCount = int64_t;
++
+ // Define alias of Setup/Teardown callback function type
+ using callback_function = std::function<void(const benchmark::State&)>;
+ 
+@@ -387,14 +389,15 @@ BENCHMARK_EXPORT void SetDefaultTimeUnit(TimeUnit unit);
+ // benchmark.
+ class MemoryManager {
+  public:
+-  static const int64_t TombstoneValue;
++  static constexpr int64_t TombstoneValue = std::numeric_limits<int64_t>::max();
+ 
+   struct Result {
+     Result()
+         : num_allocs(0),
+           max_bytes_used(0),
+           total_allocated_bytes(TombstoneValue),
+-          net_heap_growth(TombstoneValue) {}
++          net_heap_growth(TombstoneValue),
++          memory_iterations(0) {}
+ 
+     // The number of allocations made in total between Start and Stop.
+     int64_t num_allocs;
+@@ -410,6 +413,8 @@ class MemoryManager {
+     // ie., total_allocated_bytes - total_deallocated_bytes.
+     // Init'ed to TombstoneValue if metric not available.
+     int64_t net_heap_growth;
++
++    IterationCount memory_iterations;
+   };
+ 
+   virtual ~MemoryManager() {}
+@@ -659,8 +664,6 @@ enum BigO { oNone, o1, oN, oNSquared, oNCubed, oLogN, oNLogN, oAuto, oLambda };
+ 
+ typedef int64_t ComplexityN;
+ 
+-typedef int64_t IterationCount;
+-
+ enum StatisticUnit { kTime, kPercentage };
+ 
+ // BigOFunc is passed to a benchmark in order to specify the asymptotic
+@@ -1721,7 +1724,6 @@ class BENCHMARK_EXPORT BenchmarkReporter {
+           complexity_n(0),
+           report_big_o(false),
+           report_rms(false),
+-          memory_result(NULL),
+           allocs_per_iter(0.0) {}
+ 
+     std::string benchmark_name() const;
+@@ -1777,7 +1779,7 @@ class BENCHMARK_EXPORT BenchmarkReporter {
+     UserCounters counters;
+ 
+     // Memory metrics.
+-    const MemoryManager::Result* memory_result;
++    MemoryManager::Result memory_result;
+     double allocs_per_iter;
+   };
+ 
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index b7d3de3..b062c7c 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -81,7 +81,7 @@ BenchmarkReporter::Run CreateRunReport(
+     const benchmark::internal::BenchmarkInstance& b,
+     const internal::ThreadManager::Result& results,
+     IterationCount memory_iterations,
+-    const MemoryManager::Result* memory_result, double seconds,
++    const MemoryManager::Result& memory_result, double seconds,
+     int64_t repetition_index, int64_t repeats) {
+   // Create report about this benchmark run.
+   BenchmarkReporter::Run report;
+@@ -114,11 +114,10 @@ BenchmarkReporter::Run CreateRunReport(
+     report.counters = results.counters;
+ 
+     if (memory_iterations > 0) {
+-      assert(memory_result != nullptr);
+       report.memory_result = memory_result;
+       report.allocs_per_iter =
+           memory_iterations != 0
+-              ? static_cast<double>(memory_result->num_allocs) /
++              ? static_cast<double>(memory_result.num_allocs) /
+                     static_cast<double>(memory_iterations)
+               : 0;
+     }
+@@ -426,13 +425,8 @@ void BenchmarkRunner::RunWarmUp() {
+   }
+ }
+ 
+-MemoryManager::Result* BenchmarkRunner::RunMemoryManager(
++MemoryManager::Result BenchmarkRunner::RunMemoryManager(
+     IterationCount memory_iterations) {
+-  // TODO(vyng): Consider making BenchmarkReporter::Run::memory_result an
+-  // optional so we don't have to own the Result here.
+-  // Can't do it now due to cxx03.
+-  memory_results.push_back(MemoryManager::Result());
+-  MemoryManager::Result* memory_result = &memory_results.back();
+   memory_manager->Start();
+   std::unique_ptr<internal::ThreadManager> manager;
+   manager.reset(new internal::ThreadManager(1));
+@@ -443,7 +437,9 @@ MemoryManager::Result* BenchmarkRunner::RunMemoryManager(
+   manager->WaitForAllThreads();
+   manager.reset();
+   b.Teardown();
+-  memory_manager->Stop(*memory_result);
++  MemoryManager::Result memory_result;
++  memory_manager->Stop(memory_result);
++  memory_result.memory_iterations = memory_iterations;
+   return memory_result;
+ }
+ 
+@@ -508,7 +504,7 @@ void BenchmarkRunner::DoOneRepetition() {
+   }
+ 
+   // Produce memory measurements if requested.
+-  MemoryManager::Result* memory_result = nullptr;
++  MemoryManager::Result memory_result;
+   IterationCount memory_iterations = 0;
+   if (memory_manager != nullptr) {
+     // Only run a few iterations to reduce the impact of one-time
+diff --git a/src/benchmark_runner.h b/src/benchmark_runner.h
+index 965087e..bc76c81 100644
+--- a/src/benchmark_runner.h
++++ b/src/benchmark_runner.h
+@@ -91,8 +91,6 @@ class BenchmarkRunner {
+ 
+   std::vector<std::thread> pool;
+ 
+-  std::vector<MemoryManager::Result> memory_results;
+-
+   IterationCount iters;  // preserved between repetitions!
+   // So only the first repetition has to find/calculate it,
+   // the other repetitions will just use that precomputed iteration count.
+@@ -106,7 +104,7 @@ class BenchmarkRunner {
+   };
+   IterationResults DoNIterations();
+ 
+-  MemoryManager::Result* RunMemoryManager(IterationCount memory_iterations);
++  MemoryManager::Result RunMemoryManager(IterationCount memory_iterations);
+ 
+   void RunProfilerManager(IterationCount profile_iterations);
+ 
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index af0f34e..fe34c07 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -306,8 +306,8 @@ void JSONReporter::PrintRunData(Run const& run) {
+     out << ",\n" << indent << FormatKV(c.first, c.second);
+   }
+ 
+-  if (run.memory_result != nullptr) {
+-    const MemoryManager::Result memory_result = *run.memory_result;
++  if (run.memory_result.memory_iterations > 0) {
++    const auto& memory_result = run.memory_result;
+     out << ",\n" << indent << FormatKV("allocs_per_iter", run.allocs_per_iter);
+     out << ",\n"
+         << indent << FormatKV("max_bytes_used", memory_result.max_bytes_used);
+@@ -330,7 +330,4 @@ void JSONReporter::PrintRunData(Run const& run) {
+   out << '\n';
+ }
+ 
+-const int64_t MemoryManager::TombstoneValue =
+-    std::numeric_limits<int64_t>::max();
+-
+ }  // end namespace benchmark

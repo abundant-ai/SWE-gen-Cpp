@@ -1,0 +1,489 @@
+diff --git a/bindings/python/google_benchmark/benchmark.cc b/bindings/python/google_benchmark/benchmark.cc
+index ccd7eb5..175d351 100644
+--- a/bindings/python/google_benchmark/benchmark.cc
++++ b/bindings/python/google_benchmark/benchmark.cc
+@@ -36,8 +36,8 @@ std::vector<std::string> Initialize(const std::vector<std::string>& argv) {
+   return remaining_argv;
+ }
+ 
+-benchmark::Benchmark* RegisterBenchmark(const std::string& name,
+-                                        nb::callable f) {
++benchmark::internal::Benchmark* RegisterBenchmark(const std::string& name,
++                                                  nb::callable f) {
+   return benchmark::RegisterBenchmark(
+       name, [f](benchmark::State& state) { f(&state); });
+ }
+@@ -64,7 +64,7 @@ NB_MODULE(_benchmark, m) {
+       .value("oLambda", BigO::oLambda)
+       .export_values();
+ 
+-  using benchmark::Benchmark;
++  using benchmark::internal::Benchmark;
+   nb::class_<Benchmark>(m, "Benchmark")
+       // For methods returning a pointer to the current object, reference
+       // return policy is used to ask nanobind not to take ownership of the
+diff --git a/docs/user_guide.md b/docs/user_guide.md
+index 997737f..72fb682 100644
+--- a/docs/user_guide.md
++++ b/docs/user_guide.md
+@@ -452,7 +452,7 @@ benchmark. The following example enumerates a dense range on one parameter,
+ and a sparse range on the second.
+ 
+ ```c++
+-static void CustomArguments(benchmark::Benchmark* b) {
++static void CustomArguments(benchmark::internal::Benchmark* b) {
+   for (int i = 0; i <= 10; ++i)
+     for (int j = 32; j <= 1024*1024; j *= 8)
+       b->Args({i, j});
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 3b20153..b6153e4 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -103,7 +103,7 @@ BENCHMARK(BM_SetInsert)->Ranges({{1<<10, 8<<10}, {128, 512}});
+ // arbitrary set of arguments to run the microbenchmark on.
+ // The following example enumerates a dense range on
+ // one parameter, and a sparse range on the second.
+-static void CustomArguments(benchmark::Benchmark* b) {
++static void CustomArguments(benchmark::internal::Benchmark* b) {
+   for (int i = 0; i <= 10; ++i)
+     for (int j = 32; j <= 1024*1024; j *= 8)
+       b->Args({i, j});
+@@ -488,9 +488,8 @@ void RegisterProfilerManager(ProfilerManager* profiler_manager);
+ BENCHMARK_EXPORT
+ void AddCustomContext(std::string key, std::string value);
+ 
+-class Benchmark;
+-
+ namespace internal {
++class Benchmark;
+ class BenchmarkImp;
+ class BenchmarkFamilies;
+ 
+@@ -1126,15 +1125,20 @@ struct ThreadRunnerBase {
+   virtual void RunThreads(const std::function<void(int)>& fn) = 0;
+ };
+ 
++namespace internal {
++
+ // Define alias of ThreadRunner factory function type
+ using threadrunner_factory =
+     std::function<std::unique_ptr<ThreadRunnerBase>(int)>;
+ 
++typedef void(Function)(State&);
++
+ // ------------------------------------------------------
+-// Benchmark registration object.  The BENCHMARK() macro expands into a
+-// Benchmark* object.  Various methods can be called on this object to
+-// change the properties of the benchmark.  Each method returns "this" so
+-// that multiple method calls can chained into one expression.
++// Benchmark registration object.  The BENCHMARK() macro expands
++// into an internal::Benchmark* object.  Various methods can
++// be called on this object to change the properties of the benchmark.
++// Each method returns "this" so that multiple method calls can
++// chained into one expression.
+ class BENCHMARK_EXPORT Benchmark {
+  public:
+   virtual ~Benchmark();
+@@ -1348,11 +1352,11 @@ class BENCHMARK_EXPORT Benchmark {
+   const char* GetArgName(int arg) const;
+ 
+  private:
+-  friend class internal::BenchmarkFamilies;
+-  friend class internal::BenchmarkInstance;
++  friend class BenchmarkFamilies;
++  friend class BenchmarkInstance;
+ 
+   std::string name_;
+-  internal::AggregationReportMode aggregation_report_mode_;
++  AggregationReportMode aggregation_report_mode_;
+   std::vector<std::string> arg_names_;      // Args for all benchmark runs
+   std::vector<std::vector<int64_t>> args_;  // Args for all benchmark runs
+ 
+@@ -1369,7 +1373,7 @@ class BENCHMARK_EXPORT Benchmark {
+   bool use_manual_time_;
+   BigO complexity_;
+   BigOFunc* complexity_lambda_;
+-  std::vector<internal::Statistics> statistics_;
++  std::vector<Statistics> statistics_;
+   std::vector<int> thread_counts_;
+ 
+   callback_function setup_;
+@@ -1380,28 +1384,17 @@ class BENCHMARK_EXPORT Benchmark {
+   BENCHMARK_DISALLOW_COPY_AND_ASSIGN(Benchmark);
+ };
+ 
+-namespace internal {
+-
+-// clang-format off
+-typedef BENCHMARK_DEPRECATED_MSG("Use ::benchmark::Benchmark instead")
+-    ::benchmark::Benchmark Benchmark;
+-typedef BENCHMARK_DEPRECATED_MSG(
+-    "Use ::benchmark::threadrunner_factory instead")
+-    ::benchmark::threadrunner_factory threadrunner_factory;
+-// clang-format on
+-
+-typedef void(Function)(State&);
+-
+ }  // namespace internal
+ 
+ // Create and register a benchmark with the specified 'name' that invokes
+ // the specified functor 'fn'.
+ //
+ // RETURNS: A pointer to the registered benchmark.
+-Benchmark* RegisterBenchmark(const std::string& name, internal::Function* fn);
++internal::Benchmark* RegisterBenchmark(const std::string& name,
++                                       internal::Function* fn);
+ 
+ template <class Lambda>
+-Benchmark* RegisterBenchmark(const std::string& name, Lambda&& fn);
++internal::Benchmark* RegisterBenchmark(const std::string& name, Lambda&& fn);
+ 
+ // Remove all registered benchmarks. All pointers to previously registered
+ // benchmarks are invalidated.
+@@ -1410,7 +1403,7 @@ BENCHMARK_EXPORT void ClearRegisteredBenchmarks();
+ namespace internal {
+ // The class used to hold all Benchmarks created from static function.
+ // (ie those created using the BENCHMARK(...) macros.
+-class BENCHMARK_EXPORT FunctionBenchmark : public benchmark::Benchmark {
++class BENCHMARK_EXPORT FunctionBenchmark : public Benchmark {
+  public:
+   FunctionBenchmark(const std::string& name, Function* func)
+       : Benchmark(name), func_(func) {}
+@@ -1422,7 +1415,7 @@ class BENCHMARK_EXPORT FunctionBenchmark : public benchmark::Benchmark {
+ };
+ 
+ template <class Lambda>
+-class LambdaBenchmark : public benchmark::Benchmark {
++class LambdaBenchmark : public Benchmark {
+  public:
+   void Run(State& st) override { lambda_(st); }
+ 
+@@ -1436,15 +1429,15 @@ class LambdaBenchmark : public benchmark::Benchmark {
+ };
+ }  // namespace internal
+ 
+-inline Benchmark* RegisterBenchmark(const std::string& name,
+-                                    internal::Function* fn) {
++inline internal::Benchmark* RegisterBenchmark(const std::string& name,
++                                              internal::Function* fn) {
+   return internal::RegisterBenchmarkInternal(
+       ::benchmark::internal::make_unique<internal::FunctionBenchmark>(name,
+                                                                       fn));
+ }
+ 
+ template <class Lambda>
+-Benchmark* RegisterBenchmark(const std::string& name, Lambda&& fn) {
++internal::Benchmark* RegisterBenchmark(const std::string& name, Lambda&& fn) {
+   using BenchType =
+       internal::LambdaBenchmark<typename std::decay<Lambda>::type>;
+   return internal::RegisterBenchmarkInternal(
+@@ -1453,16 +1446,16 @@ Benchmark* RegisterBenchmark(const std::string& name, Lambda&& fn) {
+ }
+ 
+ template <class Lambda, class... Args>
+-Benchmark* RegisterBenchmark(const std::string& name, Lambda&& fn,
+-                             Args&&... args) {
++internal::Benchmark* RegisterBenchmark(const std::string& name, Lambda&& fn,
++                                       Args&&... args) {
+   return benchmark::RegisterBenchmark(
+       name, [=](benchmark::State& st) { fn(st, args...); });
+ }
+ 
+ // The base class for all fixture tests.
+-class Fixture : public Benchmark {
++class Fixture : public internal::Benchmark {
+  public:
+-  Fixture() : Benchmark("") {}
++  Fixture() : internal::Benchmark("") {}
+ 
+   void Run(State& st) override {
+     this->SetUp(st);
+@@ -1505,10 +1498,10 @@ class Fixture : public Benchmark {
+ #define BENCHMARK_PRIVATE_CONCAT_NAME(BaseClass, Method) \
+   BaseClass##_##Method##_Benchmark
+ 
+-#define BENCHMARK_PRIVATE_DECLARE(n)                                   \
+-  /* NOLINTNEXTLINE(misc-use-anonymous-namespace) */                   \
+-  static ::benchmark::Benchmark const* const BENCHMARK_PRIVATE_NAME(n) \
+-      BENCHMARK_UNUSED
++#define BENCHMARK_PRIVATE_DECLARE(n)                                           \
++  /* NOLINTNEXTLINE(misc-use-anonymous-namespace) */                           \
++  static ::benchmark::internal::Benchmark const* const BENCHMARK_PRIVATE_NAME( \
++      n) BENCHMARK_UNUSED
+ 
+ #define BENCHMARK(...)                                   \
+   BENCHMARK_PRIVATE_DECLARE(_benchmark_) =               \
+diff --git a/src/benchmark_api_internal.cc b/src/benchmark_api_internal.cc
+index f9c4990..60609d3 100644
+--- a/src/benchmark_api_internal.cc
++++ b/src/benchmark_api_internal.cc
+@@ -7,8 +7,7 @@
+ namespace benchmark {
+ namespace internal {
+ 
+-BenchmarkInstance::BenchmarkInstance(benchmark::Benchmark* benchmark,
+-                                     int family_idx,
++BenchmarkInstance::BenchmarkInstance(Benchmark* benchmark, int family_idx,
+                                      int per_family_instance_idx,
+                                      const std::vector<int64_t>& args,
+                                      int thread_count)
+diff --git a/src/benchmark_api_internal.h b/src/benchmark_api_internal.h
+index 5b48ea2..efa0602 100644
+--- a/src/benchmark_api_internal.h
++++ b/src/benchmark_api_internal.h
+@@ -17,7 +17,7 @@ namespace internal {
+ // Information kept per benchmark we may want to run
+ class BenchmarkInstance {
+  public:
+-  BenchmarkInstance(benchmark::Benchmark* benchmark, int family_idx,
++  BenchmarkInstance(Benchmark* benchmark, int family_idx,
+                     int per_family_instance_idx,
+                     const std::vector<int64_t>& args, int thread_count);
+ 
+@@ -52,7 +52,7 @@ class BenchmarkInstance {
+ 
+  private:
+   BenchmarkName name_;
+-  benchmark::Benchmark& benchmark_;
++  Benchmark& benchmark_;
+   const int family_index_;
+   const int per_family_instance_index_;
+   AggregationReportMode aggregation_report_mode_;
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index 65e1afc..8327df0 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -75,7 +75,7 @@ class BenchmarkFamilies {
+   static BenchmarkFamilies* GetInstance();
+ 
+   // Registers a benchmark family and returns the index assigned to it.
+-  size_t AddBenchmark(std::unique_ptr<benchmark::Benchmark> family);
++  size_t AddBenchmark(std::unique_ptr<Benchmark> family);
+ 
+   // Clear all registered benchmark families.
+   void ClearBenchmarks();
+@@ -89,7 +89,7 @@ class BenchmarkFamilies {
+  private:
+   BenchmarkFamilies() {}
+ 
+-  std::vector<std::unique_ptr<benchmark::Benchmark>> families_;
++  std::vector<std::unique_ptr<Benchmark>> families_;
+   Mutex mutex_;
+ };
+ 
+@@ -98,8 +98,7 @@ BenchmarkFamilies* BenchmarkFamilies::GetInstance() {
+   return &instance;
+ }
+ 
+-size_t BenchmarkFamilies::AddBenchmark(
+-    std::unique_ptr<benchmark::Benchmark> family) {
++size_t BenchmarkFamilies::AddBenchmark(std::unique_ptr<Benchmark> family) {
+   MutexLock l(mutex_);
+   size_t index = families_.size();
+   families_.push_back(std::move(family));
+@@ -136,7 +135,7 @@ bool BenchmarkFamilies::FindBenchmarks(
+   int next_family_index = 0;
+ 
+   MutexLock l(mutex_);
+-  for (std::unique_ptr<benchmark::Benchmark>& family : families_) {
++  for (std::unique_ptr<Benchmark>& family : families_) {
+     int family_index = next_family_index;
+     int per_family_instance_index = 0;
+ 
+@@ -192,9 +191,8 @@ bool BenchmarkFamilies::FindBenchmarks(
+   return true;
+ }
+ 
+-benchmark::Benchmark* RegisterBenchmarkInternal(
+-    std::unique_ptr<benchmark::Benchmark> bench) {
+-  benchmark::Benchmark* bench_ptr = bench.get();
++Benchmark* RegisterBenchmarkInternal(std::unique_ptr<Benchmark> bench) {
++  Benchmark* bench_ptr = bench.get();
+   BenchmarkFamilies* families = BenchmarkFamilies::GetInstance();
+   families->AddBenchmark(std::move(bench));
+   return bench_ptr;
+@@ -208,15 +206,13 @@ bool FindBenchmarksInternal(const std::string& re,
+   return BenchmarkFamilies::GetInstance()->FindBenchmarks(re, benchmarks, Err);
+ }
+ 
+-}  // end namespace internal
+-
+ //=============================================================================//
+ //                               Benchmark
+ //=============================================================================//
+ 
+ Benchmark::Benchmark(const std::string& name)
+     : name_(name),
+-      aggregation_report_mode_(internal::ARM_Unspecified),
++      aggregation_report_mode_(ARM_Unspecified),
+       time_unit_(GetDefaultTimeUnit()),
+       use_default_time_unit_(true),
+       range_multiplier_(kRangeMultiplier),
+@@ -257,7 +253,7 @@ Benchmark* Benchmark::Unit(TimeUnit unit) {
+ Benchmark* Benchmark::Range(int64_t start, int64_t limit) {
+   BM_CHECK(ArgsCnt() == -1 || ArgsCnt() == 1);
+   std::vector<int64_t> arglist;
+-  internal::AddRange(&arglist, start, limit, range_multiplier_);
++  AddRange(&arglist, start, limit, range_multiplier_);
+ 
+   for (int64_t i : arglist) {
+     args_.push_back({i});
+@@ -270,8 +266,8 @@ Benchmark* Benchmark::Ranges(
+   BM_CHECK(ArgsCnt() == -1 || ArgsCnt() == static_cast<int>(ranges.size()));
+   std::vector<std::vector<int64_t>> arglists(ranges.size());
+   for (std::size_t i = 0; i < ranges.size(); i++) {
+-    internal::AddRange(&arglists[i], ranges[i].first, ranges[i].second,
+-                       range_multiplier_);
++    AddRange(&arglists[i], ranges[i].first, ranges[i].second,
++             range_multiplier_);
+   }
+ 
+   ArgsProduct(arglists);
+@@ -386,8 +382,8 @@ Benchmark* Benchmark::MinWarmUpTime(double t) {
+ 
+ Benchmark* Benchmark::Iterations(IterationCount n) {
+   BM_CHECK(n > 0);
+-  BM_CHECK(internal::IsZero(min_time_));
+-  BM_CHECK(internal::IsZero(min_warmup_time_));
++  BM_CHECK(IsZero(min_time_));
++  BM_CHECK(IsZero(min_warmup_time_));
+   iterations_ = n;
+   return this;
+ }
+@@ -399,23 +395,21 @@ Benchmark* Benchmark::Repetitions(int n) {
+ }
+ 
+ Benchmark* Benchmark::ReportAggregatesOnly(bool value) {
+-  aggregation_report_mode_ =
+-      value ? internal::ARM_ReportAggregatesOnly : internal::ARM_Default;
++  aggregation_report_mode_ = value ? ARM_ReportAggregatesOnly : ARM_Default;
+   return this;
+ }
+ 
+ Benchmark* Benchmark::DisplayAggregatesOnly(bool value) {
+   // If we were called, the report mode is no longer 'unspecified', in any case.
+-  using internal::AggregationReportMode;
+   aggregation_report_mode_ = static_cast<AggregationReportMode>(
+-      aggregation_report_mode_ | internal::ARM_Default);
++      aggregation_report_mode_ | ARM_Default);
+ 
+   if (value) {
+     aggregation_report_mode_ = static_cast<AggregationReportMode>(
+-        aggregation_report_mode_ | internal::ARM_DisplayReportAggregatesOnly);
++        aggregation_report_mode_ | ARM_DisplayReportAggregatesOnly);
+   } else {
+     aggregation_report_mode_ = static_cast<AggregationReportMode>(
+-        aggregation_report_mode_ & ~internal::ARM_DisplayReportAggregatesOnly);
++        aggregation_report_mode_ & ~ARM_DisplayReportAggregatesOnly);
+   }
+ 
+   return this;
+@@ -469,7 +463,7 @@ Benchmark* Benchmark::ThreadRange(int min_threads, int max_threads) {
+   BM_CHECK_GT(min_threads, 0);
+   BM_CHECK_GE(max_threads, min_threads);
+ 
+-  internal::AddRange(&thread_counts_, min_threads, max_threads, 2);
++  AddRange(&thread_counts_, min_threads, max_threads, 2);
+   return this;
+ }
+ 
+@@ -521,8 +515,6 @@ TimeUnit Benchmark::GetTimeUnit() const {
+   return use_default_time_unit_ ? GetDefaultTimeUnit() : time_unit_;
+ }
+ 
+-namespace internal {
+-
+ //=============================================================================//
+ //                            FunctionBenchmark
+ //=============================================================================//
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index fb68867..d8a2357 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -217,8 +217,7 @@ class ThreadRunnerDefault : public ThreadRunnerBase {
+ };
+ 
+ std::unique_ptr<ThreadRunnerBase> GetThreadRunner(
+-    const benchmark::threadrunner_factory& userThreadRunnerFactory,
+-    int num_threads) {
++    const threadrunner_factory& userThreadRunnerFactory, int num_threads) {
+   return userThreadRunnerFactory
+              ? userThreadRunnerFactory(num_threads)
+              : std::make_unique<ThreadRunnerDefault>(num_threads);
+diff --git a/test/benchmark_setup_teardown_cb_types_gtest.cc b/test/benchmark_setup_teardown_cb_types_gtest.cc
+index 2ed255d..c5a1a66 100644
+--- a/test/benchmark_setup_teardown_cb_types_gtest.cc
++++ b/test/benchmark_setup_teardown_cb_types_gtest.cc
+@@ -1,13 +1,13 @@
+ #include "benchmark/benchmark.h"
+ #include "gtest/gtest.h"
+ 
+-using benchmark::Benchmark;
+ using benchmark::BenchmarkReporter;
+ using benchmark::callback_function;
+ using benchmark::ClearRegisteredBenchmarks;
+ using benchmark::RegisterBenchmark;
+ using benchmark::RunSpecifiedBenchmarks;
+ using benchmark::State;
++using benchmark::internal::Benchmark;
+ 
+ static int functor_called = 0;
+ struct Functor {
+diff --git a/test/memory_results_gtest.cc b/test/memory_results_gtest.cc
+index 70a5a5a..c40df8f 100644
+--- a/test/memory_results_gtest.cc
++++ b/test/memory_results_gtest.cc
+@@ -5,13 +5,13 @@
+ 
+ namespace {
+ 
+-using benchmark::Benchmark;
+ using benchmark::ClearRegisteredBenchmarks;
+ using benchmark::ConsoleReporter;
+ using benchmark::MemoryManager;
+ using benchmark::RegisterBenchmark;
+ using benchmark::RunSpecifiedBenchmarks;
+ using benchmark::State;
++using benchmark::internal::Benchmark;
+ 
+ constexpr int N_REPETITIONS = 100;
+ constexpr int N_ITERATIONS = 1;
+diff --git a/test/options_test.cc b/test/options_test.cc
+index 70e3e18..f9dc59b 100644
+--- a/test/options_test.cc
++++ b/test/options_test.cc
+@@ -51,7 +51,7 @@ BENCHMARK(BM_basic)->RangeMultiplier(4)->Range(-8, 8);
+ BENCHMARK(BM_basic)->DenseRange(-2, 2, 1);
+ BENCHMARK(BM_basic)->Ranges({{-64, 1}, {-8, -1}});
+ 
+-void CustomArgs(benchmark::Benchmark* b) {
++void CustomArgs(benchmark::internal::Benchmark* b) {
+   for (int i = 0; i < 10; ++i) {
+     b->Arg(i);
+   }
+diff --git a/test/register_benchmark_test.cc b/test/register_benchmark_test.cc
+index 3e39437..e6f24c2 100644
+--- a/test/register_benchmark_test.cc
++++ b/test/register_benchmark_test.cc
+@@ -56,7 +56,7 @@ int AddCases(std::initializer_list<TestCase> const& v) {
+ #define ADD_CASES(...) \
+   const int CONCAT(dummy, __LINE__) = AddCases({__VA_ARGS__})
+ 
+-using ReturnVal = benchmark::Benchmark const* const;
++using ReturnVal = benchmark::internal::Benchmark const* const;
+ 
+ //----------------------------------------------------------------------------//
+ // Test RegisterBenchmark with no additional arguments
+diff --git a/test/time_unit_gtest.cc b/test/time_unit_gtest.cc
+index 0da1109..21fd91b 100644
+--- a/test/time_unit_gtest.cc
++++ b/test/time_unit_gtest.cc
+@@ -6,7 +6,7 @@ namespace internal {
+ 
+ namespace {
+ 
+-class DummyBenchmark : public benchmark::Benchmark {
++class DummyBenchmark : public Benchmark {
+  public:
+   DummyBenchmark() : Benchmark("dummy") {}
+   void Run(State& /*state*/) override {}

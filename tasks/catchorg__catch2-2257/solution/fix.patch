@@ -1,0 +1,273 @@
+diff --git a/docs/command-line.md b/docs/command-line.md
+index f8e80270..0154f075 100644
+--- a/docs/command-line.md
++++ b/docs/command-line.md
+@@ -29,6 +29,7 @@
+ [Specify the section to run](#specify-the-section-to-run)<br>
+ [Filenames as tags](#filenames-as-tags)<br>
+ [Override output colouring](#override-output-colouring)<br>
++[Test Sharding](#test-sharding)<br>
+ 
+ Catch works quite nicely without any command line options at all - but for those times when you want greater control the following options are available.
+ Click one of the following links to take you straight to that option - or scroll on to browse the available options.
+@@ -67,6 +68,8 @@ Click one of the following links to take you straight to that option - or scroll
+ <a href="#benchmark-no-analysis">                       `    --benchmark-no-analysis`</a><br />
+ <a href="#benchmark-warmup-time">                       `    --benchmark-warmup-time`</a><br />
+ <a href="#use-colour">                                  `    --use-colour`</a><br />
++<a href="#test-sharding">                               `    --shard-count`</a><br />
++<a href="#test-sharding">                               `    --shard-index`</a><br />
+ 
+ </br>
+ 
+@@ -425,6 +428,20 @@ processing of output.
+ `--use-colour yes` forces coloured output, `--use-colour no` disables coloured
+ output. The default behaviour is `--use-colour auto`.
+ 
++<a id="test-sharding"></a>
++## Test Sharding
++<pre>--shard-count <#number of shards>, --shard-index <#shard index to run></pre>
++
++> [Introduced](https://github.com/catchorg/Catch2/pull/2257) in Catch2 X.Y.Z.
++
++When `--shard-count <#number of shards>` is used, the tests to execute will be split evenly in to the given number of sets,
++identified by indicies starting at 0. The tests in the set given by `--shard-index <#shard index to run>` will be executed.
++The default shard count is `1`, and the default index to run is `0`. It is an error to specify a shard index greater than
++the number of shards.
++
++This is useful when you want to split test execution across multiple processes, as is done with [Bazel test sharding](https://docs.bazel.build/versions/main/test-encyclopedia.html#test-sharding). 
++
++
+ ---
+ 
+ [Home](Readme.md#top)
+diff --git a/src/catch2/catch_all.hpp b/src/catch2/catch_all.hpp
+index 27282de5..742d89a9 100644
+--- a/src/catch2/catch_all.hpp
++++ b/src/catch2/catch_all.hpp
+@@ -85,6 +85,7 @@
+ #include <catch2/internal/catch_result_type.hpp>
+ #include <catch2/internal/catch_run_context.hpp>
+ #include <catch2/internal/catch_section.hpp>
++#include <catch2/internal/catch_sharding.hpp>
+ #include <catch2/internal/catch_singletons.hpp>
+ #include <catch2/internal/catch_source_line_info.hpp>
+ #include <catch2/internal/catch_startup_exception_registry.hpp>
+diff --git a/src/catch2/catch_config.cpp b/src/catch2/catch_config.cpp
+index b79059ec..c9fc8eef 100644
+--- a/src/catch2/catch_config.cpp
++++ b/src/catch2/catch_config.cpp
+@@ -73,6 +73,8 @@ namespace Catch {
+     double Config::minDuration() const                 { return m_data.minDuration; }
+     TestRunOrder Config::runOrder() const              { return m_data.runOrder; }
+     uint32_t Config::rngSeed() const                   { return m_data.rngSeed; }
++    unsigned int Config::shardCount() const            { return m_data.shardCount; }
++    unsigned int Config::shardIndex() const            { return m_data.shardIndex; }
+     UseColour Config::useColour() const                { return m_data.useColour; }
+     bool Config::shouldDebugBreak() const              { return m_data.shouldDebugBreak; }
+     int Config::abortAfter() const                     { return m_data.abortAfter; }
+diff --git a/src/catch2/catch_config.hpp b/src/catch2/catch_config.hpp
+index 7b67ba76..6aa6c4d6 100644
+--- a/src/catch2/catch_config.hpp
++++ b/src/catch2/catch_config.hpp
+@@ -37,6 +37,9 @@ namespace Catch {
+         int abortAfter = -1;
+         uint32_t rngSeed = generateRandomSeed(GenerateFrom::Default);
+ 
++        unsigned int shardCount = 1;
++        unsigned int shardIndex = 0;
++
+         bool benchmarkNoAnalysis = false;
+         unsigned int benchmarkSamples = 100;
+         double benchmarkConfidenceInterval = 0.95;
+@@ -99,6 +102,8 @@ namespace Catch {
+         double minDuration() const override;
+         TestRunOrder runOrder() const override;
+         uint32_t rngSeed() const override;
++        unsigned int shardCount() const override;
++        unsigned int shardIndex() const override;
+         UseColour useColour() const override;
+         bool shouldDebugBreak() const override;
+         int abortAfter() const override;
+diff --git a/src/catch2/catch_session.cpp b/src/catch2/catch_session.cpp
+index e7878117..3b58adbd 100644
+--- a/src/catch2/catch_session.cpp
++++ b/src/catch2/catch_session.cpp
+@@ -16,6 +16,7 @@
+ #include <catch2/catch_version.hpp>
+ #include <catch2/interfaces/catch_interfaces_reporter.hpp>
+ #include <catch2/internal/catch_startup_exception_registry.hpp>
++#include <catch2/internal/catch_sharding.hpp>
+ #include <catch2/internal/catch_textflow.hpp>
+ #include <catch2/internal/catch_windows_h_proxy.hpp>
+ #include <catch2/reporters/catch_reporter_listening.hpp>
+@@ -72,6 +73,8 @@ namespace Catch {
+                     for (auto const& match : m_matches)
+                         m_tests.insert(match.tests.begin(), match.tests.end());
+                 }
++
++                m_tests = createShard(m_tests, m_config->shardCount(), m_config->shardIndex());
+             }
+ 
+             Totals execute() {
+@@ -171,6 +174,7 @@ namespace Catch {
+             return 1;
+ 
+         auto result = m_cli.parse( Clara::Args( argc, argv ) );
++
+         if( !result ) {
+             config();
+             getCurrentMutableContext().setConfig(m_config.get());
+@@ -253,6 +257,12 @@ namespace Catch {
+         if( m_startupExceptions )
+             return 1;
+ 
++
++        if( m_configData.shardIndex >= m_configData.shardCount ) {
++            Catch::cerr() << "The shard count (" << m_configData.shardCount << ") must be greater than the shard index ("  << m_configData.shardIndex << ")\n" << std::flush;
++            return 1;
++        }
++
+         if (m_configData.showHelp || m_configData.libIdentify) {
+             return 0;
+         }
+diff --git a/src/catch2/interfaces/catch_interfaces_config.hpp b/src/catch2/interfaces/catch_interfaces_config.hpp
+index e40cf702..bd0c8a40 100644
+--- a/src/catch2/interfaces/catch_interfaces_config.hpp
++++ b/src/catch2/interfaces/catch_interfaces_config.hpp
+@@ -74,6 +74,8 @@ namespace Catch {
+         virtual std::vector<std::string> const& getTestsOrTags() const = 0;
+         virtual TestRunOrder runOrder() const = 0;
+         virtual uint32_t rngSeed() const = 0;
++        virtual unsigned int shardCount() const = 0;
++        virtual unsigned int shardIndex() const = 0;
+         virtual UseColour useColour() const = 0;
+         virtual std::vector<std::string> const& getSectionsToRun() const = 0;
+         virtual Verbosity verbosity() const = 0;
+diff --git a/src/catch2/internal/catch_commandline.cpp b/src/catch2/internal/catch_commandline.cpp
+index ad571cc5..6cf71b77 100644
+--- a/src/catch2/internal/catch_commandline.cpp
++++ b/src/catch2/internal/catch_commandline.cpp
+@@ -149,6 +149,42 @@ namespace Catch {
+                 return ParserResult::runtimeError( "Unrecognized reporter, '" + reporter + "'. Check available with --list-reporters" );
+             return ParserResult::ok( ParseResultType::Matched );
+         };
++        auto const setShardCount = [&]( std::string const& shardCount ) {
++            CATCH_TRY{
++                std::size_t parsedTo = 0;
++                int64_t parsedCount = std::stoll(shardCount, &parsedTo, 0);
++                if (parsedTo != shardCount.size()) {
++                    return ParserResult::runtimeError("Could not parse '" + shardCount + "' as shard count");
++                }
++                if (parsedCount <= 0) {
++                    return ParserResult::runtimeError("Shard count must be a positive number");
++                }
++
++                config.shardCount = static_cast<unsigned int>(parsedCount);
++                return ParserResult::ok(ParseResultType::Matched);
++            } CATCH_CATCH_ANON(std::exception const&) {
++                return ParserResult::runtimeError("Could not parse '" + shardCount + "' as shard count");
++            }
++        };
++
++        auto const setShardIndex = [&](std::string const& shardIndex) {
++            CATCH_TRY{
++                std::size_t parsedTo = 0;
++                int64_t parsedIndex = std::stoll(shardIndex, &parsedTo, 0);
++                if (parsedTo != shardIndex.size()) {
++                    return ParserResult::runtimeError("Could not parse '" + shardIndex + "' as shard index");
++                }
++                if (parsedIndex < 0) {
++                    return ParserResult::runtimeError("Shard index must be a non-negative number");
++                }
++
++                config.shardIndex = static_cast<unsigned int>(parsedIndex);
++                return ParserResult::ok(ParseResultType::Matched);
++            } CATCH_CATCH_ANON(std::exception const&) {
++                return ParserResult::runtimeError("Could not parse '" + shardIndex + "' as shard index");
++            }
++        };
++
+ 
+         auto cli
+             = ExeName( config.processName )
+@@ -240,6 +276,12 @@ namespace Catch {
+             | Opt( config.benchmarkWarmupTime, "benchmarkWarmupTime" )
+                 ["--benchmark-warmup-time"]
+                 ( "amount of time in milliseconds spent on warming up each test (default: 100)" )
++            | Opt( setShardCount, "shard count" )
++                ["--shard-count"]
++                ( "split the tests to execute into this many groups" )
++            | Opt( setShardIndex, "shard index" )
++                ["--shard-index"]
++                ( "index of the group of tests to execute (see --shard-count)" )
+             | Arg( config.testsOrTags, "test name|pattern|tags" )
+                 ( "which test or tests to use" );
+ 
+diff --git a/src/catch2/internal/catch_sharding.hpp b/src/catch2/internal/catch_sharding.hpp
+new file mode 100644
+index 00000000..0e8822ee
+--- /dev/null
++++ b/src/catch2/internal/catch_sharding.hpp
+@@ -0,0 +1,41 @@
++
++//              Copyright Catch2 Authors
++// Distributed under the Boost Software License, Version 1.0.
++//   (See accompanying file LICENSE_1_0.txt or copy at
++//        https://www.boost.org/LICENSE_1_0.txt)
++
++// SPDX-License-Identifier: BSL-1.0
++#ifndef CATCH_SHARDING_HPP_INCLUDED
++#define CATCH_SHARDING_HPP_INCLUDED
++
++#include <catch2/catch_session.hpp>
++
++#include <cmath>
++
++namespace Catch {
++
++    template<typename Container>
++    Container createShard(Container const& container, std::size_t const shardCount, std::size_t const shardIndex) {
++        assert(shardCount > shardIndex);
++
++        if (shardCount == 1) {
++            return container;
++        }
++
++        const std::size_t totalTestCount = container.size();
++
++        const std::size_t shardSize = totalTestCount / shardCount;
++        const std::size_t leftoverTests = totalTestCount % shardCount;
++
++        const std::size_t startIndex = shardIndex * shardSize + (std::min)(shardIndex, leftoverTests);
++        const std::size_t endIndex = (shardIndex + 1) * shardSize + (std::min)(shardIndex + 1, leftoverTests);
++
++        auto startIterator = std::next(container.begin(), startIndex);
++        auto endIterator = std::next(container.begin(), endIndex);
++
++        return Container(startIterator, endIterator);
++    }
++
++}
++
++#endif // CATCH_SHARDING_HPP_INCLUDED
+diff --git a/src/catch2/internal/catch_test_case_registry_impl.cpp b/src/catch2/internal/catch_test_case_registry_impl.cpp
+index dd1744a7..3c1ab54b 100644
+--- a/src/catch2/internal/catch_test_case_registry_impl.cpp
++++ b/src/catch2/internal/catch_test_case_registry_impl.cpp
+@@ -12,6 +12,7 @@
+ #include <catch2/interfaces/catch_interfaces_registry_hub.hpp>
+ #include <catch2/internal/catch_random_number_generator.hpp>
+ #include <catch2/internal/catch_run_context.hpp>
++#include <catch2/internal/catch_sharding.hpp>
+ #include <catch2/catch_test_case_info.hpp>
+ #include <catch2/catch_test_spec.hpp>
+ #include <catch2/internal/catch_move_and_forward.hpp>
+@@ -135,7 +136,7 @@ namespace {
+                 filtered.push_back(testCase);
+             }
+         }
+-        return filtered;
++        return createShard(filtered, config.shardCount(), config.shardIndex());
+     }
+     std::vector<TestCaseHandle> const& getAllTestCasesSorted( IConfig const& config ) {
+         return getRegistryHub().getTestCaseRegistry().getAllTestsSorted( config );
