@@ -2,7 +2,7 @@
 
 cd /app/src
 
-# Copy HEAD source files and baselines from /tests (overwrites BASE state with fixed versions)
+# Copy HEAD test source files and baselines from /tests (these are not modified by fix.patch - only updated to match the modern casts)
 mkdir -p "tests/SelfTest/Baselines"
 cp "/tests/SelfTest/Baselines/compact.sw.approved.txt" "tests/SelfTest/Baselines/compact.sw.approved.txt"
 cp "/tests/SelfTest/Baselines/console.sw.approved.txt" "tests/SelfTest/Baselines/console.sw.approved.txt"
@@ -12,42 +12,41 @@ mkdir -p "tests/SelfTest/IntrospectiveTests"
 cp "/tests/SelfTest/IntrospectiveTests/String.tests.cpp" "tests/SelfTest/IntrospectiveTests/String.tests.cpp"
 cp "/tests/SelfTest/IntrospectiveTests/Xml.tests.cpp" "tests/SelfTest/IntrospectiveTests/Xml.tests.cpp"
 
-# Copy the fixed source files (benchmark stats with modern casts)
-mkdir -p "src/catch2/benchmark/detail"
-cp "/tests/catch2/benchmark/detail/catch_stats.cpp" "src/catch2/benchmark/detail/catch_stats.cpp"
-cp "/tests/catch2/benchmark/detail/catch_stats.hpp" "src/catch2/benchmark/detail/catch_stats.hpp"
+# Verify that -Wold-style-cast is enabled in CMake (only present if fix was applied)
+if ! grep -q '"-Wold-style-cast"' CMake/MiscFunctions.cmake; then
+    echo "FAIL: -Wold-style-cast flag not enabled in CMake - fix not applied"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
 
-# Copy the fixed CMake file (re-enables -Wold-style-cast)
-mkdir -p "CMake"
-cp "/tests/CMake/MiscFunctions.cmake" "CMake/MiscFunctions.cmake"
-
-# Reconfigure CMake to pick up the -Wold-style-cast flag
+# Reconfigure CMake to pick up any changes
 if ! cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
     -DCATCH_BUILD_TESTING=ON \
     -DCATCH_BUILD_EXTRA_TESTS=OFF \
     -DCMAKE_CXX_FLAGS="-Wno-error=dangling-reference" \
-    -G Ninja; then
-    echo "CMake reconfiguration failed"
+    -G Ninja 2>&1; then
+    echo "FAIL: CMake reconfiguration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Rebuild - this will FAIL in BASE state (old-style casts), PASS in HEAD state (modern casts)
+# Rebuild - this will FAIL if old-style casts are still present, PASS if modern casts are used
 if ! cmake --build build 2>&1; then
-    echo "Build failed - old-style casts still present"
+    echo "FAIL: Build failed with -Wold-style-cast enabled - old-style casts still present"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Run the StringRef tests to verify they pass with modern casts
-if ! ./build/tests/SelfTest "[StringRef]"; then
-    echo "StringRef tests failed"
+# Run the StringRef tests to verify they pass
+if ! ./build/tests/SelfTest "[StringRef]" 2>&1; then
+    echo "FAIL: StringRef tests did not pass"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
+echo "SUCCESS: All checks passed - fix properly applied"
 test_status=0
 
 if [ $test_status -eq 0 ]; then

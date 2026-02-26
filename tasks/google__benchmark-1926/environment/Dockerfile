@@ -9,10 +9,11 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install C++ build tools, CMake, and clang-tidy
+# Install C++ build tools, CMake, clang, and clang-tidy
 RUN apt-get update && apt-get install -y \
     cmake \
     ninja-build \
+    clang \
     clang-tidy \
     && rm -rf /var/lib/apt/lists/*
 
