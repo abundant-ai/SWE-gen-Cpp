@@ -1,0 +1,13 @@
+In the Python Protocol Buffers runtime, the configured recursion limit (set via the public recursion-limit API, e.g., `SetRecursionLimit(...)`) can be bypassed during binary parsing in specific nested-message decoder paths. When parsing attacker-controlled payloads with deeply nested structures, recursion accounting is unintentionally reset or not forwarded when invoking `_InternalParse`, so the runtime fails to stop at the configured limit and instead continues until Python itself raises `RecursionError`. This can cause a denial-of-service for applications relying on protobuf’s recursion limit as a safety guard.
+
+This affects the pure-Python implementation (`PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python`) when parsing binary data via `ParseFromString()` / `MergeFromString()` / `FromString()`.
+
+Two scenarios must be handled correctly:
+
+1) Map fields whose values are message types: parsing a map entry that contains a message value must preserve and increment the current recursion depth when calling the nested message’s `_InternalParse`. Currently, the nested parse is invoked in a way that drops the `current_depth` tracking, which effectively restarts depth counting and allows nesting to exceed the configured recursion limit.
+
+2) Proto2 MessageSet (`message_set_wire_format = true`) and MessageSet extensions: decoding a MessageSet item/value must also preserve and increment recursion depth when parsing the embedded extension message. Currently, MessageSet decoding dispatches into nested parsing without forwarding the depth, which again resets recursion accounting.
+
+Expected behavior: when `SetRecursionLimit(N)` (or the equivalent public API) is configured, parsing a payload with nesting deeper than `N` must fail deterministically with the protobuf recursion-limit failure (the same failure mode used elsewhere for excessive nesting), rather than continuing until a Python `RecursionError` occurs. This should apply consistently to both map-value messages and MessageSet extension messages.
+
+Implement/adjust recursion guards so that any code path that calls a message’s `_InternalParse(...)` during binary decoding correctly passes `current_depth` (incremented appropriately) and does not delete or reset it. Ensure the fix applies to the pure-Python decoder paths and also covers the UPB-backed Python path for MessageSet extensions (so both implementations enforce the same recursion-limit behavior).

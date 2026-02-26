@@ -1,0 +1,9 @@
+When combining two protobuf lazy field instances, the implementation currently concatenates their underlying serialized bytes immediately, even in cases where the two lazy fields were created with different extension registries (i.e., different parsing contexts for extensions). This eager concatenation can cause the combined lazy field to lose the ability to correctly preserve each side’s registry context until parsing, and it can also force unnecessary work (materializing a new byte sequence) even though the value may never be parsed.
+
+Fix LazyField and LazyFieldLite so that when two lazy fields are merged/combined and they have different extension registries, the code avoids immediately concatenating the two ByteString/bytes. Instead, the lazy field should preserve the two pieces in a deferred form so that:
+
+- Calling getValue(...) on the combined lazy field still yields the same logical message content as if the serialized bytes had been concatenated, including correct parsing of extensions.
+- Methods like getSerializedSize() and toByteString()/getBytes() continue to report the correct combined serialized form without forcing premature parsing.
+- Equality and hashCode behavior remains consistent with the underlying message semantics both before and after getValue() is invoked.
+
+In particular, ensure that merging LazyField / LazyFieldLite instances that originate from different ExtensionRegistry inputs does not corrupt extension parsing behavior and does not require immediate byte concatenation. The combined lazy field should behave identically to one that was built from the fully concatenated bytes, but should defer the concatenation work until it is actually needed (e.g., when materializing bytes), and should not incorrectly assume the registries are interchangeable.

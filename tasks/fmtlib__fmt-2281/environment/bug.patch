@@ -1,0 +1,182 @@
+diff --git a/include/fmt/compile.h b/include/fmt/compile.h
+index 128004bc..3160588b 100644
+--- a/include/fmt/compile.h
++++ b/include/fmt/compile.h
+@@ -191,10 +191,24 @@ constexpr const auto& get([[maybe_unused]] const T& first,
+     return get<N - 1>(rest...);
+ }
+ 
++constexpr int invalid_arg_index = -1;
++
++template <int N, typename T, typename... Args, typename Char>
++constexpr int get_arg_index_by_name(basic_string_view<Char> name) {
++  if constexpr (detail::is_statically_named_arg<T>()) {
++    if (name == T::name) return N;
++  }
++  if constexpr (sizeof...(Args) == 0) {
++    return invalid_arg_index;
++  } else {
++    return get_arg_index_by_name<N + 1, Args...>(name);
++  }
++}
++
+ template <typename Char, typename... Args>
+ constexpr int get_arg_index_by_name(basic_string_view<Char> name,
+                                     type_list<Args...>) {
+-  return get_arg_index_by_name<Args...>(name);
++  return get_arg_index_by_name<0, Args...>(name);
+ }
+ 
+ template <int N, typename> struct get_type_impl;
+diff --git a/include/fmt/core.h b/include/fmt/core.h
+index 4b5236f6..24dbc7f5 100644
+--- a/include/fmt/core.h
++++ b/include/fmt/core.h
+@@ -281,16 +281,6 @@
+ #  define FMT_COMPILE_TIME_CHECKS 0
+ #endif
+ 
+-#ifndef FMT_USE_NONTYPE_TEMPLATE_PARAMETERS
+-#  if defined(__cpp_nontype_template_args) &&                \
+-      ((FMT_GCC_VERSION >= 903 && __cplusplus >= 201709L) || \
+-       __cpp_nontype_template_args >= 201911L)
+-#    define FMT_USE_NONTYPE_TEMPLATE_PARAMETERS 1
+-#  else
+-#    define FMT_USE_NONTYPE_TEMPLATE_PARAMETERS 0
+-#  endif
+-#endif
+-
+ // Enable minimal optimizations for more compact code in debug mode.
+ FMT_GCC_PRAGMA("GCC push_options")
+ #ifndef __OPTIMIZE__
+@@ -1001,7 +991,6 @@ template <typename Char>
+ inline void init_named_args(named_arg_info<Char>*, int, int) {}
+ 
+ template <typename T> struct is_named_arg : std::false_type {};
+-template <typename T> struct is_statically_named_arg : std::false_type {};
+ 
+ template <typename T, typename Char>
+ struct is_named_arg<named_arg<Char, T>> : std::true_type {};
+@@ -2436,36 +2425,6 @@ class compile_parse_context
+   using base::check_arg_id;
+ };
+ 
+-constexpr int invalid_arg_index = -1;
+-
+-#if FMT_USE_NONTYPE_TEMPLATE_PARAMETERS
+-template <int N, typename T, typename... Args, typename Char>
+-constexpr int get_arg_index_by_name(basic_string_view<Char> name) {
+-  if constexpr (detail::is_statically_named_arg<T>()) {
+-    if (name == T::name) return N;
+-  }
+-  if constexpr (sizeof...(Args) == 0) {
+-    return invalid_arg_index;
+-  } else {
+-    return get_arg_index_by_name<N + 1, Args...>(name);
+-  }
+-}
+-
+-template <typename... Args, typename Char>
+-constexpr int get_arg_index_by_name(basic_string_view<Char> name) {
+-  if constexpr (sizeof...(Args) == 0) {
+-    return invalid_arg_index;
+-  } else {
+-    return get_arg_index_by_name<0, Args...>(name);
+-  }
+-}
+-#else
+-template <typename... Args, typename Char>
+-constexpr int get_arg_index_by_name(basic_string_view<Char>) {
+-  return invalid_arg_index;
+-}
+-#endif
+-
+ template <typename Char, typename ErrorHandler, typename... Args>
+ class format_string_checker {
+  public:
+@@ -2478,16 +2437,9 @@ class format_string_checker {
+ 
+   FMT_CONSTEXPR int on_arg_id() { return context_.next_arg_id(); }
+   FMT_CONSTEXPR int on_arg_id(int id) { return context_.check_arg_id(id), id; }
+-  FMT_CONSTEXPR int on_arg_id(basic_string_view<Char> id) {
+-#if FMT_USE_NONTYPE_TEMPLATE_PARAMETERS
+-    auto index = get_arg_index_by_name<Args...>(id);
+-    if (index == invalid_arg_index) on_error("named argument is not found");
+-    return context_.check_arg_id(index), index;
+-#else
+-    (void)id;
+-    on_error("compile-time checks for named arguments require C++20 support");
++  FMT_CONSTEXPR int on_arg_id(basic_string_view<Char>) {
++    on_error("compile-time checks don't support named arguments");
+     return 0;
+-#endif
+   }
+ 
+   FMT_CONSTEXPR void on_replacement_field(int, const Char*) {}
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index 722e4e13..cfed721e 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -255,6 +255,16 @@ inline int ctzll(uint64_t x) {
+ FMT_END_NAMESPACE
+ #endif
+ 
++#ifndef FMT_USE_NONTYPE_TEMPLATE_PARAMETERS
++#  if defined(__cpp_nontype_template_args) &&                \
++      ((FMT_GCC_VERSION >= 903 && __cplusplus >= 201709L) || \
++       __cpp_nontype_template_args >= 201911L)
++#    define FMT_USE_NONTYPE_TEMPLATE_PARAMETERS 1
++#  else
++#    define FMT_USE_NONTYPE_TEMPLATE_PARAMETERS 0
++#  endif
++#endif
++
+ FMT_BEGIN_NAMESPACE
+ namespace detail {
+ 
+@@ -3216,6 +3226,9 @@ template <typename Char> struct udl_formatter {
+   }
+ };
+ 
++template <typename T, typename = void>
++struct is_statically_named_arg : std::false_type {};
++
+ #  if FMT_USE_NONTYPE_TEMPLATE_PARAMETERS
+ template <typename T, typename Char, size_t N, fixed_string<Char, N> Str>
+ struct statically_named_arg : view {
+diff --git a/test/format-test.cc b/test/format-test.cc
+index cbb2f96b..50e96ef5 100644
+--- a/test/format-test.cc
++++ b/test/format-test.cc
+@@ -1694,14 +1694,6 @@ TEST(format_test, compile_time_string) {
+   EXPECT_EQ(L"42", fmt::format(FMT_STRING(L"{}"), 42));
+   EXPECT_EQ("foo", fmt::format(FMT_STRING("{}"), string_like()));
+ 
+-#if FMT_USE_NONTYPE_TEMPLATE_PARAMETERS
+-  using namespace fmt::literals;
+-  EXPECT_EQ("foobar", fmt::format(FMT_STRING("{foo}{bar}"), "bar"_a = "bar",
+-                                  "foo"_a = "foo"));
+-  EXPECT_EQ("", fmt::format(FMT_STRING("")));
+-  EXPECT_EQ("", fmt::format(FMT_STRING(""), "arg"_a = 42));
+-#endif
+-
+   (void)static_with_null;
+   (void)static_with_null_wide;
+   (void)static_no_null;
+@@ -2347,15 +2339,8 @@ TEST(format_test, format_string_errors) {
+ #  else
+   fmt::print("warning: constexpr is broken in this version of MSVC\n");
+ #  endif
+-#  if FMT_USE_NONTYPE_TEMPLATE_PARAMETERS
+-  EXPECT_ERROR("{foo}", "named argument is not found", decltype("bar"_a = 42));
+-  EXPECT_ERROR("{foo}", "named argument is not found",
+-               decltype(fmt::arg("foo", 42)));
+-#  else
+-  EXPECT_ERROR("{foo}",
+-               "compile-time checks for named arguments require C++20 support",
++  EXPECT_ERROR("{foo", "compile-time checks don't support named arguments",
+                int);
+-#  endif
+   EXPECT_ERROR_NOARGS("{10000000000}", "number is too big");
+   EXPECT_ERROR_NOARGS("{0x}", "invalid format string");
+   EXPECT_ERROR_NOARGS("{-}", "invalid format string");

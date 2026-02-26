@@ -1,0 +1,73 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 8926b04e5..9e76da895 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -566,7 +566,13 @@ proto_lang_toolchain(
+     command_line = "--cpp_out=$(OUT)",
+     plugin = "//src/google/protobuf/compiler/cpp:protoc-gen-cpp",
+     plugin_format_flag = "--plugin=protoc-gen-cpp=%s",
+-    protoc_minimal_do_not_use = "//src/google/protobuf/compiler:protoc_minimal",
++    protoc_minimal_do_not_use = select({
++        # Set minimal protoc if prefer_prebuilt_protoc.flag_set is true since a prebuilt for protoc_minimal is not available
++        # TODO: Add a flag to switch between minimal and full protoc with proto_lang_toolchain once we have a minimal protoc binary.
++        # Setting this attribute to None will make the toolchain to pick the full protoc binary.
++        "//bazel/toolchains:prefer_prebuilt_protoc.flag_set": None,
++        "//conditions:default": "//src/google/protobuf/compiler:protoc_minimal",
++    }),
+     runtime = "//src/google/protobuf",
+     visibility = ["//visibility:public"],
+ )
+diff --git a/bazel/toolchains/BUILD b/bazel/toolchains/BUILD
+index 6ebab0a9e..c34663cdf 100644
+--- a/bazel/toolchains/BUILD
++++ b/bazel/toolchains/BUILD
+@@ -53,7 +53,11 @@ bool_flag(
+ config_setting(
+     name = "prefer_prebuilt_protoc.flag_set",
+     flag_values = {":prefer_prebuilt_protoc": "true"},
+-    visibility = ["//bazel/private/toolchains/prebuilt:__pkg__"],
++    visibility = [
++        "//bazel/private/toolchains/prebuilt:__pkg__",
++        # Needed by cc_toolchain to switch between minimal and full protoc
++        "//:__pkg__",
++    ],
+ )
+ 
+ # The public API users set to disable the validation action failing.
+diff --git a/examples/example_without_cc_toolchain/.bazelrc b/examples/example_without_cc_toolchain/.bazelrc
+index 8653aa707..90f2a4414 100644
+--- a/examples/example_without_cc_toolchain/.bazelrc
++++ b/examples/example_without_cc_toolchain/.bazelrc
+@@ -1,6 +1,6 @@
+ # Simulate a non-functional CC toolchain
+-common --per_file_copt=external/.*protobuf.*@--THIS_CC_TOOLCHAIN_IS_BROKEN
+-common --host_per_file_copt=external/.*protobuf.*@--THIS_CC_TOOLCHAIN_IS_BROKEN
++common --per_file_copt=external/.*protobuf.*/src/google/protobuf/compiler/main.cc@--THIS_CC_TOOLCHAIN_IS_BROKEN
++common --host_per_file_copt=external/.*protobuf.*/src/google/protobuf/compiler/main.cc@--THIS_CC_TOOLCHAIN_IS_BROKEN
+ # But, users should be able to use pre-built protoc toolchains instead.
+ common --incompatible_enable_proto_toolchain_resolution
+-common --@com_google_protobuf//bazel/toolchains:prefer_prebuilt_protoc
+\ No newline at end of file
++common --@com_google_protobuf//bazel/toolchains:prefer_prebuilt_protoc
+diff --git a/examples/example_without_cc_toolchain/BUILD.bazel b/examples/example_without_cc_toolchain/BUILD.bazel
+index ba5d829d7..4dbbd98fb 100644
+--- a/examples/example_without_cc_toolchain/BUILD.bazel
++++ b/examples/example_without_cc_toolchain/BUILD.bazel
+@@ -1,6 +1,17 @@
++load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+ load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+ 
+ proto_library(
+     name = "empty_proto",
+     srcs = ["empty.proto"],
+ )
++
++cc_proto_library(
++    name = "cc_empty_proto",
++    # We already have a anaylsis test that asserts that the cc_proto_library
++    # uses the correct prebuilt toolchain, this cc_proto_library will never
++    # compile since the prebuilt toolchain is always behind the HEAD therefore
++    # will end up in version skew compilation errors.
++    tags = ["manual"],
++    deps = [":empty_proto"],
++)

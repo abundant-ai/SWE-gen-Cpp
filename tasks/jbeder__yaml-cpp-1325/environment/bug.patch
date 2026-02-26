@@ -1,0 +1,494 @@
+diff --git a/include/yaml-cpp/emitter.h b/include/yaml-cpp/emitter.h
+index 1d2ae58..2897fc0 100644
+--- a/include/yaml-cpp/emitter.h
++++ b/include/yaml-cpp/emitter.h
+@@ -9,17 +9,12 @@
+ 
+ #include <cmath>
+ #include <cstddef>
+-#include <cstring>
+ #include <limits>
+ #include <memory>
+ #include <sstream>
+ #include <string>
+ #include <type_traits>
+ 
+-#if ((defined(_MSVC_LANG) && _MSVC_LANG >= 201703L) || __cplusplus >= 201703L)
+-#include <string_view>
+-#endif
+-
+ #include "yaml-cpp/binary.h"
+ #include "yaml-cpp/dll.h"
+ #include "yaml-cpp/emitterdef.h"
+@@ -72,7 +67,6 @@ class YAML_CPP_API Emitter {
+   Emitter& SetLocalPrecision(const _Precision& precision);
+ 
+   // overloads of write
+-  Emitter& Write(const char* str, std::size_t size);
+   Emitter& Write(const std::string& str);
+   Emitter& Write(bool b);
+   Emitter& Write(char ch);
+@@ -206,13 +200,8 @@ inline void Emitter::SetStreamablePrecision<double>(std::stringstream& stream) {
+ }
+ 
+ // overloads of insertion
+-#if ((defined(_MSVC_LANG) && _MSVC_LANG >= 201703L) || __cplusplus >= 201703L)
+-inline Emitter& operator<<(Emitter& emitter, const std::string_view& v) {
+-  return emitter.Write(v.data(), v.size());
+-}
+-#endif
+ inline Emitter& operator<<(Emitter& emitter, const std::string& v) {
+-  return emitter.Write(v.data(), v.size());
++  return emitter.Write(v);
+ }
+ inline Emitter& operator<<(Emitter& emitter, bool v) {
+   return emitter.Write(v);
+@@ -243,7 +232,7 @@ inline Emitter& operator<<(Emitter& emitter, const Binary& b) {
+ }
+ 
+ inline Emitter& operator<<(Emitter& emitter, const char* v) {
+-  return emitter.Write(v, std::strlen(v));
++  return emitter.Write(std::string(v));
+ }
+ 
+ inline Emitter& operator<<(Emitter& emitter, int v) {
+diff --git a/include/yaml-cpp/null.h b/include/yaml-cpp/null.h
+index 472e961..b9521d4 100644
+--- a/include/yaml-cpp/null.h
++++ b/include/yaml-cpp/null.h
+@@ -8,7 +8,7 @@
+ #endif
+ 
+ #include "yaml-cpp/dll.h"
+-#include <cstddef>
++#include <string>
+ 
+ namespace YAML {
+ class Node;
+@@ -18,7 +18,7 @@ inline bool operator==(const _Null&, const _Null&) { return true; }
+ inline bool operator!=(const _Null&, const _Null&) { return false; }
+ 
+ YAML_CPP_API bool IsNull(const Node& node);  // old API only
+-YAML_CPP_API bool IsNullString(const char* str, std::size_t size);
++YAML_CPP_API bool IsNullString(const std::string& str);
+ 
+ extern YAML_CPP_API _Null Null;
+ }
+diff --git a/src/emitter.cpp b/src/emitter.cpp
+index e5fc0ea..2a2262d 100644
+--- a/src/emitter.cpp
++++ b/src/emitter.cpp
+@@ -716,33 +716,33 @@ StringEscaping::value GetStringEscapingStyle(const EMITTER_MANIP emitterManip) {
+   }
+ }
+ 
+-Emitter& Emitter::Write(const char* str, std::size_t size) {
++Emitter& Emitter::Write(const std::string& str) {
+   if (!good())
+     return *this;
+ 
+   StringEscaping::value stringEscaping = GetStringEscapingStyle(m_pState->GetOutputCharset());
+ 
+   const StringFormat::value strFormat =
+-      Utils::ComputeStringFormat(str, size, m_pState->GetStringFormat(),
++      Utils::ComputeStringFormat(str, m_pState->GetStringFormat(),
+                                  m_pState->CurGroupFlowType(), stringEscaping == StringEscaping::NonAscii);
+ 
+-  if (strFormat == StringFormat::Literal || size > 1024)
++  if (strFormat == StringFormat::Literal || str.size() > 1024)
+     m_pState->SetMapKeyFormat(YAML::LongKey, FmtScope::Local);
+ 
+   PrepareNode(EmitterNodeType::Scalar);
+ 
+   switch (strFormat) {
+     case StringFormat::Plain:
+-      m_stream.write(str, size);
++      m_stream << str;
+       break;
+     case StringFormat::SingleQuoted:
+-      Utils::WriteSingleQuotedString(m_stream, str, size);
++      Utils::WriteSingleQuotedString(m_stream, str);
+       break;
+     case StringFormat::DoubleQuoted:
+-      Utils::WriteDoubleQuotedString(m_stream, str, size, stringEscaping);
++      Utils::WriteDoubleQuotedString(m_stream, str, stringEscaping);
+       break;
+     case StringFormat::Literal:
+-      Utils::WriteLiteralString(m_stream, str, size,
++      Utils::WriteLiteralString(m_stream, str,
+                                 m_pState->CurIndent() + m_pState->GetIndent());
+       break;
+   }
+@@ -752,10 +752,6 @@ Emitter& Emitter::Write(const char* str, std::size_t size) {
+   return *this;
+ }
+ 
+-Emitter& Emitter::Write(const std::string& str) {
+-  return Write(str.data(), str.size());
+-}
+-
+ std::size_t Emitter::GetFloatPrecision() const {
+   return m_pState->GetFloatPrecision();
+ }
+@@ -869,7 +865,7 @@ Emitter& Emitter::Write(const _Alias& alias) {
+ 
+   PrepareNode(EmitterNodeType::Scalar);
+ 
+-  if (!Utils::WriteAlias(m_stream, alias.content.data(), alias.content.size())) {
++  if (!Utils::WriteAlias(m_stream, alias.content)) {
+     m_pState->SetError(ErrorMsg::INVALID_ALIAS);
+     return *this;
+   }
+@@ -892,7 +888,7 @@ Emitter& Emitter::Write(const _Anchor& anchor) {
+ 
+   PrepareNode(EmitterNodeType::Property);
+ 
+-  if (!Utils::WriteAnchor(m_stream, anchor.content.data(), anchor.content.size())) {
++  if (!Utils::WriteAnchor(m_stream, anchor.content)) {
+     m_pState->SetError(ErrorMsg::INVALID_ANCHOR);
+     return *this;
+   }
+@@ -941,7 +937,7 @@ Emitter& Emitter::Write(const _Comment& comment) {
+ 
+   if (m_stream.col() > 0)
+     m_stream << Indentation(m_pState->GetPreCommentIndent());
+-  Utils::WriteComment(m_stream, comment.content.data(), comment.content.size(),
++  Utils::WriteComment(m_stream, comment.content,
+                       m_pState->GetPostCommentIndent());
+ 
+   m_pState->SetNonContent();
+diff --git a/src/emitterutils.cpp b/src/emitterutils.cpp
+index 1541e17..f801b1d 100644
+--- a/src/emitterutils.cpp
++++ b/src/emitterutils.cpp
+@@ -89,8 +89,8 @@ int Utf8BytesIndicated(char ch) {
+ bool IsTrailingByte(char ch) { return (ch & 0xC0) == 0x80; }
+ 
+ bool GetNextCodePointAndAdvance(int& codePoint,
+-                                const char*& first,
+-                                const char* last) {
++                                std::string::const_iterator& first,
++                                std::string::const_iterator last) {
+   if (first == last)
+     return false;
+ 
+@@ -153,23 +153,23 @@ void WriteCodePoint(ostream_wrapper& out, int codePoint) {
+   }
+ }
+ 
+-bool IsValidPlainScalar(const char* str, std::size_t size, FlowType::value flowType,
++bool IsValidPlainScalar(const std::string& str, FlowType::value flowType,
+                         bool allowOnlyAscii) {
+   // check against null
+-  if (IsNullString(str, size)) {
++  if (IsNullString(str)) {
+     return false;
+   }
+ 
+   // check the start
+   const RegEx& start = (flowType == FlowType::Flow ? Exp::PlainScalarInFlow()
+                                                    : Exp::PlainScalar());
+-  if (!start.Matches(StringCharSource(str, size))) {
++  if (!start.Matches(str)) {
+     return false;
+   }
+ 
+   // and check the end for plain whitespace (which can't be faithfully kept in a
+   // plain scalar)
+-  if (size != 0 && str[size - 1] == ' ') {
++  if (!str.empty() && *str.rbegin() == ' ') {
+     return false;
+   }
+ 
+@@ -185,7 +185,7 @@ bool IsValidPlainScalar(const char* str, std::size_t size, FlowType::value flowT
+   const RegEx& disallowed =
+       flowType == FlowType::Flow ? disallowed_flow : disallowed_block;
+ 
+-  StringCharSource buffer(str, size);
++  StringCharSource buffer(str.c_str(), str.size());
+   while (buffer) {
+     if (disallowed.Matches(buffer)) {
+       return false;
+@@ -199,22 +199,22 @@ bool IsValidPlainScalar(const char* str, std::size_t size, FlowType::value flowT
+   return true;
+ }
+ 
+-bool IsValidSingleQuotedScalar(const char* str, std::size_t size, bool escapeNonAscii) {
++bool IsValidSingleQuotedScalar(const std::string& str, bool escapeNonAscii) {
+   // TODO: check for non-printable characters?
+-  return std::none_of(str, str + size, [=](char ch) {
++  return std::none_of(str.begin(), str.end(), [=](char ch) {
+     return (escapeNonAscii && (0x80 <= static_cast<unsigned char>(ch))) ||
+            (ch == '\n');
+   });
+ }
+ 
+-bool IsValidLiteralScalar(const char* str, std::size_t size, FlowType::value flowType,
++bool IsValidLiteralScalar(const std::string& str, FlowType::value flowType,
+                           bool escapeNonAscii) {
+   if (flowType == FlowType::Flow) {
+     return false;
+   }
+ 
+   // TODO: check for non-printable characters?
+-  return std::none_of(str, str + size, [=](char ch) {
++  return std::none_of(str.begin(), str.end(), [=](char ch) {
+     return (escapeNonAscii && (0x80 <= static_cast<unsigned char>(ch)));
+   });
+ }
+@@ -254,10 +254,10 @@ void WriteDoubleQuoteEscapeSequence(ostream_wrapper& out, int codePoint, StringE
+     out << hexDigits[(codePoint >> (4 * (digits - 1))) & 0xF];
+ }
+ 
+-bool WriteAliasName(ostream_wrapper& out, const char* str, std::size_t size) {
++bool WriteAliasName(ostream_wrapper& out, const std::string& str) {
+   int codePoint;
+-  for (const char* i = str;
+-       GetNextCodePointAndAdvance(codePoint, i, str + size);) {
++  for (std::string::const_iterator i = str.begin();
++       GetNextCodePointAndAdvance(codePoint, i, str.end());) {
+     if (!IsAnchorChar(codePoint)) {
+       return false;
+     }
+@@ -268,25 +268,25 @@ bool WriteAliasName(ostream_wrapper& out, const char* str, std::size_t size) {
+ }
+ }  // namespace
+ 
+-StringFormat::value ComputeStringFormat(const char* str, std::size_t size,
++StringFormat::value ComputeStringFormat(const std::string& str,
+                                         EMITTER_MANIP strFormat,
+                                         FlowType::value flowType,
+                                         bool escapeNonAscii) {
+   switch (strFormat) {
+     case Auto:
+-      if (IsValidPlainScalar(str, size, flowType, escapeNonAscii)) {
++      if (IsValidPlainScalar(str, flowType, escapeNonAscii)) {
+         return StringFormat::Plain;
+       }
+       return StringFormat::DoubleQuoted;
+     case SingleQuoted:
+-      if (IsValidSingleQuotedScalar(str, size, escapeNonAscii)) {
++      if (IsValidSingleQuotedScalar(str, escapeNonAscii)) {
+         return StringFormat::SingleQuoted;
+       }
+       return StringFormat::DoubleQuoted;
+     case DoubleQuoted:
+       return StringFormat::DoubleQuoted;
+     case Literal:
+-      if (IsValidLiteralScalar(str, size, flowType, escapeNonAscii)) {
++      if (IsValidLiteralScalar(str, flowType, escapeNonAscii)) {
+         return StringFormat::Literal;
+       }
+       return StringFormat::DoubleQuoted;
+@@ -297,11 +297,11 @@ StringFormat::value ComputeStringFormat(const char* str, std::size_t size,
+   return StringFormat::DoubleQuoted;
+ }
+ 
+-bool WriteSingleQuotedString(ostream_wrapper& out, const char* str, std::size_t size) {
++bool WriteSingleQuotedString(ostream_wrapper& out, const std::string& str) {
+   out << "'";
+   int codePoint;
+-  for (const char* i = str;
+-       GetNextCodePointAndAdvance(codePoint, i, str + size);) {
++  for (std::string::const_iterator i = str.begin();
++       GetNextCodePointAndAdvance(codePoint, i, str.end());) {
+     if (codePoint == '\n') {
+       return false;  // We can't handle a new line and the attendant indentation
+                      // yet
+@@ -317,12 +317,12 @@ bool WriteSingleQuotedString(ostream_wrapper& out, const char* str, std::size_t
+   return true;
+ }
+ 
+-bool WriteDoubleQuotedString(ostream_wrapper& out, const char* str, std::size_t size,
++bool WriteDoubleQuotedString(ostream_wrapper& out, const std::string& str,
+                              StringEscaping::value stringEscaping) {
+   out << "\"";
+   int codePoint;
+-  for (const char* i = str;
+-       GetNextCodePointAndAdvance(codePoint, i, str + size);) {
++  for (std::string::const_iterator i = str.begin();
++       GetNextCodePointAndAdvance(codePoint, i, str.end());) {
+     switch (codePoint) {
+       case '\"':
+         out << "\\\"";
+@@ -364,12 +364,12 @@ bool WriteDoubleQuotedString(ostream_wrapper& out, const char* str, std::size_t
+   return true;
+ }
+ 
+-bool WriteLiteralString(ostream_wrapper& out, const char* str, std::size_t size,
++bool WriteLiteralString(ostream_wrapper& out, const std::string& str,
+                         std::size_t indent) {
+   out << "|\n";
+   int codePoint;
+-  for (const char* i = str;
+-       GetNextCodePointAndAdvance(codePoint, i, str + size);) {
++  for (std::string::const_iterator i = str.begin();
++       GetNextCodePointAndAdvance(codePoint, i, str.end());) {
+     if (codePoint == '\n') {
+       out << "\n";
+     } else {
+@@ -407,14 +407,14 @@ bool WriteChar(ostream_wrapper& out, char ch, StringEscaping::value stringEscapi
+   return true;
+ }
+ 
+-bool WriteComment(ostream_wrapper& out, const char* str, std::size_t size,
++bool WriteComment(ostream_wrapper& out, const std::string& str,
+                   std::size_t postCommentIndent) {
+   const std::size_t curIndent = out.col();
+   out << "#" << Indentation(postCommentIndent);
+   out.set_comment();
+   int codePoint;
+-  for (const char* i = str;
+-       GetNextCodePointAndAdvance(codePoint, i, str + size);) {
++  for (std::string::const_iterator i = str.begin();
++       GetNextCodePointAndAdvance(codePoint, i, str.end());) {
+     if (codePoint == '\n') {
+       out << "\n"
+           << IndentTo(curIndent) << "#" << Indentation(postCommentIndent);
+@@ -426,14 +426,14 @@ bool WriteComment(ostream_wrapper& out, const char* str, std::size_t size,
+   return true;
+ }
+ 
+-bool WriteAlias(ostream_wrapper& out, const char* str, std::size_t size) {
++bool WriteAlias(ostream_wrapper& out, const std::string& str) {
+   out << "*";
+-  return WriteAliasName(out, str, size);
++  return WriteAliasName(out, str);
+ }
+ 
+-bool WriteAnchor(ostream_wrapper& out, const char* str, std::size_t size) {
++bool WriteAnchor(ostream_wrapper& out, const std::string& str) {
+   out << "&";
+-  return WriteAliasName(out, str, size);
++  return WriteAliasName(out, str);
+ }
+ 
+ bool WriteTag(ostream_wrapper& out, const std::string& str, bool verbatim) {
+@@ -490,8 +490,7 @@ bool WriteTagWithPrefix(ostream_wrapper& out, const std::string& prefix,
+ }
+ 
+ bool WriteBinary(ostream_wrapper& out, const Binary& binary) {
+-  std::string encoded = EncodeBase64(binary.data(), binary.size());
+-  WriteDoubleQuotedString(out, encoded.data(), encoded.size(),
++  WriteDoubleQuotedString(out, EncodeBase64(binary.data(), binary.size()),
+                           StringEscaping::None);
+   return true;
+ }
+diff --git a/src/emitterutils.h b/src/emitterutils.h
+index 0c0dcbb..3a7d598 100644
+--- a/src/emitterutils.h
++++ b/src/emitterutils.h
+@@ -29,22 +29,22 @@ struct StringEscaping {
+ };
+ 
+ namespace Utils {
+-StringFormat::value ComputeStringFormat(const char* str, std::size_t size,
++StringFormat::value ComputeStringFormat(const std::string& str,
+                                         EMITTER_MANIP strFormat,
+                                         FlowType::value flowType,
+                                         bool escapeNonAscii);
+ 
+-bool WriteSingleQuotedString(ostream_wrapper& out, const char* str, std::size_t size);
+-bool WriteDoubleQuotedString(ostream_wrapper& out, const char* str, std::size_t size,
++bool WriteSingleQuotedString(ostream_wrapper& out, const std::string& str);
++bool WriteDoubleQuotedString(ostream_wrapper& out, const std::string& str,
+                              StringEscaping::value stringEscaping);
+-bool WriteLiteralString(ostream_wrapper& out, const char* str, std::size_t size,
++bool WriteLiteralString(ostream_wrapper& out, const std::string& str,
+                         std::size_t indent);
+ bool WriteChar(ostream_wrapper& out, char ch,
+                StringEscaping::value stringEscapingStyle);
+-bool WriteComment(ostream_wrapper& out, const char* str, std::size_t size,
++bool WriteComment(ostream_wrapper& out, const std::string& str,
+                   std::size_t postCommentIndent);
+-bool WriteAlias(ostream_wrapper& out, const char* str, std::size_t size);
+-bool WriteAnchor(ostream_wrapper& out, const char* str, std::size_t size);
++bool WriteAlias(ostream_wrapper& out, const std::string& str);
++bool WriteAnchor(ostream_wrapper& out, const std::string& str);
+ bool WriteTag(ostream_wrapper& out, const std::string& str, bool verbatim);
+ bool WriteTagWithPrefix(ostream_wrapper& out, const std::string& prefix,
+                         const std::string& tag);
+diff --git a/src/null.cpp b/src/null.cpp
+index eb75b12..db7daeb 100644
+--- a/src/null.cpp
++++ b/src/null.cpp
+@@ -1,17 +1,10 @@
+ #include "yaml-cpp/null.h"
+-#include <cstring>
+ 
+ namespace YAML {
+ _Null Null;
+ 
+-template <std::size_t N>
+-static bool same(const char* str, std::size_t size, const char (&literal)[N]) {
+-  constexpr int literalSize = N - 1; // minus null terminator
+-  return size == literalSize && std::strncmp(str, literal, literalSize) == 0;
+-}
+-
+-bool IsNullString(const char* str, std::size_t size) {
+-  return size == 0 || same(str, size, "~") || same(str, size, "null") ||
+-         same(str, size, "Null") || same(str, size, "NULL");
++bool IsNullString(const std::string& str) {
++  return str.empty() || str == "~" || str == "null" || str == "Null" ||
++         str == "NULL";
+ }
+ }  // namespace YAML
+diff --git a/src/regeximpl.h b/src/regeximpl.h
+index bc3c69b..a742cdc 100644
+--- a/src/regeximpl.h
++++ b/src/regeximpl.h
+@@ -27,10 +27,6 @@ inline bool RegEx::Matches(const Stream& in) const { return Match(in) >= 0; }
+ 
+ template <typename Source>
+ inline bool RegEx::Matches(const Source& source) const {
+-#if ((defined(_MSVC_LANG) && _MSVC_LANG >= 201103L) || __cplusplus >= 201103L)
+-  static_assert(!std::is_same<Source, const char*>::value,
+-#endif
+-    "Must use StringCharSource instead of plain C-string");
+   return Match(source) >= 0;
+ }
+ 
+diff --git a/src/singledocparser.cpp b/src/singledocparser.cpp
+index 04ea4f2..a8e949c 100644
+--- a/src/singledocparser.cpp
++++ b/src/singledocparser.cpp
+@@ -94,7 +94,7 @@ void SingleDocParser::HandleNode(EventHandler& eventHandler) {
+     tag = (token.type == Token::NON_PLAIN_SCALAR ? "!" : "?");
+ 
+   if (token.type == Token::PLAIN_SCALAR
+-      && tag.compare("?") == 0 && IsNullString(token.value.data(), token.value.size())) {
++      && tag.compare("?") == 0 && IsNullString(token.value)) {
+     eventHandler.OnNull(mark, anchor);
+     m_scanner.pop();
+     return;
+diff --git a/test/integration/emitter_test.cpp b/test/integration/emitter_test.cpp
+index 2fdfda9..e3464a6 100644
+--- a/test/integration/emitter_test.cpp
++++ b/test/integration/emitter_test.cpp
+@@ -46,26 +46,6 @@ TEST_F(EmitterTest, SimpleScalar) {
+   ExpectEmit("Hello, World!");
+ }
+ 
+-TEST_F(EmitterTest, SimpleStdStringScalar) {
+-  out << std::string("Hello, std string");
+-
+-  ExpectEmit("Hello, std string");
+-}
+-
+-#if ((defined(_MSVC_LANG) && _MSVC_LANG >= 201703L) || __cplusplus >= 201703L)
+-TEST_F(EmitterTest, SimpleStdStringViewScalar) {
+-  out << std::string_view("Hello, std string view");
+-
+-  ExpectEmit("Hello, std string view");
+-}
+-
+-TEST_F(EmitterTest, UnterminatedStdStringViewScalar) {
+-  out << std::string_view("HelloUnterminated", 5);
+-
+-  ExpectEmit("Hello");
+-}
+-#endif
+-
+ TEST_F(EmitterTest, SimpleQuotedScalar) {
+   Node n(Load("\"test\""));
+   out << n;

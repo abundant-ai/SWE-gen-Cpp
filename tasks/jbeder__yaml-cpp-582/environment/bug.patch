@@ -1,0 +1,206 @@
+diff --git a/.gitignore b/.gitignore
+index 0e29154..567609b 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,2 +1 @@
+ build/
+-/tags
+diff --git a/include/yaml-cpp/node/detail/impl.h b/include/yaml-cpp/node/detail/impl.h
+index 2be4f78..09e55f8 100644
+--- a/include/yaml-cpp/node/detail/impl.h
++++ b/include/yaml-cpp/node/detail/impl.h
+@@ -32,7 +32,7 @@ struct get_idx<Key,
+ 
+   static node* get(std::vector<node*>& sequence, const Key& key,
+                    shared_memory_holder pMemory) {
+-    if (key > sequence.size() || (key > 0 && !sequence[key - 1]->is_defined()))
++   if (key > sequence.size() || (key > 0 && !sequence[key-1]->is_defined()))
+       return 0;
+     if (key == sequence.size())
+       sequence.push_back(&pMemory->create_node());
+@@ -56,37 +56,6 @@ struct get_idx<Key, typename std::enable_if<std::is_signed<Key>::value>::type> {
+   }
+ };
+ 
+-template <typename Key, typename Enable = void>
+-struct remove_idx {
+-  static bool remove(std::vector<node*>&, const Key&) { return false; }
+-};
+-
+-template <typename Key>
+-struct remove_idx<
+-    Key, typename std::enable_if<std::is_unsigned<Key>::value &&
+-                                 !std::is_same<Key, bool>::value>::type> {
+-
+-  static bool remove(std::vector<node*>& sequence, const Key& key) {
+-    if (key >= sequence.size()) {
+-      return false;
+-    } else {
+-      sequence.erase(sequence.begin() + key);
+-      return true;
+-    }
+-  }
+-};
+-
+-template <typename Key>
+-struct remove_idx<Key,
+-                  typename std::enable_if<std::is_signed<Key>::value>::type> {
+-
+-  static bool remove(std::vector<node*>& sequence, const Key& key) {
+-    return key >= 0 ? remove_idx<std::size_t>::remove(
+-                          sequence, static_cast<std::size_t>(key))
+-                    : false;
+-  }
+-};
+-
+ template <typename T>
+ inline bool node::equals(const T& rhs, shared_memory_holder pMemory) {
+   T lhs;
+@@ -160,23 +129,21 @@ inline node& node_data::get(const Key& key, shared_memory_holder pMemory) {
+ 
+ template <typename Key>
+ inline bool node_data::remove(const Key& key, shared_memory_holder pMemory) {
+-  if (m_type == NodeType::Sequence) {
+-    return remove_idx<Key>::remove(m_sequence, key);
+-  } else if (m_type == NodeType::Map) {
+-    kv_pairs::iterator it = m_undefinedPairs.begin();
+-    while (it != m_undefinedPairs.end()) {
+-      kv_pairs::iterator jt = std::next(it);
+-      if (it->first->equals(key, pMemory)) {
+-        m_undefinedPairs.erase(it);
+-      }
+-      it = jt;
+-    }
++  if (m_type != NodeType::Map)
++    return false;
++
++  for (kv_pairs::iterator it = m_undefinedPairs.begin();
++       it != m_undefinedPairs.end();) {
++    kv_pairs::iterator jt = std::next(it);
++    if (it->first->equals(key, pMemory))
++      m_undefinedPairs.erase(it);
++    it = jt;
++  }
+ 
+-    for (node_map::iterator it = m_map.begin(); it != m_map.end(); ++it) {
+-      if (it->first->equals(key, pMemory)) {
+-        m_map.erase(it);
+-        return true;
+-      }
++  for (node_map::iterator it = m_map.begin(); it != m_map.end(); ++it) {
++    if (it->first->equals(key, pMemory)) {
++      m_map.erase(it);
++      return true;
+     }
+   }
+ 
+diff --git a/src/node_data.cpp b/src/node_data.cpp
+index 2dfcd7b..77cd465 100644
+--- a/src/node_data.cpp
++++ b/src/node_data.cpp
+@@ -235,14 +235,6 @@ bool node_data::remove(node& key, shared_memory_holder /* pMemory */) {
+   if (m_type != NodeType::Map)
+     return false;
+ 
+-  kv_pairs::iterator it = m_undefinedPairs.begin();
+-  while (it != m_undefinedPairs.end()) {
+-    kv_pairs::iterator jt = std::next(it);
+-    if (it->first->is(key))
+-      m_undefinedPairs.erase(it);
+-    it = jt;
+-  }
+-
+   for (node_map::iterator it = m_map.begin(); it != m_map.end(); ++it) {
+     if (it->first->is(key)) {
+       m_map.erase(it);
+diff --git a/test/node/node_test.cpp b/test/node/node_test.cpp
+index 61ba3e6..485ad09 100644
+--- a/test/node/node_test.cpp
++++ b/test/node/node_test.cpp
+@@ -1,10 +1,10 @@
+-#include "yaml-cpp/node/node.h"
+ #include "yaml-cpp/emitter.h"
+-#include "yaml-cpp/node/convert.h"
+-#include "yaml-cpp/node/detail/impl.h"
+ #include "yaml-cpp/node/emit.h"
++#include "yaml-cpp/node/node.h"
+ #include "yaml-cpp/node/impl.h"
++#include "yaml-cpp/node/convert.h"
+ #include "yaml-cpp/node/iterator.h"
++#include "yaml-cpp/node/detail/impl.h"
+ 
+ #include "gmock/gmock.h"
+ #include "gtest/gtest.h"
+@@ -47,30 +47,6 @@ TEST(NodeTest, SimpleAppendSequence) {
+   EXPECT_TRUE(node.IsSequence());
+ }
+ 
+-TEST(NodeTest, SequenceElementRemoval) {
+-  Node node;
+-  node[0] = "a";
+-  node[1] = "b";
+-  node[2] = "c";
+-  node.remove(1);
+-  EXPECT_TRUE(node.IsSequence());
+-  EXPECT_EQ(2, node.size());
+-  EXPECT_EQ("a", node[0].as<std::string>());
+-  EXPECT_EQ("c", node[1].as<std::string>());
+-}
+-
+-TEST(NodeTest, SequenceLastElementRemoval) {
+-  Node node;
+-  node[0] = "a";
+-  node[1] = "b";
+-  node[2] = "c";
+-  node.remove(2);
+-  EXPECT_TRUE(node.IsSequence());
+-  EXPECT_EQ(2, node.size());
+-  EXPECT_EQ("a", node[0].as<std::string>());
+-  EXPECT_EQ("b", node[1].as<std::string>());
+-}
+-
+ TEST(NodeTest, MapElementRemoval) {
+   Node node;
+   node["foo"] = "bar";
+@@ -78,16 +54,6 @@ TEST(NodeTest, MapElementRemoval) {
+   EXPECT_TRUE(!node["foo"]);
+ }
+ 
+-TEST(NodeTest, MapIntegerElementRemoval) {
+-  Node node;
+-  node[1] = "hello";
+-  node[2] = 'c';
+-  node["foo"] = "bar";
+-  EXPECT_TRUE(node.IsMap());
+-  node.remove(1);
+-  EXPECT_TRUE(node.IsMap());
+-}
+-
+ TEST(NodeTest, SimpleAssignSequence) {
+   Node node;
+   node[0] = 10;
+@@ -140,14 +106,6 @@ TEST(NodeTest, RemoveUnassignedNode) {
+   EXPECT_EQ(0, node.size());
+ }
+ 
+-TEST(NodeTest, RemoveUnassignedNodeFromMap) {
+-  Node node(NodeType::Map);
+-  Node n;
+-  node[n];
+-  node.remove(n);
+-  EXPECT_EQ(0, node.size());
+-}
+-
+ TEST(NodeTest, MapForceInsert) {
+   Node node;
+   Node k1("k1");
+diff --git a/util/CMakeLists.txt b/util/CMakeLists.txt
+index 931884f..2286627 100644
+--- a/util/CMakeLists.txt
++++ b/util/CMakeLists.txt
+@@ -1,5 +1,3 @@
+-cmake_minimum_required(VERSION 3.5)
+-
+ add_sources(parse.cpp)
+ add_executable(parse parse.cpp)
+ target_link_libraries(parse yaml-cpp)

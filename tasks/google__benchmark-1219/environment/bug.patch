@@ -1,0 +1,841 @@
+diff --git a/docs/user_guide.md b/docs/user_guide.md
+index 9fd4ac1..9cbaeae 100644
+--- a/docs/user_guide.md
++++ b/docs/user_guide.md
+@@ -140,8 +140,8 @@ Write benchmark results to a file with the `--benchmark_out=<filename>` option
+ (or set `BENCHMARK_OUT`). Specify the output format with
+ `--benchmark_out_format={json|console|csv}` (or set
+ `BENCHMARK_OUT_FORMAT={json|console|csv}`). Note that the 'csv' reporter is
+-deprecated and the saved `.csv` file
+-[is not parsable](https://github.com/google/benchmark/issues/794) by csv
++deprecated and the saved `.csv` file 
++[is not parsable](https://github.com/google/benchmark/issues/794) by csv 
+ parsers.
+ 
+ Specifying `--benchmark_out` does not suppress the console output.
+@@ -983,25 +983,6 @@ BENCHMARK(BM_spin_empty)
+   ->Arg(512);
+ ```
+ 
+-While usually the statistics produce values in time units,
+-you can also produce percentages:
+-
+-```c++
+-void BM_spin_empty(benchmark::State& state) {
+-  for (auto _ : state) {
+-    for (int x = 0; x < state.range(0); ++x) {
+-      benchmark::DoNotOptimize(x);
+-    }
+-  }
+-}
+-
+-BENCHMARK(BM_spin_empty)
+-  ->ComputeStatistics("ratio", [](const std::vector<double>& v) -> double {
+-    return std::begin(v) / std::end(v);
+-  }, benchmark::StatisticUnit::Percentage)
+-  ->Arg(512);
+-```
+-
+ <a name="using-register-benchmark" />
+ 
+ ## Using RegisterBenchmark(name, fn, args...)
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index fbb5340..31f2b02 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -450,8 +450,6 @@ enum BigO { oNone, o1, oN, oNSquared, oNCubed, oLogN, oNLogN, oAuto, oLambda };
+ 
+ typedef uint64_t IterationCount;
+ 
+-enum StatisticUnit { kTime, kPercentage };
+-
+ // BigOFunc is passed to a benchmark in order to specify the asymptotic
+ // computational complexity for the benchmark.
+ typedef double(BigOFunc)(IterationCount);
+@@ -464,11 +462,9 @@ namespace internal {
+ struct Statistics {
+   std::string name_;
+   StatisticsFunc* compute_;
+-  StatisticUnit unit_;
+ 
+-  Statistics(const std::string& name, StatisticsFunc* compute,
+-             StatisticUnit unit = kTime)
+-      : name_(name), compute_(compute), unit_(unit) {}
++  Statistics(const std::string& name, StatisticsFunc* compute)
++      : name_(name), compute_(compute) {}
+ };
+ 
+ class BenchmarkInstance;
+@@ -969,8 +965,7 @@ class Benchmark {
+   Benchmark* Complexity(BigOFunc* complexity);
+ 
+   // Add this statistics to be computed over all the values of benchmark run
+-  Benchmark* ComputeStatistics(std::string name, StatisticsFunc* statistics,
+-                               StatisticUnit unit = kTime);
++  Benchmark* ComputeStatistics(std::string name, StatisticsFunc* statistics);
+ 
+   // Support for running multiple copies of the same benchmark concurrently
+   // in multiple threads.  This may be useful when measuring the scaling
+@@ -1426,7 +1421,6 @@ class BenchmarkReporter {
+ 
+     Run()
+         : run_type(RT_Iteration),
+-          aggregate_unit(kTime),
+           error_occurred(false),
+           iterations(1),
+           threads(1),
+@@ -1450,7 +1444,6 @@ class BenchmarkReporter {
+     int64_t per_family_instance_index;
+     RunType run_type;
+     std::string aggregate_name;
+-    StatisticUnit aggregate_unit;
+     std::string report_label;  // Empty if not set by benchmark.
+     bool error_occurred;
+     std::string error_message;
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index 56fef5c..0a90be3 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -399,9 +399,8 @@ Benchmark* Benchmark::Complexity(BigOFunc* complexity) {
+ }
+ 
+ Benchmark* Benchmark::ComputeStatistics(std::string name,
+-                                        StatisticsFunc* statistics,
+-                                        StatisticUnit unit) {
+-  statistics_.emplace_back(name, statistics, unit);
++                                        StatisticsFunc* statistics) {
++  statistics_.emplace_back(name, statistics);
+   return this;
+ }
+ 
+diff --git a/src/complexity.cc b/src/complexity.cc
+index b87697f..7757315 100644
+--- a/src/complexity.cc
++++ b/src/complexity.cc
+@@ -199,7 +199,6 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+   big_o.repetition_index = Run::no_repetition_index;
+   big_o.threads = reports[0].threads;
+   big_o.aggregate_name = "BigO";
+-  big_o.aggregate_unit = StatisticUnit::kTime;
+   big_o.report_label = reports[0].report_label;
+   big_o.iterations = 0;
+   big_o.real_accumulated_time = result_real.coef;
+@@ -221,7 +220,6 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+   rms.per_family_instance_index = reports[0].per_family_instance_index;
+   rms.run_type = BenchmarkReporter::Run::RT_Aggregate;
+   rms.aggregate_name = "RMS";
+-  rms.aggregate_unit = StatisticUnit::kPercentage;
+   rms.report_label = big_o.report_label;
+   rms.iterations = 0;
+   rms.repetition_index = Run::no_repetition_index;
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index de2a7a0..6fd7645 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -142,16 +142,10 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+   } else if (result.report_rms) {
+     printer(Out, COLOR_YELLOW, "%10.0f %-4s %10.0f %-4s ", real_time * 100, "%",
+             cpu_time * 100, "%");
+-  } else if (result.run_type != Run::RT_Aggregate ||
+-             result.aggregate_unit == StatisticUnit::kTime) {
++  } else {
+     const char* timeLabel = GetTimeUnitString(result.time_unit);
+     printer(Out, COLOR_YELLOW, "%s %-4s %s %-4s ", real_time_str.c_str(), timeLabel,
+             cpu_time_str.c_str(), timeLabel);
+-  } else {
+-    assert(result.aggregate_unit == StatisticUnit::kPercentage);
+-    printer(Out, COLOR_YELLOW, "%10.2f %-4s %10.2f %-4s ",
+-            (100. * result.real_accumulated_time), "%",
+-            (100. * result.cpu_accumulated_time), "%");
+   }
+ 
+   if (!result.report_big_o && !result.report_rms) {
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index 22d5ce0..f3ddfb9 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -251,15 +251,6 @@ void JSONReporter::PrintRunData(Run const& run) {
+   out << indent << FormatKV("threads", run.threads) << ",\n";
+   if (run.run_type == BenchmarkReporter::Run::RT_Aggregate) {
+     out << indent << FormatKV("aggregate_name", run.aggregate_name) << ",\n";
+-    out << indent << FormatKV("aggregate_unit", [&run]() -> const char* {
+-      switch (run.aggregate_unit) {
+-        case StatisticUnit::kTime:
+-          return "time";
+-        case StatisticUnit::kPercentage:
+-          return "percentage";
+-      }
+-      BENCHMARK_UNREACHABLE();
+-    }()) << ",\n";
+   }
+   if (run.error_occurred) {
+     out << indent << FormatKV("error_occurred", run.error_occurred) << ",\n";
+@@ -267,17 +258,8 @@ void JSONReporter::PrintRunData(Run const& run) {
+   }
+   if (!run.report_big_o && !run.report_rms) {
+     out << indent << FormatKV("iterations", run.iterations) << ",\n";
+-    if (run.run_type != Run::RT_Aggregate ||
+-        run.aggregate_unit == StatisticUnit::kTime) {
+-      out << indent << FormatKV("real_time", run.GetAdjustedRealTime())
+-          << ",\n";
+-      out << indent << FormatKV("cpu_time", run.GetAdjustedCPUTime());
+-    } else {
+-      assert(run.aggregate_unit == StatisticUnit::kPercentage);
+-      out << indent << FormatKV("real_time", run.real_accumulated_time)
+-          << ",\n";
+-      out << indent << FormatKV("cpu_time", run.cpu_accumulated_time);
+-    }
++    out << indent << FormatKV("real_time", run.GetAdjustedRealTime()) << ",\n";
++    out << indent << FormatKV("cpu_time", run.GetAdjustedCPUTime());
+     out << ",\n"
+         << indent << FormatKV("time_unit", GetTimeUnitString(run.time_unit));
+   } else if (run.report_big_o) {
+diff --git a/src/statistics.cc b/src/statistics.cc
+index 88dfc35..5f82c27 100644
+--- a/src/statistics.cc
++++ b/src/statistics.cc
+@@ -155,7 +155,6 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+     data.repetitions = reports[0].repetitions;
+     data.repetition_index = Run::no_repetition_index;
+     data.aggregate_name = Stat.name_;
+-    data.aggregate_unit = Stat.unit_;
+     data.report_label = report_label;
+ 
+     // It is incorrect to say that an aggregate is computed over
+@@ -168,15 +167,13 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+     data.real_accumulated_time = Stat.compute_(real_accumulated_time_stat);
+     data.cpu_accumulated_time = Stat.compute_(cpu_accumulated_time_stat);
+ 
+-    if (data.aggregate_unit == StatisticUnit::kTime) {
+-      // We will divide these times by data.iterations when reporting, but the
+-      // data.iterations is not necessarily the scale of these measurements,
+-      // because in each repetition, these timers are sum over all the iters.
+-      // And if we want to say that the stats are over N repetitions and not
+-      // M iterations, we need to multiply these by (N/M).
+-      data.real_accumulated_time *= iteration_rescale_factor;
+-      data.cpu_accumulated_time *= iteration_rescale_factor;
+-    }
++    // We will divide these times by data.iterations when reporting, but the
++    // data.iterations is not nessesairly the scale of these measurements,
++    // because in each repetition, these timers are sum over all the iterations.
++    // And if we want to say that the stats are over N repetitions and not
++    // M iterations, we need to multiply these by (N/M).
++    data.real_accumulated_time *= iteration_rescale_factor;
++    data.cpu_accumulated_time *= iteration_rescale_factor;
+ 
+     data.time_unit = reports[0].time_unit;
+ 
+diff --git a/test/complexity_test.cc b/test/complexity_test.cc
+index 7407359..0de73c5 100644
+--- a/test/complexity_test.cc
++++ b/test/complexity_test.cc
+@@ -36,7 +36,6 @@ int AddComplexityTest(std::string test_name, std::string big_o_test_name,
+        {"\"repetitions\": %int,$", MR_Next},
+        {"\"threads\": 1,$", MR_Next},
+        {"\"aggregate_name\": \"BigO\",$", MR_Next},
+-       {"\"aggregate_unit\": \"time\",$", MR_Next},
+        {"\"cpu_coefficient\": %float,$", MR_Next},
+        {"\"real_coefficient\": %float,$", MR_Next},
+        {"\"big_o\": \"%bigo\",$", MR_Next},
+@@ -50,7 +49,6 @@ int AddComplexityTest(std::string test_name, std::string big_o_test_name,
+        {"\"repetitions\": %int,$", MR_Next},
+        {"\"threads\": 1,$", MR_Next},
+        {"\"aggregate_name\": \"RMS\",$", MR_Next},
+-       {"\"aggregate_unit\": \"percentage\",$", MR_Next},
+        {"\"rms\": %float$", MR_Next},
+        {"}", MR_Next}});
+   AddCases(TC_CSVOut, {{"^\"%bigo_name\",,%float,%float,%bigo,,,,,$"},
+diff --git a/test/repetitions_test.cc b/test/repetitions_test.cc
+index 569777d..2f94d05 100644
+--- a/test/repetitions_test.cc
++++ b/test/repetitions_test.cc
+@@ -59,7 +59,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"mean\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -74,7 +73,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"median\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -89,7 +87,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -167,7 +164,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions_mean\",$"},
+                        {"\"repetitions\": 3,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"mean\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": %int,$", MR_Next},
+                        {"\"real_time\": %float,$", MR_Next},
+                        {"\"cpu_time\": %float,$", MR_Next},
+@@ -181,7 +177,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions_median\",$"},
+                        {"\"repetitions\": 3,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"median\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": %int,$", MR_Next},
+                        {"\"real_time\": %float,$", MR_Next},
+                        {"\"cpu_time\": %float,$", MR_Next},
+@@ -195,7 +190,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions_stddev\",$"},
+                        {"\"repetitions\": 3,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": %int,$", MR_Next},
+                        {"\"real_time\": %float,$", MR_Next},
+                        {"\"cpu_time\": %float,$", MR_Next},
+diff --git a/test/reporter_output_test.cc b/test/reporter_output_test.cc
+index 7c7d994..989eb48 100644
+--- a/test/reporter_output_test.cc
++++ b/test/reporter_output_test.cc
+@@ -1,6 +1,5 @@
+ 
+ #undef NDEBUG
+-#include <numeric>
+ #include <utility>
+ 
+ #include "benchmark/benchmark.h"
+@@ -455,7 +454,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:2\",$"},
+                        {"\"repetitions\": 2,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"mean\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": 2,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:2_median\",$"},
+                        {"\"family_index\": 15,$", MR_Next},
+@@ -465,7 +463,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:2\",$"},
+                        {"\"repetitions\": 2,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"median\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": 2,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:2_stddev\",$"},
+                        {"\"family_index\": 15,$", MR_Next},
+@@ -475,7 +472,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:2\",$"},
+                        {"\"repetitions\": 2,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": 2,$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_Repeat/repeats:2\",%csv_report$"},
+                       {"^\"BM_Repeat/repeats:2\",%csv_report$"},
+@@ -523,7 +519,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:3\",$"},
+                        {"\"repetitions\": 3,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"mean\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": 3,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3_median\",$"},
+                        {"\"family_index\": 16,$", MR_Next},
+@@ -533,7 +528,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:3\",$"},
+                        {"\"repetitions\": 3,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"median\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": 3,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3_stddev\",$"},
+                        {"\"family_index\": 16,$", MR_Next},
+@@ -543,7 +537,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:3\",$"},
+                        {"\"repetitions\": 3,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": 3,$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_Repeat/repeats:3\",%csv_report$"},
+                       {"^\"BM_Repeat/repeats:3\",%csv_report$"},
+@@ -601,7 +594,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:4\",$"},
+                        {"\"repetitions\": 4,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"mean\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": 4,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4_median\",$"},
+                        {"\"family_index\": 17,$", MR_Next},
+@@ -611,7 +603,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:4\",$"},
+                        {"\"repetitions\": 4,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"median\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": 4,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4_stddev\",$"},
+                        {"\"family_index\": 17,$", MR_Next},
+@@ -621,7 +612,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:4\",$"},
+                        {"\"repetitions\": 4,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-                       {"\"aggregate_unit\": \"time\",$", MR_Next},
+                        {"\"iterations\": 4,$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_Repeat/repeats:4\",%csv_report$"},
+                       {"^\"BM_Repeat/repeats:4\",%csv_report$"},
+@@ -671,7 +661,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 3,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"mean\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 3,$", MR_Next},
+            {"\"name\": \"BM_SummaryRepeat/repeats:3_median\",$"},
+            {"\"family_index\": 19,$", MR_Next},
+@@ -681,7 +670,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 3,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"median\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 3,$", MR_Next},
+            {"\"name\": \"BM_SummaryRepeat/repeats:3_stddev\",$"},
+            {"\"family_index\": 19,$", MR_Next},
+@@ -691,7 +679,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 3,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 3,$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{".*BM_SummaryRepeat/repeats:3 ", MR_Not},
+                       {"^\"BM_SummaryRepeat/repeats:3_mean\",%csv_report$"},
+@@ -722,7 +709,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"mean\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 2,$", MR_Next},
+            {"\"name\": \"BM_SummaryDisplay/repeats:2_median\",$"},
+            {"\"family_index\": 20,$", MR_Next},
+@@ -732,7 +718,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"median\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 2,$", MR_Next},
+            {"\"name\": \"BM_SummaryDisplay/repeats:2_stddev\",$"},
+            {"\"family_index\": 20,$", MR_Next},
+@@ -742,7 +727,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 2,$", MR_Next}});
+ ADD_CASES(TC_CSVOut,
+           {{".*BM_SummaryDisplay/repeats:2 ", MR_Not},
+@@ -777,7 +761,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 3,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"mean\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 3,$", MR_Next},
+            {"\"time_unit\": \"us\",?$"},
+            {"\"name\": \"BM_RepeatTimeUnit/repeats:3_median\",$"},
+@@ -788,7 +771,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 3,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"median\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 3,$", MR_Next},
+            {"\"time_unit\": \"us\",?$"},
+            {"\"name\": \"BM_RepeatTimeUnit/repeats:3_stddev\",$"},
+@@ -799,7 +781,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 3,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 3,$", MR_Next},
+            {"\"time_unit\": \"us\",?$"}});
+ ADD_CASES(TC_CSVOut,
+@@ -888,7 +869,6 @@ ADD_CASES(
+      {"\"repetitions\": 3,$", MR_Next},
+      {"\"threads\": 1,$", MR_Next},
+      {"\"aggregate_name\": \"mean\",$", MR_Next},
+-     {"\"aggregate_unit\": \"time\",$", MR_Next},
+      {"\"iterations\": 3,$", MR_Next},
+      {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+      {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_median\",$"},
+@@ -900,7 +880,6 @@ ADD_CASES(
+      {"\"repetitions\": 3,$", MR_Next},
+      {"\"threads\": 1,$", MR_Next},
+      {"\"aggregate_name\": \"median\",$", MR_Next},
+-     {"\"aggregate_unit\": \"time\",$", MR_Next},
+      {"\"iterations\": 3,$", MR_Next},
+      {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+      {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_stddev\",$"},
+@@ -912,7 +891,6 @@ ADD_CASES(
+      {"\"repetitions\": 3,$", MR_Next},
+      {"\"threads\": 1,$", MR_Next},
+      {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-     {"\"aggregate_unit\": \"time\",$", MR_Next},
+      {"\"iterations\": 3,$", MR_Next},
+      {"\"real_time\": %float,$", MR_Next},
+      {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_\",$"},
+@@ -924,7 +902,6 @@ ADD_CASES(
+      {"\"repetitions\": 3,$", MR_Next},
+      {"\"threads\": 1,$", MR_Next},
+      {"\"aggregate_name\": \"\",$", MR_Next},
+-     {"\"aggregate_unit\": \"time\",$", MR_Next},
+      {"\"iterations\": 3,$", MR_Next},
+      {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next}});
+ ADD_CASES(
+@@ -939,154 +916,6 @@ ADD_CASES(
+       "manual_time_stddev\",%csv_report$"},
+      {"^\"BM_UserStats/iterations:5/repeats:3/manual_time_\",%csv_report$"}});
+ 
+-// ========================================================================= //
+-// ------------- Testing relative standard deviation statistics ------------ //
+-// ========================================================================= //
+-
+-const auto UserPercentStatistics = [](const std::vector<double>& v) {
+-  return 1. / 100.;
+-};
+-void BM_UserPercentStats(benchmark::State& state) {
+-  for (auto _ : state) {
+-    state.SetIterationTime(150 / 10e8);
+-  }
+-}
+-// clang-format off
+-BENCHMARK(BM_UserPercentStats)
+-  ->Repetitions(3)
+-  ->Iterations(5)
+-  ->UseManualTime()
+-  ->Unit(benchmark::TimeUnit::kNanosecond)
+-  ->ComputeStatistics("", UserPercentStatistics, benchmark::StatisticUnit::kPercentage);
+-// clang-format on
+-
+-// check that UserPercent-provided stats is calculated, and is after the
+-// default-ones empty string as name is intentional, it would sort before
+-// anything else
+-ADD_CASES(TC_ConsoleOut,
+-          {{"^BM_UserPercentStats/iterations:5/repeats:3/manual_time [ "
+-            "]* 150 ns %time [ ]*5$"},
+-           {"^BM_UserPercentStats/iterations:5/repeats:3/manual_time [ "
+-            "]* 150 ns %time [ ]*5$"},
+-           {"^BM_UserPercentStats/iterations:5/repeats:3/manual_time [ "
+-            "]* 150 ns %time [ ]*5$"},
+-           {"^BM_UserPercentStats/iterations:5/repeats:3/"
+-            "manual_time_mean [ ]* 150 ns %time [ ]*3$"},
+-           {"^BM_UserPercentStats/iterations:5/repeats:3/"
+-            "manual_time_median [ ]* 150 ns %time [ ]*3$"},
+-           {"^BM_UserPercentStats/iterations:5/repeats:3/"
+-            "manual_time_stddev [ ]* 0.000 ns %time [ ]*3$"},
+-           {"^BM_UserPercentStats/iterations:5/repeats:3/manual_time_ "
+-            "[ ]* 1.00 % [ ]* 1.00 %[ ]*3$"}});
+-ADD_CASES(
+-    TC_JSONOut,
+-    {{"\"name\": \"BM_UserPercentStats/iterations:5/repeats:3/manual_time\",$"},
+-     {"\"family_index\": 23,$", MR_Next},
+-     {"\"per_family_instance_index\": 0,$", MR_Next},
+-     {"\"run_name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time\",$",
+-      MR_Next},
+-     {"\"run_type\": \"iteration\",$", MR_Next},
+-     {"\"repetitions\": 3,$", MR_Next},
+-     {"\"repetition_index\": 0,$", MR_Next},
+-     {"\"threads\": 1,$", MR_Next},
+-     {"\"iterations\": 5,$", MR_Next},
+-     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+-     {"\"name\": \"BM_UserPercentStats/iterations:5/repeats:3/manual_time\",$"},
+-     {"\"family_index\": 23,$", MR_Next},
+-     {"\"per_family_instance_index\": 0,$", MR_Next},
+-     {"\"run_name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time\",$",
+-      MR_Next},
+-     {"\"run_type\": \"iteration\",$", MR_Next},
+-     {"\"repetitions\": 3,$", MR_Next},
+-     {"\"repetition_index\": 1,$", MR_Next},
+-     {"\"threads\": 1,$", MR_Next},
+-     {"\"iterations\": 5,$", MR_Next},
+-     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+-     {"\"name\": \"BM_UserPercentStats/iterations:5/repeats:3/manual_time\",$"},
+-     {"\"family_index\": 23,$", MR_Next},
+-     {"\"per_family_instance_index\": 0,$", MR_Next},
+-     {"\"run_name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time\",$",
+-      MR_Next},
+-     {"\"run_type\": \"iteration\",$", MR_Next},
+-     {"\"repetitions\": 3,$", MR_Next},
+-     {"\"repetition_index\": 2,$", MR_Next},
+-     {"\"threads\": 1,$", MR_Next},
+-     {"\"iterations\": 5,$", MR_Next},
+-     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+-     {"\"name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time_mean\",$"},
+-     {"\"family_index\": 23,$", MR_Next},
+-     {"\"per_family_instance_index\": 0,$", MR_Next},
+-     {"\"run_name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time\",$",
+-      MR_Next},
+-     {"\"run_type\": \"aggregate\",$", MR_Next},
+-     {"\"repetitions\": 3,$", MR_Next},
+-     {"\"threads\": 1,$", MR_Next},
+-     {"\"aggregate_name\": \"mean\",$", MR_Next},
+-     {"\"aggregate_unit\": \"time\",$", MR_Next},
+-     {"\"iterations\": 3,$", MR_Next},
+-     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+-     {"\"name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time_median\",$"},
+-     {"\"family_index\": 23,$", MR_Next},
+-     {"\"per_family_instance_index\": 0,$", MR_Next},
+-     {"\"run_name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time\",$",
+-      MR_Next},
+-     {"\"run_type\": \"aggregate\",$", MR_Next},
+-     {"\"repetitions\": 3,$", MR_Next},
+-     {"\"threads\": 1,$", MR_Next},
+-     {"\"aggregate_name\": \"median\",$", MR_Next},
+-     {"\"aggregate_unit\": \"time\",$", MR_Next},
+-     {"\"iterations\": 3,$", MR_Next},
+-     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+-     {"\"name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time_stddev\",$"},
+-     {"\"family_index\": 23,$", MR_Next},
+-     {"\"per_family_instance_index\": 0,$", MR_Next},
+-     {"\"run_name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time\",$",
+-      MR_Next},
+-     {"\"run_type\": \"aggregate\",$", MR_Next},
+-     {"\"repetitions\": 3,$", MR_Next},
+-     {"\"threads\": 1,$", MR_Next},
+-     {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-     {"\"aggregate_unit\": \"time\",$", MR_Next},
+-     {"\"iterations\": 3,$", MR_Next},
+-     {"\"real_time\": %float,$", MR_Next},
+-     {"\"name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time_\",$"},
+-     {"\"family_index\": 23,$", MR_Next},
+-     {"\"per_family_instance_index\": 0,$", MR_Next},
+-     {"\"run_name\": "
+-      "\"BM_UserPercentStats/iterations:5/repeats:3/manual_time\",$",
+-      MR_Next},
+-     {"\"run_type\": \"aggregate\",$", MR_Next},
+-     {"\"repetitions\": 3,$", MR_Next},
+-     {"\"threads\": 1,$", MR_Next},
+-     {"\"aggregate_name\": \"\",$", MR_Next},
+-     {"\"aggregate_unit\": \"percentage\",$", MR_Next},
+-     {"\"iterations\": 3,$", MR_Next},
+-     {"\"real_time\": 1\\.(0)*e-(0)*2,$", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_UserPercentStats/iterations:5/repeats:3/"
+-                       "manual_time\",%csv_report$"},
+-                      {"^\"BM_UserPercentStats/iterations:5/repeats:3/"
+-                       "manual_time\",%csv_report$"},
+-                      {"^\"BM_UserPercentStats/iterations:5/repeats:3/"
+-                       "manual_time\",%csv_report$"},
+-                      {"^\"BM_UserPercentStats/iterations:5/repeats:3/"
+-                       "manual_time_mean\",%csv_report$"},
+-                      {"^\"BM_UserPercentStats/iterations:5/repeats:3/"
+-                       "manual_time_median\",%csv_report$"},
+-                      {"^\"BM_UserPercentStats/iterations:5/repeats:3/"
+-                       "manual_time_stddev\",%csv_report$"},
+-                      {"^\"BM_UserPercentStats/iterations:5/repeats:3/"
+-                       "manual_time_\",%csv_report$"}});
+-
+ // ========================================================================= //
+ // ------------------------- Testing StrEscape JSON ------------------------ //
+ // ========================================================================= //
+diff --git a/test/user_counters_tabular_test.cc b/test/user_counters_tabular_test.cc
+index ff81e26..421f27b 100644
+--- a/test/user_counters_tabular_test.cc
++++ b/test/user_counters_tabular_test.cc
+@@ -125,7 +125,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"mean\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -147,7 +146,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"median\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -169,7 +167,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -234,7 +231,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 2,$", MR_Next},
+            {"\"aggregate_name\": \"median\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -256,7 +252,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 2,$", MR_Next},
+            {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+diff --git a/test/user_counters_thousands_test.cc b/test/user_counters_thousands_test.cc
+index a42683b..bbe1942 100644
+--- a/test/user_counters_thousands_test.cc
++++ b/test/user_counters_thousands_test.cc
+@@ -96,7 +96,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"mean\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 2,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -116,7 +115,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"median\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 2,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -136,7 +134,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"repetitions\": 2,$", MR_Next},
+            {"\"threads\": 1,$", MR_Next},
+            {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-           {"\"aggregate_unit\": \"time\",$", MR_Next},
+            {"\"iterations\": 2,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+diff --git a/tools/gbench/Inputs/test4_run0.json b/tools/gbench/Inputs/test4_run0.json
+deleted file mode 100644
+index 54cf127..0000000
+--- a/tools/gbench/Inputs/test4_run0.json
++++ /dev/null
+@@ -1,21 +0,0 @@
+-{
+-  "context": {
+-    "date": "2016-08-02 17:44:46",
+-    "num_cpus": 4,
+-    "mhz_per_cpu": 4228,
+-    "cpu_scaling_enabled": false,
+-    "library_build_type": "release"
+-  },
+-  "benchmarks": [
+-    {
+-      "name": "whocares",
+-      "run_type": "aggregate",
+-      "aggregate_name": "zz",
+-      "aggregate_unit": "percentage",
+-      "iterations": 1000,
+-      "real_time": 0.01,
+-      "cpu_time": 0.10,
+-      "time_unit": "ns"
+-    }
+-  ]
+-}
+diff --git a/tools/gbench/Inputs/test4_run1.json b/tools/gbench/Inputs/test4_run1.json
+deleted file mode 100644
+index 25d5605..0000000
+--- a/tools/gbench/Inputs/test4_run1.json
++++ /dev/null
+@@ -1,21 +0,0 @@
+-{
+-  "context": {
+-    "date": "2016-08-02 17:44:46",
+-    "num_cpus": 4,
+-    "mhz_per_cpu": 4228,
+-    "cpu_scaling_enabled": false,
+-    "library_build_type": "release"
+-  },
+-  "benchmarks": [
+-    {
+-      "name": "whocares",
+-      "run_type": "aggregate",
+-      "aggregate_name": "zz",
+-      "aggregate_unit": "percentage",
+-      "iterations": 1000,
+-      "real_time": 0.005,
+-      "cpu_time": 0.15,
+-      "time_unit": "ns"
+-    }
+-  ]
+-}
+diff --git a/tools/gbench/report.py b/tools/gbench/report.py
+index 8203cba..504e15f 100644
+--- a/tools/gbench/report.py
++++ b/tools/gbench/report.py
+@@ -914,69 +914,6 @@ class TestReportDifferenceWithUTestWhileDisplayingAggregatesOnly(
+             assert_measurements(self, out, expected)
+ 
+ 
+-
+-class TestReportDifferenceForPercentageAggregates(
+-        unittest.TestCase):
+-    @classmethod
+-    def setUpClass(cls):
+-        def load_results():
+-            import json
+-            testInputs = os.path.join(
+-                os.path.dirname(
+-                    os.path.realpath(__file__)),
+-                'Inputs')
+-            testOutput1 = os.path.join(testInputs, 'test4_run0.json')
+-            testOutput2 = os.path.join(testInputs, 'test4_run1.json')
+-            with open(testOutput1, 'r') as f:
+-                json1 = json.load(f)
+-            with open(testOutput2, 'r') as f:
+-                json2 = json.load(f)
+-            return json1, json2
+-
+-        json1, json2 = load_results()
+-        cls.json_diff_report = get_difference_report(
+-            json1, json2, utest=True)
+-
+-    def test_json_diff_report_pretty_printing(self):
+-        expect_lines = [
+-            ['whocares', '-0.5000', '+0.5000', '0', '0', '0', '0']
+-        ]
+-        output_lines_with_header = print_difference_report(
+-            self.json_diff_report,
+-            utest=True, utest_alpha=0.05, use_color=False)
+-        output_lines = output_lines_with_header[2:]
+-        print("\n")
+-        print("\n".join(output_lines_with_header))
+-        self.assertEqual(len(output_lines), len(expect_lines))
+-        for i in range(0, len(output_lines)):
+-            parts = [x for x in output_lines[i].split(' ') if x]
+-            self.assertEqual(expect_lines[i], parts)
+-
+-    def test_json_diff_report(self):
+-        expected_output = [
+-            {
+-                'name': u'whocares',
+-                'measurements': [
+-                    {'time': -0.5,
+-                     'cpu': 0.5,
+-                     'real_time': 0.01,
+-                     'real_time_other': 0.005,
+-                     'cpu_time': 0.10,
+-                     'cpu_time_other': 0.15}
+-                ],
+-                'time_unit': 'ns',
+-                'utest': {}
+-            }
+-        ]
+-        self.assertEqual(len(self.json_diff_report), len(expected_output))
+-        for out, expected in zip(
+-                self.json_diff_report, expected_output):
+-            self.assertEqual(out['name'], expected['name'])
+-            self.assertEqual(out['time_unit'], expected['time_unit'])
+-            assert_utest(self, out, expected)
+-            assert_measurements(self, out, expected)
+-
+-
+ class TestReportSorting(unittest.TestCase):
+     @classmethod
+     def setUpClass(cls):

@@ -1,0 +1,439 @@
+diff --git a/Makefile b/Makefile
+index fcb7158..edc3c42 100644
+--- a/Makefile
++++ b/Makefile
+@@ -27,8 +27,13 @@ ifeq ($(config),coverage)
+ endif
+ 
+ ifeq ($(config),sanitize)
+-	CXXFLAGS+=-fsanitize=address,undefined
+-	LDFLAGS+=-fsanitize=address,undefined
++	CXXFLAGS+=-fsanitize=address
++	LDFLAGS+=-fsanitize=address
++
++	ifneq ($(shell uname),Darwin)
++		CXXFLAGS+=-fsanitize=undefined
++		LDFLAGS+=-fsanitize=undefined
++	endif
+ endif
+ 
+ ifeq ($(config),analyze)
+diff --git a/src/pugixml.cpp b/src/pugixml.cpp
+index 01ab41d..b9e54fe 100644
+--- a/src/pugixml.cpp
++++ b/src/pugixml.cpp
+@@ -327,10 +327,10 @@ PUGI__NS_BEGIN
+ 			item->value = value;
+ 		}
+ 
+-		bool reserve(size_t extra = 16)
++		bool reserve()
+ 		{
+-			if (_count + extra >= _capacity - _capacity / 4)
+-				return rehash(_count + extra);
++			if (_count + 16 >= _capacity - _capacity / 4)
++				return rehash();
+ 
+ 			return true;
+ 		}
+@@ -347,7 +347,7 @@ PUGI__NS_BEGIN
+ 
+ 		size_t _count;
+ 
+-		bool rehash(size_t count);
++		bool rehash();
+ 
+ 		item_t* get_item(const void* key)
+ 		{
+@@ -387,20 +387,16 @@ PUGI__NS_BEGIN
+ 		}
+ 	};
+ 
+-	PUGI__FN_NO_INLINE bool compact_hash_table::rehash(size_t count)
++	PUGI__FN_NO_INLINE bool compact_hash_table::rehash()
+ 	{
+-		size_t capacity = 32;
+-		while (count >= capacity - capacity / 4)
+-			capacity *= 2;
+-
+ 		compact_hash_table rt;
+-		rt._capacity = capacity;
+-		rt._items = static_cast<item_t*>(xml_memory::allocate(sizeof(item_t) * capacity));
++		rt._capacity = (_capacity == 0) ? 32 : _capacity * 2;
++		rt._items = static_cast<item_t*>(xml_memory::allocate(sizeof(item_t) * rt._capacity));
+ 
+ 		if (!rt._items)
+ 			return false;
+ 
+-		memset(rt._items, 0, sizeof(item_t) * capacity);
++		memset(rt._items, 0, sizeof(item_t) * rt._capacity);
+ 
+ 		for (size_t i = 0; i < _capacity; ++i)
+ 			if (_items[i].key)
+@@ -409,7 +405,7 @@ PUGI__NS_BEGIN
+ 		if (_items)
+ 			xml_memory::deallocate(_items);
+ 
+-		_capacity = capacity;
++		_capacity = rt._capacity;
+ 		_items = rt._items;
+ 
+ 		assert(_count == rt._count);
+@@ -6834,25 +6830,6 @@ namespace pugi
+ 		_destroy();
+ 	}
+ 
+-#ifdef PUGIXML_HAS_MOVE
+-	PUGI__FN xml_document::xml_document(xml_document&& rhs): _buffer(0)
+-	{
+-		_create();
+-		_move(rhs);
+-	}
+-
+-	PUGI__FN xml_document& xml_document::operator=(xml_document&& rhs)
+-	{
+-		if (this == &rhs) return *this;
+-
+-		_destroy();
+-		_create();
+-		_move(rhs);
+-
+-		return *this;
+-	}
+-#endif
+-
+ 	PUGI__FN void xml_document::reset()
+ 	{
+ 		_destroy();
+@@ -6948,113 +6925,6 @@ namespace pugi
+ 		_root = 0;
+ 	}
+ 
+-#ifdef PUGIXML_HAS_MOVE
+-	PUGI__FN void xml_document::_move(xml_document& rhs)
+-	{
+-		impl::xml_document_struct* doc = static_cast<impl::xml_document_struct*>(_root);
+-		impl::xml_document_struct* other = static_cast<impl::xml_document_struct*>(rhs._root);
+-
+-		// save first child pointer for later; this needs hash access
+-		xml_node_struct* other_first_child = other->first_child;
+-
+-	#ifdef PUGIXML_COMPACT
+-		// reserve space for the hash table up front; this is the only operation that can fail
+-		// if it does, we have no choice but to throw (if we have exceptions)
+-		if (other_first_child)
+-		{
+-			size_t other_children = 0;
+-			for (xml_node_struct* node = other_first_child; node; node = node->next_sibling)
+-				other_children++;
+-
+-			// in compact mode, each pointer assignment could result in a hash table request
+-			// during move, we have to relocate document first_child and parents of all children
+-			// normally there's just one child and its parent has a pointerless encoding but
+-			// we assume the worst here
+-			if (!other->_hash->reserve(other_children + 1))
+-			{
+-			#ifdef PUGIXML_NO_EXCEPTIONS
+-				return;
+-			#else
+-				throw std::bad_alloc();
+-			#endif
+-			}
+-		}
+-	#endif
+-
+-		// move allocation state
+-		doc->_root = other->_root;
+-		doc->_busy_size = other->_busy_size;
+-
+-		// move buffer state
+-		doc->buffer = other->buffer;
+-		doc->extra_buffers = other->extra_buffers;
+-		_buffer = rhs._buffer;
+-
+-	#ifdef PUGIXML_COMPACT
+-		// move compact hash; note that the hash table can have pointers to other but they will be "inactive", similarly to nodes removed with remove_child
+-		doc->hash = other->hash;
+-		doc->_hash = &doc->hash;
+-
+-		// make sure we don't access other hash up until the end when we reinitialize other document
+-		other->_hash = 0;
+-	#endif
+-
+-		// move page structure
+-		impl::xml_memory_page* doc_page = PUGI__GETPAGE(doc);
+-		assert(doc_page && !doc_page->prev && !doc_page->next);
+-
+-		impl::xml_memory_page* other_page = PUGI__GETPAGE(other);
+-		assert(other_page && !other_page->prev);
+-
+-		// relink pages since root page is embedded into xml_document
+-		if (impl::xml_memory_page* page = other_page->next)
+-		{
+-			assert(page->prev == other_page);
+-
+-			page->prev = doc_page;
+-
+-			doc_page->next = page;
+-			other_page->next = 0;
+-		}
+-
+-		// make sure pages point to the correct document state
+-		for (impl::xml_memory_page* page = doc_page->next; page; page = page->next)
+-		{
+-			assert(page->allocator == other);
+-
+-			page->allocator = doc;
+-
+-		#ifdef PUGIXML_COMPACT
+-			// this automatically migrates most children between documents and prevents ->parent assignment from allocating
+-			if (page->compact_shared_parent == other)
+-				page->compact_shared_parent = doc;
+-		#endif
+-		}
+-
+-		// move tree structure
+-		assert(!doc->first_child);
+-
+-		doc->first_child = other_first_child;
+-
+-		for (xml_node_struct* node = other_first_child; node; node = node->next_sibling)
+-		{
+-		#ifdef PUGIXML_COMPACT
+-			// most children will have migrated when we reassigned compact_shared_parent
+-			assert(node->parent == other || node->parent == doc);
+-
+-			node->parent = doc;
+-		#else
+-			assert(node->parent == other);
+-			node->parent = doc;
+-		#endif
+-		}
+-
+-		// reset other document
+-		new (other) impl::xml_document_struct(PUGI__GETPAGE(other));
+-		rhs._buffer = 0;
+-	}
+-#endif
+-
+ #ifndef PUGIXML_NO_STL
+ 	PUGI__FN xml_parse_result xml_document::load(std::basic_istream<char, std::char_traits<char> >& stream, unsigned int options, xml_encoding encoding)
+ 	{
+diff --git a/src/pugixml.hpp b/src/pugixml.hpp
+index 0058fd3..5059c96 100644
+--- a/src/pugixml.hpp
++++ b/src/pugixml.hpp
+@@ -983,7 +983,6 @@ namespace pugi
+ 
+ 		void _create();
+ 		void _destroy();
+-		void _move(xml_document& rhs);
+ 
+ 	public:
+ 		// Default constructor, makes empty document
+@@ -992,12 +991,6 @@ namespace pugi
+ 		// Destructor, invalidates all node/attribute handles to this document
+ 		~xml_document();
+ 
+-	#ifdef PUGIXML_HAS_MOVE
+-		// Move semantics support
+-		xml_document(xml_document&& rhs);
+-		xml_document& operator=(xml_document&& rhs);
+-	#endif
+-
+ 		// Removes all nodes, leaving the empty document
+ 		void reset();
+ 
+diff --git a/tests/test_document.cpp b/tests/test_document.cpp
+index 08d836c..ecbe6dc 100644
+--- a/tests/test_document.cpp
++++ b/tests/test_document.cpp
+@@ -1621,188 +1621,3 @@ TEST(document_convert_out_of_memory)
+ 		delete[] files[j].data;
+ 	}
+ }
+-
+-#ifdef PUGIXML_HAS_MOVE
+-TEST_XML(document_move_ctor, "<node1/><node2/>")
+-{
+-	xml_document other = std::move(doc);
+-
+-	CHECK(doc.first_child().empty());
+-
+-	CHECK_STRING(other.first_child().name(), STR("node1"));
+-	CHECK(other.first_child().parent() == other);
+-
+-	CHECK_STRING(other.last_child().name(), STR("node2"));
+-	CHECK(other.last_child().parent() == other);
+-}
+-
+-TEST_XML(document_move_assign, "<node1/><node2/>")
+-{
+-	xml_document other;
+-	CHECK(other.load_string(STR("<node3/>")));
+-
+-	other = std::move(doc);
+-
+-	CHECK(doc.first_child().empty());
+-
+-	CHECK_STRING(other.first_child().name(), STR("node1"));
+-	CHECK(other.first_child().parent() == other);
+-
+-	CHECK_STRING(other.last_child().name(), STR("node2"));
+-	CHECK(other.last_child().parent() == other);
+-}
+-
+-TEST_XML(document_move_zero_alloc, "<node1/><node2/>")
+-{
+-	test_runner::_memory_fail_threshold = 1;
+-
+-	xml_document other = std::move(doc);
+-
+-	CHECK(doc.first_child().empty());
+-
+-	CHECK_STRING(other.first_child().name(), STR("node1"));
+-	CHECK(other.first_child().parent() == other);
+-
+-	CHECK_STRING(other.last_child().name(), STR("node2"));
+-	CHECK(other.last_child().parent() == other);
+-}
+-
+-TEST(document_move_append_buffer)
+-{
+-	xml_document* doc = new xml_document();
+-	CHECK(doc->load_string(STR("<node1 attr1='value1'><node2/></node1>")));
+-	CHECK(doc->child(STR("node1")).append_buffer("<node3/>", 8));
+-	CHECK(doc->child(STR("node1")).append_buffer("<node4/>", 8));
+-
+-	xml_document other = std::move(*doc);
+-	delete doc;
+-
+-	CHECK(other.child(STR("node1")).append_buffer("<node5/>", 8));
+-	CHECK(other.child(STR("node1")).append_buffer("<node6/>", 8));
+-
+-	CHECK_NODE(other, STR("<node1 attr1=\"value1\"><node2/><node3/><node4/><node5/><node6/></node1>"));
+-}
+-
+-TEST(document_move_append_child)
+-{
+-	xml_document* doc = new xml_document();
+-	CHECK(doc->load_string(STR("<node1 attr1='value1'><node2/></node1>")));
+-
+-	xml_document other = std::move(*doc);
+-	delete doc;
+-
+-	for (int i = 0; i < 3000; ++i)
+-		other.child(STR("node1")).append_child(STR("node"));
+-
+-	for (int i = 0; i < 3000; ++i)
+-		other.child(STR("node1")).remove_child(other.child(STR("node1")).last_child());
+-
+-	CHECK_NODE(other, STR("<node1 attr1=\"value1\"><node2/></node1>"));
+-
+-	other.remove_child(other.first_child());
+-
+-	CHECK(!other.first_child());
+-}
+-
+-TEST(document_move_empty)
+-{
+-	xml_document* doc = new xml_document();
+-	xml_document other = std::move(*doc);
+-	delete doc;
+-}
+-
+-TEST(document_move_large)
+-{
+-	xml_document* doc = new xml_document();
+-
+-	xml_node dn = doc->append_child(STR("node"));
+-
+-	for (int i = 0; i < 3000; ++i)
+-		dn.append_child(STR("child"));
+-
+-	xml_document other = std::move(*doc);
+-	delete doc;
+-
+-	xml_node on = other.child(STR("node"));
+-
+-	for (int i = 0; i < 3000; ++i)
+-		CHECK(on.remove_child(on.first_child()));
+-
+-	CHECK(!on.first_child());
+-}
+-
+-TEST_XML(document_move_buffer, "<node1/><node2/>")
+-{
+-	CHECK(doc.child(STR("node2")).offset_debug() == 9);
+-
+-	xml_document other = std::move(doc);
+-
+-	CHECK(other.child(STR("node2")).offset_debug() == 9);
+-}
+-
+-TEST_XML(document_move_append_child_zero_alloc, "<node1/><node2/>")
+-{
+-	test_runner::_memory_fail_threshold = 1;
+-
+-	xml_document other = std::move(doc);
+-
+-	CHECK(other.append_child(STR("node3")));
+-
+-	CHECK_NODE(other, STR("<node1/><node2/><node3/>"));
+-}
+-
+-TEST(document_move_empty_zero_alloc)
+-{
+-	xml_document* docs = new xml_document[32];
+-
+-	test_runner::_memory_fail_threshold = 1;
+-
+-	for (int i = 1; i < 32; ++i)
+-		docs[i] = std::move(docs[i-1]);
+-
+-	delete[] docs;
+-}
+-
+-#ifndef PUGIXML_COMPACT
+-TEST(document_move_repeated_zero_alloc)
+-{
+-	xml_document docs[32];
+-
+-	CHECK(docs[0].load_string(STR("<node><child/></node>")));
+-
+-	test_runner::_memory_fail_threshold = 1;
+-
+-	for (int i = 1; i < 32; ++i)
+-		docs[i] = std::move(docs[i-1]);
+-
+-	for (int i = 0; i < 31; ++i)
+-		CHECK(!docs[i].first_child());
+-
+-	CHECK_NODE(docs[31], STR("<node><child/></node>"));
+-}
+-#endif
+-
+-#ifdef PUGIXML_COMPACT
+-TEST(document_move_compact_fail)
+-{
+-	xml_document docs[32];
+-
+-	CHECK(docs[0].load_string(STR("<node><child/></node>")));
+-
+-	test_runner::_memory_fail_threshold = 1;
+-
+-	int safe_count = 21;
+-
+-	for (int i = 1; i <= safe_count; ++i)
+-		docs[i] = std::move(docs[i-1]);
+-
+-	CHECK_ALLOC_FAIL(docs[safe_count+1] = std::move(docs[safe_count]));
+-
+-	for (int i = 0; i < safe_count; ++i)
+-		CHECK(!docs[i].first_child());
+-
+-	CHECK_NODE(docs[safe_count], STR("<node><child/></node>"));
+-	CHECK(!docs[safe_count+1].first_child());
+-}
+-#endif
+-#endif

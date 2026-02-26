@@ -1,0 +1,9 @@
+Serializing XML nodes to a string currently encodes disallowed XML 1.0 control characters (U+0001..U+001F) using numeric character references like "&#12;". This produces output that is not valid XML 1.0 for characters such as form feed (U+000C, '\f') and other control characters like U+000F and U+0019. Only '\t' (U+0009), '\n' (U+000A), and '\r' (U+000D) are permitted control characters in XML 1.0.
+
+Add support for a new formatting option flag named `pugi::format_skip_control_chars` that changes how node text is serialized: when this flag is enabled, any disallowed control characters in the XML 1.0 range (U+0001..U+001F excluding tab/newline/carriage return) must be omitted from the serialized output instead of being emitted as numeric character references.
+
+Expected behavior:
+- With default formatting (`pugi::format_default`), serialization must keep the current behavior: disallowed control characters are emitted as numeric character references. For example, serializing a node containing the characters "\f\t\n\x0F\x19" should produce output where the disallowed characters appear as "&#12;", "&#15;", and "&#25;", while tab and newline remain as literal characters.
+- With `pugi::format_default | pugi::format_skip_control_chars`, serialization must skip the disallowed control characters entirely. Using the same example content "\f\t\n\x0F\x19", the serialized output should contain only "\t\n" (tab and newline) in the text content; the form feed and the other disallowed control characters must not appear either as raw bytes or as character references.
+
+The change should apply when printing/saving an XML node/tree to a textual representation, so that enabling `pugi::format_skip_control_chars` guarantees the resulting string does not contain XML 1.0–invalid numeric references for control characters.

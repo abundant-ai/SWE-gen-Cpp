@@ -1,0 +1,226 @@
+diff --git a/README.md b/README.md
+index a853115..478ac89 100644
+--- a/README.md
++++ b/README.md
+@@ -463,15 +463,6 @@ BM_memcpy/32          11 ns         11 ns   79545455
+ BM_memcpy/32k       2181 ns       2185 ns     324074
+ ```
+ 
+-You can get the same effect with the API:
+-
+-```c++
+-  benchmark::AddCustomContext("foo", "bar");
+-```
+-
+-Note that attempts to add a second value with the same key will fail with an
+-error message.
+-
+ <a name="runtime-and-reporting-considerations" />
+ 
+ ### Runtime and Reporting Considerations
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index efcc003..664422b 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -294,9 +294,6 @@ size_t RunSpecifiedBenchmarks(BenchmarkReporter* display_reporter,
+ // allocation measurements for benchmark runs.
+ void RegisterMemoryManager(MemoryManager* memory_manager);
+ 
+-// Add a key-value pair to output as part of the context stanza in the report.
+-void AddCustomContext(const std::string& key, const std::string& value);
+-
+ namespace internal {
+ class Benchmark;
+ class BenchmarkImp;
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 16c347d..930a756 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -33,7 +33,6 @@
+ #include <cstdlib>
+ #include <fstream>
+ #include <iostream>
+-#include <map>
+ #include <memory>
+ #include <string>
+ #include <thread>
+@@ -106,6 +105,10 @@ DEFINE_string(benchmark_color, "auto");
+ // Valid values: 'true'/'yes'/1, 'false'/'no'/0.  Defaults to false.
+ DEFINE_bool(benchmark_counters_tabular, false);
+ 
++// Extra context to include in the output formatted as comma-separated key-value
++// pairs.
++DEFINE_kvpairs(benchmark_context, {});
++
+ // The level of verbose logging to output
+ DEFINE_int32(v, 0);
+ 
+@@ -114,13 +117,8 @@ DEFINE_int32(v, 0);
+ DEFINE_string(benchmark_perf_counters, "");
+ 
+ namespace benchmark {
+-namespace internal {
+-
+-// Extra context to include in the output formatted as comma-separated key-value
+-// pairs. Kept internal as it's only used for parsing from env/command line.
+-DEFINE_kvpairs(benchmark_context, {});
+ 
+-std::map<std::string, std::string>* global_context = nullptr;
++namespace internal {
+ 
+ // FIXME: wouldn't LTO mess this up?
+ void UseCharPointer(char const volatile*) {}
+@@ -437,16 +435,6 @@ void RegisterMemoryManager(MemoryManager* manager) {
+   internal::memory_manager = manager;
+ }
+ 
+-void AddCustomContext(const std::string& key, const std::string& value) {
+-  if (internal::global_context == nullptr) {
+-    internal::global_context = new std::map<std::string, std::string>();
+-  }
+-  if (!internal::global_context->emplace(key, value).second) {
+-    std::cerr << "Failed to add custom context \"" << key << "\" as it already "
+-              << "exists with value \"" << value << "\"\n";
+-  }
+-}
+-
+ namespace internal {
+ 
+ void PrintUsageAndExit() {
+@@ -508,17 +496,13 @@ void ParseCommandLineFlags(int* argc, char** argv) {
+     }
+   }
+   for (auto const* flag :
+-       {&FLAGS_benchmark_format, &FLAGS_benchmark_out_format}) {
++       {&FLAGS_benchmark_format, &FLAGS_benchmark_out_format})
+     if (*flag != "console" && *flag != "json" && *flag != "csv") {
+       PrintUsageAndExit();
+     }
+-  }
+   if (FLAGS_benchmark_color.empty()) {
+     PrintUsageAndExit();
+   }
+-  for (const auto& kv : FLAGS_benchmark_context) {
+-    AddCustomContext(kv.first, kv.second);
+-  }
+ }
+ 
+ int InitializeStreams() {
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index effa6bd..959d245 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -29,9 +29,6 @@
+ #include "timers.h"
+ 
+ namespace benchmark {
+-namespace internal {
+-extern std::map<std::string, std::string>* global_context;
+-}
+ 
+ namespace {
+ 
+@@ -163,13 +160,6 @@ bool JSONReporter::ReportContext(const Context& context) {
+   const char build_type[] = "debug";
+ #endif
+   out << indent << FormatKV("library_build_type", build_type) << "\n";
+-
+-  if (internal::global_context != nullptr) {
+-    for (const auto& kv: *internal::global_context) {
+-      out << indent << FormatKV(kv.first, kv.second) << "\n";
+-    }
+-  }
+-
+   // Close context block and open the list of benchmarks.
+   out << inner_indent << "},\n";
+   out << inner_indent << "\"benchmarks\": [\n";
+diff --git a/src/reporter.cc b/src/reporter.cc
+index 14dd40d..b7d64fb 100644
+--- a/src/reporter.cc
++++ b/src/reporter.cc
+@@ -18,18 +18,16 @@
+ #include <cstdlib>
+ 
+ #include <iostream>
+-#include <map>
+-#include <string>
+ #include <tuple>
+ #include <vector>
+ 
+ #include "check.h"
++#include "commandlineflags.h"
+ #include "string_util.h"
+ 
++DECLARE_kvpairs(benchmark_context);
++
+ namespace benchmark {
+-namespace internal {
+-extern std::map<std::string, std::string>* global_context;
+-}
+ 
+ BenchmarkReporter::BenchmarkReporter()
+     : output_stream_(&std::cout), error_stream_(&std::cerr) {}
+@@ -69,10 +67,8 @@ void BenchmarkReporter::PrintBasicContext(std::ostream *out,
+     Out << "\n";
+   }
+ 
+-  if (internal::global_context != nullptr) {
+-    for (const auto& kv: *internal::global_context) {
+-      Out << kv.first << ": " << kv.second << "\n";
+-    }
++  for (const auto& kv: FLAGS_benchmark_context) {
++    Out << kv.first << ": " << kv.second << "\n";
+   }
+ 
+   if (CPUInfo::Scaling::ENABLED == info.scaling) {
+diff --git a/test/benchmark_gtest.cc b/test/benchmark_gtest.cc
+index cbbf48b..6dbf7a5 100644
+--- a/test/benchmark_gtest.cc
++++ b/test/benchmark_gtest.cc
+@@ -1,5 +1,3 @@
+-#include <map>
+-#include <string>
+ #include <vector>
+ 
+ #include "../src/benchmark_register.h"
+@@ -8,8 +6,6 @@
+ 
+ namespace benchmark {
+ namespace internal {
+-extern std::map<std::string, std::string>* global_context;
+-
+ namespace {
+ 
+ TEST(AddRangeTest, Simple) {
+@@ -133,31 +129,6 @@ TEST(AddRangeTest, Simple8) {
+   EXPECT_THAT(dst, testing::ElementsAre(1, 2, 4, 8));
+ }
+ 
+-TEST(AddCustomContext, Simple) {
+-  EXPECT_THAT(global_context, nullptr);
+-
+-  AddCustomContext("foo", "bar");
+-  AddCustomContext("baz", "qux");
+-
+-  EXPECT_THAT(*global_context,
+-              testing::UnorderedElementsAre(testing::Pair("foo", "bar"),
+-                                            testing::Pair("baz", "qux")));
+-
+-  global_context = nullptr;
+-}
+-
+-TEST(AddCustomContext, DuplicateKey) {
+-  EXPECT_THAT(global_context, nullptr);
+-
+-  AddCustomContext("foo", "bar");
+-  AddCustomContext("foo", "qux");
+-
+-  EXPECT_THAT(*global_context,
+-              testing::UnorderedElementsAre(testing::Pair("foo", "bar")));
+-
+-  global_context = nullptr;
+-}
+-
+ }  // namespace
+ }  // namespace internal
+ }  // namespace benchmark

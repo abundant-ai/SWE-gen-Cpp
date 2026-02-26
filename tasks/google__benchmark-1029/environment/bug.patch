@@ -1,0 +1,242 @@
+diff --git a/AUTHORS b/AUTHORS
+index e353b53..89205a1 100644
+--- a/AUTHORS
++++ b/AUTHORS
+@@ -13,7 +13,6 @@ Alex Steele <steeleal123@gmail.com>
+ Andriy Berestovskyy <berestovskyy@gmail.com>
+ Arne Beer <arne@twobeer.de>
+ Carto
+-Christian Wassermann <christian_wassermann@web.de>
+ Christopher Seymour <chris.j.seymour@hotmail.com>
+ Colin Braley <braley.colin@gmail.com>
+ Daniel Harvey <danielharvey458@gmail.com>
+diff --git a/CONTRIBUTORS b/CONTRIBUTORS
+index 6beed71..88f7eee 100644
+--- a/CONTRIBUTORS
++++ b/CONTRIBUTORS
+@@ -28,7 +28,6 @@ Andriy Berestovskyy <berestovskyy@gmail.com>
+ Arne Beer <arne@twobeer.de>
+ Billy Robert O'Neal III <billy.oneal@gmail.com> <bion@microsoft.com>
+ Chris Kennelly <ckennelly@google.com> <ckennelly@ckennelly.com>
+-Christian Wassermann <christian_wassermann@web.de>
+ Christopher Seymour <chris.j.seymour@hotmail.com>
+ Colin Braley <braley.colin@gmail.com>
+ Cyrille Faucheux <cyrille.faucheux@gmail.com>
+diff --git a/README.md b/README.md
+index 41a1bdf..314feee 100644
+--- a/README.md
++++ b/README.md
+@@ -548,29 +548,6 @@ pair.
+ BENCHMARK(BM_SetInsert)->Ranges({{1<<10, 8<<10}, {128, 512}});
+ ```
+ 
+-Some benchmarks may require specific argument values that cannot be expressed
+-with `Ranges`. In this case, `ArgsProduct` offers the ability to generate a
+-benchmark input for each combination in the product of the supplied vectors.
+-
+-```c++
+-BENCHMARK(BM_SetInsert)
+-    ->ArgsProduct({{1<<10, 3<<10, 8<<10}, {20, 40, 60, 80}})
+-// would generate the same benchmark arguments as
+-BENCHMARK(BM_SetInsert)
+-    ->Args({1<<10, 20})
+-    ->Args({3<<10, 20})
+-    ->Args({8<<10, 20})
+-    ->Args({3<<10, 40})
+-    ->Args({8<<10, 40})
+-    ->Args({1<<10, 40})
+-    ->Args({1<<10, 60})
+-    ->Args({3<<10, 60})
+-    ->Args({8<<10, 60})
+-    ->Args({1<<10, 80})
+-    ->Args({3<<10, 80})
+-    ->Args({8<<10, 80});
+-```
+-
+ For more complex patterns of inputs, passing a custom function to `Apply` allows
+ programmatic specification of an arbitrary set of arguments on which to run the
+ benchmark. The following example enumerates a dense range on one parameter,
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 01f1262..da638f9 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -828,11 +828,6 @@ class Benchmark {
+   // REQUIRES: The function passed to the constructor must accept arg1, arg2 ...
+   Benchmark* Ranges(const std::vector<std::pair<int64_t, int64_t> >& ranges);
+ 
+-  // Run this benchmark once for each combination of values in the (cartesian)
+-  // product of the supplied argument lists.
+-  // REQUIRES: The function passed to the constructor must accept arg1, arg2 ...
+-  Benchmark* ArgsProduct(const std::vector<std::vector<int64_t> >& arglists);
+-
+   // Equivalent to ArgNames({name})
+   Benchmark* ArgName(const std::string& name);
+ 
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index 65d9944..cca39b2 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -31,7 +31,6 @@
+ #include <fstream>
+ #include <iostream>
+ #include <memory>
+-#include <numeric>
+ #include <sstream>
+ #include <thread>
+ 
+@@ -304,41 +303,33 @@ Benchmark* Benchmark::Ranges(
+     const std::vector<std::pair<int64_t, int64_t>>& ranges) {
+   CHECK(ArgsCnt() == -1 || ArgsCnt() == static_cast<int>(ranges.size()));
+   std::vector<std::vector<int64_t>> arglists(ranges.size());
++  std::size_t total = 1;
+   for (std::size_t i = 0; i < ranges.size(); i++) {
+     AddRange(&arglists[i], ranges[i].first, ranges[i].second,
+              range_multiplier_);
++    total *= arglists[i].size();
+   }
+ 
+-  ArgsProduct(arglists);
++  std::vector<std::size_t> ctr(arglists.size(), 0);
+ 
+-  return this;
+-}
+-
+-Benchmark* Benchmark::ArgsProduct(
+-    const std::vector<std::vector<int64_t>>& arglists) {
+-  CHECK(ArgsCnt() == -1 || ArgsCnt() == static_cast<int>(arglists.size()));
+-
+-  std::vector<std::size_t> indices(arglists.size());
+-  const std::size_t total = std::accumulate(
+-      std::begin(arglists), std::end(arglists), std::size_t{1},
+-      [](const std::size_t res, const std::vector<int64_t>& arglist) {
+-        return res * arglist.size();
+-      });
+-  std::vector<int64_t> args;
+-  args.reserve(arglists.size());
+   for (std::size_t i = 0; i < total; i++) {
+-    for (std::size_t arg = 0; arg < arglists.size(); arg++) {
+-      args.push_back(arglists[arg][indices[arg]]);
++    std::vector<int64_t> tmp;
++    tmp.reserve(arglists.size());
++
++    for (std::size_t j = 0; j < arglists.size(); j++) {
++      tmp.push_back(arglists[j].at(ctr[j]));
+     }
+-    args_.push_back(args);
+-    args.clear();
+ 
+-    std::size_t arg = 0;
+-    do {
+-      indices[arg] = (indices[arg] + 1) % arglists[arg].size();
+-    } while (indices[arg++] == 0 && arg < arglists.size());
+-  }
++    args_.push_back(std::move(tmp));
+ 
++    for (std::size_t j = 0; j < arglists.size(); j++) {
++      if (ctr[j] + 1 < arglists[j].size()) {
++        ++ctr[j];
++        break;
++      }
++      ctr[j] = 0;
++    }
++  }
+   return this;
+ }
+ 
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index c1a3a3f..0d228b8 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -113,9 +113,6 @@ add_test(NAME map_test COMMAND map_test --benchmark_min_time=0.01)
+ compile_benchmark_test(multiple_ranges_test)
+ add_test(NAME multiple_ranges_test COMMAND multiple_ranges_test --benchmark_min_time=0.01)
+ 
+-compile_benchmark_test(args_product_test)
+-add_test(NAME args_product_test COMMAND args_product_test --benchmark_min_time=0.01)
+-
+ compile_benchmark_test_with_main(link_main_test)
+ add_test(NAME link_main_test COMMAND link_main_test --benchmark_min_time=0.01)
+ 
+diff --git a/test/args_product_test.cc b/test/args_product_test.cc
+deleted file mode 100644
+index 8a859f8..0000000
+--- a/test/args_product_test.cc
++++ /dev/null
+@@ -1,77 +0,0 @@
+-#include "benchmark/benchmark.h"
+-
+-#include <cassert>
+-#include <iostream>
+-#include <set>
+-#include <vector>
+-
+-class ArgsProductFixture : public ::benchmark::Fixture {
+- public:
+-  ArgsProductFixture()
+-      : expectedValues({{0, 100, 2000, 30000},
+-                        {1, 15, 3, 8},
+-                        {1, 15, 3, 9},
+-                        {1, 15, 7, 8},
+-                        {1, 15, 7, 9},
+-                        {1, 15, 10, 8},
+-                        {1, 15, 10, 9},
+-                        {2, 15, 3, 8},
+-                        {2, 15, 3, 9},
+-                        {2, 15, 7, 8},
+-                        {2, 15, 7, 9},
+-                        {2, 15, 10, 8},
+-                        {2, 15, 10, 9},
+-                        {4, 5, 6, 11}}) {}
+-
+-  void SetUp(const ::benchmark::State& state) {
+-    std::vector<int64_t> ranges = {state.range(0), state.range(1),
+-                                   state.range(2), state.range(3)};
+-
+-    assert(expectedValues.find(ranges) != expectedValues.end());
+-
+-    actualValues.insert(ranges);
+-  }
+-
+-  // NOTE: This is not TearDown as we want to check after _all_ runs are
+-  // complete.
+-  virtual ~ArgsProductFixture() {
+-    if (actualValues != expectedValues) {
+-      std::cout << "EXPECTED\n";
+-      for (auto v : expectedValues) {
+-        std::cout << "{";
+-        for (int64_t iv : v) {
+-          std::cout << iv << ", ";
+-        }
+-        std::cout << "}\n";
+-      }
+-      std::cout << "ACTUAL\n";
+-      for (auto v : actualValues) {
+-        std::cout << "{";
+-        for (int64_t iv : v) {
+-          std::cout << iv << ", ";
+-        }
+-        std::cout << "}\n";
+-      }
+-    }
+-  }
+-
+-  std::set<std::vector<int64_t>> expectedValues;
+-  std::set<std::vector<int64_t>> actualValues;
+-};
+-
+-BENCHMARK_DEFINE_F(ArgsProductFixture, Empty)(benchmark::State& state) {
+-  for (auto _ : state) {
+-    int64_t product =
+-        state.range(0) * state.range(1) * state.range(2) * state.range(3);
+-    for (int64_t x = 0; x < product; x++) {
+-      benchmark::DoNotOptimize(x);
+-    }
+-  }
+-}
+-
+-BENCHMARK_REGISTER_F(ArgsProductFixture, Empty)
+-    ->Args({0, 100, 2000, 30000})
+-    ->ArgsProduct({{1, 2}, {15}, {3, 7, 10}, {8, 9}})
+-    ->Args({4, 5, 6, 11});
+-
+-BENCHMARK_MAIN();

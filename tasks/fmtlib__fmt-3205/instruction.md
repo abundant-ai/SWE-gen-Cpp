@@ -1,0 +1,11 @@
+Downstream projects that consume fmt as a subproject (e.g., via CMake `add_subdirectory`) and use modern CMake to request a specific C++ standard (such as `target_compile_features(my_target PRIVATE cxx_std_17)` or otherwise relying on the target’s compile features) can have their requested language standard overridden when fmt is configured. This happens because fmt hard-codes the global CMake variable `CMAKE_CXX_STANDARD` during configuration to enforce its own minimum standard. As a result, the consuming project’s targets may end up being compiled with fmt’s default/forced standard instead of the standard the consumer requested.
+
+The expected behavior is that fmt expresses its C++ standard requirement on its own targets using target-based mechanisms (CMake `target_compile_features`) rather than setting the global `CMAKE_CXX_STANDARD`. When a consumer requests C++17 (or newer) for their own targets, adding fmt as a subdirectory should not change that request or force a different standard for the consumer’s targets.
+
+Update fmt’s CMake configuration so that:
+
+- fmt’s library targets (including the normal library target and the header-only variant when available) declare the minimum required C++ standard via `target_compile_features` (e.g., `cxx_std_11` / `cxx_std_14` as appropriate for fmt’s support policy) instead of globally setting `CMAKE_CXX_STANDARD`.
+- Consuming projects using `add_subdirectory` can set their own compile features (e.g., `cxx_std_17`) and keep that standard without needing to set `CMAKE_CXX_STANDARD` before including fmt.
+- Consumption via `find_package(FMT REQUIRED)` and linking against `fmt::fmt` (and `fmt::fmt-header-only` when present) continues to work with the same expected compile feature requirements propagated through the imported targets.
+
+If fmt relies on `cxx_std_11` (or similar compile features), ensure the project’s minimum supported CMake version is high enough for these compile features to be available; otherwise configuration should fail clearly rather than silently falling back to overriding `CMAKE_CXX_STANDARD`.

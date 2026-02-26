@@ -1,0 +1,11 @@
+Building and running the project’s fuzzing targets is currently fragmented across multiple separate fuzzer executables and build configurations, which makes it difficult to run fuzzing consistently across environments (local runs, OSS-Fuzz/libFuzzer, and “reproduce from corpus files” mode). The fuzzing harness should be consolidated so that all fuzz targets share a common entry strategy and can be built in a consistent way, while still supporting both of these workflows:
+
+1) LibFuzzer mode: each fuzz target must expose `extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, std::size_t Size)` and be linkable with the fuzzing engine.
+
+2) Reproduce mode: it must be possible to build a standalone executable that provides `main(int argc, char* argv[])` which reads one or more input files, feeds their bytes into `LLVMFuzzerTestOneInput(...)`, and asserts basic I/O sanity (e.g., fully reading the file content).
+
+At the moment, enabling fuzzing can also miss important safety behavior related to duration formatting: safe duration casting is only enabled in certain fuzzing builds, meaning the same fuzzer input may behave differently depending on how the target was built. Safe duration casting should be enabled by default (or otherwise applied consistently) so that formatting of `std::chrono` durations does not trigger undefined behavior, overflow, or sanitizer findings in one build mode but not another.
+
+When the fuzzers are built with fuzzing-related build definitions (e.g., `FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION`) and sanitizer/fuzzer flags, running any of the fuzz targets on arbitrary input should not crash due to build-configuration differences. In particular, duration-related fuzzing must not depend on a special “fuzz-only” enablement of safe duration casting; the behavior should be consistent between fuzzing and non-fuzzing builds.
+
+Fix the fuzzing build/harness so that fuzz targets are merged/consolidated with shared common code, support both libFuzzer and standalone reproduce execution, and ensure safe duration casting behavior is not only enabled during fuzzing but is consistent by default across builds that exercise `std::chrono` formatting.

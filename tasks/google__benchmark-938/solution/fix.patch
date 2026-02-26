@@ -1,0 +1,86 @@
+diff --git a/README.md b/README.md
+index b43d4d2..02a3bfa 100644
+--- a/README.md
++++ b/README.md
+@@ -1184,7 +1184,9 @@ Users must explicitly exit the loop, otherwise all iterations will be performed.
+ Users may explicitly return to exit the benchmark immediately.
+ 
+ The `SkipWithError(...)` function may be used at any point within the benchmark,
+-including before and after the benchmark loop.
++including before and after the benchmark loop. Moreover, if `SkipWithError(...)`
++has been used, it is not required to reach the benchmark loop and one may return
++from the benchmark function early.
+ 
+ For example:
+ 
+@@ -1192,24 +1194,32 @@ For example:
+ static void BM_test(benchmark::State& state) {
+   auto resource = GetResource();
+   if (!resource.good()) {
+-      state.SkipWithError("Resource is not good!");
+-      // KeepRunning() loop will not be entered.
++    state.SkipWithError("Resource is not good!");
++    // KeepRunning() loop will not be entered.
+   }
+   while (state.KeepRunning()) {
+-      auto data = resource.read_data();
+-      if (!resource.good()) {
+-        state.SkipWithError("Failed to read data!");
+-        break; // Needed to skip the rest of the iteration.
+-     }
+-     do_stuff(data);
++    auto data = resource.read_data();
++    if (!resource.good()) {
++      state.SkipWithError("Failed to read data!");
++      break; // Needed to skip the rest of the iteration.
++    }
++    do_stuff(data);
+   }
+ }
+ 
+ static void BM_test_ranged_fo(benchmark::State & state) {
+-  state.SkipWithError("test will not be entered");
++  auto resource = GetResource();
++  if (!resource.good()) {
++    state.SkipWithError("Resource is not good!");
++    return; // Early return is allowed when SkipWithError() has been used.
++  }
+   for (auto _ : state) {
+-    state.SkipWithError("Failed!");
+-    break; // REQUIRED to prevent all further iterations.
++    auto data = resource.read_data();
++    if (!resource.good()) {
++      state.SkipWithError("Failed to read data!");
++      break; // REQUIRED to prevent all further iterations.
++    }
++    do_stuff(data);
+   }
+ }
+ ```
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 144e212..e5f6778 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -541,6 +541,9 @@ class State {
+   // responsibility to exit the scope as needed.
+   void SkipWithError(const char* msg);
+ 
++  // Returns true if an error has been reported with 'SkipWithError(...)'.
++  bool error_occurred() const { return error_occurred_; }
++
+   // REQUIRES: called exactly once per iteration of the benchmarking loop.
+   // Set the manually measured time for this benchmark iteration, which
+   // is used instead of automatically measured time if UseManualTime() was
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index 337fac1..c414eff 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -117,7 +117,7 @@ void RunInThread(const BenchmarkInstance* b, IterationCount iters,
+           ? internal::ThreadTimer::CreateProcessCpuTime()
+           : internal::ThreadTimer::Create());
+   State st = b->Run(iters, thread_id, &timer, manager);
+-  CHECK(st.iterations() >= st.max_iterations)
++  CHECK(st.error_occurred() || st.iterations() >= st.max_iterations)
+       << "Benchmark returned before State::KeepRunning() returned false!";
+   {
+     MutexLock l(manager->GetBenchmarkMutex());

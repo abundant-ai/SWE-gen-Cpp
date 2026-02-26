@@ -1,0 +1,472 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index c154a15..ad7c92e 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -218,6 +218,18 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ #define BENCHMARK_UNUSED
+ #endif
+ 
++// Used to annotate functions, methods and classes so they
++// are not optimized by the compiler. Useful for tests
++// where you expect loops to stay in place churning cycles
++#if defined(__clang__)
++#define BENCHMARK_DONT_OPTIMIZE __attribute__((optnone))
++#elif defined(__GNUC__) || defined(__GNUG__)
++#define BENCHMARK_DONT_OPTIMIZE __attribute__((optimize(0)))
++#else
++// MSVC & Intel do not have a no-optimize attribute, only line pragmas
++#define BENCHMARK_DONT_OPTIMIZE
++#endif
++
+ #if defined(__GNUC__) || defined(__clang__)
+ #define BENCHMARK_ALWAYS_INLINE __attribute__((always_inline))
+ #elif defined(_MSC_VER) && !defined(__clang__)
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index e2d85fe..b8eda00 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -348,14 +348,26 @@ void RunBenchmarks(const std::vector<BenchmarkInstance>& benchmarks,
+ 
+     size_t num_repetitions_total = 0;
+ 
++    // This perfcounters object needs to be created before the runners vector
++    // below so it outlasts their lifetime.
++    PerfCountersMeasurement perfcounters(
++        StrSplit(FLAGS_benchmark_perf_counters, ','));
++
++    // Vector of benchmarks to run
+     std::vector<internal::BenchmarkRunner> runners;
+     runners.reserve(benchmarks.size());
++
++    // Count the number of benchmarks with threads to warn the user in case
++    // performance counters are used.
++    int benchmarks_with_threads = 0;
++
++    // Loop through all benchmarks
+     for (const BenchmarkInstance& benchmark : benchmarks) {
+       BenchmarkReporter::PerFamilyRunReports* reports_for_family = nullptr;
+       if (benchmark.complexity() != oNone)
+         reports_for_family = &per_family_reports[benchmark.family_index()];
+-
+-      runners.emplace_back(benchmark, reports_for_family);
++      benchmarks_with_threads += (benchmark.threads() > 0);
++      runners.emplace_back(benchmark, &perfcounters, reports_for_family);
+       int num_repeats_of_this_instance = runners.back().GetNumRepeats();
+       num_repetitions_total += num_repeats_of_this_instance;
+       if (reports_for_family)
+@@ -363,6 +375,17 @@ void RunBenchmarks(const std::vector<BenchmarkInstance>& benchmarks,
+     }
+     assert(runners.size() == benchmarks.size() && "Unexpected runner count.");
+ 
++    // The use of performance counters with threads would be unintuitive for
++    // the average user so we need to warn them about this case
++    if ((benchmarks_with_threads > 0) && (perfcounters.num_counters() > 0)) {
++      GetErrorLogInstance()
++          << "***WARNING*** There are " << benchmarks_with_threads
++          << " benchmarks with threads and " << perfcounters.num_counters()
++          << " performance counters were requested. Beware counters will "
++             "reflect the combined usage across all "
++             "threads.\n";
++    }
++
+     std::vector<size_t> repetition_indices;
+     repetition_indices.reserve(num_repetitions_total);
+     for (size_t runner_index = 0, num_runners = runners.size();
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index 09975a9..58147ca 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -221,6 +221,7 @@ BenchTimeType ParseBenchMinTime(const std::string& value) {
+ 
+ BenchmarkRunner::BenchmarkRunner(
+     const benchmark::internal::BenchmarkInstance& b_,
++    PerfCountersMeasurement* pcm_,
+     BenchmarkReporter::PerFamilyRunReports* reports_for_family_)
+     : b(b_),
+       reports_for_family(reports_for_family_),
+@@ -239,10 +240,7 @@ BenchmarkRunner::BenchmarkRunner(
+       iters(has_explicit_iteration_count
+                 ? ComputeIters(b_, parsed_benchtime_flag)
+                 : 1),
+-      perf_counters_measurement(StrSplit(FLAGS_benchmark_perf_counters, ',')),
+-      perf_counters_measurement_ptr(perf_counters_measurement.IsValid()
+-                                        ? &perf_counters_measurement
+-                                        : nullptr) {
++      perf_counters_measurement_ptr(pcm_) {
+   run_results.display_report_aggregates_only =
+       (FLAGS_benchmark_report_aggregates_only ||
+        FLAGS_benchmark_display_aggregates_only);
+@@ -255,7 +253,7 @@ BenchmarkRunner::BenchmarkRunner(
+     run_results.file_report_aggregates_only =
+         (b.aggregation_report_mode() & internal::ARM_FileReportAggregatesOnly);
+     BM_CHECK(FLAGS_benchmark_perf_counters.empty() ||
+-             perf_counters_measurement.IsValid())
++             (perf_counters_measurement_ptr->num_counters() == 0))
+         << "Perf counters were requested but could not be set up.";
+   }
+ }
+diff --git a/src/benchmark_runner.h b/src/benchmark_runner.h
+index 9d80653..db2fa04 100644
+--- a/src/benchmark_runner.h
++++ b/src/benchmark_runner.h
+@@ -58,6 +58,7 @@ BenchTimeType ParseBenchMinTime(const std::string& value);
+ class BenchmarkRunner {
+  public:
+   BenchmarkRunner(const benchmark::internal::BenchmarkInstance& b_,
++                  benchmark::internal::PerfCountersMeasurement* pmc_,
+                   BenchmarkReporter::PerFamilyRunReports* reports_for_family);
+ 
+   int GetNumRepeats() const { return repeats; }
+@@ -103,8 +104,7 @@ class BenchmarkRunner {
+   // So only the first repetition has to find/calculate it,
+   // the other repetitions will just use that precomputed iteration count.
+ 
+-  PerfCountersMeasurement perf_counters_measurement;
+-  PerfCountersMeasurement* const perf_counters_measurement_ptr;
++  PerfCountersMeasurement* const perf_counters_measurement_ptr = nullptr;
+ 
+   struct IterationResults {
+     internal::ThreadManager::Result results;
+diff --git a/src/perf_counters.cc b/src/perf_counters.cc
+index 38b73ae..3980ea0 100644
+--- a/src/perf_counters.cc
++++ b/src/perf_counters.cc
+@@ -71,80 +71,78 @@ bool PerfCounters::IsCounterSupported(const std::string& name) {
+   return (ret == PFM_SUCCESS);
+ }
+ 
+-// Validates all counter names passed, returning only the valid ones
+-static std::vector<std::string> validateCounters(
++PerfCounters PerfCounters::Create(
+     const std::vector<std::string>& counter_names) {
+-  // All valid names to be returned
++  // Valid counters will populate these arrays but we start empty
+   std::vector<std::string> valid_names;
++  std::vector<int> counter_ids;
++  std::vector<int> leader_ids;
++
++  // Resize to the maximum possible
++  valid_names.reserve(counter_names.size());
++  counter_ids.reserve(counter_names.size());
++
++  const int kCounterMode = PFM_PLM3;  // user mode only
++
++  // Group leads will be assigned on demand. The idea is that once we cannot
++  // create a counter descriptor, the reason is that this group has maxed out
++  // so we set the group_id again to -1 and retry - giving the algorithm a
++  // chance to create a new group leader to hold the next set of counters.
++  int group_id = -1;
+ 
+-  // Loop through all the given names
+-  int invalid_counter = 0;
+-  for (const std::string& name : counter_names) {
+-    // Check trivial empty
++  // Loop through all performance counters
++  for (size_t i = 0; i < counter_names.size(); ++i) {
++    // we are about to push into the valid names vector
++    // check if we did not reach the maximum
++    if (valid_names.size() == PerfCounterValues::kMaxCounters) {
++      // Log a message if we maxed out and stop adding
++      GetErrorLogInstance()
++          << counter_names.size() << " counters were requested. The maximum is "
++          << PerfCounterValues::kMaxCounters << " and " << valid_names.size()
++          << " were already added. All remaining counters will be ignored\n";
++      // stop the loop and return what we have already
++      break;
++    }
++
++    // Check if this name is empty
++    const auto& name = counter_names[i];
+     if (name.empty()) {
+-      GetErrorLogInstance() << "A counter name was the empty string\n";
+-      invalid_counter++;
++      GetErrorLogInstance()
++          << "A performance counter name was the empty string\n";
+       continue;
+     }
+-    if (PerfCounters::IsCounterSupported(name)) {
+-      // we are about to push into the valid names vector
+-      // check if we did not reach the maximum
+-      if (valid_names.size() == PerfCounterValues::kMaxCounters) {
+-        GetErrorLogInstance()
+-            << counter_names.size()
+-            << " counters were requested. The maximum is "
+-            << PerfCounterValues::kMaxCounters << " and "
+-            << counter_names.size() - invalid_counter - valid_names.size()
+-            << " will be ignored\n";
+-        // stop the loop and return what we have already
+-        break;
+-      }
+-      valid_names.push_back(name);
+-    } else {
+-      GetErrorLogInstance() << "Performance counter " << name
+-                            << " incorrect or not supported on this platform\n";
+-      invalid_counter++;
+-    }
+-  }
+-  // RVO should take care of this
+-  return valid_names;
+-}
+-
+-PerfCounters PerfCounters::Create(
+-    const std::vector<std::string>& counter_names) {
+-  std::vector<std::string> valid_names = validateCounters(counter_names);
+-  if (valid_names.empty()) {
+-    return NoCounters();
+-  }
+-  std::vector<int> counter_ids(valid_names.size());
+-  std::vector<int> leader_ids;
+ 
+-  const int mode = PFM_PLM3;  // user mode only
+-  int group_id = -1;
+-  for (size_t i = 0; i < valid_names.size(); ++i) {
++    // Here first means first in group, ie the group leader
+     const bool is_first = (group_id < 0);
++
++    // This struct will be populated by libpfm from the counter string
++    // and then fed into the syscall perf_event_open
+     struct perf_event_attr attr {};
+     attr.size = sizeof(attr);
+-    const auto& name = valid_names[i];
++
++    // This is the input struct to libpfm.
+     pfm_perf_encode_arg_t arg{};
+     arg.attr = &attr;
+-
+-    const int pfm_get =
+-        pfm_get_os_event_encoding(name.c_str(), mode, PFM_OS_PERF_EVENT, &arg);
++    const int pfm_get = pfm_get_os_event_encoding(name.c_str(), kCounterMode,
++                                                  PFM_OS_PERF_EVENT, &arg);
+     if (pfm_get != PFM_SUCCESS) {
+-      GetErrorLogInstance() << "Unknown counter name: " << name << "\n";
+-      return NoCounters();
++      GetErrorLogInstance()
++          << "Unknown performance counter name: " << name << "\n";
++      continue;
+     }
+-    attr.disabled = is_first;
++
++    // We then proceed to populate the remaining fields in our attribute struct
+     // Note: the man page for perf_event_create suggests inherit = true and
+     // read_format = PERF_FORMAT_GROUP don't work together, but that's not the
+     // case.
++    attr.disabled = is_first;
+     attr.inherit = true;
+     attr.pinned = is_first;
+     attr.exclude_kernel = true;
+     attr.exclude_user = false;
+     attr.exclude_hv = true;
+-    // Read all counters in one read.
++
++    // Read all counters in a group in one read.
+     attr.read_format = PERF_FORMAT_GROUP;
+ 
+     int id = -1;
+@@ -159,36 +157,64 @@ PerfCounters PerfCounters::Create(
+         }
+       }
+       if (id < 0) {
+-        // We reached a limit perhaps?
++        // If the file descriptor is negative we might have reached a limit
++        // in the current group. Set the group_id to -1 and retry
+         if (group_id >= 0) {
+           // Create a new group
+           group_id = -1;
+         } else {
+-          // Give up, there is nothing else to try
++          // At this point we have already retried to set a new group id and
++          // failed. We then give up.
+           break;
+         }
+       }
+     }
++
++    // We failed to get a new file descriptor. We might have reached a hard
++    // hardware limit that cannot be resolved even with group multiplexing
+     if (id < 0) {
+-      GetErrorLogInstance()
+-          << "Failed to get a file descriptor for " << name << "\n";
+-      return NoCounters();
++      GetErrorLogInstance() << "***WARNING** Failed to get a file descriptor "
++                               "for performance counter "
++                            << name << ". Ignoring\n";
++
++      // We give up on this counter but try to keep going
++      // as the others would be fine
++      continue;
+     }
+     if (group_id < 0) {
+-      // This is a leader, store and assign it
++      // This is a leader, store and assign it to the current file descriptor
+       leader_ids.push_back(id);
+       group_id = id;
+     }
+-    counter_ids[i] = id;
++    // This is a valid counter, add it to our descriptor's list
++    counter_ids.push_back(id);
++    valid_names.push_back(name);
+   }
++
++  // Loop through all group leaders activating them
++  // There is another option of starting ALL counters in a process but
++  // that would be far reaching an intrusion. If the user is using PMCs
++  // by themselves then this would have a side effect on them. It is
++  // friendlier to loop through all groups individually.
+   for (int lead : leader_ids) {
+     if (ioctl(lead, PERF_EVENT_IOC_ENABLE) != 0) {
+-      GetErrorLogInstance() << "Failed to start counters\n";
++      // This should never happen but if it does, we give up on the
++      // entire batch as recovery would be a mess.
++      GetErrorLogInstance() << "***WARNING*** Failed to start counters. "
++                               "Claring out all counters.\n";
++
++      // Close all peformance counters
++      for (int id : counter_ids) {
++        ::close(id);
++      }
++
++      // Return an empty object so our internal state is still good and
++      // the process can continue normally without impact
+       return NoCounters();
+     }
+   }
+ 
+-  return PerfCounters(valid_names, std::move(counter_ids),
++  return PerfCounters(std::move(valid_names), std::move(counter_ids),
+                       std::move(leader_ids));
+ }
+ 
+@@ -223,34 +249,10 @@ PerfCounters PerfCounters::Create(
+ void PerfCounters::CloseCounters() const {}
+ #endif  // defined HAVE_LIBPFM
+ 
+-Mutex PerfCountersMeasurement::mutex_;
+-int PerfCountersMeasurement::ref_count_ = 0;
+-PerfCounters PerfCountersMeasurement::counters_ = PerfCounters::NoCounters();
+-
+-// The validation in PerfCounter::Create will create less counters than passed
+-// so it should be okay to initialize start_values_ and end_values_ with the
+-// upper bound as passed
+ PerfCountersMeasurement::PerfCountersMeasurement(
+     const std::vector<std::string>& counter_names)
+     : start_values_(counter_names.size()), end_values_(counter_names.size()) {
+-  MutexLock l(mutex_);
+-  if (ref_count_ == 0) {
+-    counters_ = PerfCounters::Create(counter_names);
+-  }
+-  // We chose to increment it even if `counters_` ends up invalid,
+-  // so that we don't keep trying to create, and also since the dtor
+-  // will decrement regardless of `counters_`'s validity
+-  ++ref_count_;
+-
+-  BM_CHECK(!counters_.IsValid() || counters_.names() == counter_names);
+-}
+-
+-PerfCountersMeasurement::~PerfCountersMeasurement() {
+-  MutexLock l(mutex_);
+-  --ref_count_;
+-  if (ref_count_ == 0) {
+-    counters_ = PerfCounters::NoCounters();
+-  }
++  counters_ = PerfCounters::Create(counter_names);
+ }
+ 
+ PerfCounters& PerfCounters::operator=(PerfCounters&& other) noexcept {
+diff --git a/src/perf_counters.h b/src/perf_counters.h
+index aeea350..152a6f2 100644
+--- a/src/perf_counters.h
++++ b/src/perf_counters.h
+@@ -90,10 +90,11 @@ class BENCHMARK_EXPORT PerfCounters final {
+   // True iff this platform supports performance counters.
+   static const bool kSupported;
+ 
+-  bool IsValid() const { return !counter_names_.empty(); }
++  // Returns an empty object
+   static PerfCounters NoCounters() { return PerfCounters(); }
+ 
+   ~PerfCounters() { CloseCounters(); }
++  PerfCounters() = default;
+   PerfCounters(PerfCounters&&) = default;
+   PerfCounters(const PerfCounters&) = delete;
+   PerfCounters& operator=(PerfCounters&&) noexcept;
+@@ -110,8 +111,8 @@ class BENCHMARK_EXPORT PerfCounters final {
+   // Return a PerfCounters object ready to read the counters with the names
+   // specified. The values are user-mode only. The counter name format is
+   // implementation and OS specific.
+-  // TODO: once we move to C++-17, this should be a std::optional, and then the
+-  // IsValid() boolean can be dropped.
++  // In case of failure, this method will in the worst case return an
++  // empty object whose state will still be valid.
+   static PerfCounters Create(const std::vector<std::string>& counter_names);
+ 
+   // Take a snapshot of the current value of the counters into the provided
+@@ -120,7 +121,6 @@ class BENCHMARK_EXPORT PerfCounters final {
+   BENCHMARK_ALWAYS_INLINE bool Snapshot(PerfCounterValues* values) const {
+ #ifndef BENCHMARK_OS_WINDOWS
+     assert(values != nullptr);
+-    assert(IsValid());
+     return values->Read(leader_ids_) == counter_ids_.size();
+ #else
+     (void)values;
+@@ -137,7 +137,6 @@ class BENCHMARK_EXPORT PerfCounters final {
+       : counter_ids_(std::move(counter_ids)),
+         leader_ids_(std::move(leader_ids)),
+         counter_names_(counter_names) {}
+-  PerfCounters() = default;
+ 
+   void CloseCounters() const;
+ 
+@@ -150,33 +149,25 @@ class BENCHMARK_EXPORT PerfCounters final {
+ class BENCHMARK_EXPORT PerfCountersMeasurement final {
+  public:
+   PerfCountersMeasurement(const std::vector<std::string>& counter_names);
+-  ~PerfCountersMeasurement();
+-
+-  // The only way to get to `counters_` is after ctor-ing a
+-  // `PerfCountersMeasurement`, which means that `counters_`'s state is, here,
+-  // decided (either invalid or valid) and won't change again even if a ctor is
+-  // concurrently running with this. This is preferring efficiency to
+-  // maintainability, because the address of the static can be known at compile
+-  // time.
+-  bool IsValid() const {
+-    MutexLock l(mutex_);
+-    return counters_.IsValid();
+-  }
+ 
+-  BENCHMARK_ALWAYS_INLINE void Start() {
+-    assert(IsValid());
+-    MutexLock l(mutex_);
++  size_t num_counters() const { return counters_.num_counters(); }
++
++  std::vector<std::string> names() const { return counters_.names(); }
++
++  BENCHMARK_ALWAYS_INLINE bool Start() {
++    if (num_counters() == 0) return true;
+     // Tell the compiler to not move instructions above/below where we take
+     // the snapshot.
+     ClobberMemory();
+     valid_read_ &= counters_.Snapshot(&start_values_);
+     ClobberMemory();
++
++    return valid_read_;
+   }
+ 
+   BENCHMARK_ALWAYS_INLINE bool Stop(
+       std::vector<std::pair<std::string, double>>& measurements) {
+-    assert(IsValid());
+-    MutexLock l(mutex_);
++    if (num_counters() == 0) return true;
+     // Tell the compiler to not move instructions above/below where we take
+     // the snapshot.
+     ClobberMemory();
+@@ -193,9 +184,7 @@ class BENCHMARK_EXPORT PerfCountersMeasurement final {
+   }
+ 
+  private:
+-  static Mutex mutex_;
+-  GUARDED_BY(mutex_) static int ref_count_;
+-  GUARDED_BY(mutex_) static PerfCounters counters_;
++  PerfCounters counters_;
+   bool valid_read_ = true;
+   PerfCounterValues start_values_;
+   PerfCounterValues end_values_;

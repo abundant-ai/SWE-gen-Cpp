@@ -1,0 +1,389 @@
+diff --git a/bindings/python/google_benchmark/benchmark.cc b/bindings/python/google_benchmark/benchmark.cc
+index ea40990..89e44ff 100644
+--- a/bindings/python/google_benchmark/benchmark.cc
++++ b/bindings/python/google_benchmark/benchmark.cc
+@@ -95,8 +95,6 @@ PYBIND11_MODULE(_benchmark, m) {
+       .def("range_multiplier", &Benchmark::RangeMultiplier,
+            py::return_value_policy::reference)
+       .def("min_time", &Benchmark::MinTime, py::return_value_policy::reference)
+-      .def("min_warmup_time", &Benchmark::MinWarmUpTime,
+-           py::return_value_policy::reference)
+       .def("iterations", &Benchmark::Iterations,
+            py::return_value_policy::reference)
+       .def("repetitions", &Benchmark::Repetitions,
+@@ -167,7 +165,7 @@ PYBIND11_MODULE(_benchmark, m) {
+                     &State::SetComplexityN)
+       .def_property("items_processed", &State::items_processed,
+                     &State::SetItemsProcessed)
+-      .def("set_label", (void (State::*)(const char*)) & State::SetLabel)
++      .def("set_label", (void(State::*)(const char*)) & State::SetLabel)
+       .def("range", &State::range, py::arg("pos") = 0)
+       .def_property_readonly("iterations", &State::iterations)
+       .def_readwrite("counters", &State::counters)
+diff --git a/docs/user_guide.md b/docs/user_guide.md
+index f96b7df..676128e 100644
+--- a/docs/user_guide.md
++++ b/docs/user_guide.md
+@@ -240,19 +240,6 @@ iterations is at least one, not more than 1e9, until CPU time is greater than
+ the minimum time, or the wallclock time is 5x minimum time. The minimum time is
+ set per benchmark by calling `MinTime` on the registered benchmark object.
+ 
+-Furthermore warming up a benchmark might be necessary in order to get
+-stable results because of e.g caching effects of the code under benchmark.
+-Warming up means running the benchmark a given amount of time, before
+-results are actually taken into account. The amount of time for which
+-the warmup should be run can be set per benchmark by calling
+-`MinWarmUpTime` on the registered benchmark object or for all benchmarks
+-using the `--benchmark_min_warmup_time` command-line option. Note that
+-`MinWarmUpTime` will overwrite the value of `--benchmark_min_warmup_time`
+-for the single benchmark. How many iterations the warmup run of each
+-benchmark takes is determined the same way as described in the paragraph
+-above. Per default the warmup phase is set to 0 seconds and is therefore
+-disabled.
+-
+ Average timings are then reported over the iterations run. If multiple
+ repetitions are requested using the `--benchmark_repetitions` command-line
+ option, or at registration time, the benchmark function will be run several
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 42c04cc..63e4542 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -1033,12 +1033,6 @@ class BENCHMARK_EXPORT Benchmark {
+   // REQUIRES: `t > 0` and `Iterations` has not been called on this benchmark.
+   Benchmark* MinTime(double t);
+ 
+-  // Set the minimum amount of time to run the benchmark before taking runtimes
+-  // of this benchmark into account. This
+-  // option overrides the `benchmark_min_warmup_time` flag.
+-  // REQUIRES: `t >= 0` and `Iterations` has not been called on this benchmark.
+-  Benchmark* MinWarmUpTime(double t);
+-
+   // Specify the amount of iterations that should be run by this benchmark.
+   // REQUIRES: 'n > 0' and `MinTime` has not been called on this benchmark.
+   //
+@@ -1151,7 +1145,6 @@ class BENCHMARK_EXPORT Benchmark {
+ 
+   int range_multiplier_;
+   double min_time_;
+-  double min_warmup_time_;
+   IterationCount iterations_;
+   int repetitions_;
+   bool measure_process_cpu_time_;
+@@ -1546,7 +1539,6 @@ struct BENCHMARK_EXPORT BenchmarkName {
+   std::string function_name;
+   std::string args;
+   std::string min_time;
+-  std::string min_warmup_time;
+   std::string iterations;
+   std::string repetitions;
+   std::string time_type;
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 254b95e..6e4415a 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -72,13 +72,6 @@ BM_DEFINE_string(benchmark_filter, "");
+ // benchmark execution, regardless of number of threads.
+ BM_DEFINE_double(benchmark_min_time, 0.5);
+ 
+-// Minimum number of seconds a benchmark should be run before results should be
+-// taken into account. This e.g can be neccessary for benchmarks of code which
+-// needs to fill some form of cache before performance is of interrest.
+-// Note: results gathered within this period are discarded and not used for
+-// reported result.
+-BM_DEFINE_double(benchmark_min_warmup_time, 0.0);
+-
+ // The number of runs of each benchmark. If greater than 1, the mean and
+ // standard deviation of the runs will be reported.
+ BM_DEFINE_int32(benchmark_repetitions, 1);
+@@ -575,7 +568,6 @@ void PrintUsageAndExit() {
+             " [--benchmark_list_tests={true|false}]\n"
+             "          [--benchmark_filter=<regex>]\n"
+             "          [--benchmark_min_time=<min_time>]\n"
+-            "          [--benchmark_min_warmup_time=<min_warmup_time>]\n"
+             "          [--benchmark_repetitions=<num_repetitions>]\n"
+             "          [--benchmark_enable_random_interleaving={true|false}]\n"
+             "          [--benchmark_report_aggregates_only={true|false}]\n"
+@@ -616,8 +608,6 @@ void ParseCommandLineFlags(int* argc, char** argv) {
+         ParseStringFlag(argv[i], "benchmark_filter", &FLAGS_benchmark_filter) ||
+         ParseDoubleFlag(argv[i], "benchmark_min_time",
+                         &FLAGS_benchmark_min_time) ||
+-        ParseDoubleFlag(argv[i], "benchmark_min_warmup_time",
+-                        &FLAGS_benchmark_min_warmup_time) ||
+         ParseInt32Flag(argv[i], "benchmark_repetitions",
+                        &FLAGS_benchmark_repetitions) ||
+         ParseBoolFlag(argv[i], "benchmark_enable_random_interleaving",
+diff --git a/src/benchmark_api_internal.cc b/src/benchmark_api_internal.cc
+index 963fea2..6b90cfa 100644
+--- a/src/benchmark_api_internal.cc
++++ b/src/benchmark_api_internal.cc
+@@ -25,7 +25,6 @@ BenchmarkInstance::BenchmarkInstance(Benchmark* benchmark, int family_idx,
+       statistics_(benchmark_.statistics_),
+       repetitions_(benchmark_.repetitions_),
+       min_time_(benchmark_.min_time_),
+-      min_warmup_time_(benchmark_.min_warmup_time_),
+       iterations_(benchmark_.iterations_),
+       threads_(thread_count) {
+   name_.function_name = benchmark_.name_;
+@@ -51,11 +50,6 @@ BenchmarkInstance::BenchmarkInstance(Benchmark* benchmark, int family_idx,
+     name_.min_time = StrFormat("min_time:%0.3f", benchmark_.min_time_);
+   }
+ 
+-  if (!IsZero(benchmark->min_warmup_time_)) {
+-    name_.min_warmup_time =
+-        StrFormat("min_warmup_time:%0.3f", benchmark_.min_warmup_time_);
+-  }
+-
+   if (benchmark_.iterations_ != 0) {
+     name_.iterations = StrFormat(
+         "iterations:%lu", static_cast<unsigned long>(benchmark_.iterations_));
+diff --git a/src/benchmark_api_internal.h b/src/benchmark_api_internal.h
+index 94f5165..8060fe3 100644
+--- a/src/benchmark_api_internal.h
++++ b/src/benchmark_api_internal.h
+@@ -36,7 +36,6 @@ class BenchmarkInstance {
+   const std::vector<Statistics>& statistics() const { return statistics_; }
+   int repetitions() const { return repetitions_; }
+   double min_time() const { return min_time_; }
+-  double min_warmup_time() const { return min_warmup_time_; }
+   IterationCount iterations() const { return iterations_; }
+   int threads() const { return threads_; }
+   void Setup() const;
+@@ -63,7 +62,6 @@ class BenchmarkInstance {
+   const std::vector<Statistics>& statistics_;
+   int repetitions_;
+   double min_time_;
+-  double min_warmup_time_;
+   IterationCount iterations_;
+   int threads_;  // Number of concurrent threads to us
+ 
+diff --git a/src/benchmark_name.cc b/src/benchmark_name.cc
+index 4f73860..2a17ebc 100644
+--- a/src/benchmark_name.cc
++++ b/src/benchmark_name.cc
+@@ -52,7 +52,7 @@ std::string join(char delimiter, const Ts&... ts) {
+ }  // namespace
+ 
+ std::string BenchmarkName::str() const {
+-  return join('/', function_name, args, min_time, min_warmup_time, iterations,
+-              repetitions, time_type, threads);
++  return join('/', function_name, args, min_time, iterations, repetitions,
++              time_type, threads);
+ }
+ }  // namespace benchmark
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index a42b766..c2a8b68 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -211,7 +211,6 @@ Benchmark::Benchmark(const char* name)
+       use_default_time_unit_(true),
+       range_multiplier_(kRangeMultiplier),
+       min_time_(0),
+-      min_warmup_time_(0),
+       iterations_(0),
+       repetitions_(0),
+       measure_process_cpu_time_(false),
+@@ -356,17 +355,9 @@ Benchmark* Benchmark::MinTime(double t) {
+   return this;
+ }
+ 
+-Benchmark* Benchmark::MinWarmUpTime(double t) {
+-  BM_CHECK(t >= 0.0);
+-  BM_CHECK(iterations_ == 0);
+-  min_warmup_time_ = t;
+-  return this;
+-}
+-
+ Benchmark* Benchmark::Iterations(IterationCount n) {
+   BM_CHECK(n > 0);
+   BM_CHECK(IsZero(min_time_));
+-  BM_CHECK(IsZero(min_warmup_time_));
+   iterations_ = n;
+   return this;
+ }
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index 0fb74bf..06a11a3 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -122,7 +122,6 @@ void RunInThread(const BenchmarkInstance* b, IterationCount iters,
+       b->measure_process_cpu_time()
+           ? internal::ThreadTimer::CreateProcessCpuTime()
+           : internal::ThreadTimer::Create());
+-
+   State st =
+       b->Run(iters, thread_id, &timer, manager, perf_counters_measurement);
+   BM_CHECK(st.error_occurred() || st.iterations() >= st.max_iterations)
+@@ -148,10 +147,6 @@ BenchmarkRunner::BenchmarkRunner(
+     : b(b_),
+       reports_for_family(reports_for_family_),
+       min_time(!IsZero(b.min_time()) ? b.min_time() : FLAGS_benchmark_min_time),
+-      min_warmup_time((!IsZero(b.min_time()) && b.min_warmup_time() > 0.0)
+-                          ? b.min_warmup_time()
+-                          : FLAGS_benchmark_min_warmup_time),
+-      warmup_done(!(min_warmup_time > 0.0)),
+       repeats(b.repetitions() != 0 ? b.repetitions()
+                                    : FLAGS_benchmark_repetitions),
+       has_explicit_iteration_count(b.iterations() != 0),
+@@ -236,13 +231,13 @@ IterationCount BenchmarkRunner::PredictNumItersNeeded(
+     const IterationResults& i) const {
+   // See how much iterations should be increased by.
+   // Note: Avoid division by zero with max(seconds, 1ns).
+-  double multiplier = GetMinTimeToApply() * 1.4 / std::max(i.seconds, 1e-9);
++  double multiplier = min_time * 1.4 / std::max(i.seconds, 1e-9);
+   // If our last run was at least 10% of FLAGS_benchmark_min_time then we
+   // use the multiplier directly.
+   // Otherwise we use at most 10 times expansion.
+   // NOTE: When the last run was at least 10% of the min time the max
+   // expansion should be 14x.
+-  const bool is_significant = (i.seconds / GetMinTimeToApply()) > 0.1;
++  bool is_significant = (i.seconds / min_time) > 0.1;
+   multiplier = is_significant ? multiplier : 10.0;
+ 
+   // So what seems to be the sufficiently-large iteration count? Round up.
+@@ -263,78 +258,19 @@ bool BenchmarkRunner::ShouldReportIterationResults(
+   // or because an error was reported.
+   return i.results.has_error_ ||
+          i.iters >= kMaxIterations ||  // Too many iterations already.
+-         i.seconds >=
+-             GetMinTimeToApply() ||  // The elapsed time is large enough.
++         i.seconds >= min_time ||      // The elapsed time is large enough.
+          // CPU time is specified but the elapsed real time greatly exceeds
+          // the minimum time.
+          // Note that user provided timers are except from this test.
+-         ((i.results.real_time_used >= 5 * GetMinTimeToApply()) &&
+-          !b.use_manual_time());
+-}
+-
+-double BenchmarkRunner::GetMinTimeToApply() const {
+-  // In order to re-use functionality to run and measure benchmarks for running
+-  // a warmup phase of the benchmark, we need a way of telling whether to apply
+-  // min_time or min_warmup_time. This function will figure out if we are in the
+-  // warmup phase and therefore need to apply min_warmup_time or if we already
+-  // in the benchmarking phase and min_time needs to be applied.
+-  return warmup_done ? min_time : min_warmup_time;
+-}
+-
+-void BenchmarkRunner::FinishWarmUp(const IterationCount& i) {
+-  warmup_done = true;
+-  iters = i;
+-}
+-
+-void BenchmarkRunner::RunWarmUp() {
+-  // Use the same mechanisms for warming up the benchmark as used for actually
+-  // running and measuring the benchmark.
+-  IterationResults i_warmup;
+-  // Dont use the iterations determined in the warmup phase for the actual
+-  // measured benchmark phase. While this may be a good starting point for the
+-  // benchmark and it would therefore get rid of the need to figure out how many
+-  // iterations are needed if min_time is set again, this may also be a complete
+-  // wrong guess since the warmup loops might be considerably slower (e.g
+-  // because of caching effects).
+-  const IterationCount i_backup = iters;
+-
+-  for (;;) {
+-    b.Setup();
+-    i_warmup = DoNIterations();
+-    b.Teardown();
+-
+-    const bool finish = ShouldReportIterationResults(i_warmup);
+-
+-    if (finish) {
+-      FinishWarmUp(i_backup);
+-      break;
+-    }
+-
+-    // Although we are running "only" a warmup phase where running enough
+-    // iterations at once without measuring time isn't as important as it is for
+-    // the benchmarking phase, we still do it the same way as otherwise it is
+-    // very confusing for the user to know how to choose a proper value for
+-    // min_warmup_time if a different approach on running it is used.
+-    iters = PredictNumItersNeeded(i_warmup);
+-    assert(iters > i_warmup.iters &&
+-           "if we did more iterations than we want to do the next time, "
+-           "then we should have accepted the current iteration run.");
+-  }
++         ((i.results.real_time_used >= 5 * min_time) && !b.use_manual_time());
+ }
+ 
+ void BenchmarkRunner::DoOneRepetition() {
+   assert(HasRepeatsRemaining() && "Already done all repetitions?");
+ 
+   const bool is_the_first_repetition = num_repetitions_done == 0;
+-
+-  // In case a warmup phase is requested by the benchmark, run it now.
+-  // After running the warmup phase the BenchmarkRunner should be in a state as
+-  // this warmup never happened except the fact that warmup_done is set. Every
+-  // other manipulation of the BenchmarkRunner instance would be a bug! Please
+-  // fix it.
+-  if (!warmup_done) RunWarmUp();
+-
+   IterationResults i;
++
+   // We *may* be gradually increasing the length (iteration count)
+   // of the benchmark until we decide the results are significant.
+   // And once we do, we report those last results and exit.
+diff --git a/src/benchmark_runner.h b/src/benchmark_runner.h
+index 0174bd3..752eefd 100644
+--- a/src/benchmark_runner.h
++++ b/src/benchmark_runner.h
+@@ -26,7 +26,6 @@
+ namespace benchmark {
+ 
+ BM_DECLARE_double(benchmark_min_time);
+-BM_DECLARE_double(benchmark_min_warmup_time);
+ BM_DECLARE_int32(benchmark_repetitions);
+ BM_DECLARE_bool(benchmark_report_aggregates_only);
+ BM_DECLARE_bool(benchmark_display_aggregates_only);
+@@ -70,8 +69,6 @@ class BenchmarkRunner {
+   BenchmarkReporter::PerFamilyRunReports* reports_for_family;
+ 
+   const double min_time;
+-  const double min_warmup_time;
+-  bool warmup_done;
+   const int repeats;
+   const bool has_explicit_iteration_count;
+ 
+@@ -98,12 +95,6 @@ class BenchmarkRunner {
+   IterationCount PredictNumItersNeeded(const IterationResults& i) const;
+ 
+   bool ShouldReportIterationResults(const IterationResults& i) const;
+-
+-  double GetMinTimeToApply() const;
+-
+-  void FinishWarmUp(const IterationCount& i);
+-
+-  void RunWarmUp();
+ };
+ 
+ }  // namespace internal
+diff --git a/test/benchmark_name_gtest.cc b/test/benchmark_name_gtest.cc
+index 0a6746d..afb401c 100644
+--- a/test/benchmark_name_gtest.cc
++++ b/test/benchmark_name_gtest.cc
+@@ -32,14 +32,6 @@ TEST(BenchmarkNameTest, MinTime) {
+   EXPECT_EQ(name.str(), "function_name/some_args:3/4/min_time:3.4s");
+ }
+ 
+-TEST(BenchmarkNameTest, MinWarmUpTime) {
+-  auto name = BenchmarkName();
+-  name.function_name = "function_name";
+-  name.args = "some_args:3/4";
+-  name.min_warmup_time = "min_warmup_time:3.5s";
+-  EXPECT_EQ(name.str(), "function_name/some_args:3/4/min_warmup_time:3.5s");
+-}
+-
+ TEST(BenchmarkNameTest, Iterations) {
+   auto name = BenchmarkName();
+   name.function_name = "function_name";
+diff --git a/test/options_test.cc b/test/options_test.cc
+index 6bba0ea..d424d40 100644
+--- a/test/options_test.cc
++++ b/test/options_test.cc
+@@ -33,8 +33,6 @@ BENCHMARK(BM_basic)->DenseRange(10, 15);
+ BENCHMARK(BM_basic)->Args({42, 42});
+ BENCHMARK(BM_basic)->Ranges({{64, 512}, {64, 512}});
+ BENCHMARK(BM_basic)->MinTime(0.7);
+-BENCHMARK(BM_basic)->MinWarmUpTime(0.8);
+-BENCHMARK(BM_basic)->MinTime(0.1)->MinWarmUpTime(0.2);
+ BENCHMARK(BM_basic)->UseRealTime();
+ BENCHMARK(BM_basic)->ThreadRange(2, 4);
+ BENCHMARK(BM_basic)->ThreadPerCpu();

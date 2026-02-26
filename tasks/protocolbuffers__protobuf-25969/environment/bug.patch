@@ -1,0 +1,154 @@
+diff --git a/.github/workflows/test_bazel.yml b/.github/workflows/test_bazel.yml
+index f5a690b08..0618b4c91 100644
+--- a/.github/workflows/test_bazel.yml
++++ b/.github/workflows/test_bazel.yml
+@@ -30,12 +30,11 @@ jobs:
+         bazelversion: [ '8.0.0' ]
+         bzlmod: [ true, false ]
+         toolchain_resolution:
+-          # Default flags, uses from prebuilt protoc
++          # Default flags, uses from-source protoc
+           - ""
+-          # Still uses prebuilt protoc
+-          - "--incompatible_enable_proto_toolchain_resolution=false"
+-          # Uses protoc from source.
+-          - "--@com_google_protobuf//bazel/flags:prefer_prebuilt_protoc=false"
++          # still uses from-source protoc unless 
++          # --@com_google_protobuf//bazel/flags:prefer_prebuilt_protoc is set
++          - "--incompatible_enable_proto_toolchain_resolution=true"
+     runs-on: ${{ matrix.runner }}-latest
+     name: ${{ matrix.continuous-only && inputs.continuous-prefix || '' }} Examples ${{ matrix.runner }} ${{ matrix.bazelversion }}${{ matrix.bzlmod && ' (bzlmod)' || '' }} ${{ matrix.toolchain_resolution && ' (toolchain resolution)' || '' }}
+     steps:
+@@ -79,27 +78,8 @@ jobs:
+             cd examples;
+             bazel build //... @com_google_protobuf-examples-with-hyphen//... $BAZEL_FLAGS --enable_bzlmod=${{ matrix.bzlmod }} --enable_workspace=${{ !matrix.bzlmod }} ${{ matrix.toolchain_resolution }};
+ 
+-  prebuilt-protoc:
+-    strategy:
+-      fail-fast: false
+-      matrix:
+-        runner: [ ubuntu, windows, macos ]
+-        bazelversion: [ '8.0.0' ]
+-        bzlmod: [ true ]
+-        toolchain_resolution:
+-          # Default flags, uses from prebuilt protoc
+-          - ""
+-    runs-on: ${{ matrix.runner }}-latest
+-    name: ${{ matrix.continuous-only && inputs.continuous-prefix || '' }} Prebuilt test ${{ matrix.runner }} ${{ matrix.bazelversion }} ${{ matrix.toolchain_resolution && ' (toolchain resolution)' || '' }}
+-    steps:
+-      - name: Checkout pending changes
+-        if: ${{ !matrix.continuous-only || inputs.continuous-run }}
+-        uses: protocolbuffers/protobuf-ci/checkout@v5
+-        with:
+-          ref: ${{ inputs.safe-checkout }}
+-
+-      - name: Run tests
+-        if: ${{ !matrix.continuous-only || inputs.continuous-run }}
++      - name: Prebuilt test
++        if: ${{ matrix.bzlmod && (!matrix.continuous-only || inputs.continuous-run) }}
+         uses: protocolbuffers/protobuf-ci/bazel@v5
+         with:
+           credentials: ${{ secrets.GAR_SERVICE_ACCOUNT }}
+diff --git a/MODULE.bazel b/MODULE.bazel
+index 297abfe50..182f2f74f 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -120,9 +120,8 @@ use_repo(
+     "prebuilt_protoc.win64",
+ )
+ 
+-# This registration applies when the config_setting for prefer_prebuilt_protoc is true.
+-# This is now enabled by default.
+-# It can be disabled using --@protobuf//bazel/flags:prefer_prebuilt_protoc=false
++# However this registration only matters if the config_setting for prefer_prebuilt_protoc is true,
++# using --@protobuf//bazel/flags:prefer_prebuilt_protoc
+ register_toolchains("//bazel/private/oss/toolchains/prebuilt:all")
+ 
+ # From-source protobuf toolchains
+diff --git a/bazel/flags/BUILD b/bazel/flags/BUILD
+index 3bdd4dfd6..bda469574 100644
+--- a/bazel/flags/BUILD
++++ b/bazel/flags/BUILD
+@@ -37,10 +37,10 @@ label_flag(
+ )
+ 
+ # When set to true, we will use a prebuilt protoc binary from GitHub if it's available.
+-# This is now enabled by default.
+ bool_flag(
+     name = "prefer_prebuilt_protoc",
+-    build_setting_default = True,
++    # TODO: this should be True after the feature is vetted with some adoption
++    build_setting_default = False,
+     visibility = ["//bazel/toolchains:__pkg__"],
+ )
+ 
+diff --git a/bazel/tests/cc_toolchain_tests.bzl b/bazel/tests/cc_toolchain_tests.bzl
+index 448feed43..624bafff9 100644
+--- a/bazel/tests/cc_toolchain_tests.bzl
++++ b/bazel/tests/cc_toolchain_tests.bzl
+@@ -18,12 +18,12 @@ def cc_toolchain_test_suite(name):
+     test_suite(
+         name = name,
+         tests = [
+-            _test_cc_toolchain_uses_protoc_minimal_when_prefer_prebuilt_flag_unset,
+-            _test_cc_toolchain_uses_full_protoc_by_default,
++            _test_cc_toolchain_uses_full_protoc_when_prefer_prebuilt_flag_set,
++            _test_cc_toolchain_uses_protoc_minimal_by_default,
+         ],
+     )
+ 
+-def _test_cc_toolchain_uses_protoc_minimal_when_prefer_prebuilt_flag_unset(name):
++def _test_cc_toolchain_uses_full_protoc_when_prefer_prebuilt_flag_set(name):
+     util.helper_target(
+         proto_library,
+         name = name + "_proto",
+@@ -39,19 +39,21 @@ def _test_cc_toolchain_uses_protoc_minimal_when_prefer_prebuilt_flag_unset(name)
+     analysis_test(
+         name = name,
+         target = name + "_compile",
+-        impl = _test_cc_toolchain_uses_protoc_minimal_when_prefer_prebuilt_flag_unset_impl,
+-        config_settings = {_PREFER_PREBUILT_PROTOC: False},
++        impl = _test_cc_toolchain_uses_full_protoc_when_prefer_prebuilt_flag_set_impl,
++        config_settings = {_PREFER_PREBUILT_PROTOC: True},
+     )
+ 
+-def _test_cc_toolchain_uses_protoc_minimal_when_prefer_prebuilt_flag_unset_impl(env, target):
++def _test_cc_toolchain_uses_full_protoc_when_prefer_prebuilt_flag_set_impl(env, target):
+     # Find the compile action
+     action = env.expect.that_target(target).action_named("GenProto")
+ 
+-    # When prefer_prebuilt_protoc is False, protoc_minimal_do_not_use is set,
+-    # so the cc_toolchain should use protoc_minimal.
+-    action.argv().contains_predicate(matching.str_matches("*protoc_minimal*"))
++    # When prefer_prebuilt_protoc is True, protoc_minimal_do_not_use is None,
++    # so the cc_toolchain should use the full protoc (not protoc_minimal).
++    # The protoc path should end with "/protoc" not contain "protoc_minimal"
++    action.argv().contains_predicate(matching.str_matches("*/protoc"))
++    action.argv().not_contains_predicate(matching.str_matches("*protoc_minimal*"))
+ 
+-def _test_cc_toolchain_uses_full_protoc_by_default(name):
++def _test_cc_toolchain_uses_protoc_minimal_by_default(name):
+     util.helper_target(
+         proto_library,
+         name = name + "_proto",
+@@ -67,15 +69,13 @@ def _test_cc_toolchain_uses_full_protoc_by_default(name):
+     analysis_test(
+         name = name,
+         target = name + "_compile",
+-        impl = _test_cc_toolchain_uses_full_protoc_by_default_impl,
++        impl = _test_cc_toolchain_uses_protoc_minimal_by_default_impl,
+     )
+ 
+-def _test_cc_toolchain_uses_full_protoc_by_default_impl(env, target):
++def _test_cc_toolchain_uses_protoc_minimal_by_default_impl(env, target):
+     # Find the compile action
+     action = env.expect.that_target(target).action_named("GenProto")
+ 
+-    # By default (prefer_prebuilt_protoc is True), protoc_minimal_do_not_use is None,
+-    # so the cc_toolchain should use the full protoc (not protoc_minimal).
+-    # The protoc path should end with "/protoc" not contain "protoc_minimal"
+-    action.argv().contains_predicate(matching.str_matches("*/protoc"))
+-    action.argv().not_contains_predicate(matching.str_matches("*protoc_minimal*"))
++    # By default (prefer_prebuilt_protoc is False), protoc_minimal_do_not_use is set,
++    # so the cc_toolchain should use protoc_minimal.
++    action.argv().contains_predicate(matching.str_matches("*protoc_minimal*"))

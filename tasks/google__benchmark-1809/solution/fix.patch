@@ -1,0 +1,197 @@
+diff --git a/CONTRIBUTORS b/CONTRIBUTORS
+index 9ca2caa..54aba7b 100644
+--- a/CONTRIBUTORS
++++ b/CONTRIBUTORS
+@@ -42,6 +42,7 @@ Dominic Hamon <dma@stripysock.com> <dominic@google.com>
+ Dominik Czarnota <dominik.b.czarnota@gmail.com>
+ Dominik Korman <kormandominik@gmail.com>
+ Donald Aingworth <donalds_junk_mail@yahoo.com>
++Doug Evans <xdje42@gmail.com>
+ Eric Backus <eric_backus@alum.mit.edu>
+ Eric Fiselier <eric@efcs.ca>
+ Eugene Zhuk <eugene.zhuk@gmail.com>
+diff --git a/docs/user_guide.md b/docs/user_guide.md
+index d87ccc4..e382620 100644
+--- a/docs/user_guide.md
++++ b/docs/user_guide.md
+@@ -1139,6 +1139,21 @@ a report on the number of allocations, bytes used, etc.
+ This data will then be reported alongside other performance data, currently
+ only when using JSON output.
+ 
++<a name="profiling" />
++
++## Profiling
++
++It's often useful to also profile benchmarks in particular ways, in addition to
++CPU performance. For this reason, benchmark offers the `RegisterProfilerManager`
++method that allows a custom `ProfilerManager` to be injected.
++
++If set, the `ProfilerManager::AfterSetupStart` and
++`ProfilerManager::BeforeTeardownStop` methods will be called at the start and
++end of a separate benchmark run to allow user code to collect and report
++user-provided profile metrics.
++
++Output collected from this profiling run must be reported separately.
++
+ <a name="using-register-benchmark" />
+ 
+ ## Using RegisterBenchmark(name, fn, args...)
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 08cfe29..7dd72e2 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -416,6 +416,26 @@ class MemoryManager {
+ BENCHMARK_EXPORT
+ void RegisterMemoryManager(MemoryManager* memory_manager);
+ 
++// If a ProfilerManager is registered (via RegisterProfilerManager()), the
++// benchmark will be run an additional time under the profiler to collect and
++// report profile metrics for the run of the benchmark.
++class ProfilerManager {
++ public:
++  virtual ~ProfilerManager() {}
++
++  // This is called after `Setup()` code and right before the benchmark is run.
++  virtual void AfterSetupStart() = 0;
++
++  // This is called before `Teardown()` code and right after the benchmark
++  // completes.
++  virtual void BeforeTeardownStop() = 0;
++};
++
++// Register a ProfilerManager instance that will be used to collect and report
++// profile measurements for benchmark runs.
++BENCHMARK_EXPORT
++void RegisterProfilerManager(ProfilerManager* profiler_manager);
++
+ // Add a key-value pair to output as part of the context stanza in the report.
+ BENCHMARK_EXPORT
+ void AddCustomContext(const std::string& key, const std::string& value);
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 337bb3f..374c514 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -656,6 +656,10 @@ void RegisterMemoryManager(MemoryManager* manager) {
+   internal::memory_manager = manager;
+ }
+ 
++void RegisterProfilerManager(ProfilerManager* manager) {
++  internal::profiler_manager = manager;
++}
++
+ void AddCustomContext(const std::string& key, const std::string& value) {
+   if (internal::global_context == nullptr) {
+     internal::global_context = new std::map<std::string, std::string>();
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index a74bdad..3a8c307 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -62,6 +62,8 @@ namespace internal {
+ 
+ MemoryManager* memory_manager = nullptr;
+ 
++ProfilerManager* profiler_manager = nullptr;
++
+ namespace {
+ 
+ static constexpr IterationCount kMaxIterations = 1000000000000;
+@@ -401,6 +403,41 @@ void BenchmarkRunner::RunWarmUp() {
+   }
+ }
+ 
++MemoryManager::Result* BenchmarkRunner::RunMemoryManager(
++    IterationCount memory_iterations) {
++  // TODO(vyng): Consider making BenchmarkReporter::Run::memory_result an
++  // optional so we don't have to own the Result here.
++  // Can't do it now due to cxx03.
++  memory_results.push_back(MemoryManager::Result());
++  MemoryManager::Result* memory_result = &memory_results.back();
++  memory_manager->Start();
++  std::unique_ptr<internal::ThreadManager> manager;
++  manager.reset(new internal::ThreadManager(1));
++  b.Setup();
++  RunInThread(&b, memory_iterations, 0, manager.get(),
++              perf_counters_measurement_ptr);
++  manager->WaitForAllThreads();
++  manager.reset();
++  b.Teardown();
++  memory_manager->Stop(*memory_result);
++  return memory_result;
++}
++
++void BenchmarkRunner::RunProfilerManager() {
++  // TODO: Provide a way to specify the number of iterations.
++  IterationCount profile_iterations = 1;
++  std::unique_ptr<internal::ThreadManager> manager;
++  manager.reset(new internal::ThreadManager(1));
++  b.Setup();
++  profiler_manager->AfterSetupStart();
++  RunInThread(&b, profile_iterations, 0, manager.get(),
++              /*perf_counters_measurement_ptr=*/nullptr);
++  manager->WaitForAllThreads();
++  profiler_manager->BeforeTeardownStop();
++  manager.reset();
++  b.Teardown();
++}
++
+ void BenchmarkRunner::DoOneRepetition() {
+   assert(HasRepeatsRemaining() && "Already done all repetitions?");
+ 
+@@ -445,28 +482,18 @@ void BenchmarkRunner::DoOneRepetition() {
+            "then we should have accepted the current iteration run.");
+   }
+ 
+-  // Oh, one last thing, we need to also produce the 'memory measurements'..
++  // Produce memory measurements if requested.
+   MemoryManager::Result* memory_result = nullptr;
+   IterationCount memory_iterations = 0;
+   if (memory_manager != nullptr) {
+-    // TODO(vyng): Consider making BenchmarkReporter::Run::memory_result an
+-    // optional so we don't have to own the Result here.
+-    // Can't do it now due to cxx03.
+-    memory_results.push_back(MemoryManager::Result());
+-    memory_result = &memory_results.back();
+     // Only run a few iterations to reduce the impact of one-time
+     // allocations in benchmarks that are not properly managed.
+     memory_iterations = std::min<IterationCount>(16, iters);
+-    memory_manager->Start();
+-    std::unique_ptr<internal::ThreadManager> manager;
+-    manager.reset(new internal::ThreadManager(1));
+-    b.Setup();
+-    RunInThread(&b, memory_iterations, 0, manager.get(),
+-                perf_counters_measurement_ptr);
+-    manager->WaitForAllThreads();
+-    manager.reset();
+-    b.Teardown();
+-    memory_manager->Stop(*memory_result);
++    memory_result = RunMemoryManager(memory_iterations);
++  }
++
++  if (profiler_manager != nullptr) {
++    RunProfilerManager();
+   }
+ 
+   // Ok, now actually report.
+diff --git a/src/benchmark_runner.h b/src/benchmark_runner.h
+index db2fa04..cd34d2d 100644
+--- a/src/benchmark_runner.h
++++ b/src/benchmark_runner.h
+@@ -35,6 +35,7 @@ BM_DECLARE_string(benchmark_perf_counters);
+ namespace internal {
+ 
+ extern MemoryManager* memory_manager;
++extern ProfilerManager* profiler_manager;
+ 
+ struct RunResults {
+   std::vector<BenchmarkReporter::Run> non_aggregates;
+@@ -113,6 +114,10 @@ class BenchmarkRunner {
+   };
+   IterationResults DoNIterations();
+ 
++  MemoryManager::Result* RunMemoryManager(IterationCount memory_iterations);
++
++  void RunProfilerManager();
++
+   IterationCount PredictNumItersNeeded(const IterationResults& i) const;
+ 
+   bool ShouldReportIterationResults(const IterationResults& i) const;

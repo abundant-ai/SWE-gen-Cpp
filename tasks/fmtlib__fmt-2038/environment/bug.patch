@@ -1,0 +1,339 @@
+diff --git a/doc/api.rst b/doc/api.rst
+index 3542e489..260fd3f7 100644
+--- a/doc/api.rst
++++ b/doc/api.rst
+@@ -165,11 +165,6 @@ functions in their ``formatter`` specializations.
+ 
+ .. _udt:
+ 
+-To force the use of compile-time checks, define the preprocessor variable
+-``FMT_ENFORCE_COMPILE_STRING``. When set, functions accepting ``FMT_STRING``
+-will fail to compile with regular strings. Runtime-checked
+-formatting is still possible using ``fmt::vformat``, ``fmt::vprint``, etc.
+-
+ Formatting User-defined Types
+ -----------------------------
+ 
+diff --git a/include/fmt/chrono.h b/include/fmt/chrono.h
+index 87f3a46f..d68d8c9a 100644
+--- a/include/fmt/chrono.h
++++ b/include/fmt/chrono.h
+@@ -768,16 +768,19 @@ inline std::chrono::duration<Rep, std::milli> get_milliseconds(
+ template <typename Char, typename Rep, typename OutputIt,
+           FMT_ENABLE_IF(std::is_integral<Rep>::value)>
+ OutputIt format_duration_value(OutputIt out, Rep val, int) {
+-  return write<Char>(out, val);
++  static FMT_CONSTEXPR_DECL const Char format[] = {'{', '}', 0};
++  return format_to(out, compile_string_to_view(format), val);
+ }
+ 
+ template <typename Char, typename Rep, typename OutputIt,
+           FMT_ENABLE_IF(std::is_floating_point<Rep>::value)>
+ OutputIt format_duration_value(OutputIt out, Rep val, int precision) {
+-  basic_format_specs<Char> specs;
+-  specs.precision = precision;
+-  specs.type = precision > 0 ? 'f' : 'g';
+-  return write<Char>(out, val, specs);
++  static FMT_CONSTEXPR_DECL const Char pr_f[] = {'{', ':', '.', '{',
++                                                 '}', 'f', '}', 0};
++  if (precision >= 0)
++    return format_to(out, compile_string_to_view(pr_f), val, precision);
++  static FMT_CONSTEXPR_DECL const Char fp_f[] = {'{', ':', 'g', '}', 0};
++  return format_to(out, compile_string_to_view(fp_f), val);
+ }
+ 
+ template <typename Char, typename OutputIt>
+@@ -797,18 +800,13 @@ template <typename Char, typename Period, typename OutputIt>
+ OutputIt format_duration_unit(OutputIt out) {
+   if (const char* unit = get_units<Period>())
+     return copy_unit(string_view(unit), out, Char());
+-
+-  *out++ = '[';
+-  out = write<Char>(out, Period::num);
+-
+-  if (const_check(Period::den != 1)) {
+-    *out++ = '/';
+-    out = write<Char>(out, Period::den);
+-  }
+-
+-  *out++ = ']';
+-  *out++ = 's';
+-  return out;
++  static FMT_CONSTEXPR_DECL const Char num_f[] = {'[', '{', '}', ']', 's', 0};
++  if (const_check(Period::den == 1))
++    return format_to(out, compile_string_to_view(num_f), Period::num);
++  static FMT_CONSTEXPR_DECL const Char num_def_f[] = {'[', '{', '}', '/', '{',
++                                                      '}', ']', 's', 0};
++  return format_to(out, compile_string_to_view(num_def_f), Period::num,
++                   Period::den);
+ }
+ 
+ template <typename FormatContext, typename OutputIt, typename Rep,
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index ddf24503..ceef2ef1 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -3828,7 +3828,7 @@ inline std::string to_string(T value) {
+   Converts *value* to ``std::wstring`` using the default format for type *T*.
+  */
+ template <typename T> inline std::wstring to_wstring(const T& value) {
+-  return format(FMT_STRING(L"{}"), value);
++  return format(L"{}", value);
+ }
+ 
+ template <typename Char, size_t SIZE>
+diff --git a/include/fmt/ranges.h b/include/fmt/ranges.h
+index 91f55e0b..732d3209 100644
+--- a/include/fmt/ranges.h
++++ b/include/fmt/ranges.h
+@@ -37,13 +37,19 @@ struct formatting_range : formatting_base<Char> {
+       FMT_RANGE_OUTPUT_LENGTH_LIMIT;  // output only up to N items from the
+                                       // range.
+   Char prefix = '{';
++  Char delimiter = ',';
+   Char postfix = '}';
++  static FMT_CONSTEXPR_DECL const bool add_delimiter_spaces = true;
++  static FMT_CONSTEXPR_DECL const bool add_prepostfix_space = false;
+ };
+ 
+ template <typename Char, typename Enable = void>
+ struct formatting_tuple : formatting_base<Char> {
+   Char prefix = '(';
++  Char delimiter = ',';
+   Char postfix = ')';
++  static FMT_CONSTEXPR_DECL const bool add_delimiter_spaces = true;
++  static FMT_CONSTEXPR_DECL const bool add_prepostfix_space = false;
+ };
+ 
+ namespace detail {
+@@ -241,39 +247,31 @@ template <typename Range>
+ using value_type =
+     remove_cvref_t<decltype(*detail::range_begin(std::declval<Range>()))>;
+ 
+-template <typename OutputIt> OutputIt write_delimiter(OutputIt out) {
+-  *out++ = ',';
+-  *out++ = ' ';
+-  return out;
++template <typename Arg, FMT_ENABLE_IF(!is_like_std_string<
++                                      typename std::decay<Arg>::type>::value)>
++FMT_CONSTEXPR const char* format_str_quoted(bool add_space, const Arg&) {
++  return add_space ? " {}" : "{}";
+ }
+ 
+-template <
+-    typename Char, typename OutputIt, typename Arg,
+-    FMT_ENABLE_IF(is_like_std_string<typename std::decay<Arg>::type>::value)>
+-OutputIt write_range_entry(OutputIt out, const Arg& v) {
+-  *out++ = '"';
+-  out = write<Char>(out, v);
+-  *out++ = '"';
+-  return out;
++template <typename Arg, FMT_ENABLE_IF(is_like_std_string<
++                                      typename std::decay<Arg>::type>::value)>
++FMT_CONSTEXPR const char* format_str_quoted(bool add_space, const Arg&) {
++  return add_space ? " \"{}\"" : "\"{}\"";
+ }
+ 
+-template <typename Char, typename OutputIt, typename Arg,
+-          FMT_ENABLE_IF(std::is_same<Arg, Char>::value)>
+-OutputIt write_range_entry(OutputIt out, const Arg v) {
+-  *out++ = '\'';
+-  *out++ = v;
+-  *out++ = '\'';
+-  return out;
++FMT_CONSTEXPR const char* format_str_quoted(bool add_space, const char*) {
++  return add_space ? " \"{}\"" : "\"{}\"";
+ }
+-
+-template <
+-    typename Char, typename OutputIt, typename Arg,
+-    FMT_ENABLE_IF(!is_like_std_string<typename std::decay<Arg>::type>::value &&
+-                  !std::is_same<Arg, Char>::value)>
+-OutputIt write_range_entry(OutputIt out, const Arg& v) {
+-  return write<Char>(out, v);
++FMT_CONSTEXPR const wchar_t* format_str_quoted(bool add_space, const wchar_t*) {
++  return add_space ? L" \"{}\"" : L"\"{}\"";
+ }
+ 
++FMT_CONSTEXPR const char* format_str_quoted(bool add_space, const char) {
++  return add_space ? " '{}'" : "'{}'";
++}
++FMT_CONSTEXPR const wchar_t* format_str_quoted(bool add_space, const wchar_t) {
++  return add_space ? L" '{}'" : L"'{}'";
++}
+ }  // namespace detail
+ 
+ template <typename T> struct is_tuple_like {
+@@ -288,10 +286,15 @@ struct formatter<TupleT, Char, enable_if_t<fmt::is_tuple_like<TupleT>::value>> {
+   template <typename FormatContext> struct format_each {
+     template <typename T> void operator()(const T& v) {
+       if (i > 0) {
+-        out = write_delimiter(out);
++        if (formatting.add_prepostfix_space) {
++          *out++ = ' ';
++        }
++        out = detail::copy(formatting.delimiter, out);
+       }
+-
+-      out = detail::write_range_entry<Char>(out, v);
++      out = format_to(out,
++                      detail::format_str_quoted(
++                          (formatting.add_delimiter_spaces && i > 0), v),
++                      v);
+       ++i;
+     }
+ 
+@@ -313,9 +316,12 @@ struct formatter<TupleT, Char, enable_if_t<fmt::is_tuple_like<TupleT>::value>> {
+   auto format(const TupleT& values, FormatContext& ctx) -> decltype(ctx.out()) {
+     auto out = ctx.out();
+     size_t i = 0;
+-
+     detail::copy(formatting.prefix, out);
++
+     detail::for_each(values, format_each<FormatContext>{formatting, i, out});
++    if (formatting.add_prepostfix_space) {
++      *out++ = ' ';
++    }
+     detail::copy(formatting.postfix, out);
+ 
+     return ctx.out();
+@@ -357,16 +363,19 @@ struct formatter<
+     auto end = view.end();
+     for (; it != end; ++it) {
+       if (i > 0) {
+-        out = detail::write_delimiter(out);
++        if (formatting.add_prepostfix_space) *out++ = ' ';
++        out = detail::copy(formatting.delimiter, out);
+       }
+-
+-      out = detail::write_range_entry<Char>(out, *it);
+-
++      out = format_to(out,
++                      detail::format_str_quoted(
++                          (formatting.add_delimiter_spaces && i > 0), *it),
++                      *it);
+       if (++i > formatting.range_length_limit) {
+-        out = format_to(out, FMT_STRING("{}"), " ... <other elements>");
++        out = format_to(out, " ... <other elements>");
+         break;
+       }
+     }
++    if (formatting.add_prepostfix_space) *out++ = ' ';
+     return detail::copy(formatting.postfix, out);
+   }
+ };
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 78798d87..45721a6d 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -106,14 +106,6 @@ add_fmt_test(printf-test)
+ add_fmt_test(ranges-test)
+ add_fmt_test(scan-test)
+ 
+-if (NOT MSVC)
+-  # FMT_ENFORCE_COMPILE_STRING not supported under MSVC
+-  # See https://developercommunity.visualstudio.com/content/problem/1277597/internal-compiler-c0001-error-on-complex-nested-la.html
+-  add_fmt_test(enforce-compile-string-test)
+-  target_compile_definitions(enforce-compile-string-test PRIVATE
+-    "-DFMT_ENFORCE_COMPILE_STRING")
+-endif()
+-
+ if (NOT DEFINED MSVC_STATIC_RUNTIME AND MSVC)
+   foreach (flag_var
+ 			 CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
+diff --git a/test/enforce-compile-string-test.cc b/test/enforce-compile-string-test.cc
+deleted file mode 100644
+index 146e8d5e..00000000
+--- a/test/enforce-compile-string-test.cc
++++ /dev/null
+@@ -1,74 +0,0 @@
+-// Formatting library for C++ - formatting library tests
+-//
+-// Copyright (c) 2012 - present, Victor Zverovich
+-// All rights reserved.
+-//
+-// For the license information refer to format.h.
+-
+-#include <array>
+-#include <chrono>
+-#include <iterator>
+-#include <list>
+-#include <string>
+-
+-#include "fmt/chrono.h"
+-#include "fmt/color.h"
+-#include "fmt/format.h"
+-#include "fmt/locale.h"
+-#include "fmt/ostream.h"
+-#include "fmt/ranges.h"
+-
+-// Exercise the API to verify that everything we expect to can compile.
+-void test_format_api() {
+-  fmt::format(FMT_STRING("{}"), 42);
+-  fmt::format(FMT_STRING(L"{}"), 42);
+-  fmt::format(FMT_STRING("noop"));
+-
+-  fmt::to_string(42);
+-  fmt::to_wstring(42);
+-
+-  std::list<char> out;
+-  fmt::format_to(std::back_inserter(out), FMT_STRING("{}"), 42);
+-
+-  char buffer[4];
+-  fmt::format_to_n(buffer, 3, FMT_STRING("{}"), 12345);
+-
+-  wchar_t wbuffer[4];
+-  fmt::format_to_n(wbuffer, 3, FMT_STRING(L"{}"), 12345);
+-}
+-
+-void test_literals_api() {
+-#if FMT_USE_UDL_TEMPLATE
+-  using namespace fmt::literals;
+-  "{}c{}"_format("ab", 1);
+-  L"{}c{}"_format(L"ab", 1);
+-#endif
+-}
+-
+-void test_chrono() {
+-  fmt::format(FMT_STRING("{}"), std::chrono::seconds(42));
+-  fmt::format(FMT_STRING(L"{}"), std::chrono::seconds(42));
+-}
+-
+-void test_text_style() {
+-  fmt::print(fg(fmt::rgb(255, 20, 30)), FMT_STRING("{}"), "rgb(255,20,30)");
+-  fmt::format(fg(fmt::rgb(255, 20, 30)), FMT_STRING("{}"), "rgb(255,20,30)");
+-
+-  fmt::text_style ts = fg(fmt::rgb(255, 20, 30));
+-  std::string out;
+-  fmt::format_to(std::back_inserter(out), ts,
+-                 FMT_STRING("rgb(255,20,30){}{}{}"), 1, 2, 3);
+-}
+-
+-void test_range() {
+-  std::array<char, 5> hello = {'h', 'e', 'l', 'l', 'o'};
+-  fmt::format(FMT_STRING("{}"), hello);
+-}
+-
+-int main() {
+-  test_format_api();
+-  test_literals_api();
+-  test_chrono();
+-  test_text_style();
+-  test_range();
+-}
+diff --git a/test/ranges-test.cc b/test/ranges-test.cc
+index 802f4ab2..c05e5fcb 100644
+--- a/test/ranges-test.cc
++++ b/test/ranges-test.cc
+@@ -51,11 +51,6 @@ TEST(RangesTest, FormatMap) {
+   EXPECT_EQ("{(\"one\", 1), (\"two\", 2)}", fmt::format("{}", simap));
+ }
+ 
+-TEST(RangesTest, FormatArrayOfLiterals) {
+-  const char* aol[] = {"1234", "abcd"};
+-  EXPECT_EQ("{\"1234\", \"abcd\"}", fmt::format("{}", aol));
+-}
+-
+ TEST(RangesTest, FormatPair) {
+   std::pair<int64_t, float> pa1{42, 1.5f};
+   EXPECT_EQ("(42, 1.5)", fmt::format("{}", pa1));

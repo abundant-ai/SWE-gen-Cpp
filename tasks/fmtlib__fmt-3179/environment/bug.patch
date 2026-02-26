@@ -1,0 +1,309 @@
+diff --git a/include/fmt/format-inl.h b/include/fmt/format-inl.h
+index f1fc7840..eadf0da3 100644
+--- a/include/fmt/format-inl.h
++++ b/include/fmt/format-inl.h
+@@ -1040,7 +1040,8 @@ template <> struct cache_accessor<double> {
+       {0xfcf62c1dee382c42, 0x46729e03dd9ed7b6},
+       {0x9e19db92b4e31ba9, 0x6c07a2c26a8346d2},
+       {0xc5a05277621be293, 0xc7098b7305241886},
+-      {0xf70867153aa2db38, 0xb8cbee4fc66d1ea8}
++      { 0xf70867153aa2db38,
++        0xb8cbee4fc66d1ea8 }
+ #else
+       {0xff77b1fcbebcdc4f, 0x25e8e89c13bb0f7b},
+       {0xce5d73ff402d98e3, 0xfb0a3d212dc81290},
+@@ -1424,6 +1425,17 @@ small_divisor_case_label:
+   return ret_value;
+ }
+ }  // namespace dragonbox
++
++#ifdef _MSC_VER
++FMT_FUNC auto fmt_snprintf(char* buf, size_t size, const char* fmt, ...)
++    -> int {
++  auto args = va_list();
++  va_start(args, fmt);
++  int result = vsnprintf_s(buf, size, _TRUNCATE, fmt, args);
++  va_end(args);
++  return result;
++}
++#endif
+ }  // namespace detail
+ 
+ template <> struct formatter<detail::bigint> {
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index 01e0a509..5223e8c8 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -360,10 +360,6 @@ class uint128_fallback {
+       -> uint128_fallback {
+     return {lhs.hi_ & rhs.hi_, lhs.lo_ & rhs.lo_};
+   }
+-  friend constexpr auto operator~(const uint128_fallback& n)
+-      -> uint128_fallback {
+-    return {~n.hi_, ~n.lo_};
+-  }
+   friend auto operator+(const uint128_fallback& lhs,
+                         const uint128_fallback& rhs) -> uint128_fallback {
+     auto result = uint128_fallback(lhs);
+@@ -402,10 +398,6 @@ class uint128_fallback {
+     lo_ = new_lo;
+     hi_ = new_hi;
+   }
+-  FMT_CONSTEXPR void operator&=(uint128_fallback n) {
+-    lo_ &= n.lo_;
+-    hi_ &= n.hi_;
+-  }
+ 
+   FMT_CONSTEXPR20 uint128_fallback& operator+=(uint64_t n) noexcept {
+     if (is_constant_evaluated()) {
+@@ -1626,6 +1618,62 @@ FMT_CONSTEXPR inline fp get_cached_power(int min_exponent,
+           *(data::pow10_exponents + index)};
+ }
+ 
++#ifndef _MSC_VER
++#  define FMT_SNPRINTF snprintf
++#else
++FMT_API auto fmt_snprintf(char* buf, size_t size, const char* fmt, ...) -> int;
++#  define FMT_SNPRINTF fmt_snprintf
++#endif  // _MSC_VER
++
++// Formats a floating-point number with snprintf using the hexfloat format.
++template <typename T>
++auto snprintf_float(T value, int precision, float_specs specs,
++                    buffer<char>& buf) -> int {
++  // Buffer capacity must be non-zero, otherwise MSVC's vsnprintf_s will fail.
++  FMT_ASSERT(buf.capacity() > buf.size(), "empty buffer");
++  FMT_ASSERT(specs.format == float_format::hex, "");
++  static_assert(!std::is_same<T, float>::value, "");
++
++  // Build the format string.
++  char format[7];  // The longest format is "%#.*Le".
++  char* format_ptr = format;
++  *format_ptr++ = '%';
++  if (specs.showpoint) *format_ptr++ = '#';
++  if (precision >= 0) {
++    *format_ptr++ = '.';
++    *format_ptr++ = '*';
++  }
++  if (std::is_same<T, long double>()) *format_ptr++ = 'L';
++  *format_ptr++ = specs.upper ? 'A' : 'a';
++  *format_ptr = '\0';
++
++  // Format using snprintf.
++  auto offset = buf.size();
++  for (;;) {
++    auto begin = buf.data() + offset;
++    auto capacity = buf.capacity() - offset;
++    abort_fuzzing_if(precision > 100000);
++    // Suppress the warning about a nonliteral format string.
++    // Cannot use auto because of a bug in MinGW (#1532).
++    int (*snprintf_ptr)(char*, size_t, const char*, ...) = FMT_SNPRINTF;
++    int result = precision >= 0
++                     ? snprintf_ptr(begin, capacity, format, precision, value)
++                     : snprintf_ptr(begin, capacity, format, value);
++    if (result < 0) {
++      // The buffer will grow exponentially.
++      buf.try_reserve(buf.capacity() + 1);
++      continue;
++    }
++    auto size = to_unsigned(result);
++    // Size equal to capacity means that the last character was truncated.
++    if (size < capacity) {
++      buf.try_resize(size + offset);
++      return 0;
++    }
++    buf.try_reserve(size + offset + 1);  // Add 1 for the terminating '\0'.
++  }
++}
++
+ template <typename T>
+ using convert_float_result =
+     conditional_t<std::is_same<T, float>::value ||
+@@ -3121,88 +3169,6 @@ FMT_CONSTEXPR20 inline void format_dragon(basic_fp<uint128_t> value,
+   buf[num_digits - 1] = static_cast<char>('0' + digit);
+ }
+ 
+-// Formats a floating-point number using the hexfloat format.
+-template <typename Float>
+-FMT_CONSTEXPR20 void format_hexfloat(Float value, int precision,
+-                                     float_specs specs, buffer<char>& buf) {
+-  // float is passed as double to reduce the number of instantiations and to
+-  // simplify implementation.
+-  static_assert(!std::is_same<Float, float>::value, "");
+-
+-  using info = dragonbox::float_info<Float>;
+-
+-  // Assume Float is in the format [sign][exponent][significand].
+-  using carrier_uint = typename info::carrier_uint;
+-
+-  constexpr auto num_float_significand_bits =
+-      detail::num_significand_bits<Float>();
+-
+-  basic_fp<carrier_uint> f(value);
+-  f.e += num_float_significand_bits;
+-  if (!has_implicit_bit<Float>()) --f.e;
+-
+-  constexpr auto num_fraction_bits =
+-      num_float_significand_bits + (has_implicit_bit<Float>() ? 1 : 0);
+-  constexpr auto num_xdigits = (num_fraction_bits + 3) / 4;
+-
+-  constexpr auto leading_shift = ((num_xdigits - 1) * 4);
+-  const auto leading_mask = carrier_uint(0xF) << leading_shift;
+-  const auto leading_v =
+-      static_cast<uint32_t>((f.f & leading_mask) >> leading_shift);
+-  if (leading_v > 1) f.e -= (32 - FMT_BUILTIN_CLZ(leading_v) - 1);
+-
+-  int print_xdigits = num_xdigits - 1;
+-  if (precision >= 0 && print_xdigits > precision) {
+-    const int shift = ((print_xdigits - precision - 1) * 4);
+-    const auto mask = carrier_uint(0xF) << shift;
+-    const auto v = static_cast<uint32_t>((f.f & mask) >> shift);
+-
+-    if (v >= 8) {
+-      const auto inc = carrier_uint(1) << (shift + 4);
+-      f.f += inc;
+-      f.f &= ~(inc - 1);
+-    }
+-
+-    // Check long double overflow
+-    if (!has_implicit_bit<Float>()) {
+-      const auto implicit_bit = carrier_uint(1) << num_float_significand_bits;
+-      if ((f.f & implicit_bit) == implicit_bit) {
+-        f.f >>= 4;
+-        f.e += 4;
+-      }
+-    }
+-
+-    print_xdigits = precision;
+-  }
+-
+-  char xdigits[num_bits<carrier_uint>() / 4];
+-  detail::fill_n(xdigits, sizeof(xdigits), '0');
+-  format_uint<4>(xdigits, f.f, num_xdigits, specs.upper);
+-
+-  // Remove zero tail
+-  while (print_xdigits > 0 && xdigits[print_xdigits] == '0') --print_xdigits;
+-
+-  buf.push_back('0');
+-  buf.push_back(specs.upper ? 'X' : 'x');
+-  buf.push_back(xdigits[0]);
+-  if (specs.showpoint || print_xdigits > 0 || print_xdigits < precision)
+-    buf.push_back('.');
+-  buf.append(xdigits + 1, xdigits + 1 + print_xdigits);
+-  for (; print_xdigits < precision; ++print_xdigits) buf.push_back('0');
+-
+-  buf.push_back(specs.upper ? 'P' : 'p');
+-
+-  uint32_t abs_e;
+-  if (f.e < 0) {
+-    buf.push_back('-');
+-    abs_e = static_cast<uint32_t>(-f.e);
+-  } else {
+-    buf.push_back('+');
+-    abs_e = static_cast<uint32_t>(f.e);
+-  }
+-  format_decimal<char>(appender(buf), abs_e, detail::count_digits(abs_e));
+-}
+-
+ template <typename Float>
+ FMT_CONSTEXPR20 auto format_float(Float value, int precision, float_specs specs,
+                                   buffer<char>& buf) -> int {
+@@ -3317,7 +3283,7 @@ FMT_CONSTEXPR20 auto write_float(OutputIt out, T value,
+   memory_buffer buffer;
+   if (fspecs.format == float_format::hex) {
+     if (fspecs.sign) buffer.push_back(detail::sign<char>(fspecs.sign));
+-    format_hexfloat(convert_float(value), specs.precision, fspecs, buffer);
++    snprintf_float(convert_float(value), specs.precision, fspecs, buffer);
+     return write_bytes<align::right>(out, {buffer.data(), buffer.size()},
+                                      specs);
+   }
+diff --git a/test/format-test.cc b/test/format-test.cc
+index 4e56bf69..49b5f541 100644
+--- a/test/format-test.cc
++++ b/test/format-test.cc
+@@ -1344,64 +1344,16 @@ TEST(format_test, format_double) {
+   EXPECT_EQ(fmt::format("{:f}", 392.65), "392.650000");
+   EXPECT_EQ(fmt::format("{:F}", 392.65), "392.650000");
+   EXPECT_EQ(fmt::format("{:L}", 42.0), "42");
+-  EXPECT_EQ(fmt::format("{:24a}", 4.2f), "           0x1.0cccccp+2");
+   EXPECT_EQ(fmt::format("{:24a}", 4.2), "    0x1.0cccccccccccdp+2");
+   EXPECT_EQ(fmt::format("{:<24a}", 4.2), "0x1.0cccccccccccdp+2    ");
+   EXPECT_EQ(fmt::format("{0:e}", 392.65), "3.926500e+02");
+   EXPECT_EQ(fmt::format("{0:E}", 392.65), "3.926500E+02");
+   EXPECT_EQ(fmt::format("{0:+010.4g}", 392.65), "+0000392.6");
+   char buffer[buffer_size];
+-
+-#if FMT_CPLUSPLUS >= 201703L
+-  double xd = 0x1.ffffffffffp+2;
+-  safe_sprintf(buffer, "%.*a", 10, xd);
+-  EXPECT_EQ(fmt::format("{:.10a}", xd), buffer);
+-  safe_sprintf(buffer, "%.*a", 9, xd);
+-  EXPECT_EQ(fmt::format("{:.9a}", xd), buffer);
+-
+-  if (std::numeric_limits<long double>::digits == 64) {
+-    auto ld = 0xf.ffffffffffp-3l;
+-    safe_sprintf(buffer, "%La", ld);
+-    EXPECT_EQ(fmt::format("{:a}", ld), buffer);
+-    safe_sprintf(buffer, "%.*La", 10, ld);
+-    EXPECT_EQ(fmt::format("{:.10a}", ld), buffer);
+-    safe_sprintf(buffer, "%.*La", 9, ld);
+-    EXPECT_EQ(fmt::format("{:.9a}", ld), buffer);
+-  }
+-#endif
+-
+-  if (fmt::detail::const_check(std::numeric_limits<double>::is_iec559)) {
+-    double d = (std::numeric_limits<double>::min)();
+-    EXPECT_EQ(fmt::format("{:a}", d), "0x1p-1022");
+-    EXPECT_EQ(fmt::format("{:#a}", d), "0x1.p-1022");
+-
+-    d = (std::numeric_limits<double>::max)();
+-    safe_sprintf(buffer, "%a", d);
+-    EXPECT_EQ(fmt::format("{:a}", d), buffer);
+-
+-    d = std::numeric_limits<double>::denorm_min();
+-    EXPECT_EQ(fmt::format("{:a}", d), "0x0.0000000000001p-1022");
+-  }
+-
+-  if (std::numeric_limits<long double>::digits == 64) {
+-    auto ld = (std::numeric_limits<long double>::min)();
+-    safe_sprintf(buffer, "%La", ld);
+-    EXPECT_EQ(fmt::format("{:a}", ld), buffer);
+-
+-    ld = (std::numeric_limits<long double>::max)();
+-    safe_sprintf(buffer, "%La", ld);
+-    EXPECT_EQ(fmt::format("{:a}", ld), buffer);
+-
+-    ld = std::numeric_limits<long double>::denorm_min();
+-    EXPECT_EQ(fmt::format("{:a}", ld), "0x0.000000000000001p-16382");
+-  }
+-
+-  safe_sprintf(buffer, "%.*a", 10, 4.2);
+-  EXPECT_EQ(fmt::format("{:.10a}", 4.2), buffer);
+-
+-  EXPECT_EQ(fmt::format("{:a}", -42.0), "-0x1.5p+5");
+-  EXPECT_EQ(fmt::format("{:A}", -42.0), "-0X1.5P+5");
+-
++  safe_sprintf(buffer, "%a", -42.0);
++  EXPECT_EQ(fmt::format("{:a}", -42.0), buffer);
++  safe_sprintf(buffer, "%A", -42.0);
++  EXPECT_EQ(fmt::format("{:A}", -42.0), buffer);
+   EXPECT_EQ(fmt::format("{:f}", 9223372036854775807.0),
+             "9223372036854775808.000000");
+ }
+diff --git a/test/printf-test.cc b/test/printf-test.cc
+index be2cc3ba..383ffb83 100644
+--- a/test/printf-test.cc
++++ b/test/printf-test.cc
+@@ -225,8 +225,10 @@ TEST(printf_test, hash_flag) {
+   EXPECT_PRINTF("-42.0000", "%#g", -42.0);
+   EXPECT_PRINTF("-42.0000", "%#G", -42.0);
+ 
+-  EXPECT_PRINTF("0x1.p+4", "%#a", 16.0);
+-  EXPECT_PRINTF("0X1.P+4", "%#A", 16.0);
++  safe_sprintf(buffer, "%#a", 16.0);
++  EXPECT_PRINTF(buffer, "%#a", 16.0);
++  safe_sprintf(buffer, "%#A", 16.0);
++  EXPECT_PRINTF(buffer, "%#A", 16.0);
+ 
+   // '#' flag is ignored for non-numeric types.
+   EXPECT_PRINTF("x", "%#c", 'x');

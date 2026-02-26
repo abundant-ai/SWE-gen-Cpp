@@ -1,0 +1,148 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 58d9237..693c2b8 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -1418,6 +1418,7 @@ class BenchmarkReporter {
+ 
+     std::string benchmark_name() const;
+     BenchmarkName run_name;
++    int64_t family_index;
+     RunType run_type;
+     std::string aggregate_name;
+     std::string report_label;  // Empty if not set by benchmark.
+diff --git a/src/benchmark_api_internal.cc b/src/benchmark_api_internal.cc
+index 553ff44..c481317 100644
+--- a/src/benchmark_api_internal.cc
++++ b/src/benchmark_api_internal.cc
+@@ -7,10 +7,11 @@
+ namespace benchmark {
+ namespace internal {
+ 
+-BenchmarkInstance::BenchmarkInstance(Benchmark* benchmark,
++BenchmarkInstance::BenchmarkInstance(Benchmark* benchmark, int family_idx,
+                                      const std::vector<int64_t>& args,
+                                      int thread_count)
+     : benchmark_(*benchmark),
++      family_index_(family_idx),
+       aggregation_report_mode_(benchmark_.aggregation_report_mode_),
+       args_(args),
+       time_unit_(benchmark_.time_unit_),
+diff --git a/src/benchmark_api_internal.h b/src/benchmark_api_internal.h
+index b0595e5..5ee6fad 100644
+--- a/src/benchmark_api_internal.h
++++ b/src/benchmark_api_internal.h
+@@ -17,10 +17,11 @@ namespace internal {
+ // Information kept per benchmark we may want to run
+ class BenchmarkInstance {
+  public:
+-  BenchmarkInstance(Benchmark* benchmark, const std::vector<int64_t>& args,
+-                    int threads);
++  BenchmarkInstance(Benchmark* benchmark, int family_index,
++                    const std::vector<int64_t>& args, int threads);
+ 
+   const BenchmarkName& name() const { return name_; }
++  int family_index() const { return family_index_; }
+   AggregationReportMode aggregation_report_mode() const {
+     return aggregation_report_mode_;
+   }
+@@ -45,6 +46,7 @@ class BenchmarkInstance {
+  private:
+   BenchmarkName name_;
+   Benchmark& benchmark_;
++  const int family_index_;
+   AggregationReportMode aggregation_report_mode_;
+   const std::vector<int64_t>& args_;
+   TimeUnit time_unit_;
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index ebea2d9..bc6c668 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -129,8 +129,12 @@ bool BenchmarkFamilies::FindBenchmarks(
+   // Special list of thread counts to use when none are specified
+   const std::vector<int> one_thread = {1};
+ 
++  int next_family_index = 0;
++
+   MutexLock l(mutex_);
+   for (std::unique_ptr<Benchmark>& family : families_) {
++    int family_index = next_family_index;
++
+     // Family was deleted or benchmark doesn't match
+     if (!family) continue;
+ 
+@@ -154,13 +158,18 @@ bool BenchmarkFamilies::FindBenchmarks(
+ 
+     for (auto const& args : family->args_) {
+       for (int num_threads : *thread_counts) {
+-        BenchmarkInstance instance(family.get(), args, num_threads);
++        BenchmarkInstance instance(family.get(), family_index, args,
++                                   num_threads);
+ 
+         const auto full_name = instance.name().str();
+         if ((re.Match(full_name) && !isNegativeFilter) ||
+             (!re.Match(full_name) && isNegativeFilter)) {
+           instance.last_benchmark_instance = (&args == &family->args_.back());
+           benchmarks->push_back(std::move(instance));
++
++          // Only bump the next family index once we've estabilished that
++          // at least one instance of this family will be run.
++          if (next_family_index == family_index) ++next_family_index;
+         }
+       }
+     }
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index d4eb7d9..c71fc71 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -72,6 +72,7 @@ BenchmarkReporter::Run CreateRunReport(
+   BenchmarkReporter::Run report;
+ 
+   report.run_name = b.name();
++  report.family_index = b.family_index();
+   report.error_occurred = results.has_error_;
+   report.error_message = results.error_message_;
+   report.report_label = results.report_label_;
+diff --git a/src/complexity.cc b/src/complexity.cc
+index aeed67f..22f4263 100644
+--- a/src/complexity.cc
++++ b/src/complexity.cc
+@@ -193,6 +193,7 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+   // Get the data from the accumulator to BenchmarkReporter::Run's.
+   Run big_o;
+   big_o.run_name = run_name;
++  big_o.family_index = reports[0].family_index;
+   big_o.run_type = BenchmarkReporter::Run::RT_Aggregate;
+   big_o.repetitions = reports[0].repetitions;
+   big_o.repetition_index = Run::no_repetition_index;
+@@ -215,6 +216,7 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+   // Only add label to mean/stddev if it is same for all runs
+   Run rms;
+   rms.run_name = run_name;
++  rms.family_index = reports[0].family_index;
+   rms.run_type = BenchmarkReporter::Run::RT_Aggregate;
+   rms.aggregate_name = "RMS";
+   rms.report_label = big_o.report_label;
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index effa6bd..5a7d843 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -207,6 +207,7 @@ void JSONReporter::PrintRunData(Run const& run) {
+   std::string indent(6, ' ');
+   std::ostream& out = GetOutputStream();
+   out << indent << FormatKV("name", run.benchmark_name()) << ",\n";
++  out << indent << FormatKV("family_index", run.family_index) << ",\n";
+   out << indent << FormatKV("run_name", run.run_name.str()) << ",\n";
+   out << indent << FormatKV("run_type", [&run]() -> const char* {
+     switch (run.run_type) {
+diff --git a/src/statistics.cc b/src/statistics.cc
+index bd5a3d6..c9235e0 100644
+--- a/src/statistics.cc
++++ b/src/statistics.cc
+@@ -148,6 +148,7 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+     // Get the data from the accumulator to BenchmarkReporter::Run's.
+     Run data;
+     data.run_name = reports[0].run_name;
++    data.family_index = reports[0].family_index;
+     data.run_type = BenchmarkReporter::Run::RT_Aggregate;
+     data.threads = reports[0].threads;
+     data.repetitions = reports[0].repetitions;

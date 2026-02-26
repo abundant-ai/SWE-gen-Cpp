@@ -1,37 +1,22 @@
-Catch2’s composable matchers are currently tied to a single concrete argument type via `MatcherBase<T>`. This prevents writing matchers that can be applied to different, but compatible, argument types. For example, an equality-style matcher can compare `std::vector<int>` to `std::vector<int>`, but cannot be used to compare `std::vector<int>` to `std::array<int, N>` or `std::list<int>` even when the comparison logic is well-defined.
+Composable matchers in Catch2 are currently tied to a single concrete argument type via inheritance from `Catch::MatcherBase<T>`. This prevents writing matchers that can accept multiple different, but comparable, argument types (e.g., comparing a `std::vector<int>` to a `std::array<int, N>` or `std::list<int>`), and also makes it impossible to use matchers with inputs that cannot be bound as `const T&` (e.g., certain range/view types that mutate internal state while iterating and therefore cannot be `const`).
 
-This limitation also shows up when trying to match values that cannot be treated as const during matching (e.g., certain range-v3 views that mutate internal state during iteration). Because matchers commonly accept the matched value as `T const&`, such non-const-iterable values cannot be used with `CHECK_THAT`/`REQUIRE_THAT`.
+The matcher API needs to support “generic” matchers that are not parameterized by a single `T`, while still allowing them to be composed with existing typed matchers using `&&`, `||`, and `!`, and without breaking existing `MatcherBase<T>`-derived matchers.
 
-The matcher framework should support “generic” matchers whose `match` operation can be templated on the argument type, without breaking existing `MatcherBase<T>` matchers and while still allowing composition with `&&`, `||`, and `!` across both generic and non-generic matchers.
-
-After the change, users should be able to write a matcher by inheriting from `Catch::MatcherGenericBase` and providing a templated `match` function, e.g.
+Implement support for a new generic matcher base (exposed as `Catch::MatcherGenericBase`) that enables defining matchers with a templated `match` member, e.g.
 
 ```cpp
-template<typename Range>
+template <typename Range>
 struct EqualsRangeMatcher : Catch::MatcherGenericBase {
-    EqualsRangeMatcher(Range const& range) : range{range} {}
+    EqualsRangeMatcher(Range const& range);
 
-    template<typename OtherRange>
-    bool match(OtherRange const& other) const {
-        using std::begin;
-        using std::end;
-        return std::equal(begin(range), end(range), begin(other), end(other));
-    }
+    template <typename OtherRange>
+    bool match(OtherRange const& other) const;
 
-    std::string describe() const override {
-        return "Equals: " + Catch::rangeToString(range);
-    }
-
-    Range const& range;
+    std::string describe() const override;
 };
-
-template<typename Range>
-auto EqualsRange(Range const& range) -> EqualsRangeMatcher<Range> {
-    return EqualsRangeMatcher<Range>{range};
-}
 ```
 
-And then use it with different container types in a single composed expression:
+With this capability, the following kind of usage must compile and work as expected:
 
 ```cpp
 std::array<int, 3> container{1,2,3};
@@ -42,8 +27,15 @@ std::list<int> c{4,5,6};
 CHECK_THAT(container, EqualsRange(a) || EqualsRange(b) || EqualsRange(c));
 ```
 
-`CHECK_THAT`/`REQUIRE_THAT` must accept such generic matchers, including when they are composed via `&&`, `||`, and `!` with other matchers. Existing matchers deriving from `MatcherBase<T>` must continue to work unchanged.
+Expected behavior:
+- A generic matcher (derived from `Catch::MatcherGenericBase`) can be used with `CHECK_THAT`/`REQUIRE_THAT` against different argument types, as long as its templated `match` can be instantiated for that argument.
+- Generic matchers can be combined with `&&`, `||`, and `!`, including mixing generic matchers and classic `Catch::MatcherBase<T>` matchers in the same expression.
+- Existing matchers derived from `Catch::MatcherBase<T>` continue to work unchanged and remain composable.
+- The generic matcher mechanism must address the const-reference limitation from the reported issue: matchers should no longer force the matched value to be accepted only as `const T&` in a way that blocks matching non-const-iterable views/ranges; users should be able to write matchers that accept inputs in a way compatible with non-const iteration (e.g., by value or non-const reference) when needed.
 
-Additionally, matching should not require the matched value to be `const`-iterable in cases where the underlying matcher logic can operate on a non-const value. In other words, the matcher infrastructure should not inherently force the matched argument to be passed only as `T const&` when a generic matcher can instead match on a non-const reference/value as needed.
+Actual current behavior to fix:
+- Matchers are type-locked to `T` through `MatcherBase<T>` and thus cannot naturally compare different container/range types.
+- Composable matchers require a shared `MatcherBase<T>`, making it difficult to author reusable range/container matchers that work across multiple types.
+- Matching fails (at compile time) for inputs that cannot be bound as `const&` due to internal mutation during iteration, because the matcher interface requires `match(T const&)` for a fixed `T`.
 
-If the generic matcher is used in contexts that previously compiled with `MatcherBase<T>`, compilation should remain successful, and failure messages should still use the matcher’s `describe()` text for reporting.
+After the change, users should be able to implement and compose generic matchers via `Catch::MatcherGenericBase` and use them seamlessly with `CHECK_THAT`/`REQUIRE_THAT`, including for heterogeneous container/range comparisons and for non-const-iterable view types.

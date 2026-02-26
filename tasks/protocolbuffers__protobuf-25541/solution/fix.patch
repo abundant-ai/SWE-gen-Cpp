@@ -1,0 +1,276 @@
+diff --git a/MODULE.bazel b/MODULE.bazel
+index c70ac3008..00184fc20 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -116,7 +116,7 @@ register_toolchains(
+ )
+ 
+ # Define toolchains that use pre-built protoc binaries.
+-prebuilt_protoc = use_extension("//bazel/private:prebuilt_protoc_extension.bzl", "protoc")
++prebuilt_protoc = use_extension("//bazel/private/oss/toolchains/prebuilt:protoc_extension.bzl", "protoc")
+ use_repo(
+     prebuilt_protoc,
+     "prebuilt_protoc.linux_aarch_64",
+@@ -131,7 +131,7 @@ use_repo(
+ )
+ 
+ # However this registration only matters if the config_setting for prefer_prebuilt_protoc is true,
+-# using --@protobuf//bazel/toolchains:prefer_prebuilt_protoc
++# using --@protobuf//bazel/flags:prefer_prebuilt_protoc
+ register_toolchains("//bazel/private/oss/toolchains/prebuilt:all")
+
+ # From-source protobuf toolchains
+diff --git a/BUILD.bazel b/BUILD.bazel
+index f17eb907f..8aac20e68 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -570,7 +570,7 @@ proto_lang_toolchain(
+         # Set minimal protoc if prefer_prebuilt_protoc.flag_set is true since a prebuilt for protoc_minimal is not available
+         # TODO: Add a flag to switch between minimal and full protoc with proto_lang_toolchain once we have a minimal protoc binary.
+         # Setting this attribute to None will make the toolchain to pick the full protoc binary.
+-        "//bazel/toolchains:prefer_prebuilt_protoc.flag_set": None,
++        "//bazel/flags:prefer_prebuilt_protoc.flag_set": None,
+         "//conditions:default": "//src/google/protobuf/compiler:protoc_minimal",
+     }),
+     runtime = "//src/google/protobuf",
+diff --git a/bazel/flags/BUILD b/bazel/flags/BUILD
+index a767cd5a8..380e2a942 100644
+--- a/bazel/flags/BUILD
++++ b/bazel/flags/BUILD
+@@ -36,6 +36,36 @@ label_flag(
+     build_setting_default = "@bazel_tools//tools/proto:protoc",
+ )
+ 
++# When set to true, we will use a prebuilt protoc binary from GitHub if it's available.
++bool_flag(
++    name = "prefer_prebuilt_protoc",
++    # TODO: this should be True after the feature is vetted with some adoption
++    build_setting_default = False,
++    visibility = ["//visibility:private"],
++)
++
++config_setting(
++    name = "prefer_prebuilt_protoc.flag_set",
++    flag_values = {":prefer_prebuilt_protoc": "true"},
++    visibility = [
++        "//bazel/private/oss/toolchains/prebuilt:__pkg__",
++        # Needed by cc_toolchain to switch between minimal and full protoc
++        "//:__pkg__",
++    ],
++)
++
++# The public API users set to disable the validation action failing.
++bool_flag(
++    name = "allow_nonstandard_protoc",
++    build_setting_default = False,
++)
++
++config_setting(
++    name = "allow_nonstandard_protoc.flag_set",
++    flag_values = {":allow_nonstandard_protoc": "true"},
++    visibility = ["//bazel/private/oss/toolchains/prebuilt:__pkg__"],
++)
++
+ # TODO: deprecate this flag.
+ string_flag(
+     name = "strict_proto_deps",
+diff --git a/bazel/private/oss/toolchains/prebuilt/BUILD.bazel b/bazel/private/oss/toolchains/prebuilt/BUILD.bazel
+index e4786894d..60a959577 100644
+--- a/bazel/private/oss/toolchains/prebuilt/BUILD.bazel
++++ b/bazel/private/oss/toolchains/prebuilt/BUILD.bazel
+@@ -12,7 +12,7 @@ load(":protoc_authenticity.bzl", "protoc_authenticity")
+         name = "{}_toolchain".format(platform.replace("-", "_")),
+         exec_compatible_with = meta["compatible_with"],
+         # Toolchain resolution will only permit this toolchain if the config_setting for prefer_prebuilt_protoc is true,
+-        target_settings = ["@com_google_protobuf//bazel/toolchains:prefer_prebuilt_protoc.flag_set"],
++        target_settings = ["@com_google_protobuf//bazel/flags:prefer_prebuilt_protoc.flag_set"],
+         # Bazel does not follow this attribute during analysis, so the referenced repo
+         # will only be fetched if this toolchain is selected.
+         toolchain = "@prebuilt_protoc.{}//:prebuilt_protoc_toolchain".format(platform.replace("-", "_")),
+@@ -25,7 +25,7 @@ load(":protoc_authenticity.bzl", "protoc_authenticity")
+ protoc_authenticity(
+     name = "authenticity_validation",
+     fail_on_mismatch = select({
+-        "//bazel/toolchains:allow_nonstandard_protoc.flag_set": False,
++        "//bazel/flags:allow_nonstandard_protoc.flag_set": False,
+         "//conditions:default": True,
+     }),
+     visibility = ["//visibility:public"],
+diff --git a/bazel/private/oss/toolchains/prebuilt/protoc_authenticity.bzl b/bazel/private/oss/toolchains/prebuilt/protoc_authenticity.bzl
+index 39dcae7c3..c866304e5 100644
+--- a/bazel/private/oss/toolchains/prebuilt/protoc_authenticity.bzl
++++ b/bazel/private/oss/toolchains/prebuilt/protoc_authenticity.bzl
+@@ -1,8 +1,8 @@
+ "Validate that the protoc binary is authentic and not spoofed by a malicious actor."
+ 
+ load("//bazel/common:proto_common.bzl", "proto_common")
+-load("//bazel/private:prebuilt_tool_integrity.bzl", "RELEASE_VERSION")
+ load("//bazel/private:toolchain_helpers.bzl", "toolchains")
++load(":tool_integrity.bzl", "RELEASE_VERSION")
+ 
+ def _protoc_authenticity_impl(ctx):
+     # When this flag is disabled, then users have no way to replace the protoc binary with their own toolchain registration.
+diff --git a/bazel/private/oss/toolchains/prebuilt/protoc_extension.bzl b/bazel/private/oss/toolchains/prebuilt/protoc_extension.bzl
+new file mode 100644
+index 000000000..4efece6db
+--- /dev/null
++++ b/bazel/private/oss/toolchains/prebuilt/protoc_extension.bzl
+@@ -0,0 +1,15 @@
++"Module extensions for use under bzlmod"
++
++load("@bazel_skylib//lib:modules.bzl", "modules")
++load("//toolchain:platforms.bzl", "PROTOBUF_PLATFORMS")
++load(":protoc_toolchain.bzl", "prebuilt_protoc_repo")
++
++def create_all_toolchain_repos(name = "prebuilt_protoc"):
++    for platform in PROTOBUF_PLATFORMS.keys():
++        prebuilt_protoc_repo(
++            # We must replace hyphen with underscore to workaround rules_python py_proto_library constraint
++            name = ".".join([name, platform.replace("-", "_")]),
++            platform = platform,
++        )
++
++protoc = modules.as_extension(create_all_toolchain_repos)
+diff --git a/bazel/private/oss/toolchains/prebuilt/protoc_toolchain.bzl b/bazel/private/oss/toolchains/prebuilt/protoc_toolchain.bzl
+new file mode 100644
+index 000000000..842ac00f9
+--- /dev/null
++++ b/bazel/private/oss/toolchains/prebuilt/protoc_toolchain.bzl
+@@ -0,0 +1,57 @@
++"Repository rule that downloads a pre-compiled protoc from our official release for a single platform."
++
++load("//toolchain:platforms.bzl", "PROTOBUF_PLATFORMS")
++load(":tool_integrity.bzl", "RELEASED_BINARY_INTEGRITY", "RELEASE_VERSION")
++
++def release_version_to_artifact_name(release_version, platform):
++    # versions have a "v" prefix like "v28.0"
++    stripped_version = release_version.removeprefix("v")
++
++    # release candidate versions like "v29.0-rc3" have artifact names
++    # like "protoc-29.0-rc-3-osx-x86_64.zip"
++    artifact_version = stripped_version.replace("rc", "rc-")
++
++    return "{}-{}-{}.zip".format(
++        "protoc",
++        artifact_version,
++        platform,
++    )
++
++def _prebuilt_protoc_repo_impl(rctx):
++    filename = release_version_to_artifact_name(
++        RELEASE_VERSION,
++        rctx.attr.platform,
++    )
++    rctx.download_and_extract(
++        url = "https://github.com/protocolbuffers/protobuf/releases/download/{}/{}".format(
++            RELEASE_VERSION,
++            filename,
++        ),
++        sha256 = RELEASED_BINARY_INTEGRITY[filename],
++    )
++
++    rctx.file("BUILD.bazel", """\
++# Generated by @protobuf//bazel/private/oss/toolchains/prebuilt:protoc_toolchain.bzl
++load("@com_google_protobuf//bazel/toolchains:proto_toolchain.bzl", "proto_toolchain")
++
++package(default_visibility = ["//visibility:public"])
++
++proto_toolchain(
++    name = "prebuilt_protoc_toolchain",
++    proto_compiler = "{protoc_label}",
++)
++""".format(
++        protoc_label = "bin/protoc.exe" if rctx.attr.platform.startswith("win") else "bin/protoc",
++    ))
++
++prebuilt_protoc_repo = repository_rule(
++    doc = "Download a pre-built protoc and create a concrete toolchains for it",
++    implementation = _prebuilt_protoc_repo_impl,
++    attrs = {
++        "platform": attr.string(
++            doc = "A platform that protobuf ships a release for",
++            mandatory = True,
++            values = PROTOBUF_PLATFORMS.keys(),
++        ),
++    },
++)
+diff --git a/bazel/private/oss/toolchains/prebuilt/tool_integrity.bzl b/bazel/private/oss/toolchains/prebuilt/tool_integrity.bzl
+new file mode 100644
+index 000000000..913b217cf
+--- /dev/null
++++ b/bazel/private/oss/toolchains/prebuilt/tool_integrity.bzl
+@@ -0,0 +1,21 @@
++"""Release binary integrity hashes.
++
++This file contents are entirely replaced during release publishing, by .github/workflows/release_prep.sh
++so that the integrity of the prebuilt tools is included in the release artifact.
++
++The checked in content is only here to allow load() statements in the sources to resolve, and permit local testing.
++"""
++
++# An arbitrary version of protobuf that includes pre-built binaries.
++# See /examples/example_without_cc_toolchain which uses this for testing.
++# TODO: add some automation to update this version occasionally.
++_TEST_VERSION = "v33.0"
++_TEST_SHAS = dict()
++
++# Add a couple platforms which are commonly used for testing.
++_TEST_SHAS["protoc-33.0-linux-x86_64.zip"] = "d99c011b799e9e412064244f0be417e5d76c9b6ace13a2ac735330fa7d57ad8f"
++_TEST_SHAS["protoc-33.0-osx-aarch_64.zip"] = "3cf55dd47118bd2efda9cd26b74f8bbbfcf5beb1bf606bc56ad4c001b543f6d3"
++_TEST_SHAS["protoc-33.0-win64.zip"] = "3742cd49c8b6bd78b6760540367eb0ff62fa70a1032e15dafe131bfaf296986a"
++
++RELEASE_VERSION = _TEST_VERSION
++RELEASED_BINARY_INTEGRITY = _TEST_SHAS
+diff --git a/bazel/toolchains/BUILD b/bazel/toolchains/BUILD
+index 0adacdb33..04ddcc241 100644
+--- a/bazel/toolchains/BUILD
++++ b/bazel/toolchains/BUILD
+@@ -1,5 +1,4 @@
+ load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+-load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+ 
+ package(
+     default_applicable_licenses = ["//:license"],
+@@ -42,32 +41,3 @@ filegroup(
+         "//bazel:__pkg__",
+     ],
+ )
+-
+-# The public API users set
+-bool_flag(
+-    name = "prefer_prebuilt_protoc",
+-    # TODO: this should be True after the feature is vetted with some adoption
+-    build_setting_default = False,
+-)
+-
+-config_setting(
+-    name = "prefer_prebuilt_protoc.flag_set",
+-    flag_values = {":prefer_prebuilt_protoc": "true"},
+-    visibility = [
+-        "//bazel/private/oss/toolchains/prebuilt:__pkg__",
+-        # Needed by cc_toolchain to switch between minimal and full protoc
+-        "//:__pkg__",
+-    ],
+-)
+-
+-# The public API users set to disable the validation action failing.
+-bool_flag(
+-    name = "allow_nonstandard_protoc",
+-    build_setting_default = False,
+-)
+-
+-config_setting(
+-    name = "allow_nonstandard_protoc.flag_set",
+-    flag_values = {":allow_nonstandard_protoc": "true"},
+-    visibility = ["//bazel/private/oss/toolchains/prebuilt:__pkg__"],
+-)
+diff --git a/examples/example_without_cc_toolchain/.bazelrc b/examples/example_without_cc_toolchain/.bazelrc
+index 90f2a4414..4d5f15935 100644
+--- a/examples/example_without_cc_toolchain/.bazelrc
++++ b/examples/example_without_cc_toolchain/.bazelrc
+@@ -3,4 +3,4 @@ common --per_file_copt=external/.*protobuf.*/src/google/protobuf/compiler/main.c
+ common --host_per_file_copt=external/.*protobuf.*/src/google/protobuf/compiler/main.cc@--THIS_CC_TOOLCHAIN_IS_BROKEN
+ # But, users should be able to use pre-built protoc toolchains instead.
+ common --incompatible_enable_proto_toolchain_resolution
+-common --@com_google_protobuf//bazel/toolchains:prefer_prebuilt_protoc
++common --@com_google_protobuf//bazel/flags:prefer_prebuilt_protoc

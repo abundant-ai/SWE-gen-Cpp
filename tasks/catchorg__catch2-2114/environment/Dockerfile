@@ -9,25 +9,13 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# TODO: Install language runtime
-# Analyze the repo to determine what's needed. Examples:
-#   Python: apt-get install python3 python3-pip python3-venv python3-dev
-#   Node.js: curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
-#   Go: Download from golang.org/dl or use apt
-#   Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-#   Ruby: apt-get install ruby ruby-dev
-#   Java: apt-get install openjdk-17-jdk
-# Check .nvmrc, .python-version, .ruby-version, go.mod, rust-toolchain.toml, etc.
-
-# TODO: Install additional system packages if needed
-# Check CI config (.github/workflows/*.yml) for hints about required packages
-# Examples: python3-dev, libssl-dev, pkg-config, cmake, etc.
-
-# TODO: Set up package manager if needed
-# For Python: PREFER uv (much faster than pip)
-#   curl -LsSf https://astral.sh/uv/install.sh | sh && mv /root/.local/bin/uv /usr/local/bin/uv
-# For Node.js: corepack enable (for yarn/pnpm) or npm is built-in
-# For Ruby: gem install bundler
+# Install C++ compiler, CMake, and Python (needed for tests)
+RUN apt-get update && apt-get install -y \
+    cmake \
+    ninja-build \
+    g++ \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -40,38 +28,41 @@ RUN git clone https://github.com/catchorg/Catch2.git src && \
 
 WORKDIR /app/src
 
-# TODO: Set environment variables if needed
-# Check CI config and README for required env vars
-# Examples: CI=true, NODE_ENV=test, CARGO_TERM_COLOR=never
+# Fix GCC 13 build issue (missing cstdint includes) - needed for this commit to compile
+RUN sed -i '/#include <catch2\/internal\/catch_stringref.hpp>/a \\n#include <cstdint>' src/catch2/internal/catch_string_manip.hpp && \
+    sed -i '/#include <catch2\/internal\/catch_unique_ptr.hpp>/a \\n#include <cstdint>' src/catch2/catch_test_case_info.hpp && \
+    sed -i '/#include <catch2\/internal\/catch_xmlwriter.hpp>/a \\n#include <cstdint>' src/catch2/internal/catch_xmlwriter.cpp
 
-# TODO: Install dependencies
-# For Python: PREFER uv (much faster). Create venv and install:
-#   uv venv /opt/venv
-#   uv pip install --python /opt/venv/bin/python -e ".[dev,test]"
-#   # Or: uv pip install --python /opt/venv/bin/python -r requirements.txt
-#   # Then add to PATH: ENV PATH="/opt/venv/bin:${PATH}"
-# For Node.js: npm ci, yarn install --frozen-lockfile, pnpm install --frozen-lockfile
-# For Go: go mod download
-# For Rust: cargo fetch
-# For Ruby: bundle install
-# For Java: mvn dependency:resolve or gradle dependencies
+# Fix MINSIGSTKSZ issue - MINSIGSTKSZ is no longer a compile-time constant in newer glibc
+RUN sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static const std::size_t sigStackSize = 32768;/' src/catch2/internal/catch_fatal_condition_handler.cpp
 
-# TODO: Build if needed (check if it's a compiled language or has build step)
-# Examples:
-#   TypeScript: npm run build, tsc
-#   Rust: cargo build
-#   Go: go build ./...
-#   Java: mvn compile, gradle build
+# Configure and build Catch2 with CMake (disable extra tests to avoid MINSIGSTKSZ issues)
+# Disable -Wdangling-reference warning which causes false positives in GCC 13+
+RUN cmake -Bbuild -H. \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DCATCH_DEVELOPMENT_BUILD=ON \
+    -DCATCH_BUILD_TESTING=ON \
+    -DCATCH_BUILD_EXTRA_TESTS=OFF \
+    -DCMAKE_CXX_FLAGS="-Wno-error=dangling-reference" \
+    -G Ninja
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+RUN cmake --build build
+
+# Reset tracked files so bug.patch applies cleanly
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# TODO: Rebuild after applying bug.patch if needed
-# For compiled languages (TypeScript, Rust, Go, Java), you MUST rebuild after patching
+# Re-apply GCC 13 build fixes after git reset removed them
+RUN sed -i '/#include <catch2\/internal\/catch_stringref.hpp>/a \\n#include <cstdint>' src/catch2/internal/catch_string_manip.hpp && \
+    sed -i '/#include <catch2\/internal\/catch_unique_ptr.hpp>/a \\n#include <cstdint>' src/catch2/catch_test_case_info.hpp && \
+    sed -i '/#include <catch2\/internal\/catch_xmlwriter.hpp>/a \\n#include <cstdint>' src/catch2/internal/catch_xmlwriter.cpp && \
+    sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static const std::size_t sigStackSize = 32768;/' src/catch2/internal/catch_fatal_condition_handler.cpp
+
+# Rebuild after applying bug.patch (C++ is a compiled language)
+RUN cmake --build build
 
 RUN rm -rf /app/src/.git
 

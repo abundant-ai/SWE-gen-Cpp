@@ -1,0 +1,283 @@
+diff --git a/AUTHORS b/AUTHORS
+index 98d2d98..205951b 100644
+--- a/AUTHORS
++++ b/AUTHORS
+@@ -32,6 +32,7 @@ Federico Ficarelli <federico.ficarelli@gmail.com>
+ Felix Homann <linuxaudio@showlabor.de>
+ Gergő Szitár <szitar.gergo@gmail.com>
+ Google Inc.
++Henrique Bucher <hbucher@gmail.com>
+ International Business Machines Corporation
+ Ismael Jimenez Martinez <ismael.jimenez.martinez@gmail.com>
+ Jern-Kuan Leong <jernkuan@gmail.com>
+diff --git a/CONTRIBUTORS b/CONTRIBUTORS
+index 32ab15b..10243a5 100644
+--- a/CONTRIBUTORS
++++ b/CONTRIBUTORS
+@@ -52,6 +52,7 @@ Felix Homann <linuxaudio@showlabor.de>
+ Geoffrey Martin-Noble <gcmn@google.com> <gmngeoffrey@gmail.com>
+ Gergő Szitár <szitar.gergo@gmail.com>
+ Hannes Hauswedell <h2@fsfe.org>
++Henrique Bucher <hbucher@gmail.com>
+ Ismael Jimenez Martinez <ismael.jimenez.martinez@gmail.com>
+ Jern-Kuan Leong <jernkuan@gmail.com>
+ JianXiong Zhou <zhoujianxiong2@gmail.com>
+diff --git a/src/perf_counters.cc b/src/perf_counters.cc
+index 06351b6..2ce4f7e 100644
+--- a/src/perf_counters.cc
++++ b/src/perf_counters.cc
+@@ -29,10 +29,48 @@ namespace internal {
+ constexpr size_t PerfCounterValues::kMaxCounters;
+ 
+ #if defined HAVE_LIBPFM
++
++size_t PerfCounterValues::Read(const std::vector<int>& leaders) {
++  // Create a pointer for multiple reads
++  const size_t bufsize = values_.size() * sizeof(values_[0]);
++  char* ptr = reinterpret_cast<char*>(values_.data());
++  size_t size = bufsize;
++  for (int lead : leaders) {
++    auto read_bytes = ::read(lead, ptr, size);
++    if (read_bytes >= ssize_t(sizeof(uint64_t))) {
++      // Actual data bytes are all bytes minus initial padding
++      std::size_t data_bytes = read_bytes - sizeof(uint64_t);
++      // This should be very cheap since it's in hot cache
++      std::memmove(ptr, ptr + sizeof(uint64_t), data_bytes);
++      // Increment our counters
++      ptr += data_bytes;
++      size -= data_bytes;
++    } else {
++      int err = errno;
++      GetErrorLogInstance() << "Error reading lead " << lead << " errno:" << err
++                            << " " << ::strerror(err) << "\n";
++      return 0;
++    }
++  }
++  return (bufsize - size) / sizeof(uint64_t);
++}
++
+ const bool PerfCounters::kSupported = true;
+ 
+ bool PerfCounters::Initialize() { return pfm_initialize() == PFM_SUCCESS; }
+ 
++bool PerfCounters::IsCounterSupported(const std::string& name) {
++  perf_event_attr_t attr;
++  std::memset(&attr, 0, sizeof(attr));
++  pfm_perf_encode_arg_t arg;
++  std::memset(&arg, 0, sizeof(arg));
++  arg.attr = &attr;
++  const int mode = PFM_PLM3;  // user mode only
++  int ret = pfm_get_os_event_encoding(name.c_str(), mode, PFM_OS_PERF_EVENT_EXT,
++                                      &arg);
++  return (ret == PFM_SUCCESS);
++}
++
+ PerfCounters PerfCounters::Create(
+     const std::vector<std::string>& counter_names) {
+   if (counter_names.empty()) {
+@@ -46,13 +84,14 @@ PerfCounters PerfCounters::Create(
+     return NoCounters();
+   }
+   std::vector<int> counter_ids(counter_names.size());
++  std::vector<int> leader_ids;
+ 
+   const int mode = PFM_PLM3;  // user mode only
++  int group_id = -1;
+   for (size_t i = 0; i < counter_names.size(); ++i) {
+-    const bool is_first = i == 0;
++    const bool is_first = (group_id < 0);
+     struct perf_event_attr attr {};
+     attr.size = sizeof(attr);
+-    const int group_id = !is_first ? counter_ids[0] : -1;
+     const auto& name = counter_names[i];
+     if (name.empty()) {
+       GetErrorLogInstance() << "A counter name was the empty string\n";
+@@ -80,13 +119,25 @@ PerfCounters PerfCounters::Create(
+     attr.read_format = PERF_FORMAT_GROUP;
+ 
+     int id = -1;
+-    static constexpr size_t kNrOfSyscallRetries = 5;
+-    // Retry syscall as it was interrupted often (b/64774091).
+-    for (size_t num_retries = 0; num_retries < kNrOfSyscallRetries;
+-         ++num_retries) {
+-      id = perf_event_open(&attr, 0, -1, group_id, 0);
+-      if (id >= 0 || errno != EINTR) {
+-        break;
++    while (id < 0) {
++      static constexpr size_t kNrOfSyscallRetries = 5;
++      // Retry syscall as it was interrupted often (b/64774091).
++      for (size_t num_retries = 0; num_retries < kNrOfSyscallRetries;
++           ++num_retries) {
++        id = perf_event_open(&attr, 0, -1, group_id, 0);
++        if (id >= 0 || errno != EINTR) {
++          break;
++        }
++      }
++      if (id < 0) {
++        // We reached a limit perhaps?
++        if (group_id >= 0) {
++          // Create a new group
++          group_id = -1;
++        } else {
++          // Give up, there is nothing else to try
++          break;
++        }
+       }
+     }
+     if (id < 0) {
+@@ -94,31 +145,44 @@ PerfCounters PerfCounters::Create(
+           << "Failed to get a file descriptor for " << name << "\n";
+       return NoCounters();
+     }
+-
++    if (group_id < 0) {
++      // This is a leader, store and assign it
++      leader_ids.push_back(id);
++      group_id = id;
++    }
+     counter_ids[i] = id;
+   }
+-  if (ioctl(counter_ids[0], PERF_EVENT_IOC_ENABLE) != 0) {
+-    GetErrorLogInstance() << "Failed to start counters\n";
+-    return NoCounters();
++  for (int lead : leader_ids) {
++    if (ioctl(lead, PERF_EVENT_IOC_ENABLE) != 0) {
++      GetErrorLogInstance() << "Failed to start counters\n";
++      return NoCounters();
++    }
+   }
+ 
+-  return PerfCounters(counter_names, std::move(counter_ids));
++  return PerfCounters(counter_names, std::move(counter_ids),
++                      std::move(leader_ids));
+ }
+ 
+ void PerfCounters::CloseCounters() const {
+   if (counter_ids_.empty()) {
+     return;
+   }
+-  ioctl(counter_ids_[0], PERF_EVENT_IOC_DISABLE);
++  for (int lead : leader_ids_) {
++    ioctl(lead, PERF_EVENT_IOC_DISABLE);
++  }
+   for (int fd : counter_ids_) {
+     close(fd);
+   }
+ }
+ #else   // defined HAVE_LIBPFM
++size_t PerfCounterValues::Read(const std::vector<int>&) { return 0; }
++
+ const bool PerfCounters::kSupported = false;
+ 
+ bool PerfCounters::Initialize() { return false; }
+ 
++bool PerfCounters::IsCounterSupported(const std::string&) { return false; }
++
+ PerfCounters PerfCounters::Create(
+     const std::vector<std::string>& counter_names) {
+   if (!counter_names.empty()) {
+@@ -162,6 +226,7 @@ PerfCounters& PerfCounters::operator=(PerfCounters&& other) noexcept {
+     CloseCounters();
+ 
+     counter_ids_ = std::move(other.counter_ids_);
++    leader_ids_ = std::move(other.leader_ids_);
+     counter_names_ = std::move(other.counter_names_);
+   }
+   return *this;
+diff --git a/src/perf_counters.h b/src/perf_counters.h
+index 680555d..aeea350 100644
+--- a/src/perf_counters.h
++++ b/src/perf_counters.h
+@@ -17,6 +17,7 @@
+ 
+ #include <array>
+ #include <cstdint>
++#include <cstring>
+ #include <memory>
+ #include <vector>
+ 
+@@ -44,18 +45,21 @@ namespace internal {
+ // The implementation ensures the storage is inlined, and allows 0-based
+ // indexing into the counter values.
+ // The object is used in conjunction with a PerfCounters object, by passing it
+-// to Snapshot(). The values are populated such that
+-// perfCounters->names()[i]'s value is obtained at position i (as given by
+-// operator[]) of this object.
+-class PerfCounterValues {
++// to Snapshot(). The Read() method relocates individual reads, discarding
++// the initial padding from each group leader in the values buffer such that
++// all user accesses through the [] operator are correct.
++class BENCHMARK_EXPORT PerfCounterValues {
+  public:
+   explicit PerfCounterValues(size_t nr_counters) : nr_counters_(nr_counters) {
+     BM_CHECK_LE(nr_counters_, kMaxCounters);
+   }
+ 
+-  uint64_t operator[](size_t pos) const { return values_[kPadding + pos]; }
++  // We are reading correctly now so the values don't need to skip padding
++  uint64_t operator[](size_t pos) const { return values_[pos]; }
+ 
+-  static constexpr size_t kMaxCounters = 3;
++  // Increased the maximum to 32 only since the buffer
++  // is std::array<> backed
++  static constexpr size_t kMaxCounters = 32;
+ 
+  private:
+   friend class PerfCounters;
+@@ -66,7 +70,14 @@ class PerfCounterValues {
+             sizeof(uint64_t) * (kPadding + nr_counters_)};
+   }
+ 
+-  static constexpr size_t kPadding = 1;
++  // This reading is complex and as the goal of this class is to
++  // abstract away the intrincacies of the reading process, this is
++  // a better place for it
++  size_t Read(const std::vector<int>& leaders);
++
++  // Move the padding to 2 due to the reading algorithm (1st padding plus a
++  // current read padding)
++  static constexpr size_t kPadding = 2;
+   std::array<uint64_t, kPadding + kMaxCounters> values_;
+   const size_t nr_counters_;
+ };
+@@ -92,6 +103,10 @@ class BENCHMARK_EXPORT PerfCounters final {
+   // initialization here.
+   static bool Initialize();
+ 
++  // Check if the given counter is supported, if the app wants to
++  // check before passing
++  static bool IsCounterSupported(const std::string& name);
++
+   // Return a PerfCounters object ready to read the counters with the names
+   // specified. The values are user-mode only. The counter name format is
+   // implementation and OS specific.
+@@ -106,9 +121,7 @@ class BENCHMARK_EXPORT PerfCounters final {
+ #ifndef BENCHMARK_OS_WINDOWS
+     assert(values != nullptr);
+     assert(IsValid());
+-    auto buffer = values->get_data_buffer();
+-    auto read_bytes = ::read(counter_ids_[0], buffer.first, buffer.second);
+-    return static_cast<size_t>(read_bytes) == buffer.second;
++    return values->Read(leader_ids_) == counter_ids_.size();
+ #else
+     (void)values;
+     return false;
+@@ -120,13 +133,16 @@ class BENCHMARK_EXPORT PerfCounters final {
+ 
+  private:
+   PerfCounters(const std::vector<std::string>& counter_names,
+-               std::vector<int>&& counter_ids)
+-      : counter_ids_(std::move(counter_ids)), counter_names_(counter_names) {}
++               std::vector<int>&& counter_ids, std::vector<int>&& leader_ids)
++      : counter_ids_(std::move(counter_ids)),
++        leader_ids_(std::move(leader_ids)),
++        counter_names_(counter_names) {}
+   PerfCounters() = default;
+ 
+   void CloseCounters() const;
+ 
+   std::vector<int> counter_ids_;
++  std::vector<int> leader_ids_;
+   std::vector<std::string> counter_names_;
+ };
+ 

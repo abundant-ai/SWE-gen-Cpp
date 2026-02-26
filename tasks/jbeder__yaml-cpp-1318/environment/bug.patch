@@ -1,0 +1,195 @@
+diff --git a/include/yaml-cpp/exceptions.h b/include/yaml-cpp/exceptions.h
+index 99e06b2..f6b2602 100644
+--- a/include/yaml-cpp/exceptions.h
++++ b/include/yaml-cpp/exceptions.h
+@@ -48,8 +48,6 @@ const char* const UNKNOWN_TOKEN = "unknown token";
+ const char* const DOC_IN_SCALAR = "illegal document indicator in scalar";
+ const char* const EOF_IN_SCALAR = "illegal EOF in scalar";
+ const char* const CHAR_IN_SCALAR = "illegal character in scalar";
+-const char* const UNEXPECTED_SCALAR = "unexpected scalar";
+-const char* const UNEXPECTED_FLOW = "plain value cannot start with flow indicator character";
+ const char* const TAB_IN_INDENTATION =
+     "illegal tab when looking for indentation";
+ const char* const FLOW_END = "illegal flow end";
+diff --git a/src/scanner.cpp b/src/scanner.cpp
+index d0eb03c..ea5511a 100644
+--- a/src/scanner.cpp
++++ b/src/scanner.cpp
+@@ -13,7 +13,6 @@ Scanner::Scanner(std::istream& in)
+       m_startedStream(false),
+       m_endedStream(false),
+       m_simpleKeyAllowed(false),
+-      m_scalarValueAllowed(false),
+       m_canBeJSONFlow(false),
+       m_simpleKeys{},
+       m_indents{},
+@@ -128,17 +127,6 @@ void Scanner::ScanNextToken() {
+   }
+ 
+   if (INPUT.peek() == Keys::FlowEntry) {
+-    // values starting with `,` are not allowed.
+-    // eg: reject `,foo`
+-    if (INPUT.column() == 0) {
+-      throw ParserException(INPUT.mark(), ErrorMsg::UNEXPECTED_FLOW);
+-    }
+-    // if we already parsed a quoted scalar value and we are not in a flow,
+-    // then `,` is not a valid character.
+-    // eg: reject `"foo",`
+-    if (!m_scalarValueAllowed) {
+-      throw ParserException(INPUT.mark(), ErrorMsg::UNEXPECTED_SCALAR);
+-    }
+     return ScanFlowEntry();
+   }
+ 
+@@ -171,13 +159,6 @@ void Scanner::ScanNextToken() {
+     return ScanBlockScalar();
+   }
+ 
+-  // if we already parsed a quoted scalar value in this line,
+-  // another scalar value is an error.
+-  // eg: reject `"foo" "bar"`
+-  if (!m_scalarValueAllowed) {
+-    throw ParserException(INPUT.mark(), ErrorMsg::UNEXPECTED_SCALAR);
+-  }
+-
+   if (INPUT.peek() == '\'' || INPUT.peek() == '\"') {
+     return ScanQuotedScalar();
+   }
+@@ -222,9 +203,6 @@ void Scanner::ScanToNextToken() {
+     // oh yeah, and let's get rid of that simple key
+     InvalidateSimpleKey();
+ 
+-    // new line - we accept a scalar value now
+-    m_scalarValueAllowed = true;
+-
+     // new line - we may be able to accept a simple key now
+     if (InBlockContext()) {
+       m_simpleKeyAllowed = true;
+@@ -267,7 +245,6 @@ const RegEx& Scanner::GetValueRegex() const {
+ void Scanner::StartStream() {
+   m_startedStream = true;
+   m_simpleKeyAllowed = true;
+-  m_scalarValueAllowed = true;
+   std::unique_ptr<IndentMarker> pIndent(
+       new IndentMarker(-1, IndentMarker::NONE));
+   m_indentRefs.push_back(std::move(pIndent));
+@@ -284,7 +261,6 @@ void Scanner::EndStream() {
+   PopAllSimpleKeys();
+ 
+   m_simpleKeyAllowed = false;
+-  m_scalarValueAllowed = false;
+   m_endedStream = true;
+ }
+ 
+diff --git a/src/scanner.h b/src/scanner.h
+index a3bfb66..4af938e 100644
+--- a/src/scanner.h
++++ b/src/scanner.h
+@@ -177,7 +177,6 @@ class Scanner {
+   // state info
+   bool m_startedStream, m_endedStream;
+   bool m_simpleKeyAllowed;
+-  bool m_scalarValueAllowed;
+   bool m_canBeJSONFlow;
+   std::stack<SimpleKey> m_simpleKeys;
+   std::stack<IndentMarker *> m_indents;
+diff --git a/src/scantoken.cpp b/src/scantoken.cpp
+index b13d211..1a94ab1 100644
+--- a/src/scantoken.cpp
++++ b/src/scantoken.cpp
+@@ -211,9 +211,6 @@ void Scanner::ScanValue() {
+     m_simpleKeyAllowed = InBlockContext();
+   }
+ 
+-  // we are parsing a `key: value` pair; scalars are always allowed
+-  m_scalarValueAllowed = true;
+-
+   // eat
+   Mark mark = INPUT.mark();
+   INPUT.eat(1);
+@@ -363,10 +360,6 @@ void Scanner::ScanQuotedScalar() {
+   // and scan
+   scalar = ScanScalar(INPUT, params);
+   m_simpleKeyAllowed = false;
+-  // we just scanned a quoted scalar;
+-  // we can only have another scalar in this line
+-  // if we are in a flow, eg: `[ "foo", "bar" ]` is ok, but `"foo", "bar"` isn't.
+-  m_scalarValueAllowed = InFlowContext();
+   m_canBeJSONFlow = true;
+ 
+   Token token(Token::NON_PLAIN_SCALAR, mark);
+diff --git a/test/integration/load_node_test.cpp b/test/integration/load_node_test.cpp
+index e9a133b..1cc84a4 100644
+--- a/test/integration/load_node_test.cpp
++++ b/test/integration/load_node_test.cpp
+@@ -334,70 +334,6 @@ TEST(NodeTest, LoadQuotedNull) {
+   EXPECT_EQ(node.as<std::string>(), "null");
+ }
+ 
+-TEST(NodeTest, LoadNonClosedQuotedString) {
+-  EXPECT_THROW(Load(R"("foo)"), ParserException);
+-}
+-
+-TEST(NodeTest, LoadWrongQuotedString) {
+-  EXPECT_THROW(Load(R"("foo" [)"), ParserException);
+-  EXPECT_THROW(Load(R"("foo", [)"), ParserException);
+-}
+-
+-TEST(NodeTest, LoadUnquotedQuotedStrings) {
+-  Node node = Load(R"(foo,"bar")");
+-  EXPECT_EQ(node.as<std::string>(), "foo,\"bar\"");
+-
+-  node = Load(R"(foo,bar)");
+-  EXPECT_EQ(node.as<std::string>(), "foo,bar");
+-
+-  node = Load(R"(foo,)");
+-  EXPECT_EQ(node.as<std::string>(), "foo,");
+-
+-  node = Load(R"(foo "bar")");
+-  EXPECT_EQ(node.as<std::string>(), "foo \"bar\"");
+-}
+-
+-TEST(NodeTest, LoadCommaSeparatedStrings) {
+-  EXPECT_THROW(Load(R"("foo","bar")"), ParserException);
+-  EXPECT_THROW(Load(R"("foo",bar)"), ParserException);
+-  EXPECT_THROW(Load(R"(,)"), ParserException);
+-  EXPECT_THROW(Load(R"("foo",)"), ParserException);
+-  EXPECT_THROW(Load(R"("foo","")"), ParserException);
+-  EXPECT_THROW(Load(R"("foo",)"), ParserException);
+-  EXPECT_THROW(Load(R"(,"foo")"), ParserException);
+-  EXPECT_THROW(Load(R"(,foo)"), ParserException);
+-}
+-
+-struct NewLineStringsTestCase {
+-  std::string input;
+-  std::string expected_content;
+-  bool should_throw;
+-};
+-TEST(NodeTest, LoadNewLineStrings) {
+-  std::vector<NewLineStringsTestCase> tests = {
+-      {"foo\n, bar", "foo , bar", false},
+-      {"foo\n, \"bar\"", "foo , \"bar\"", false},
+-      {"\"foo\"\n, \"bar\"", "", true},
+-      {"\"foo\"\n, bar", "", true},
+-  };
+-  for (const NewLineStringsTestCase& test : tests) {
+-    if (test.should_throw) {
+-      EXPECT_THROW(Load(test.input), ParserException);
+-    } else {
+-      Node node = Load(test.input);
+-      Emitter emitter;
+-      emitter << node;
+-      EXPECT_EQ(NodeType::Scalar, node.Type());
+-      EXPECT_EQ(test.expected_content, std::string(emitter.c_str()));
+-    }
+-  }
+-}
+-
+-TEST(NodeTest, LoadSameLineStrings) {
+-  EXPECT_THROW(Load(R"("foo" "bar")"), ParserException);
+-  EXPECT_THROW(Load(R"("foo" bar)"), ParserException);
+-}
+-
+ TEST(NodeTest, LoadTagWithParenthesis) {
+     Node node = Load("!Complex(Tag) foo");
+     EXPECT_EQ(node.Tag(), "!Complex(Tag)");

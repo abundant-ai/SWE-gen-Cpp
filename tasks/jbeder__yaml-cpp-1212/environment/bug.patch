@@ -1,0 +1,212 @@
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index 78b2956..f3fc2dd 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -6,9 +6,6 @@ on:
+     branches: [ master ]
+   workflow_dispatch:
+ permissions: read-all
+-defaults:
+-  run:
+-    shell: bash
+ jobs:
+   cmake-build:
+       strategy:
+@@ -29,59 +26,23 @@ jobs:
+         YAML_BUILD_SHARED_LIBS: ${{ matrix.build == 'shared' && 'ON' || 'OFF' }}
+         CMAKE_GENERATOR: >-
+           ${{format(matrix.generator != 'Default Generator' && '-G "{0}"' || '', matrix.generator)}}
+-        CMAKE_INSTALL_PREFIX: "${{ github.workspace }}/install-prefix"
+-        CMAKE_BUILD_TYPE: Debug
+       runs-on: ${{ matrix.os }}
+       steps:
+-        - uses: actions/checkout@v3
++        - uses: actions/checkout@v2
+ 
+-        - name: Configure
+-          run: |
+-            cmake \
+-              ${{ env.CMAKE_GENERATOR }} \
+-              -S "${{ github.workspace }}" \
+-              -B build \
+-              -D CMAKE_CXX_STANDARD=${{ matrix.cxx_standard }} \
+-              -D CMAKE_INSTALL_PREFIX="${{ env.CMAKE_INSTALL_PREFIX }}" \
+-              -D CMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+-              -D YAML_BUILD_SHARED_LIBS=${{ env.YAML_BUILD_SHARED_LIBS }} \
+-              -D YAML_CPP_BUILD_TESTS=ON
++        - name: Get number of CPU cores
++          uses: SimenB/github-actions-cpu-cores@v1
+ 
+-        - name: Build
++        - name: Build Tests
++          shell: bash
+           run: |
+-            cmake \
+-              --build build \
+-              --config ${{ env.CMAKE_BUILD_TYPE }} \
+-              --verbose \
+-              --parallel
++            cmake ${{ env.CMAKE_GENERATOR }} -S "${{ github.workspace }}" -B build -DCMAKE_CXX_STANDARD=${{ matrix.cxx_standard }} -DYAML_BUILD_SHARED_LIBS=${{ env.YAML_BUILD_SHARED_LIBS }} -DYAML_CPP_BUILD_TESTS=ON
++            cd build && cmake --build . --parallel ${{ steps.cpu-cores.outputs.count }}
+ 
+         - name: Run Tests
+           shell: bash
+           run: |
+-            ctest \
+-              --test-dir build \
+-              --build-config ${{ env.CMAKE_BUILD_TYPE }} \
+-              --output-on-failure \
+-              --verbose
+-
+-        - name: Install
+-          run: cmake --install build --config ${{ env.CMAKE_BUILD_TYPE }}
+-
+-        - name: Configure CMake package test
+-          run: |
+-            cmake \
+-              ${{ env.CMAKE_GENERATOR }} \
+-              -S "${{ github.workspace }}/test/cmake" \
+-              -B consumer-build \
+-              -D CMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+-              -D CMAKE_PREFIX_PATH="${{ env.CMAKE_INSTALL_PREFIX }}"
+-
+-        - name: Build CMake package test
+-          run: |
+-            cmake \
+-              --build consumer-build \
+-              --config ${{ env.CMAKE_BUILD_TYPE }} \
+-              --verbose
++            cd build && ctest -C Debug --output-on-failure --verbose
+ 
+   bazel-build:
+       strategy:
+@@ -89,14 +50,16 @@ jobs:
+           os: [ubuntu-latest, windows-latest, macos-latest]
+       runs-on: ${{ matrix.os }}
+       steps:
+-        - uses: actions/checkout@v3
++        - uses: actions/checkout@v2
+ 
+         - name: Build
++          shell: bash
+           run: |
+             cd "${{ github.workspace }}"
+             bazel build :all
+ 
+         - name: Test
++          shell: bash
+           run: |
+             cd "${{ github.workspace }}"
+             bazel test test
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d152fd5..b13e77f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -34,9 +34,7 @@ cmake_dependent_option(YAML_CPP_BUILD_TESTS
+ cmake_dependent_option(YAML_MSVC_SHARED_RT
+   "MSVC: Build yaml-cpp with shared runtime libs (/MD)" ON
+   "CMAKE_SYSTEM_NAME MATCHES Windows" OFF)
+-set(YAML_CPP_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/yaml-cpp"
+-  CACHE STRING "Path to install the CMake package to")
+- 
++
+ if (YAML_CPP_FORMAT_SOURCE)
+     find_program(YAML_CPP_CLANG_FORMAT_EXE NAMES clang-format)
+ endif()
+@@ -148,12 +146,13 @@ set_target_properties(yaml-cpp PROPERTIES
+   PROJECT_LABEL "yaml-cpp ${yaml-cpp-label-postfix}"
+   DEBUG_POSTFIX "${CMAKE_DEBUG_POSTFIX}")
+ 
+-set(EXPORT_TARGETS yaml-cpp::yaml-cpp)
++set(CONFIG_EXPORT_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/yaml-cpp")
++set(EXPORT_TARGETS yaml-cpp)
+ configure_package_config_file(
+   "${PROJECT_SOURCE_DIR}/yaml-cpp-config.cmake.in"
+   "${PROJECT_BINARY_DIR}/yaml-cpp-config.cmake"
+-  INSTALL_DESTINATION "${YAML_CPP_INSTALL_CMAKEDIR}"
+-  PATH_VARS CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR)
++  INSTALL_DESTINATION "${CONFIG_EXPORT_DIR}"
++  PATH_VARS CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR CONFIG_EXPORT_DIR YAML_BUILD_SHARED_LIBS)
+ unset(EXPORT_TARGETS)
+ 
+ write_basic_package_version_file(
+@@ -173,14 +172,15 @@ if (YAML_CPP_INSTALL)
+                 FILES_MATCHING PATTERN "*.h")
+   install(EXPORT yaml-cpp-targets
+     NAMESPACE yaml-cpp::
+-    DESTINATION "${YAML_CPP_INSTALL_CMAKEDIR}")
++    DESTINATION "${CONFIG_EXPORT_DIR}")
+   install(FILES
+       "${PROJECT_BINARY_DIR}/yaml-cpp-config.cmake"
+       "${PROJECT_BINARY_DIR}/yaml-cpp-config-version.cmake"
+-    DESTINATION "${YAML_CPP_INSTALL_CMAKEDIR}")
++    DESTINATION "${CONFIG_EXPORT_DIR}")
+   install(FILES "${PROJECT_BINARY_DIR}/yaml-cpp.pc"
+     DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+ endif()
++unset(CONFIG_EXPORT_DIR)
+ 
+ if(YAML_CPP_BUILD_TESTS)
+   add_subdirectory(test)
+diff --git a/test/cmake/CMakeLists.txt b/test/cmake/CMakeLists.txt
+deleted file mode 100644
+index 19a7910..0000000
+--- a/test/cmake/CMakeLists.txt
++++ /dev/null
+@@ -1,19 +0,0 @@
+-cmake_minimum_required(VERSION 3.5)
+-project(yaml-cpp-consumer LANGUAGES CXX)
+-
+-find_package(yaml-cpp CONFIG REQUIRED)
+-get_target_property(LIBRARY_TYPE yaml-cpp::yaml-cpp TYPE)
+-
+-if(LIBRARY_TYPE STREQUAL "SHARED_LIBRARY")
+-  if(NOT YAML_CPP_SHARED_LIBS_BUILT)
+-    message(FATAL_ERROR "Library type (${LIBRARY_TYPE}) contradicts config: ${YAML_CPP_SHARED_LIBS_BUILT}")
+-  endif()
+-else()
+-  if(YAML_CPP_SHARED_LIBS_BUILT)
+-    message(FATAL_ERROR "Library type (${LIBRARY_TYPE}) contradicts config: ${YAML_CPP_SHARED_LIBS_BUILT}")
+-  endif()
+-endif()
+-
+-add_executable(main main.cpp)
+-set_target_properties(main PROPERTIES CXX_STANDARD 11)
+-target_link_libraries(main PRIVATE ${YAML_CPP_LIBRARIES})
+diff --git a/test/cmake/main.cpp b/test/cmake/main.cpp
+deleted file mode 100644
+index bce9ea6..0000000
+--- a/test/cmake/main.cpp
++++ /dev/null
+@@ -1,3 +0,0 @@
+-#include "yaml-cpp/yaml.h"
+-
+-int main(int, char**) { YAML::Parser foo{}; }
+diff --git a/yaml-cpp-config.cmake.in b/yaml-cpp-config.cmake.in
+index f71e13b..799b9b4 100644
+--- a/yaml-cpp-config.cmake.in
++++ b/yaml-cpp-config.cmake.in
+@@ -11,20 +11,12 @@ set_and_check(YAML_CPP_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+ set_and_check(YAML_CPP_LIBRARY_DIR "@PACKAGE_CMAKE_INSTALL_LIBDIR@")
+ 
+ # Are we building shared libraries?
+-set(YAML_CPP_SHARED_LIBS_BUILT @YAML_BUILD_SHARED_LIBS@)
++set(YAML_CPP_SHARED_LIBS_BUILT "@PACKAGE_YAML_BUILD_SHARED_LIBS@")
+ 
+ # Our library dependencies (contains definitions for IMPORTED targets)
+-include("${CMAKE_CURRENT_LIST_DIR}/yaml-cpp-targets.cmake")
++include(@PACKAGE_CONFIG_EXPORT_DIR@/yaml-cpp-targets.cmake)
+ 
+ # These are IMPORTED targets created by yaml-cpp-targets.cmake
+ set(YAML_CPP_LIBRARIES "@EXPORT_TARGETS@")
+ 
+-add_library(yaml-cpp INTERFACE IMPORTED)
+-target_link_libraries(yaml-cpp INTERFACE yaml-cpp::yaml-cpp)
+-if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.17)
+-  set_target_properties(yaml-cpp PROPERTIES 
+-    DEPRECATION "The target yaml-cpp is deprecated and will be removed in version 0.10.0. Use the yaml-cpp::yaml-cpp target instead."
+-  )
+-endif()
+-
+-check_required_components(yaml-cpp)
++check_required_components(@EXPORT_TARGETS@)

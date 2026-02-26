@@ -1,0 +1,228 @@
+diff --git a/docs/manual.adoc b/docs/manual.adoc
+index f1f61f9..6464950 100644
+--- a/docs/manual.adoc
++++ b/docs/manual.adoc
+@@ -749,8 +749,6 @@ These flags control the resulting tree contents:
+ * [[parse_embed_pcdata]]`parse_embed_pcdata` determines if PCDATA contents is to be saved as element values. Normally element nodes have names but not values; this flag forces the parser to store the contents as a value if PCDATA is the first child of the element node (otherwise PCDATA node is created as usual). This can significantly reduce the memory required for documents with many PCDATA nodes. To retrieve the data you can use `xml_node::value()` on the element nodes or any of the higher-level functions like `child_value` or `text`. This flag is *off* by default.
+ Since this flag significantly changes the DOM structure it is only recommended for parsing documents with many PCDATA nodes in memory-constrained environments. This flag is *off* by default.
+ 
+-* [[parse_merge_pcdata]]`parse_merge_pcdata` determines if PCDATA contents is to be merged with the previous PCDATA node when no intermediary nodes are present between them. If the PCDATA contains CDATA sections, PI nodes, or comments in between, and either of the flags <<parse_cdata,parse_cdata>> ,<<parse_pi,parse_pi>> ,<<parse_comments,parse_comments>> is not set, the contents of the PCDATA node will be merged with the previous one. This flag is *off* by default.
+-
+ * [[parse_fragment]]`parse_fragment` determines if document should be treated as a fragment of a valid XML. Parsing document as a fragment leads to top-level PCDATA content (i.e. text that is not located inside a node) to be added to a tree, and additionally treats documents without element nodes as valid and permits multiple top-level element nodes (currently multiple top-level element nodes are also permitted when the flag is off, but that behavior should not be relied on). This flag is *off* by default.
+ 
+ CAUTION: Using in-place parsing (<<xml_document::load_buffer_inplace,load_buffer_inplace>>) with `parse_fragment` flag may result in the loss of the last character of the buffer if it is a part of PCDATA. Since PCDATA values are null-terminated strings, the only way to resolve this is to provide a null-terminated buffer as an input to `load_buffer_inplace` - i.e. `doc.load_buffer_inplace("test\0", 5, pugi::parse_default | pugi::parse_fragment)`.
+@@ -2801,7 +2799,6 @@ const unsigned int +++<a href="#parse_trim_pcdata">parse_trim_pcdata</a>+++
+ const unsigned int +++<a href="#parse_ws_pcdata">parse_ws_pcdata</a>+++
+ const unsigned int +++<a href="#parse_ws_pcdata_single">parse_ws_pcdata_single</a>+++
+ const unsigned int +++<a href="#parse_embed_pcdata">parse_embed_pcdata</a>+++
+-const unsigned int +++<a href="#parse_merge_pcdata">parse_merge_pcdata</a>+++
+ const unsigned int +++<a href="#parse_wconv_attribute">parse_wconv_attribute</a>+++
+ const unsigned int +++<a href="#parse_wnorm_attribute">parse_wnorm_attribute</a>+++
+ ----
+diff --git a/src/pugixml.cpp b/src/pugixml.cpp
+index 814e258..e02a137 100644
+--- a/src/pugixml.cpp
++++ b/src/pugixml.cpp
+@@ -3279,7 +3279,6 @@ PUGI_IMPL_NS_BEGIN
+ 			char_t ch = 0;
+ 			xml_node_struct* cursor = root;
+ 			char_t* mark = s;
+-			char_t* merged_pcdata = s;
+ 
+ 			while (*s != 0)
+ 			{
+@@ -3474,38 +3473,21 @@ PUGI_IMPL_NS_BEGIN
+ 
+ 					if (cursor->parent || PUGI_IMPL_OPTSET(parse_fragment))
+ 					{
+-						char_t* parsed_pcdata = s;
+-
+-						s = strconv_pcdata(s);
+-
+ 						if (PUGI_IMPL_OPTSET(parse_embed_pcdata) && cursor->parent && !cursor->first_child && !cursor->value)
+ 						{
+-							cursor->value = parsed_pcdata; // Save the offset.
+-						}
+-						else if (PUGI_IMPL_OPTSET(parse_merge_pcdata) && cursor->first_child && PUGI_IMPL_NODETYPE(cursor->first_child->prev_sibling_c) == node_pcdata)
+-						{
+-							assert(merged_pcdata >= cursor->first_child->prev_sibling_c->value);
+-
+-							// Catch up to the end of last parsed value; only needed for the first fragment.
+-							merged_pcdata += strlength(merged_pcdata);
+-
+-							size_t length = strlength(parsed_pcdata);
+-
+-							// Must use memmove instead of memcpy as this move may overlap
+-							memmove(merged_pcdata, parsed_pcdata, (length + 1) * sizeof(char_t));
+-							merged_pcdata += length;
++							cursor->value = s; // Save the offset.
+ 						}
+ 						else
+ 						{
+-							xml_node_struct* prev_cursor = cursor;
+ 							PUGI_IMPL_PUSHNODE(node_pcdata); // Append a new node on the tree.
+ 
+-							cursor->value = parsed_pcdata; // Save the offset.
+-							merged_pcdata = parsed_pcdata; // Used for parse_merge_pcdata above, cheaper to save unconditionally
++							cursor->value = s; // Save the offset.
+ 
+-							cursor = prev_cursor; // Pop since this is a standalone.
++							PUGI_IMPL_POPNODE(); // Pop since this is a standalone.
+ 						}
+ 
++						s = strconv_pcdata(s);
++
+ 						if (!*s) break;
+ 					}
+ 					else
+@@ -3584,7 +3566,7 @@ PUGI_IMPL_NS_BEGIN
+ 					return make_parse_result(status_unrecognized_tag, length - 1);
+ 
+ 				// check if there are any element nodes parsed
+-				xml_node_struct* first_root_child_parsed = last_root_child ? last_root_child->next_sibling + 0 : root->first_child + 0;
++				xml_node_struct* first_root_child_parsed = last_root_child ? last_root_child->next_sibling + 0 : root->first_child+ 0;
+ 
+ 				if (!PUGI_IMPL_OPTSET(parse_fragment) && !has_element_node_siblings(first_root_child_parsed))
+ 					return make_parse_result(status_no_document_element, length - 1);
+@@ -6304,9 +6286,6 @@ namespace pugi
+ 		// append_buffer is only valid for elements/documents
+ 		if (!impl::allow_insert_child(type(), node_element)) return impl::make_parse_result(status_append_invalid_root);
+ 
+-		// append buffer can not merge PCDATA into existing PCDATA nodes
+-		if ((options & parse_merge_pcdata) != 0 && last_child().type() == node_pcdata) return impl::make_parse_result(status_append_invalid_root);
+-
+ 		// get document node
+ 		impl::xml_document_struct* doc = &impl::get_document(_root);
+ 
+diff --git a/src/pugixml.hpp b/src/pugixml.hpp
+index e9c6a20..8749759 100644
+--- a/src/pugixml.hpp
++++ b/src/pugixml.hpp
+@@ -212,10 +212,6 @@ namespace pugi
+ 	// the document; this flag is only recommended for parsing documents with many PCDATA nodes in memory-constrained environments.
+ 	// This flag is off by default.
+ 	const unsigned int parse_embed_pcdata = 0x2000;
+-	
+-	// This flag determines whether determines whether the the two pcdata should be merged or not, if no intermediatory data are parsed in the document.
+-	// This flag is off by default.
+-	const unsigned int parse_merge_pcdata = 0x4000;
+ 
+ 	// The default parsing mode.
+ 	// Elements, PCDATA and CDATA sections are added to the DOM tree, character/reference entities are expanded,
+diff --git a/tests/test_parse.cpp b/tests/test_parse.cpp
+index 4bfd6b2..180c70a 100644
+--- a/tests/test_parse.cpp
++++ b/tests/test_parse.cpp
+@@ -1252,112 +1252,6 @@ TEST_XML_FLAGS(parse_embed_pcdata_comment, "<n>text1<!---->text2</n>", parse_emb
+ 	CHECK_STRING(n.last_child().value(), STR("text2"));
+ }
+ 
+-TEST(parse_merge_pcdata)
+-{
+-	unsigned int flag_sets[] = {parse_cdata, parse_pi, parse_comments, parse_declaration};
+-
+-	for (unsigned int i = 0; i < sizeof(flag_sets) / sizeof(flag_sets[0]); ++i)
+-	{
+-		unsigned int flags = parse_merge_pcdata | flag_sets[i];
+-
+-		xml_document doc;
+-		xml_parse_result res = doc.load_string(STR("<node>First text<!-- here is a mesh node -->Second text<![CDATA[someothertext]]>some more text<?include somedata?>Last text</node>"), flags);
+-		CHECK(res);
+-
+-		xml_node child = doc.child(STR("node"));
+-
+-		if (flags & parse_comments)
+-		{
+-			CHECK_STRING(child.first_child().value(), STR("First text"));
+-			CHECK(child.first_child().next_sibling().type() == node_comment);
+-			CHECK_NODE(doc, STR("<node>First text<!-- here is a mesh node -->Second textsome more textLast text</node>"));
+-		}
+-		else if (flags & parse_cdata)
+-		{
+-			CHECK_STRING(child.first_child().value(), STR("First textSecond text"));
+-			CHECK(child.first_child().next_sibling().type() == node_cdata);
+-			CHECK_NODE(doc, STR("<node>First textSecond text<![CDATA[someothertext]]>some more textLast text</node>"));
+-		}
+-		else if (flags & parse_pi)
+-		{
+-			CHECK_STRING(child.first_child().value(), STR("First textSecond textsome more text"));
+-			CHECK(child.first_child().next_sibling().type() == node_pi);
+-			CHECK_NODE(doc, STR("<node>First textSecond textsome more text<?include somedata?>Last text</node>"));
+-		}
+-		else
+-		{
+-			CHECK(child.first_child() == child.last_child());
+-			CHECK(child.first_child().type() == node_pcdata);
+-			CHECK_NODE(doc, STR("<node>First textSecond textsome more textLast text</node>"));
+-		}
+-
+-		CHECK(child.last_child().type() == node_pcdata);
+-	}
+-}
+-
+-TEST(parse_merge_pcdata_escape)
+-{
+-	xml_document doc;
+-	xml_parse_result res = doc.load_string(STR("<node>First &amp;lt; <!-- comment 1 --> Second &amp;gt; <!-- comment 2 --> Third &amp;quot;</node>"), parse_default | parse_merge_pcdata);
+-	CHECK(res);
+-
+-	CHECK_STRING(doc.child(STR("node")).child_value(), STR("First &lt;  Second &gt;  Third &quot;"));
+-}
+-
+-TEST(parse_merge_pcdata_whitespace)
+-{
+-	unsigned int flag_sets[] = {0, parse_ws_pcdata, parse_ws_pcdata_single};
+-
+-	for (unsigned int i = 0; i < sizeof(flag_sets) / sizeof(flag_sets[0]); ++i)
+-	{
+-		unsigned int flags = parse_merge_pcdata | flag_sets[i];
+-
+-		xml_document doc;
+-		xml_parse_result res = doc.load_string(STR("<node><child1>  <!-- comment 1 -->\t<!-- comment 2 -->\n</child1><child2>text<!-- comment 1-->\t<!-- comment2 --> end</child2></node>"), flags);
+-		CHECK(res);
+-
+-		if (flags & parse_ws_pcdata)
+-		{
+-			CHECK_STRING(doc.child(STR("node")).child(STR("child1")).child_value(), STR("  \t\n"));
+-			CHECK_STRING(doc.child(STR("node")).child(STR("child2")).child_value(), STR("text\t end"));
+-		}
+-		else if (flags & parse_ws_pcdata_single)
+-		{
+-			CHECK_STRING(doc.child(STR("node")).child(STR("child1")).child_value(), STR("\n"));
+-			CHECK_STRING(doc.child(STR("node")).child(STR("child2")).child_value(), STR("text end"));
+-		}
+-		else
+-		{
+-			CHECK(!doc.child(STR("node")).child(STR("child1")).first_child());
+-			CHECK_STRING(doc.child(STR("node")).child(STR("child2")).child_value(), STR("text end"));
+-		}
+-	}
+-}
+-
+-TEST(parse_merge_pcdata_append)
+-{
+-	xml_document doc;
+-	doc.append_child(STR("node")).append_child(node_pcdata);
+-	xml_parse_result res = doc.child(STR("node")).append_buffer("hello <!--comment-->world", 25, parse_merge_pcdata | parse_fragment);
+-
+-	CHECK(res.status == status_append_invalid_root);
+-	CHECK_STRING(doc.child(STR("node")).first_child().value(), STR(""));
+-
+-	doc.child(STR("node")).remove_children();
+-	res = doc.child(STR("node")).append_buffer("hello <!--comment-->world", 25, parse_merge_pcdata | parse_fragment);
+-
+-	CHECK(res.status == status_ok);
+-	CHECK_STRING(doc.child(STR("node")).first_child().value(), STR("hello world"));
+-}
+-
+-TEST(parse_merge_pcdata_overlap)
+-{
+-	xml_document doc;
+-	xml_parse_result res = doc.load_string(STR("<node>short <!-- --> this string is very long so long that copying it will overlap itself</node>"), parse_merge_pcdata);
+-	CHECK(res);
+-	CHECK_STRING(doc.child_value(STR("node")), STR("short  this string is very long so long that copying it will overlap itself"));
+-}
+-
+ TEST(parse_encoding_detect)
+ {
+ 	char test[] = "<?xml version='1.0' encoding='utf-8'?><n/>";

@@ -1,0 +1,367 @@
+diff --git a/ruby/red-arrow-format/lib/arrow-format/field.rb b/ruby/red-arrow-format/lib/arrow-format/field.rb
+index 022091f651..7736bbf5e7 100644
+--- a/ruby/red-arrow-format/lib/arrow-format/field.rb
++++ b/ruby/red-arrow-format/lib/arrow-format/field.rb
+@@ -19,17 +19,11 @@ module ArrowFormat
+     attr_reader :name
+     attr_reader :type
+     attr_reader :dictionary_id
+-    attr_reader :metadata
+-    def initialize(name,
+-                   type,
+-                   nullable: true,
+-                   dictionary_id: nil,
+-                   metadata: nil)
++    def initialize(name, type, nullable, dictionary_id)
+       @name = name
+       @type = type
+       @nullable = nullable
+       @dictionary_id = dictionary_id
+-      @metadata = metadata
+     end
+ 
+     def nullable?
+@@ -50,14 +44,7 @@ module ArrowFormat
+       elsif @type.respond_to?(:children)
+         fb_field.children = @type.children.collect(&:to_flatbuffers)
+       end
+-      if @metadata
+-        fb_field.custom_metadata = @metadata.collect do |key, value|
+-          fb_key_value = FB::KeyValue::Data.new
+-          fb_key_value.key = key
+-          fb_key_value.value = value
+-          fb_key_value
+-        end
+-      end
++      # fb_field.custom_metadata = @custom_metadata
+       fb_field
+     end
+   end
+diff --git a/ruby/red-arrow-format/lib/arrow-format/file-reader.rb b/ruby/red-arrow-format/lib/arrow-format/file-reader.rb
+index ed510ff09c..05399180be 100644
+--- a/ruby/red-arrow-format/lib/arrow-format/file-reader.rb
++++ b/ruby/red-arrow-format/lib/arrow-format/file-reader.rb
+@@ -47,7 +47,7 @@ module ArrowFormat
+ 
+       validate
+       @footer = read_footer
+-      @record_batch_blocks = @footer.record_batches || []
++      @record_batch_blocks = @footer.record_batches
+       @schema = read_schema(@footer.schema)
+       @dictionaries = read_dictionaries
+     end
+@@ -193,7 +193,7 @@ module ArrowFormat
+         end
+ 
+         value_type = dictionary_fields[id].type.value_type
+-        schema = Schema.new([Field.new("dummy", value_type)])
++        schema = Schema.new([Field.new("dummy", value_type, true, nil)])
+         record_batch = read_record_batch(fb_header.data, schema, body)
+         if fb_header.delta?
+           dictionaries[id] << record_batch.columns[0]
+diff --git a/ruby/red-arrow-format/lib/arrow-format/readable.rb b/ruby/red-arrow-format/lib/arrow-format/readable.rb
+index b0e65317ad..ff09c6129d 100644
+--- a/ruby/red-arrow-format/lib/arrow-format/readable.rb
++++ b/ruby/red-arrow-format/lib/arrow-format/readable.rb
+@@ -25,21 +25,11 @@ require_relative "type"
+ module ArrowFormat
+   module Readable
+     private
+-    def read_custom_metadata(fb_custom_metadata)
+-      return nil if fb_custom_metadata.nil?
+-      metadata = {}
+-      fb_custom_metadata.each do |key_value|
+-        metadata[key_value.key] = key_value.value
+-      end
+-      metadata
+-    end
+-
+     def read_schema(fb_schema)
+       fields = fb_schema.fields.collect do |fb_field|
+         read_field(fb_field)
+       end
+-      Schema.new(fields,
+-                 metadata: read_custom_metadata(fb_schema.custom_metadata))
++      Schema.new(fields)
+     end
+ 
+     def read_field(fb_field)
+@@ -142,11 +132,7 @@ module ArrowFormat
+       else
+         dictionary_id = nil
+       end
+-      Field.new(fb_field.name,
+-                type,
+-                nullable: fb_field.nullable?,
+-                dictionary_id: dictionary_id,
+-                metadata: read_custom_metadata(fb_field.custom_metadata))
++      Field.new(fb_field.name, type, fb_field.nullable?, dictionary_id)
+     end
+ 
+     def read_type_int(fb_type)
+diff --git a/ruby/red-arrow-format/lib/arrow-format/schema.rb b/ruby/red-arrow-format/lib/arrow-format/schema.rb
+index ef2a1b9be3..aba175a39c 100644
+--- a/ruby/red-arrow-format/lib/arrow-format/schema.rb
++++ b/ruby/red-arrow-format/lib/arrow-format/schema.rb
+@@ -17,24 +17,15 @@
+ module ArrowFormat
+   class Schema
+     attr_reader :fields
+-    attr_reader :metadata
+-    def initialize(fields, metadata: nil)
++    def initialize(fields)
+       @fields = fields
+-      @metadata = metadata
+     end
+ 
+     def to_flatbuffers
+       fb_schema = FB::Schema::Data.new
+       fb_schema.endianness = FB::Endianness::LITTLE
+       fb_schema.fields = fields.collect(&:to_flatbuffers)
+-      if @metadata
+-        fb_schema.custom_metadata = @metadata.collect do |key, value|
+-          fb_key_value = FB::KeyValue::Data.new
+-          fb_key_value.key = key
+-          fb_key_value.value = value
+-          fb_key_value
+-        end
+-      end
++      # fb_schema.custom_metadata = @custom_metadata
+       # fb_schema.features = @features
+       fb_schema
+     end
+diff --git a/ruby/red-arrow-format/lib/arrow-format/streaming-pull-reader.rb b/ruby/red-arrow-format/lib/arrow-format/streaming-pull-reader.rb
+index 5657ca4a1b..98263de77e 100644
+--- a/ruby/red-arrow-format/lib/arrow-format/streaming-pull-reader.rb
++++ b/ruby/red-arrow-format/lib/arrow-format/streaming-pull-reader.rb
+@@ -222,7 +222,7 @@ module ArrowFormat
+       end
+       field = @dictionary_fields[header.id]
+       value_type = field.type.value_type
+-      schema = Schema.new([Field.new("dummy", value_type)])
++      schema = Schema.new([Field.new("dummy", value_type, true, nil)])
+       record_batch = read_record_batch(header.data, schema, body)
+       if header.delta?
+         @dictionaries[header.id] << record_batch.columns[0]
+diff --git a/ruby/red-arrow-format/lib/arrow-format/streaming-writer.rb b/ruby/red-arrow-format/lib/arrow-format/streaming-writer.rb
+index 0621dcbb89..11f2b4375a 100644
+--- a/ruby/red-arrow-format/lib/arrow-format/streaming-writer.rb
++++ b/ruby/red-arrow-format/lib/arrow-format/streaming-writer.rb
+@@ -125,7 +125,7 @@ module ArrowFormat
+           dictionary = dictionary.slice(written_offset - current_base_offset)
+         end
+ 
+-        schema = Schema.new([Field.new("dummy", value_type)])
++        schema = Schema.new([Field.new("dummy", value_type, true, nil)])
+         size = dictionary.size
+         record_batch = RecordBatch.new(schema, size, [dictionary])
+         fb_dictionary_batch = FB::DictionaryBatch::Data.new
+diff --git a/ruby/red-arrow-format/red-arrow-format.gemspec b/ruby/red-arrow-format/red-arrow-format.gemspec
+index 52340b9748..bccb51dce3 100644
+--- a/ruby/red-arrow-format/red-arrow-format.gemspec
++++ b/ruby/red-arrow-format/red-arrow-format.gemspec
+@@ -46,7 +46,7 @@ Gem::Specification.new do |spec|
+   spec.files += Dir.glob("lib/**/*.rb")
+   spec.files += Dir.glob("doc/text/*")
+ 
+-  spec.add_runtime_dependency("red-flatbuffers", ">=0.0.6")
++  spec.add_runtime_dependency("red-flatbuffers", ">=0.0.5")
+ 
+   github_url = "https://github.com/apache/arrow"
+   spec.metadata = {
+diff --git a/ruby/red-arrow-format/test/test-reader.rb b/ruby/red-arrow-format/test/test-reader.rb
+index 9d54ab987f..763e8737b5 100644
+--- a/ruby/red-arrow-format/test/test-reader.rb
++++ b/ruby/red-arrow-format/test/test-reader.rb
+@@ -16,81 +16,24 @@
+ # under the License.
+ 
+ module ReaderTests
+-  def roundtrip(data)
++  def roundtrip(array)
+     Dir.mktmpdir do |tmp_dir|
+-      case data
+-      when Arrow::Array
+-        table = Arrow::Table.new(value: data)
+-      when Arrow::RecordBatch
+-        table = data.to_table
+-      else
+-        table = data
+-      end
++      table = Arrow::Table.new(value: array)
+       path = File.join(tmp_dir, "data.#{file_extension}")
+       table.save(path)
+       File.open(path, "rb") do |input|
+         reader = reader_class.new(input)
+-        case data
+-        when Arrow::Array
+-          values = []
+-          reader.each do |record_batch|
+-            values.concat(record_batch.columns[0].to_a)
+-          end
+-          [reader.schema.fields[0].type, values]
+-        else
+-          record_batches = reader.collect do |record_batch|
+-            record_batch.to_h.tap do |hash|
+-              hash.each do |key, value|
+-                hash[key] = value.to_a
+-              end
+-            end
+-          end
+-          [reader.schema, record_batches]
++        values = []
++        reader.each do |record_batch|
++          values.concat(record_batch.columns[0].to_a)
+         end
++        [reader.schema.fields[0].type, values]
+       end
+     ensure
+       GC.start
+     end
+   end
+ 
+-  def test_custom_metadata_field
+-    field =
+-      Arrow::Field.new("value", :boolean)
+-        .with_metadata("key1" => "value1",
+-                       "key2" => "value2")
+-    schema = Arrow::Schema.new([field])
+-    values = [true, nil, false]
+-    record_batch = Arrow::RecordBatch.new(schema, {"value" => values})
+-    schema, record_batches = roundtrip(record_batch)
+-    assert_equal([
+-                   {
+-                     "key1" => "value1",
+-                     "key2" => "value2",
+-                   },
+-                   [{"value" => values}],
+-                 ],
+-                 [schema.fields[0].metadata, record_batches])
+-  end
+-
+-  def test_custom_metadata_schema
+-    field = Arrow::Field.new("value", :boolean)
+-    schema =
+-      Arrow::Schema.new([field])
+-        .with_metadata("key1" => "value1",
+-                       "key2" => "value2")
+-    values = [true, nil, false]
+-    record_batch = Arrow::RecordBatch.new(schema, {"value" => values})
+-    schema, record_batches = roundtrip(record_batch)
+-    assert_equal([
+-                   {
+-                     "key1" => "value1",
+-                     "key2" => "value2",
+-                   },
+-                   [{"value" => values}],
+-                 ],
+-                 [schema.metadata, record_batches])
+-  end
+-
+   def test_null
+     type, values = roundtrip(Arrow::NullArray.new(3))
+     assert_equal(["Null", [nil, nil, nil]],
+diff --git a/ruby/red-arrow-format/test/test-writer.rb b/ruby/red-arrow-format/test/test-writer.rb
+index 629543a58b..3b97d08fc4 100644
+--- a/ruby/red-arrow-format/test/test-writer.rb
++++ b/ruby/red-arrow-format/test/test-writer.rb
+@@ -128,9 +128,8 @@ module WriterHelper
+     end
+     ArrowFormat::Field.new(red_arrow_field.name,
+                            type,
+-                           nullable: red_arrow_field.nullable?,
+-                           dictionary_id: dictionary_id,
+-                           metadata: red_arrow_field.metadata)
++                           red_arrow_field.nullable?,
++                           dictionary_id)
+   end
+ 
+   def convert_buffer(buffer)
+@@ -231,58 +230,13 @@ module WriterHelper
+       end
+       # pp(read(path)) # debug
+       data = File.open(path, "rb", &:read).freeze
+-      case file_extension
+-      when "arrow"
+-        format = :arrow_file
+-      else
+-        format = :arrow_streaming
+-      end
+-      table = Arrow::Table.load(Arrow::Buffer.new(data), format: format)
+-      if inputs[0].is_a?(Arrow::Array)
+-        [table.value.data_type, table.value.values]
+-      else
+-        table
+-      end
++      table = Arrow::Table.load(Arrow::Buffer.new(data), format: :arrow)
++      [table.value.data_type, table.value.values]
+     end
+   end
+ end
+ 
+ module WriterTests
+-  def test_custom_metadata_field
+-    field = ArrowFormat::Field.new("value",
+-                                   ArrowFormat::BooleanType.new,
+-                                   metadata: {
+-                                     "key1" => "value1",
+-                                     "key2" => "value2",
+-                                   })
+-    schema = ArrowFormat::Schema.new([field])
+-    column = convert_array(Arrow::BooleanArray.new([true, nil, false]))
+-    record_batch = ArrowFormat::RecordBatch.new(schema, 3, [column])
+-    table = roundtrip(record_batch)
+-    assert_equal({
+-                   "key1" => "value1",
+-                   "key2" => "value2",
+-                 },
+-                 table.schema.fields[0].metadata)
+-  end
+-
+-  def test_custom_metadata_schema
+-    field = ArrowFormat::Field.new("value", ArrowFormat::BooleanType.new)
+-    schema = ArrowFormat::Schema.new([field],
+-                                     metadata: {
+-                                       "key1" => "value1",
+-                                       "key2" => "value2",
+-                                     })
+-    column = convert_array(Arrow::BooleanArray.new([true, nil, false]))
+-    record_batch = ArrowFormat::RecordBatch.new(schema, 3, [column])
+-    table = roundtrip(record_batch)
+-    assert_equal({
+-                   "key1" => "value1",
+-                   "key2" => "value2",
+-                 },
+-                 table.schema.metadata)
+-  end
+-
+   def test_null
+     array = Arrow::NullArray.new(3)
+     type, values = roundtrip(array)
+@@ -911,9 +865,12 @@ module WriterDictionaryDeltaTests
+     type = ArrowFormat::DictionaryType.new(index_type,
+                                            value_type,
+                                            ordered)
++    nullable = true
++    dictionary_id = 1
+     field = ArrowFormat::Field.new("value",
+                                    type,
+-                                   dictionary_id: 1)
++                                   nullable,
++                                   dictionary_id)
+     ArrowFormat::Schema.new([field])
+   end
+ 
+@@ -977,10 +934,9 @@ module WriterDictionaryDeltaTests
+   end
+ 
+   def roundtrip(value_type, values1, values2)
+-    record_batches = build_record_batches(value_type, values1, values2)
++    r = build_record_batches(value_type, values1, values2)
+     GC.start
+-    table = super(*record_batches)
+-    [table.value.data_type, table.value.values]
++    super(*r)
+   end
+ 
+   def test_boolean

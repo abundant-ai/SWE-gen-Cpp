@@ -1,0 +1,1023 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 693c2b8..58d9237 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -1418,7 +1418,6 @@ class BenchmarkReporter {
+ 
+     std::string benchmark_name() const;
+     BenchmarkName run_name;
+-    int64_t family_index;
+     RunType run_type;
+     std::string aggregate_name;
+     std::string report_label;  // Empty if not set by benchmark.
+diff --git a/src/benchmark_api_internal.cc b/src/benchmark_api_internal.cc
+index c481317..553ff44 100644
+--- a/src/benchmark_api_internal.cc
++++ b/src/benchmark_api_internal.cc
+@@ -7,11 +7,10 @@
+ namespace benchmark {
+ namespace internal {
+ 
+-BenchmarkInstance::BenchmarkInstance(Benchmark* benchmark, int family_idx,
++BenchmarkInstance::BenchmarkInstance(Benchmark* benchmark,
+                                      const std::vector<int64_t>& args,
+                                      int thread_count)
+     : benchmark_(*benchmark),
+-      family_index_(family_idx),
+       aggregation_report_mode_(benchmark_.aggregation_report_mode_),
+       args_(args),
+       time_unit_(benchmark_.time_unit_),
+diff --git a/src/benchmark_api_internal.h b/src/benchmark_api_internal.h
+index 5ee6fad..b0595e5 100644
+--- a/src/benchmark_api_internal.h
++++ b/src/benchmark_api_internal.h
+@@ -17,11 +17,10 @@ namespace internal {
+ // Information kept per benchmark we may want to run
+ class BenchmarkInstance {
+  public:
+-  BenchmarkInstance(Benchmark* benchmark, int family_index,
+-                    const std::vector<int64_t>& args, int threads);
++  BenchmarkInstance(Benchmark* benchmark, const std::vector<int64_t>& args,
++                    int threads);
+ 
+   const BenchmarkName& name() const { return name_; }
+-  int family_index() const { return family_index_; }
+   AggregationReportMode aggregation_report_mode() const {
+     return aggregation_report_mode_;
+   }
+@@ -46,7 +45,6 @@ class BenchmarkInstance {
+  private:
+   BenchmarkName name_;
+   Benchmark& benchmark_;
+-  const int family_index_;
+   AggregationReportMode aggregation_report_mode_;
+   const std::vector<int64_t>& args_;
+   TimeUnit time_unit_;
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index bc6c668..ebea2d9 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -129,12 +129,8 @@ bool BenchmarkFamilies::FindBenchmarks(
+   // Special list of thread counts to use when none are specified
+   const std::vector<int> one_thread = {1};
+ 
+-  int next_family_index = 0;
+-
+   MutexLock l(mutex_);
+   for (std::unique_ptr<Benchmark>& family : families_) {
+-    int family_index = next_family_index;
+-
+     // Family was deleted or benchmark doesn't match
+     if (!family) continue;
+ 
+@@ -158,18 +154,13 @@ bool BenchmarkFamilies::FindBenchmarks(
+ 
+     for (auto const& args : family->args_) {
+       for (int num_threads : *thread_counts) {
+-        BenchmarkInstance instance(family.get(), family_index, args,
+-                                   num_threads);
++        BenchmarkInstance instance(family.get(), args, num_threads);
+ 
+         const auto full_name = instance.name().str();
+         if ((re.Match(full_name) && !isNegativeFilter) ||
+             (!re.Match(full_name) && isNegativeFilter)) {
+           instance.last_benchmark_instance = (&args == &family->args_.back());
+           benchmarks->push_back(std::move(instance));
+-
+-          // Only bump the next family index once we've estabilished that
+-          // at least one instance of this family will be run.
+-          if (next_family_index == family_index) ++next_family_index;
+         }
+       }
+     }
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index c71fc71..d4eb7d9 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -72,7 +72,6 @@ BenchmarkReporter::Run CreateRunReport(
+   BenchmarkReporter::Run report;
+ 
+   report.run_name = b.name();
+-  report.family_index = b.family_index();
+   report.error_occurred = results.has_error_;
+   report.error_message = results.error_message_;
+   report.report_label = results.report_label_;
+diff --git a/src/complexity.cc b/src/complexity.cc
+index 22f4263..aeed67f 100644
+--- a/src/complexity.cc
++++ b/src/complexity.cc
+@@ -193,7 +193,6 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+   // Get the data from the accumulator to BenchmarkReporter::Run's.
+   Run big_o;
+   big_o.run_name = run_name;
+-  big_o.family_index = reports[0].family_index;
+   big_o.run_type = BenchmarkReporter::Run::RT_Aggregate;
+   big_o.repetitions = reports[0].repetitions;
+   big_o.repetition_index = Run::no_repetition_index;
+@@ -216,7 +215,6 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+   // Only add label to mean/stddev if it is same for all runs
+   Run rms;
+   rms.run_name = run_name;
+-  rms.family_index = reports[0].family_index;
+   rms.run_type = BenchmarkReporter::Run::RT_Aggregate;
+   rms.aggregate_name = "RMS";
+   rms.report_label = big_o.report_label;
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index 5a7d843..effa6bd 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -207,7 +207,6 @@ void JSONReporter::PrintRunData(Run const& run) {
+   std::string indent(6, ' ');
+   std::ostream& out = GetOutputStream();
+   out << indent << FormatKV("name", run.benchmark_name()) << ",\n";
+-  out << indent << FormatKV("family_index", run.family_index) << ",\n";
+   out << indent << FormatKV("run_name", run.run_name.str()) << ",\n";
+   out << indent << FormatKV("run_type", [&run]() -> const char* {
+     switch (run.run_type) {
+diff --git a/src/statistics.cc b/src/statistics.cc
+index c9235e0..bd5a3d6 100644
+--- a/src/statistics.cc
++++ b/src/statistics.cc
+@@ -148,7 +148,6 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+     // Get the data from the accumulator to BenchmarkReporter::Run's.
+     Run data;
+     data.run_name = reports[0].run_name;
+-    data.family_index = reports[0].family_index;
+     data.run_type = BenchmarkReporter::Run::RT_Aggregate;
+     data.threads = reports[0].threads;
+     data.repetitions = reports[0].repetitions;
+diff --git a/test/BUILD b/test/BUILD
+index 1f27f99..9bb8cb0 100644
+--- a/test/BUILD
++++ b/test/BUILD
+@@ -20,7 +20,6 @@ TEST_ARGS = ["--benchmark_min_time=0.01"]
+ 
+ PER_SRC_TEST_ARGS = ({
+     "user_counters_tabular_test.cc": ["--benchmark_counters_tabular=true"],
+-    "repetitions_test.cc": [" --benchmark_repetitions=3"],
+ })
+ 
+ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+diff --git a/test/complexity_test.cc b/test/complexity_test.cc
+index 34731e8..5681fdc 100644
+--- a/test/complexity_test.cc
++++ b/test/complexity_test.cc
+@@ -13,8 +13,7 @@ namespace {
+   int CONCAT(dummy, __LINE__) = AddComplexityTest(__VA_ARGS__)
+ 
+ int AddComplexityTest(std::string test_name, std::string big_o_test_name,
+-                      std::string rms_test_name, std::string big_o,
+-                      int family_index) {
++                      std::string rms_test_name, std::string big_o) {
+   SetSubstitutions({{"%name", test_name},
+                     {"%bigo_name", big_o_test_name},
+                     {"%rms_name", rms_test_name},
+@@ -26,29 +25,25 @@ int AddComplexityTest(std::string test_name, std::string big_o_test_name,
+       {{"^%bigo_name %bigo_str %bigo_str[ ]*$"},
+        {"^%bigo_name", MR_Not},  // Assert we we didn't only matched a name.
+        {"^%rms_name %rms %rms[ ]*$", MR_Next}});
+-  AddCases(
+-      TC_JSONOut,
+-      {{"\"name\": \"%bigo_name\",$"},
+-       {"\"family_index\": " + std::to_string(family_index) + ",$", MR_Next},
+-       {"\"run_name\": \"%name\",$", MR_Next},
+-       {"\"run_type\": \"aggregate\",$", MR_Next},
+-       {"\"repetitions\": %int,$", MR_Next},
+-       {"\"threads\": 1,$", MR_Next},
+-       {"\"aggregate_name\": \"BigO\",$", MR_Next},
+-       {"\"cpu_coefficient\": %float,$", MR_Next},
+-       {"\"real_coefficient\": %float,$", MR_Next},
+-       {"\"big_o\": \"%bigo\",$", MR_Next},
+-       {"\"time_unit\": \"ns\"$", MR_Next},
+-       {"}", MR_Next},
+-       {"\"name\": \"%rms_name\",$"},
+-       {"\"family_index\": " + std::to_string(family_index) + ",$", MR_Next},
+-       {"\"run_name\": \"%name\",$", MR_Next},
+-       {"\"run_type\": \"aggregate\",$", MR_Next},
+-       {"\"repetitions\": %int,$", MR_Next},
+-       {"\"threads\": 1,$", MR_Next},
+-       {"\"aggregate_name\": \"RMS\",$", MR_Next},
+-       {"\"rms\": %float$", MR_Next},
+-       {"}", MR_Next}});
++  AddCases(TC_JSONOut, {{"\"name\": \"%bigo_name\",$"},
++                        {"\"run_name\": \"%name\",$", MR_Next},
++                        {"\"run_type\": \"aggregate\",$", MR_Next},
++                        {"\"repetitions\": %int,$", MR_Next},
++                        {"\"threads\": 1,$", MR_Next},
++                        {"\"aggregate_name\": \"BigO\",$", MR_Next},
++                        {"\"cpu_coefficient\": %float,$", MR_Next},
++                        {"\"real_coefficient\": %float,$", MR_Next},
++                        {"\"big_o\": \"%bigo\",$", MR_Next},
++                        {"\"time_unit\": \"ns\"$", MR_Next},
++                        {"}", MR_Next},
++                        {"\"name\": \"%rms_name\",$"},
++                        {"\"run_name\": \"%name\",$", MR_Next},
++                        {"\"run_type\": \"aggregate\",$", MR_Next},
++                        {"\"repetitions\": %int,$", MR_Next},
++                        {"\"threads\": 1,$", MR_Next},
++                        {"\"aggregate_name\": \"RMS\",$", MR_Next},
++                        {"\"rms\": %float$", MR_Next},
++                        {"}", MR_Next}});
+   AddCases(TC_CSVOut, {{"^\"%bigo_name\",,%float,%float,%bigo,,,,,$"},
+                        {"^\"%bigo_name\"", MR_Not},
+                        {"^\"%rms_name\",,%float,%float,,,,,,$", MR_Next}});
+@@ -87,15 +82,15 @@ const char *lambda_big_o_1 = "f\\(N\\)";
+ 
+ // Add enum tests
+ ADD_COMPLEXITY_CASES(one_test_name, big_o_1_test_name, rms_o_1_test_name,
+-                     enum_big_o_1, /*family_index=*/0);
++                     enum_big_o_1);
+ 
+ // Add auto enum tests
+ ADD_COMPLEXITY_CASES(one_test_name, big_o_1_test_name, rms_o_1_test_name,
+-                     auto_big_o_1, /*family_index=*/1);
++                     auto_big_o_1);
+ 
+ // Add lambda tests
+ ADD_COMPLEXITY_CASES(one_test_name, big_o_1_test_name, rms_o_1_test_name,
+-                     lambda_big_o_1, /*family_index=*/2);
++                     lambda_big_o_1);
+ 
+ // ========================================================================= //
+ // --------------------------- Testing BigO O(N) --------------------------- //
+@@ -142,11 +137,11 @@ const char *lambda_big_o_n = "f\\(N\\)";
+ 
+ // Add enum tests
+ ADD_COMPLEXITY_CASES(n_test_name, big_o_n_test_name, rms_o_n_test_name,
+-                     enum_auto_big_o_n, /*family_index=*/3);
++                     enum_auto_big_o_n);
+ 
+ // Add lambda tests
+ ADD_COMPLEXITY_CASES(n_test_name, big_o_n_test_name, rms_o_n_test_name,
+-                     lambda_big_o_n, /*family_index=*/4);
++                     lambda_big_o_n);
+ 
+ // ========================================================================= //
+ // ------------------------- Testing BigO O(N*lgN) ------------------------- //
+@@ -183,13 +178,11 @@ const char *lambda_big_o_n_lg_n = "f\\(N\\)";
+ 
+ // Add enum tests
+ ADD_COMPLEXITY_CASES(n_lg_n_test_name, big_o_n_lg_n_test_name,
+-                     rms_o_n_lg_n_test_name, enum_auto_big_o_n_lg_n,
+-                     /*family_index=*/6);
++                     rms_o_n_lg_n_test_name, enum_auto_big_o_n_lg_n);
+ 
+ // Add lambda tests
+ ADD_COMPLEXITY_CASES(n_lg_n_test_name, big_o_n_lg_n_test_name,
+-                     rms_o_n_lg_n_test_name, lambda_big_o_n_lg_n,
+-                     /*family_index=*/7);
++                     rms_o_n_lg_n_test_name, lambda_big_o_n_lg_n);
+ 
+ // ========================================================================= //
+ // -------- Testing formatting of Complexity with captured args ------------ //
+@@ -211,7 +204,7 @@ const std::string complexity_capture_name =
+     "BM_ComplexityCaptureArgs/capture_test";
+ 
+ ADD_COMPLEXITY_CASES(complexity_capture_name, complexity_capture_name + "_BigO",
+-                     complexity_capture_name + "_RMS", "N", /*family_index=*/9);
++                     complexity_capture_name + "_RMS", "N");
+ 
+ // ========================================================================= //
+ // --------------------------- TEST CASES END ------------------------------ //
+diff --git a/test/filter_test.cc b/test/filter_test.cc
+index 1c19891..fece6dc 100644
+--- a/test/filter_test.cc
++++ b/test/filter_test.cc
+@@ -1,15 +1,15 @@
+-#include <algorithm>
++#include "benchmark/benchmark.h"
++
+ #include <cassert>
+ #include <cmath>
+ #include <cstdint>
+ #include <cstdlib>
++
+ #include <iostream>
+ #include <limits>
+ #include <sstream>
+ #include <string>
+ 
+-#include "benchmark/benchmark.h"
+-
+ namespace {
+ 
+ class TestReporter : public benchmark::ConsoleReporter {
+@@ -20,22 +20,17 @@ class TestReporter : public benchmark::ConsoleReporter {
+ 
+   virtual void ReportRuns(const std::vector<Run>& report) BENCHMARK_OVERRIDE {
+     ++count_;
+-    max_family_index_ =
+-        std::max<size_t>(max_family_index_, report[0].family_index);
+     ConsoleReporter::ReportRuns(report);
+   };
+ 
+-  TestReporter() : count_(0), max_family_index_(0) {}
++  TestReporter() : count_(0) {}
+ 
+   virtual ~TestReporter() {}
+ 
+   size_t GetCount() const { return count_; }
+ 
+-  size_t GetMaxFamilyIndex() const { return max_family_index_; }
+-
+  private:
+   mutable size_t count_;
+-  mutable size_t max_family_index_;
+ };
+ 
+ }  // end namespace
+@@ -103,15 +98,6 @@ int main(int argc, char **argv) {
+                 << std::endl;
+       return -1;
+     }
+-
+-    const size_t max_family_index = test_reporter.GetMaxFamilyIndex();
+-    const size_t num_families = reports_count == 0 ? 0 : 1 + max_family_index;
+-    if (num_families != expected_reports) {
+-      std::cerr << "ERROR: Expected " << expected_reports
+-                << " test families to be run but num_families = "
+-                << num_families << std::endl;
+-      return -1;
+-    }
+   }
+ 
+   return 0;
+diff --git a/test/memory_manager_test.cc b/test/memory_manager_test.cc
+index 0c31274..4e0e649 100644
+--- a/test/memory_manager_test.cc
++++ b/test/memory_manager_test.cc
+@@ -21,7 +21,6 @@ BENCHMARK(BM_empty);
+ 
+ ADD_CASES(TC_ConsoleOut, {{"^BM_empty %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_empty\",$"},
+-                       {"\"family_index\": 0,$", MR_Next},
+                        {"\"run_name\": \"BM_empty\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+diff --git a/test/repetitions_test.cc b/test/repetitions_test.cc
+index a5ab875..5980c99 100644
+--- a/test/repetitions_test.cc
++++ b/test/repetitions_test.cc
+@@ -24,7 +24,6 @@ ADD_CASES(TC_ConsoleOut,
+           {{"^BM_ExplicitRepetitions/repeats:2_stddev %console_report$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_ExplicitRepetitions/repeats:2\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_ExplicitRepetitions/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -37,7 +36,6 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_ExplicitRepetitions/repeats:2\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_ExplicitRepetitions/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -50,7 +48,6 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_ExplicitRepetitions/repeats:2_mean\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_ExplicitRepetitions/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -63,7 +60,6 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_ExplicitRepetitions/repeats:2_median\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_ExplicitRepetitions/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -76,7 +72,6 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_ExplicitRepetitions/repeats:2_stddev\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_ExplicitRepetitions/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -113,7 +108,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_ImplicitRepetitions_mean %console_report$"}});
+ ADD_CASES(TC_ConsoleOut, {{"^BM_ImplicitRepetitions_median %console_report$"}});
+ ADD_CASES(TC_ConsoleOut, {{"^BM_ImplicitRepetitions_stddev %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions\",$"},
+-                       {"\"family_index\": 1,$", MR_Next},
+                        {"\"run_name\": \"BM_ImplicitRepetitions\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+@@ -125,7 +119,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions\",$"},
+                        {"\"time_unit\": \"ns\"$", MR_Next},
+                        {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions\",$"},
+-                       {"\"family_index\": 1,$", MR_Next},
+                        {"\"run_name\": \"BM_ImplicitRepetitions\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+@@ -137,7 +130,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions\",$"},
+                        {"\"time_unit\": \"ns\"$", MR_Next},
+                        {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions\",$"},
+-                       {"\"family_index\": 1,$", MR_Next},
+                        {"\"run_name\": \"BM_ImplicitRepetitions\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+@@ -149,7 +141,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions\",$"},
+                        {"\"time_unit\": \"ns\"$", MR_Next},
+                        {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions_mean\",$"},
+-                       {"\"family_index\": 1,$", MR_Next},
+                        {"\"run_name\": \"BM_ImplicitRepetitions\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+@@ -161,7 +152,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions_mean\",$"},
+                        {"\"time_unit\": \"ns\"$", MR_Next},
+                        {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions_median\",$"},
+-                       {"\"family_index\": 1,$", MR_Next},
+                        {"\"run_name\": \"BM_ImplicitRepetitions\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+@@ -173,7 +163,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions_median\",$"},
+                        {"\"time_unit\": \"ns\"$", MR_Next},
+                        {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_ImplicitRepetitions_stddev\",$"},
+-                       {"\"family_index\": 1,$", MR_Next},
+                        {"\"run_name\": \"BM_ImplicitRepetitions\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+diff --git a/test/reporter_output_test.cc b/test/reporter_output_test.cc
+index 91c6f49..31bedfa 100644
+--- a/test/reporter_output_test.cc
++++ b/test/reporter_output_test.cc
+@@ -71,7 +71,6 @@ BENCHMARK(BM_basic);
+ 
+ ADD_CASES(TC_ConsoleOut, {{"^BM_basic %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_basic\",$"},
+-                       {"\"family_index\": 0,$", MR_Next},
+                        {"\"run_name\": \"BM_basic\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -100,7 +99,6 @@ BENCHMARK(BM_bytes_per_second);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_bytes_per_second %console_report "
+                            "bytes_per_second=%float[kM]{0,1}/s$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_bytes_per_second\",$"},
+-                       {"\"family_index\": 1,$", MR_Next},
+                        {"\"run_name\": \"BM_bytes_per_second\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -130,7 +128,6 @@ BENCHMARK(BM_items_per_second);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_items_per_second %console_report "
+                            "items_per_second=%float[kM]{0,1}/s$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_items_per_second\",$"},
+-                       {"\"family_index\": 2,$", MR_Next},
+                        {"\"run_name\": \"BM_items_per_second\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -157,7 +154,6 @@ BENCHMARK(BM_label);
+ 
+ ADD_CASES(TC_ConsoleOut, {{"^BM_label %console_report some label$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_label\",$"},
+-                       {"\"family_index\": 3,$", MR_Next},
+                        {"\"run_name\": \"BM_label\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -185,7 +181,6 @@ BENCHMARK(BM_time_label_nanosecond)->Unit(benchmark::kNanosecond);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_time_label_nanosecond %console_report$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_time_label_nanosecond\",$"},
+-           {"\"family_index\": 4,$", MR_Next},
+            {"\"run_name\": \"BM_time_label_nanosecond\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -207,7 +202,6 @@ BENCHMARK(BM_time_label_microsecond)->Unit(benchmark::kMicrosecond);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_time_label_microsecond %console_us_report$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_time_label_microsecond\",$"},
+-           {"\"family_index\": 5,$", MR_Next},
+            {"\"run_name\": \"BM_time_label_microsecond\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -229,7 +223,6 @@ BENCHMARK(BM_time_label_millisecond)->Unit(benchmark::kMillisecond);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_time_label_millisecond %console_ms_report$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_time_label_millisecond\",$"},
+-           {"\"family_index\": 6,$", MR_Next},
+            {"\"run_name\": \"BM_time_label_millisecond\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -250,7 +243,6 @@ BENCHMARK(BM_time_label_second)->Unit(benchmark::kSecond);
+ 
+ ADD_CASES(TC_ConsoleOut, {{"^BM_time_label_second %console_s_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_time_label_second\",$"},
+-                       {"\"family_index\": 7,$", MR_Next},
+                        {"\"run_name\": \"BM_time_label_second\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -275,7 +267,6 @@ void BM_error(benchmark::State& state) {
+ BENCHMARK(BM_error);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_error[ ]+ERROR OCCURRED: 'message'$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_error\",$"},
+-                       {"\"family_index\": 8,$", MR_Next},
+                        {"\"run_name\": \"BM_error\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -298,7 +289,6 @@ void BM_no_arg_name(benchmark::State& state) {
+ BENCHMARK(BM_no_arg_name)->Arg(3);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_no_arg_name/3 %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_no_arg_name/3\",$"},
+-                       {"\"family_index\": 9,$", MR_Next},
+                        {"\"run_name\": \"BM_no_arg_name/3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -317,7 +307,6 @@ void BM_arg_name(benchmark::State& state) {
+ BENCHMARK(BM_arg_name)->ArgName("first")->Arg(3);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_arg_name/first:3 %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_arg_name/first:3\",$"},
+-                       {"\"family_index\": 10,$", MR_Next},
+                        {"\"run_name\": \"BM_arg_name/first:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -338,7 +327,6 @@ ADD_CASES(TC_ConsoleOut,
+           {{"^BM_arg_names/first:2/5/third:4 %console_report$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_arg_names/first:2/5/third:4\",$"},
+-           {"\"family_index\": 11,$", MR_Next},
+            {"\"run_name\": \"BM_arg_names/first:2/5/third:4\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -358,7 +346,6 @@ BENCHMARK(BM_name)->Name("BM_custom_name");
+ 
+ ADD_CASES(TC_ConsoleOut, {{"^BM_custom_name %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_custom_name\",$"},
+-                       {"\"family_index\": 12,$", MR_Next},
+                        {"\"run_name\": \"BM_custom_name\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -418,21 +405,18 @@ ADD_CASES(TC_ConsoleOut,
+            {"^BM_Repeat/repeats:2_median %console_time_only_report [ ]*2$"},
+            {"^BM_Repeat/repeats:2_stddev %console_time_only_report [ ]*2$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:2\",$"},
+-                       {"\"family_index\": 15,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:2\"", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 2,$", MR_Next},
+                        {"\"repetition_index\": 0,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:2\",$"},
+-                       {"\"family_index\": 15,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 2,$", MR_Next},
+                        {"\"repetition_index\": 1,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:2_mean\",$"},
+-                       {"\"family_index\": 15,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 2,$", MR_Next},
+@@ -440,7 +424,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:2\",$"},
+                        {"\"aggregate_name\": \"mean\",$", MR_Next},
+                        {"\"iterations\": 2,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:2_median\",$"},
+-                       {"\"family_index\": 15,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 2,$", MR_Next},
+@@ -448,7 +431,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:2\",$"},
+                        {"\"aggregate_name\": \"median\",$", MR_Next},
+                        {"\"iterations\": 2,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:2_stddev\",$"},
+-                       {"\"family_index\": 15,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 2,$", MR_Next},
+@@ -470,28 +452,24 @@ ADD_CASES(TC_ConsoleOut,
+            {"^BM_Repeat/repeats:3_median %console_time_only_report [ ]*3$"},
+            {"^BM_Repeat/repeats:3_stddev %console_time_only_report [ ]*3$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:3\",$"},
+-                       {"\"family_index\": 16,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+                        {"\"repetition_index\": 0,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3\",$"},
+-                       {"\"family_index\": 16,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+                        {"\"repetition_index\": 1,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3\",$"},
+-                       {"\"family_index\": 16,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+                        {"\"repetition_index\": 2,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3_mean\",$"},
+-                       {"\"family_index\": 16,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+@@ -499,7 +477,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:3\",$"},
+                        {"\"aggregate_name\": \"mean\",$", MR_Next},
+                        {"\"iterations\": 3,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3_median\",$"},
+-                       {"\"family_index\": 16,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+@@ -507,7 +484,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:3\",$"},
+                        {"\"aggregate_name\": \"median\",$", MR_Next},
+                        {"\"iterations\": 3,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3_stddev\",$"},
+-                       {"\"family_index\": 16,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 3,$", MR_Next},
+@@ -531,35 +507,30 @@ ADD_CASES(TC_ConsoleOut,
+            {"^BM_Repeat/repeats:4_median %console_time_only_report [ ]*4$"},
+            {"^BM_Repeat/repeats:4_stddev %console_time_only_report [ ]*4$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:4\",$"},
+-                       {"\"family_index\": 17,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 4,$", MR_Next},
+                        {"\"repetition_index\": 0,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4\",$"},
+-                       {"\"family_index\": 17,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 4,$", MR_Next},
+                        {"\"repetition_index\": 1,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4\",$"},
+-                       {"\"family_index\": 17,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 4,$", MR_Next},
+                        {"\"repetition_index\": 2,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4\",$"},
+-                       {"\"family_index\": 17,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 4,$", MR_Next},
+                        {"\"repetition_index\": 3,$", MR_Next},
+                        {"\"threads\": 1,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4_mean\",$"},
+-                       {"\"family_index\": 17,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 4,$", MR_Next},
+@@ -567,7 +538,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:4\",$"},
+                        {"\"aggregate_name\": \"mean\",$", MR_Next},
+                        {"\"iterations\": 4,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4_median\",$"},
+-                       {"\"family_index\": 17,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 4,$", MR_Next},
+@@ -575,7 +545,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:4\",$"},
+                        {"\"aggregate_name\": \"median\",$", MR_Next},
+                        {"\"iterations\": 4,$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4_stddev\",$"},
+-                       {"\"family_index\": 17,$", MR_Next},
+                        {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+                        {"\"repetitions\": 4,$", MR_Next},
+@@ -599,7 +568,6 @@ void BM_RepeatOnce(benchmark::State& state) {
+ BENCHMARK(BM_RepeatOnce)->Repetitions(1)->ReportAggregatesOnly();
+ ADD_CASES(TC_ConsoleOut, {{"^BM_RepeatOnce/repeats:1 %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_RepeatOnce/repeats:1\",$"},
+-                       {"\"family_index\": 18,$", MR_Next},
+                        {"\"run_name\": \"BM_RepeatOnce/repeats:1\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -622,7 +590,6 @@ ADD_CASES(
+ ADD_CASES(TC_JSONOut,
+           {{".*BM_SummaryRepeat/repeats:3 ", MR_Not},
+            {"\"name\": \"BM_SummaryRepeat/repeats:3_mean\",$"},
+-           {"\"family_index\": 19,$", MR_Next},
+            {"\"run_name\": \"BM_SummaryRepeat/repeats:3\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 3,$", MR_Next},
+@@ -630,7 +597,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"aggregate_name\": \"mean\",$", MR_Next},
+            {"\"iterations\": 3,$", MR_Next},
+            {"\"name\": \"BM_SummaryRepeat/repeats:3_median\",$"},
+-           {"\"family_index\": 19,$", MR_Next},
+            {"\"run_name\": \"BM_SummaryRepeat/repeats:3\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 3,$", MR_Next},
+@@ -638,7 +604,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"aggregate_name\": \"median\",$", MR_Next},
+            {"\"iterations\": 3,$", MR_Next},
+            {"\"name\": \"BM_SummaryRepeat/repeats:3_stddev\",$"},
+-           {"\"family_index\": 19,$", MR_Next},
+            {"\"run_name\": \"BM_SummaryRepeat/repeats:3\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 3,$", MR_Next},
+@@ -667,7 +632,6 @@ ADD_CASES(
+ ADD_CASES(TC_JSONOut,
+           {{".*BM_SummaryDisplay/repeats:2 ", MR_Not},
+            {"\"name\": \"BM_SummaryDisplay/repeats:2_mean\",$"},
+-           {"\"family_index\": 20,$", MR_Next},
+            {"\"run_name\": \"BM_SummaryDisplay/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -675,7 +639,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"aggregate_name\": \"mean\",$", MR_Next},
+            {"\"iterations\": 2,$", MR_Next},
+            {"\"name\": \"BM_SummaryDisplay/repeats:2_median\",$"},
+-           {"\"family_index\": 20,$", MR_Next},
+            {"\"run_name\": \"BM_SummaryDisplay/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -683,7 +646,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"aggregate_name\": \"median\",$", MR_Next},
+            {"\"iterations\": 2,$", MR_Next},
+            {"\"name\": \"BM_SummaryDisplay/repeats:2_stddev\",$"},
+-           {"\"family_index\": 20,$", MR_Next},
+            {"\"run_name\": \"BM_SummaryDisplay/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -716,7 +678,6 @@ ADD_CASES(
+ ADD_CASES(TC_JSONOut,
+           {{".*BM_RepeatTimeUnit/repeats:3 ", MR_Not},
+            {"\"name\": \"BM_RepeatTimeUnit/repeats:3_mean\",$"},
+-           {"\"family_index\": 21,$", MR_Next},
+            {"\"run_name\": \"BM_RepeatTimeUnit/repeats:3\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 3,$", MR_Next},
+@@ -725,7 +686,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"iterations\": 3,$", MR_Next},
+            {"\"time_unit\": \"us\",?$"},
+            {"\"name\": \"BM_RepeatTimeUnit/repeats:3_median\",$"},
+-           {"\"family_index\": 21,$", MR_Next},
+            {"\"run_name\": \"BM_RepeatTimeUnit/repeats:3\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 3,$", MR_Next},
+@@ -734,7 +694,6 @@ ADD_CASES(TC_JSONOut,
+            {"\"iterations\": 3,$", MR_Next},
+            {"\"time_unit\": \"us\",?$"},
+            {"\"name\": \"BM_RepeatTimeUnit/repeats:3_stddev\",$"},
+-           {"\"family_index\": 21,$", MR_Next},
+            {"\"run_name\": \"BM_RepeatTimeUnit/repeats:3\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 3,$", MR_Next},
+@@ -787,7 +746,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_UserStats/iterations:5/repeats:3/manual_time [ "
+ ADD_CASES(
+     TC_JSONOut,
+     {{"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$"},
+-     {"\"family_index\": 22,$", MR_Next},
+      {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+       MR_Next},
+      {"\"run_type\": \"iteration\",$", MR_Next},
+@@ -797,7 +755,6 @@ ADD_CASES(
+      {"\"iterations\": 5,$", MR_Next},
+      {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+      {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$"},
+-     {"\"family_index\": 22,$", MR_Next},
+      {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+       MR_Next},
+      {"\"run_type\": \"iteration\",$", MR_Next},
+@@ -807,7 +764,6 @@ ADD_CASES(
+      {"\"iterations\": 5,$", MR_Next},
+      {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+      {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$"},
+-     {"\"family_index\": 22,$", MR_Next},
+      {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+       MR_Next},
+      {"\"run_type\": \"iteration\",$", MR_Next},
+@@ -817,7 +773,6 @@ ADD_CASES(
+      {"\"iterations\": 5,$", MR_Next},
+      {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+      {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_mean\",$"},
+-     {"\"family_index\": 22,$", MR_Next},
+      {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+       MR_Next},
+      {"\"run_type\": \"aggregate\",$", MR_Next},
+@@ -827,7 +782,6 @@ ADD_CASES(
+      {"\"iterations\": 3,$", MR_Next},
+      {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+      {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_median\",$"},
+-     {"\"family_index\": 22,$", MR_Next},
+      {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+       MR_Next},
+      {"\"run_type\": \"aggregate\",$", MR_Next},
+@@ -837,7 +791,6 @@ ADD_CASES(
+      {"\"iterations\": 3,$", MR_Next},
+      {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+      {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_stddev\",$"},
+-     {"\"family_index\": 22,$", MR_Next},
+      {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+       MR_Next},
+      {"\"run_type\": \"aggregate\",$", MR_Next},
+@@ -847,7 +800,6 @@ ADD_CASES(
+      {"\"iterations\": 3,$", MR_Next},
+      {"\"real_time\": %float,$", MR_Next},
+      {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_\",$"},
+-     {"\"family_index\": 22,$", MR_Next},
+      {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+       MR_Next},
+      {"\"run_type\": \"aggregate\",$", MR_Next},
+@@ -879,7 +831,6 @@ void BM_JSON_Format(benchmark::State& state) {
+ }
+ BENCHMARK(BM_JSON_Format);
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_JSON_Format\",$"},
+-                       {"\"family_index\": 23,$", MR_Next},
+                        {"\"run_name\": \"BM_JSON_Format\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+diff --git a/test/user_counters_tabular_test.cc b/test/user_counters_tabular_test.cc
+index 056923e..d49ce55 100644
+--- a/test/user_counters_tabular_test.cc
++++ b/test/user_counters_tabular_test.cc
+@@ -71,7 +71,6 @@ void BM_Counters_Tabular(benchmark::State& state) {
+ BENCHMARK(BM_Counters_Tabular)->ThreadRange(1, 16);
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Tabular/threads:%int\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_Tabular/threads:%int\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -124,7 +123,6 @@ void BM_CounterRates_Tabular(benchmark::State& state) {
+ BENCHMARK(BM_CounterRates_Tabular)->ThreadRange(1, 16);
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_CounterRates_Tabular/threads:%int\",$"},
+-           {"\"family_index\": 1,$", MR_Next},
+            {"\"run_name\": \"BM_CounterRates_Tabular/threads:%int\",$",
+             MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+@@ -176,7 +174,6 @@ void BM_CounterSet0_Tabular(benchmark::State& state) {
+ BENCHMARK(BM_CounterSet0_Tabular)->ThreadRange(1, 16);
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_CounterSet0_Tabular/threads:%int\",$"},
+-           {"\"family_index\": 2,$", MR_Next},
+            {"\"run_name\": \"BM_CounterSet0_Tabular/threads:%int\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -215,7 +212,6 @@ void BM_CounterSet1_Tabular(benchmark::State& state) {
+ BENCHMARK(BM_CounterSet1_Tabular)->ThreadRange(1, 16);
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_CounterSet1_Tabular/threads:%int\",$"},
+-           {"\"family_index\": 3,$", MR_Next},
+            {"\"run_name\": \"BM_CounterSet1_Tabular/threads:%int\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -258,7 +254,6 @@ void BM_CounterSet2_Tabular(benchmark::State& state) {
+ BENCHMARK(BM_CounterSet2_Tabular)->ThreadRange(1, 16);
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_CounterSet2_Tabular/threads:%int\",$"},
+-           {"\"family_index\": 4,$", MR_Next},
+            {"\"run_name\": \"BM_CounterSet2_Tabular/threads:%int\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+diff --git a/test/user_counters_test.cc b/test/user_counters_test.cc
+index 29b33f2..4d53f5c 100644
+--- a/test/user_counters_test.cc
++++ b/test/user_counters_test.cc
+@@ -32,7 +32,6 @@ BENCHMARK(BM_Counters_Simple);
+ ADD_CASES(TC_ConsoleOut,
+           {{"^BM_Counters_Simple %console_report bar=%hrfloat foo=%hrfloat$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_Simple\",$"},
+-                       {"\"family_index\": 0,$", MR_Next},
+                        {"\"run_name\": \"BM_Counters_Simple\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -79,7 +78,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_WithBytesAndItemsPSec %console_report "
+                            "foo=%hrfloat items_per_second=%hrfloat/s$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_WithBytesAndItemsPSec\",$"},
+-           {"\"family_index\": 1,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_WithBytesAndItemsPSec\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -127,7 +125,6 @@ ADD_CASES(
+     TC_ConsoleOut,
+     {{"^BM_Counters_Rate %console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_Rate\",$"},
+-                       {"\"family_index\": 2,$", MR_Next},
+                        {"\"run_name\": \"BM_Counters_Rate\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -168,7 +165,6 @@ BENCHMARK(BM_Invert);
+ ADD_CASES(TC_ConsoleOut,
+           {{"^BM_Invert %console_report bar=%hrfloatu foo=%hrfloatk$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Invert\",$"},
+-                       {"\"family_index\": 3,$", MR_Next},
+                        {"\"run_name\": \"BM_Invert\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"repetitions\": 1,$", MR_Next},
+@@ -211,7 +207,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_InvertedRate %console_report "
+                            "bar=%hrfloats foo=%hrfloats$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_InvertedRate\",$"},
+-           {"\"family_index\": 4,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_InvertedRate\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -251,7 +246,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_Threads/threads:%int %console_report "
+                            "bar=%hrfloat foo=%hrfloat$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Threads/threads:%int\",$"},
+-           {"\"family_index\": 5,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_Threads/threads:%int\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -291,7 +285,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_AvgThreads/threads:%int "
+                            "%console_report bar=%hrfloat foo=%hrfloat$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_AvgThreads/threads:%int\",$"},
+-           {"\"family_index\": 6,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_AvgThreads/threads:%int\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -334,7 +327,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_AvgThreadsRate/threads:%int "
+                            "%console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_AvgThreadsRate/threads:%int\",$"},
+-           {"\"family_index\": 7,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_AvgThreadsRate/threads:%int\",$",
+             MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+@@ -375,7 +367,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_IterationInvariant %console_report "
+                            "bar=%hrfloat foo=%hrfloat$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_IterationInvariant\",$"},
+-           {"\"family_index\": 8,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_IterationInvariant\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -421,7 +412,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_kIsIterationInvariantRate "
+                            "%console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_kIsIterationInvariantRate\",$"},
+-           {"\"family_index\": 9,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_kIsIterationInvariantRate\",$",
+             MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+@@ -465,7 +455,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_AvgIterations %console_report "
+                            "bar=%hrfloat foo=%hrfloat$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_AvgIterations\",$"},
+-           {"\"family_index\": 10,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_AvgIterations\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+@@ -509,7 +498,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_kAvgIterationsRate "
+                            "%console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_kAvgIterationsRate\",$"},
+-           {"\"family_index\": 11,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_kAvgIterationsRate\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 1,$", MR_Next},
+diff --git a/test/user_counters_thousands_test.cc b/test/user_counters_thousands_test.cc
+index 842b366..21d8285 100644
+--- a/test/user_counters_thousands_test.cc
++++ b/test/user_counters_thousands_test.cc
+@@ -51,7 +51,6 @@ ADD_CASES(
+     });
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Thousands/repeats:2\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_Thousands/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -69,7 +68,6 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Thousands/repeats:2\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_Thousands/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -87,7 +85,6 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Thousands/repeats:2_mean\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_Thousands/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -105,7 +102,6 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Thousands/repeats:2_median\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_Thousands/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},
+@@ -123,7 +119,6 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Thousands/repeats:2_stddev\",$"},
+-           {"\"family_index\": 0,$", MR_Next},
+            {"\"run_name\": \"BM_Counters_Thousands/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+            {"\"repetitions\": 2,$", MR_Next},

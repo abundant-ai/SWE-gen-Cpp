@@ -1,0 +1,121 @@
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index 3e8aea7..463f69f 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -438,7 +438,9 @@ MemoryManager::Result* BenchmarkRunner::RunMemoryManager(
+   return memory_result;
+ }
+ 
+-void BenchmarkRunner::RunProfilerManager(IterationCount profile_iterations) {
++void BenchmarkRunner::RunProfilerManager() {
++  // TODO: Provide a way to specify the number of iterations.
++  IterationCount profile_iterations = 1;
+   std::unique_ptr<internal::ThreadManager> manager;
+   manager.reset(new internal::ThreadManager(1));
+   b.Setup();
+@@ -505,10 +507,7 @@ void BenchmarkRunner::DoOneRepetition() {
+   }
+ 
+   if (profiler_manager != nullptr) {
+-    // We want to externally profile the benchmark for the same number of
+-    // iterations because, for example, if we're tracing the benchmark then we
+-    // want trace data to reasonably match PMU data.
+-    RunProfilerManager(iters);
++    RunProfilerManager();
+   }
+ 
+   // Ok, now actually report.
+diff --git a/src/benchmark_runner.h b/src/benchmark_runner.h
+index 332bbb5..6e5ceb3 100644
+--- a/src/benchmark_runner.h
++++ b/src/benchmark_runner.h
+@@ -109,7 +109,7 @@ class BenchmarkRunner {
+ 
+   MemoryManager::Result* RunMemoryManager(IterationCount memory_iterations);
+ 
+-  void RunProfilerManager(IterationCount profile_iterations);
++  void RunProfilerManager();
+ 
+   IterationCount PredictNumItersNeeded(const IterationResults& i) const;
+ 
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 3e2c651..321e24d 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -195,9 +195,6 @@ benchmark_add_test(NAME memory_manager_test COMMAND memory_manager_test --benchm
+ compile_output_test(profiler_manager_test)
+ benchmark_add_test(NAME profiler_manager_test COMMAND profiler_manager_test --benchmark_min_time=0.01s)
+ 
+-compile_benchmark_test(profiler_manager_iterations_test)
+-benchmark_add_test(NAME profiler_manager_iterations COMMAND profiler_manager_iterations_test)
+-
+ # MSVC does not allow to set the language standard to C++98/03.
+ if(NOT (MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
+   compile_benchmark_test(cxx03_test)
+diff --git a/test/profiler_manager_iterations_test.cc b/test/profiler_manager_iterations_test.cc
+deleted file mode 100644
+index e727929..0000000
+--- a/test/profiler_manager_iterations_test.cc
++++ /dev/null
+@@ -1,61 +0,0 @@
+-#include <cassert>
+-#include <cstdlib>
+-#include <memory>
+-#include <vector>
+-
+-#include "benchmark/benchmark.h"
+-
+-// Tests that we can specify the number of profiler iterations with
+-// --benchmark_min_time=<NUM>x.
+-namespace {
+-
+-int iteration_count = 0;
+-int end_profiler_iteration_count = 0;
+-
+-class TestProfilerManager : public benchmark::ProfilerManager {
+-  void AfterSetupStart() override { iteration_count = 0; }
+-  void BeforeTeardownStop() override {
+-    end_profiler_iteration_count = iteration_count;
+-  }
+-};
+-
+-class NullReporter : public benchmark::BenchmarkReporter {
+- public:
+-  bool ReportContext(const Context& /*context*/) override { return true; }
+-  void ReportRuns(const std::vector<Run>& /* report */) override {}
+-};
+-
+-}  // end namespace
+-
+-static void BM_MyBench(benchmark::State& state) {
+-  for (auto s : state) {
+-    ++iteration_count;
+-  }
+-}
+-BENCHMARK(BM_MyBench);
+-
+-int main(int argc, char** argv) {
+-  // Make a fake argv and append the new --benchmark_profiler_iterations=<foo>
+-  // to it.
+-  int fake_argc = argc + 1;
+-  const char** fake_argv = new const char*[static_cast<size_t>(fake_argc)];
+-  for (int i = 0; i < argc; ++i) fake_argv[i] = argv[i];
+-  fake_argv[argc] = "--benchmark_min_time=4x";
+-
+-  std::unique_ptr<benchmark::ProfilerManager> pm(new TestProfilerManager());
+-  benchmark::RegisterProfilerManager(pm.get());
+-
+-  benchmark::Initialize(&fake_argc, const_cast<char**>(fake_argv));
+-
+-  NullReporter null_reporter;
+-  const size_t returned_count =
+-      benchmark::RunSpecifiedBenchmarks(&null_reporter, "BM_MyBench");
+-  assert(returned_count == 1);
+-
+-  // Check the executed iters.
+-  assert(end_profiler_iteration_count == 4);
+-
+-  benchmark::RegisterProfilerManager(nullptr);
+-  delete[] fake_argv;
+-  return 0;
+-}

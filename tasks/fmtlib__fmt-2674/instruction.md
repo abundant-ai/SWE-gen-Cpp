@@ -1,0 +1,9 @@
+Formatting strings with the presentation type '?' is not supported, even though string escaping already exists when formatting ranges of characters/strings. Users want to be able to request an escaped string representation directly when formatting a single string.
+
+Currently, using a format specifier like fmt::format("{:?}", "\t") either fails to parse/format (e.g., rejects '?' as an invalid presentation type for strings) or produces the unescaped output. The formatter should accept '?' as a valid presentation type for string-like arguments and produce an escaped representation where special characters are escaped (for example: tab becomes "\\t", newline becomes "\\n", backslash becomes "\\\\", and quotes are escaped where appropriate). The output should match the escaping behavior used when formatting ranges as escaped strings.
+
+This new '?' presentation type must also correctly participate in the standard formatting machinery: width, fill, and alignment must apply to the escaped result, not the original string. For example, fmt::format("{:*^10?}", "\n") should center the escaped form "\\n" in a field of width 10 using '*' as fill, producing the same result as if "\\n" were formatted as a plain string with those width/alignment settings.
+
+The change should work consistently for the usual string inputs supported by the library (e.g., string literals/const char*, std::string, string_view, and their wide-character equivalents if supported) and should not change existing behavior for other presentation types. If an argument type is not string-like, '?' should not silently apply string escaping; it should either remain unsupported or follow existing rules for that type.
+
+Implement support for '?' so that it is parsed as a string presentation type, performs escaping during formatting, and computes padding/width based on the escaped output length.

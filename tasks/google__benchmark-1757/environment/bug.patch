@@ -1,0 +1,549 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 08cfe29..c9c1c4b 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -1792,7 +1792,6 @@ class BENCHMARK_EXPORT BenchmarkReporter {
+           real_accumulated_time(0),
+           cpu_accumulated_time(0),
+           max_heapbytes_used(0),
+-          use_real_time_for_initial_big_o(false),
+           complexity(oNone),
+           complexity_lambda(),
+           complexity_n(0),
+@@ -1835,10 +1834,6 @@ class BENCHMARK_EXPORT BenchmarkReporter {
+     // This is set to 0.0 if memory tracing is not enabled.
+     double max_heapbytes_used;
+ 
+-    // By default Big-O is computed for CPU time, but that is not what you want
+-    // to happen when manual time was requested, which is stored as real time.
+-    bool use_real_time_for_initial_big_o;
+-
+     // Keep track of arguments to compute asymptotic complexity
+     BigO complexity;
+     BigOFunc* complexity_lambda;
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index dcddb43..d35bc30 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -96,7 +96,6 @@ BenchmarkReporter::Run CreateRunReport(
+     } else {
+       report.real_accumulated_time = results.real_time_used;
+     }
+-    report.use_real_time_for_initial_big_o = b.use_manual_time();
+     report.cpu_accumulated_time = results.cpu_time_used;
+     report.complexity_n = results.complexity_n;
+     report.complexity = b.complexity();
+diff --git a/src/complexity.cc b/src/complexity.cc
+index eee3122..e53dd34 100644
+--- a/src/complexity.cc
++++ b/src/complexity.cc
+@@ -186,19 +186,8 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+     result_cpu = MinimalLeastSq(n, cpu_time, reports[0].complexity_lambda);
+     result_real = MinimalLeastSq(n, real_time, reports[0].complexity_lambda);
+   } else {
+-    const BigO* InitialBigO = &reports[0].complexity;
+-    const bool use_real_time_for_initial_big_o =
+-        reports[0].use_real_time_for_initial_big_o;
+-    if (use_real_time_for_initial_big_o) {
+-      result_real = MinimalLeastSq(n, real_time, *InitialBigO);
+-      InitialBigO = &result_real.complexity;
+-      // The Big-O complexity for CPU time must have the same Big-O function!
+-    }
+-    result_cpu = MinimalLeastSq(n, cpu_time, *InitialBigO);
+-    InitialBigO = &result_cpu.complexity;
+-    if (!use_real_time_for_initial_big_o) {
+-      result_real = MinimalLeastSq(n, real_time, *InitialBigO);
+-    }
++    result_cpu = MinimalLeastSq(n, cpu_time, reports[0].complexity);
++    result_real = MinimalLeastSq(n, real_time, result_cpu.complexity);
+   }
+ 
+   // Drop the 'args' when reporting complexity.
+diff --git a/test/BUILD b/test/BUILD
+index e43b802..22b7dba 100644
+--- a/test/BUILD
++++ b/test/BUILD
+@@ -35,7 +35,6 @@ PER_SRC_TEST_ARGS = {
+     "repetitions_test.cc": [" --benchmark_repetitions=3"],
+     "spec_arg_test.cc": ["--benchmark_filter=BM_NotChosen"],
+     "spec_arg_verbosity_test.cc": ["--v=42"],
+-    "complexity_test.cc": ["--benchmark_min_time=1000000x"],
+ }
+ 
+ cc_library(
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 1de175f..eb7137e 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -218,8 +218,14 @@ if(NOT (MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
+   benchmark_add_test(NAME cxx03 COMMAND cxx03_test --benchmark_min_time=0.01s)
+ endif()
+ 
++# Attempt to work around flaky test failures when running on Appveyor servers.
++if (DEFINED ENV{APPVEYOR})
++  set(COMPLEXITY_MIN_TIME "0.5s")
++else()
++  set(COMPLEXITY_MIN_TIME "0.01s")
++endif()
+ compile_output_test(complexity_test)
+-benchmark_add_test(NAME complexity_benchmark COMMAND complexity_test --benchmark_min_time=1000000x)
++benchmark_add_test(NAME complexity_benchmark COMMAND complexity_test --benchmark_min_time=${COMPLEXITY_MIN_TIME})
+ 
+ ###############################################################################
+ # GoogleTest Unit Tests
+diff --git a/test/basic_test.cc b/test/basic_test.cc
+index c25bec7..cba1b0f 100644
+--- a/test/basic_test.cc
++++ b/test/basic_test.cc
+@@ -5,7 +5,7 @@
+ 
+ void BM_empty(benchmark::State& state) {
+   for (auto _ : state) {
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+ }
+diff --git a/test/complexity_test.cc b/test/complexity_test.cc
+index 0c159cd..1c746af 100644
+--- a/test/complexity_test.cc
++++ b/test/complexity_test.cc
+@@ -69,44 +69,35 @@ int AddComplexityTest(const std::string &test_name,
+ 
+ void BM_Complexity_O1(benchmark::State &state) {
+   for (auto _ : state) {
+-    // This test requires a non-zero CPU time to avoid divide-by-zero
+-    benchmark::DoNotOptimize(state.iterations());
+-    double tmp = state.iterations();
+-    benchmark::DoNotOptimize(tmp);
+-    for (benchmark::IterationCount i = 0; i < state.iterations(); ++i) {
+-      benchmark::DoNotOptimize(state.iterations());
+-      tmp *= state.iterations();
+-      benchmark::DoNotOptimize(tmp);
++    for (int i = 0; i < 1024; ++i) {
++      benchmark::DoNotOptimize(i);
+     }
+-
+-    // always 1ns per iteration
+-    state.SetIterationTime(42 * 1e-9);
+   }
+   state.SetComplexityN(state.range(0));
+ }
++BENCHMARK(BM_Complexity_O1)->Range(1, 1 << 18)->Complexity(benchmark::o1);
++BENCHMARK(BM_Complexity_O1)->Range(1, 1 << 18)->Complexity();
+ BENCHMARK(BM_Complexity_O1)
+     ->Range(1, 1 << 18)
+-    ->UseManualTime()
+-    ->Complexity(benchmark::o1);
+-BENCHMARK(BM_Complexity_O1)->Range(1, 1 << 18)->UseManualTime()->Complexity();
+-BENCHMARK(BM_Complexity_O1)
+-    ->Range(1, 1 << 18)
+-    ->UseManualTime()
+     ->Complexity([](benchmark::IterationCount) { return 1.0; });
+ 
+-const char *one_test_name = "BM_Complexity_O1/manual_time";
+-const char *big_o_1_test_name = "BM_Complexity_O1/manual_time_BigO";
+-const char *rms_o_1_test_name = "BM_Complexity_O1/manual_time_RMS";
+-const char *enum_auto_big_o_1 = "\\([0-9]+\\)";
++const char *one_test_name = "BM_Complexity_O1";
++const char *big_o_1_test_name = "BM_Complexity_O1_BigO";
++const char *rms_o_1_test_name = "BM_Complexity_O1_RMS";
++const char *enum_big_o_1 = "\\([0-9]+\\)";
++// FIXME: Tolerate both '(1)' and 'lgN' as output when the complexity is auto
++// deduced.
++// See https://github.com/google/benchmark/issues/272
++const char *auto_big_o_1 = "(\\([0-9]+\\))|(lgN)|(N\\^2)";
+ const char *lambda_big_o_1 = "f\\(N\\)";
+ 
+ // Add enum tests
+ ADD_COMPLEXITY_CASES(one_test_name, big_o_1_test_name, rms_o_1_test_name,
+-                     enum_auto_big_o_1, /*family_index=*/0);
++                     enum_big_o_1, /*family_index=*/0);
+ 
+-// Add auto tests
++// Add auto enum tests
+ ADD_COMPLEXITY_CASES(one_test_name, big_o_1_test_name, rms_o_1_test_name,
+-                     enum_auto_big_o_1, /*family_index=*/1);
++                     auto_big_o_1, /*family_index=*/1);
+ 
+ // Add lambda tests
+ ADD_COMPLEXITY_CASES(one_test_name, big_o_1_test_name, rms_o_1_test_name,
+@@ -116,44 +107,43 @@ ADD_COMPLEXITY_CASES(one_test_name, big_o_1_test_name, rms_o_1_test_name,
+ // --------------------------- Testing BigO O(N) --------------------------- //
+ // ========================================================================= //
+ 
++std::vector<int> ConstructRandomVector(int64_t size) {
++  std::vector<int> v;
++  v.reserve(static_cast<size_t>(size));
++  for (int i = 0; i < size; ++i) {
++    v.push_back(static_cast<int>(std::rand() % size));
++  }
++  return v;
++}
++
+ void BM_Complexity_O_N(benchmark::State &state) {
++  auto v = ConstructRandomVector(state.range(0));
++  // Test worst case scenario (item not in vector)
++  const int64_t item_not_in_vector = state.range(0) * 2;
+   for (auto _ : state) {
+-    // This test requires a non-zero CPU time to avoid divide-by-zero
+-    benchmark::DoNotOptimize(state.iterations());
+-    double tmp = state.iterations();
+-    benchmark::DoNotOptimize(tmp);
+-    for (benchmark::IterationCount i = 0; i < state.iterations(); ++i) {
+-      benchmark::DoNotOptimize(state.iterations());
+-      tmp *= state.iterations();
+-      benchmark::DoNotOptimize(tmp);
+-    }
+-
+-    // 1ns per iteration per entry
+-    state.SetIterationTime(state.range(0) * 42 * 1e-9);
++    auto it = std::find(v.begin(), v.end(), item_not_in_vector);
++    benchmark::DoNotOptimize(it);
+   }
+   state.SetComplexityN(state.range(0));
+ }
+ BENCHMARK(BM_Complexity_O_N)
+     ->RangeMultiplier(2)
+-    ->Range(1 << 10, 1 << 20)
+-    ->UseManualTime()
++    ->Range(1 << 10, 1 << 16)
+     ->Complexity(benchmark::oN);
+ BENCHMARK(BM_Complexity_O_N)
+     ->RangeMultiplier(2)
+-    ->Range(1 << 10, 1 << 20)
+-    ->UseManualTime()
+-    ->Complexity();
+-BENCHMARK(BM_Complexity_O_N)
+-    ->RangeMultiplier(2)
+-    ->Range(1 << 10, 1 << 20)
+-    ->UseManualTime()
++    ->Range(1 << 10, 1 << 16)
+     ->Complexity([](benchmark::IterationCount n) -> double {
+       return static_cast<double>(n);
+     });
++BENCHMARK(BM_Complexity_O_N)
++    ->RangeMultiplier(2)
++    ->Range(1 << 10, 1 << 16)
++    ->Complexity();
+ 
+-const char *n_test_name = "BM_Complexity_O_N/manual_time";
+-const char *big_o_n_test_name = "BM_Complexity_O_N/manual_time_BigO";
+-const char *rms_o_n_test_name = "BM_Complexity_O_N/manual_time_RMS";
++const char *n_test_name = "BM_Complexity_O_N";
++const char *big_o_n_test_name = "BM_Complexity_O_N_BigO";
++const char *rms_o_n_test_name = "BM_Complexity_O_N_RMS";
+ const char *enum_auto_big_o_n = "N";
+ const char *lambda_big_o_n = "f\\(N\\)";
+ 
+@@ -161,57 +151,40 @@ const char *lambda_big_o_n = "f\\(N\\)";
+ ADD_COMPLEXITY_CASES(n_test_name, big_o_n_test_name, rms_o_n_test_name,
+                      enum_auto_big_o_n, /*family_index=*/3);
+ 
+-// Add auto tests
+-ADD_COMPLEXITY_CASES(n_test_name, big_o_n_test_name, rms_o_n_test_name,
+-                     enum_auto_big_o_n, /*family_index=*/4);
+-
+ // Add lambda tests
+ ADD_COMPLEXITY_CASES(n_test_name, big_o_n_test_name, rms_o_n_test_name,
+-                     lambda_big_o_n, /*family_index=*/5);
++                     lambda_big_o_n, /*family_index=*/4);
+ 
+ // ========================================================================= //
+-// ------------------------- Testing BigO O(NlgN) ------------------------- //
++// ------------------------- Testing BigO O(N*lgN) ------------------------- //
+ // ========================================================================= //
+ 
+-static const double kLog2E = 1.44269504088896340736;
+ static void BM_Complexity_O_N_log_N(benchmark::State &state) {
++  auto v = ConstructRandomVector(state.range(0));
+   for (auto _ : state) {
+-    // This test requires a non-zero CPU time to avoid divide-by-zero
+-    benchmark::DoNotOptimize(state.iterations());
+-    double tmp = state.iterations();
+-    benchmark::DoNotOptimize(tmp);
+-    for (benchmark::IterationCount i = 0; i < state.iterations(); ++i) {
+-      benchmark::DoNotOptimize(state.iterations());
+-      tmp *= state.iterations();
+-      benchmark::DoNotOptimize(tmp);
+-    }
+-
+-    state.SetIterationTime(state.range(0) * kLog2E * std::log(state.range(0)) *
+-                           42 * 1e-9);
++    std::sort(v.begin(), v.end());
+   }
+   state.SetComplexityN(state.range(0));
+ }
++static const double kLog2E = 1.44269504088896340736;
+ BENCHMARK(BM_Complexity_O_N_log_N)
+     ->RangeMultiplier(2)
+-    ->Range(1 << 10, 1U << 24)
+-    ->UseManualTime()
++    ->Range(1 << 10, 1 << 16)
+     ->Complexity(benchmark::oNLogN);
+ BENCHMARK(BM_Complexity_O_N_log_N)
+     ->RangeMultiplier(2)
+-    ->Range(1 << 10, 1U << 24)
+-    ->UseManualTime()
+-    ->Complexity();
+-BENCHMARK(BM_Complexity_O_N_log_N)
+-    ->RangeMultiplier(2)
+-    ->Range(1 << 10, 1U << 24)
+-    ->UseManualTime()
++    ->Range(1 << 10, 1 << 16)
+     ->Complexity([](benchmark::IterationCount n) {
+       return kLog2E * static_cast<double>(n) * std::log(static_cast<double>(n));
+     });
++BENCHMARK(BM_Complexity_O_N_log_N)
++    ->RangeMultiplier(2)
++    ->Range(1 << 10, 1 << 16)
++    ->Complexity();
+ 
+-const char *n_lg_n_test_name = "BM_Complexity_O_N_log_N/manual_time";
+-const char *big_o_n_lg_n_test_name = "BM_Complexity_O_N_log_N/manual_time_BigO";
+-const char *rms_o_n_lg_n_test_name = "BM_Complexity_O_N_log_N/manual_time_RMS";
++const char *n_lg_n_test_name = "BM_Complexity_O_N_log_N";
++const char *big_o_n_lg_n_test_name = "BM_Complexity_O_N_log_N_BigO";
++const char *rms_o_n_lg_n_test_name = "BM_Complexity_O_N_log_N_RMS";
+ const char *enum_auto_big_o_n_lg_n = "NlgN";
+ const char *lambda_big_o_n_lg_n = "f\\(N\\)";
+ 
+@@ -220,15 +193,10 @@ ADD_COMPLEXITY_CASES(n_lg_n_test_name, big_o_n_lg_n_test_name,
+                      rms_o_n_lg_n_test_name, enum_auto_big_o_n_lg_n,
+                      /*family_index=*/6);
+ 
+-// NOTE: auto big-o is wron.g
+-ADD_COMPLEXITY_CASES(n_lg_n_test_name, big_o_n_lg_n_test_name,
+-                     rms_o_n_lg_n_test_name, enum_auto_big_o_n_lg_n,
+-                     /*family_index=*/7);
+-
+-//// Add lambda tests
++// Add lambda tests
+ ADD_COMPLEXITY_CASES(n_lg_n_test_name, big_o_n_lg_n_test_name,
+                      rms_o_n_lg_n_test_name, lambda_big_o_n_lg_n,
+-                     /*family_index=*/8);
++                     /*family_index=*/7);
+ 
+ // ========================================================================= //
+ // -------- Testing formatting of Complexity with captured args ------------ //
+@@ -237,31 +205,21 @@ ADD_COMPLEXITY_CASES(n_lg_n_test_name, big_o_n_lg_n_test_name,
+ void BM_ComplexityCaptureArgs(benchmark::State &state, int n) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    benchmark::DoNotOptimize(state.iterations());
+-    double tmp = state.iterations();
+-    benchmark::DoNotOptimize(tmp);
+-    for (benchmark::IterationCount i = 0; i < state.iterations(); ++i) {
+-      benchmark::DoNotOptimize(state.iterations());
+-      tmp *= state.iterations();
+-      benchmark::DoNotOptimize(tmp);
+-    }
+-
+-    state.SetIterationTime(state.range(0) * 42 * 1e-9);
++    auto iterations = state.iterations();
++    benchmark::DoNotOptimize(iterations);
+   }
+   state.SetComplexityN(n);
+ }
+ 
+ BENCHMARK_CAPTURE(BM_ComplexityCaptureArgs, capture_test, 100)
+-    ->UseManualTime()
+     ->Complexity(benchmark::oN)
+     ->Ranges({{1, 2}, {3, 4}});
+ 
+ const std::string complexity_capture_name =
+-    "BM_ComplexityCaptureArgs/capture_test/manual_time";
++    "BM_ComplexityCaptureArgs/capture_test";
+ 
+ ADD_COMPLEXITY_CASES(complexity_capture_name, complexity_capture_name + "_BigO",
+-                     complexity_capture_name + "_RMS", "N",
+-                     /*family_index=*/9);
++                     complexity_capture_name + "_RMS", "N", /*family_index=*/9);
+ 
+ // ========================================================================= //
+ // --------------------------- TEST CASES END ------------------------------ //
+diff --git a/test/diagnostics_test.cc b/test/diagnostics_test.cc
+index 7c68a98..0cd3edb 100644
+--- a/test/diagnostics_test.cc
++++ b/test/diagnostics_test.cc
+@@ -49,7 +49,7 @@ void BM_diagnostic_test(benchmark::State& state) {
+   if (called_once == false) try_invalid_pause_resume(state);
+ 
+   for (auto _ : state) {
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+ 
+@@ -65,7 +65,7 @@ void BM_diagnostic_test_keep_running(benchmark::State& state) {
+   if (called_once == false) try_invalid_pause_resume(state);
+ 
+   while (state.KeepRunning()) {
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+ 
+diff --git a/test/link_main_test.cc b/test/link_main_test.cc
+index 131937e..e806500 100644
+--- a/test/link_main_test.cc
++++ b/test/link_main_test.cc
+@@ -2,7 +2,7 @@
+ 
+ void BM_empty(benchmark::State& state) {
+   for (auto _ : state) {
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+ }
+diff --git a/test/memory_manager_test.cc b/test/memory_manager_test.cc
+index 4df674d..d94bd51 100644
+--- a/test/memory_manager_test.cc
++++ b/test/memory_manager_test.cc
+@@ -14,7 +14,7 @@ class TestMemoryManager : public benchmark::MemoryManager {
+ 
+ void BM_empty(benchmark::State& state) {
+   for (auto _ : state) {
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+ }
+diff --git a/test/perf_counters_test.cc b/test/perf_counters_test.cc
+index 3cc593e..b0a3ab0 100644
+--- a/test/perf_counters_test.cc
++++ b/test/perf_counters_test.cc
+@@ -14,7 +14,7 @@ BM_DECLARE_string(benchmark_perf_counters);
+ 
+ static void BM_Simple(benchmark::State& state) {
+   for (auto _ : state) {
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+ }
+diff --git a/test/reporter_output_test.cc b/test/reporter_output_test.cc
+index 7867165..ea5381d 100644
+--- a/test/reporter_output_test.cc
++++ b/test/reporter_output_test.cc
+@@ -96,7 +96,7 @@ ADD_CASES(TC_CSVOut, {{"^\"BM_basic\",%csv_report$"}});
+ void BM_bytes_per_second(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   state.SetBytesProcessed(1);
+@@ -128,7 +128,7 @@ ADD_CASES(TC_CSVOut, {{"^\"BM_bytes_per_second\",%csv_bytes_report$"}});
+ void BM_items_per_second(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   state.SetItemsProcessed(1);
+@@ -409,7 +409,7 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_BigArgs/1073741824 %console_report$"},
+ void BM_Complexity_O1(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   state.SetComplexityN(state.range(0));
+diff --git a/test/skip_with_error_test.cc b/test/skip_with_error_test.cc
+index 2139a19..b4c5e15 100644
+--- a/test/skip_with_error_test.cc
++++ b/test/skip_with_error_test.cc
+@@ -143,7 +143,7 @@ ADD_CASES("BM_error_during_running_ranged_for",
+ 
+ void BM_error_after_running(benchmark::State& state) {
+   for (auto _ : state) {
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   if (state.thread_index() <= (state.threads() / 2))
+diff --git a/test/user_counters_tabular_test.cc b/test/user_counters_tabular_test.cc
+index cfc1ab0..ffd3c09 100644
+--- a/test/user_counters_tabular_test.cc
++++ b/test/user_counters_tabular_test.cc
+@@ -64,7 +64,7 @@ ADD_CASES(TC_CSVOut, {{"%csv_header,"
+ void BM_Counters_Tabular(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   namespace bm = benchmark;
+diff --git a/test/user_counters_test.cc b/test/user_counters_test.cc
+index 22252ac..4cd8ee3 100644
+--- a/test/user_counters_test.cc
++++ b/test/user_counters_test.cc
+@@ -67,7 +67,7 @@ int num_calls1 = 0;
+ void BM_Counters_WithBytesAndItemsPSec(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   state.counters["foo"] = 1;
+@@ -119,7 +119,7 @@ CHECK_BENCHMARK_RESULTS("BM_Counters_WithBytesAndItemsPSec",
+ void BM_Counters_Rate(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   namespace bm = benchmark;
+@@ -163,7 +163,7 @@ CHECK_BENCHMARK_RESULTS("BM_Counters_Rate", &CheckRate);
+ void BM_Invert(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   namespace bm = benchmark;
+@@ -204,7 +204,7 @@ CHECK_BENCHMARK_RESULTS("BM_Invert", &CheckInvert);
+ void BM_Counters_InvertedRate(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   namespace bm = benchmark;
+@@ -333,7 +333,7 @@ CHECK_BENCHMARK_RESULTS("BM_Counters_AvgThreads/threads:%int",
+ void BM_Counters_AvgThreadsRate(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   namespace bm = benchmark;
+@@ -421,7 +421,7 @@ CHECK_BENCHMARK_RESULTS("BM_Counters_IterationInvariant",
+ void BM_Counters_kIsIterationInvariantRate(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   namespace bm = benchmark;
+@@ -513,7 +513,7 @@ CHECK_BENCHMARK_RESULTS("BM_Counters_AvgIterations", &CheckAvgIterations);
+ void BM_Counters_kAvgIterationsRate(benchmark::State& state) {
+   for (auto _ : state) {
+     // This test requires a non-zero CPU time to avoid divide-by-zero
+-    auto iterations = double(state.iterations()) * double(state.iterations());
++    auto iterations = state.iterations();
+     benchmark::DoNotOptimize(iterations);
+   }
+   namespace bm = benchmark;

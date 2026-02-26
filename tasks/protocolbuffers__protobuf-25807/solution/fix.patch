@@ -1,0 +1,121 @@
+diff --git a/python/google/protobuf/internal/decoder.py b/python/google/protobuf/internal/decoder.py
+index dbf848bf3..efd04096d 100755
+--- a/python/google/protobuf/internal/decoder.py
++++ b/python/google/protobuf/internal/decoder.py
+@@ -835,7 +835,7 @@ def MessageSetItemDecoder(descriptor):
+   local_ReadTag = ReadTag
+   local_DecodeVarint = _DecodeVarint
+ 
+-  def DecodeItem(buffer, pos, end, message, field_dict):
++  def DecodeItem(buffer, pos, end, message, field_dict, current_depth=0):
+     """Decode serialized message set to its value and new position.
+ 
+     Args:
+@@ -888,10 +888,19 @@ def MessageSetItemDecoder(descriptor):
+           message_factory.GetMessageClass(message_type)
+         value = field_dict.setdefault(
+             extension, message_type._concrete_class())
+-      if value._InternalParse(buffer, message_start,message_end) != message_end:
++      current_depth += 1
++      if current_depth > _recursion_limit:
++        raise _DecodeError('Error parsing message: too many levels of nesting.')
++      if (
++          value._InternalParse(
++              buffer, message_start, message_end, current_depth
++          )
++          != message_end
++      ):
+         # The only reason _InternalParse would return early is if it encountered
+         # an end-group tag.
+         raise _DecodeError('Unexpected end-group tag.')
++      current_depth -= 1
+     else:
+       if not message._unknown_fields:
+         message._unknown_fields = []
+@@ -957,7 +966,6 @@ def MapDecoder(field_descriptor, new_default, is_message_map):
+   message_type = field_descriptor.message_type
+ 
+   def DecodeMap(buffer, pos, end, message, field_dict, current_depth=0):
+-    del current_depth  # Unused.
+     submsg = message_type._concrete_class()
+     value = field_dict.get(key)
+     if value is None:
+@@ -970,10 +978,14 @@ def MapDecoder(field_descriptor, new_default, is_message_map):
+         raise _DecodeError('Truncated message.')
+       # Read sub-message.
+       submsg.Clear()
+-      if submsg._InternalParse(buffer, pos, new_pos) != new_pos:
++      current_depth += 1
++      if current_depth > _recursion_limit:
++        raise _DecodeError('Error parsing message: too many levels of nesting.')
++      if submsg._InternalParse(buffer, pos, new_pos, current_depth) != new_pos:
+         # The only reason _InternalParse would return early is if it
+         # encountered an end-group tag.
+         raise _DecodeError('Unexpected end-group tag.')
++      current_depth -= 1
+ 
+       if is_message_map:
+         value[submsg.key].CopyFrom(submsg.value)
+diff --git a/python/google/protobuf/internal/message_set_extensions.proto b/python/google/protobuf/internal/message_set_extensions.proto
+index 33db0585b..c38ad119b 100644
+--- a/python/google/protobuf/internal/message_set_extensions.proto
++++ b/python/google/protobuf/internal/message_set_extensions.proto
+@@ -26,6 +26,7 @@ message TestMessageSetExtension1 {
+     optional TestMessageSetExtension1 message_set_extension = 98418603;
+   }
+   optional int32 i = 15;
++  optional TestMessageSet sub_msg = 16;
+ }
+ 
+ message TestMessageSetExtension2 {
+diff --git a/python/google/protobuf/internal/more_messages.proto b/python/google/protobuf/internal/more_messages.proto
+index 0c0505f62..beb1c4dd4 100644
+--- a/python/google/protobuf/internal/more_messages.proto
++++ b/python/google/protobuf/internal/more_messages.proto
+@@ -67,6 +67,12 @@ message ExtendClass {
+   }
+ }
+ 
++message TestRecursiveMapMessage {
++  optional TestRecursiveMapMessage a = 1;
++  optional int32 i = 2;
++  map<int32, TestRecursiveMapMessage> map_field = 3;
++}
++
+ message TestFullKeyword {
+   optional google.protobuf.internal.OutOfOrderFields field1 = 1;
+   optional google.protobuf.internal.class field2 = 2;
+diff --git a/python/google/protobuf/internal/python_message.py b/python/google/protobuf/internal/python_message.py
+index 38f807b81..8148358f0 100755
+--- a/python/google/protobuf/internal/python_message.py
++++ b/python/google/protobuf/internal/python_message.py
+@@ -1241,7 +1241,9 @@ def _AddMergeFromStringMethod(message_descriptor, cls):
+           tag_bytes, (None, None)
+       )
+       if field_decoder:
+-        pos = field_decoder(buffer, new_pos, end, self, field_dict)
++        pos = field_decoder(
++            buffer, new_pos, end, self, field_dict, current_depth
++        )
+         continue
+       field_des, is_packed = fields_by_tag.get(tag_bytes, (None, None))
+       if field_des is None:
+diff --git a/upb/wire/decode.c b/upb/wire/decode.c
+index 55420a3a1..06862ec53 100644
+--- a/upb/wire/decode.c
++++ b/upb/wire/decode.c
+@@ -648,9 +648,13 @@ static void upb_Decoder_AddKnownMessageSetItem(
+   upb_Message* submsg = _upb_Decoder_NewSubMessage2(
+       d, ext->ext->UPB_PRIVATE(sub).UPB_PRIVATE(submsg),
+       &ext->ext->UPB_PRIVATE(field), submsgp);
++  // upb_Decode_LimitDepth() takes uint32_t, d->depth - 1 can not be negative.
++  if (d->depth <= 1) {
++    upb_ErrorHandler_ThrowError(&d->err, kUpb_DecodeStatus_MaxDepthExceeded);
++  }
+   upb_DecodeStatus status = upb_Decode(
+       data, size, submsg, upb_MiniTableExtension_GetSubMessage(item_mt),
+-      d->extreg, d->options, &d->arena);
++      d->extreg, upb_Decode_LimitDepth(d->options, d->depth - 1), &d->arena);
+   if (status != kUpb_DecodeStatus_Ok) {
+     upb_ErrorHandler_ThrowError(&d->err, status);
+   }

@@ -1,0 +1,1652 @@
+diff --git a/.travis.yml b/.travis.yml
+index 27a83c19..37599a5a 100644
+--- a/.travis.yml
++++ b/.travis.yml
+@@ -65,8 +65,8 @@ matrix:
+     - env: BUILD=Release STANDARD=14
+       compiler: clang
+       os: osx
+-      # clang 6.0 on Linux with C++14 (builds the fuzzers as well)
+-    - env: COMPILER=clang++-6.0 BUILD=Debug STANDARD=14 ENABLE_FUZZING=1
++      # clang 6.0 on Linux with C++14
++    - env: COMPILER=clang++-6.0 BUILD=Debug STANDARD=14
+       compiler: clang
+       addons:
+         apt:
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3bc16177..6214d5a2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -41,7 +41,6 @@ option(FMT_WERROR "Halt the compilation with an error on compiler warnings."
+ option(FMT_DOC "Generate the doc target." ${MASTER_PROJECT})
+ option(FMT_INSTALL "Generate the install target." ${MASTER_PROJECT})
+ option(FMT_TEST "Generate the test target." ${MASTER_PROJECT})
+-option(FMT_FUZZ "Generate the fuzz target." OFF)
+ 
+ project(FMT CXX)
+ 
+@@ -152,7 +151,7 @@ endfunction()
+ 
+ # Define the fmt library, its includes and the needed defines.
+ add_headers(FMT_HEADERS chrono.h color.h core.h format.h format-inl.h locale.h
+-                        ostream.h prepare.h printf.h ranges.h safe-duration-cast.h)
++                        ostream.h prepare.h printf.h ranges.h)
+ set(FMT_SOURCES src/format.cc)
+ if (HAVE_OPEN)
+   add_headers(FMT_HEADERS posix.h)
+@@ -191,9 +190,6 @@ if (BUILD_SHARED_LIBS)
+   endif ()
+   target_compile_definitions(fmt PRIVATE FMT_EXPORT INTERFACE FMT_SHARED)
+ endif ()
+-if (FMT_SAFE_DURATION_CAST)
+-    target_compile_definitions(fmt PUBLIC FMT_SAFE_DURATION_CAST)
+-endif()
+ 
+ add_library(fmt-header-only INTERFACE)
+ add_library(fmt::fmt-header-only ALIAS fmt-header-only)
+@@ -275,11 +271,6 @@ if (FMT_TEST)
+   add_subdirectory(test)
+ endif ()
+ 
+-# control fuzzing independent of the unit tests
+-if (FMT_FUZZ)
+-  add_subdirectory(test/fuzzing)
+-endif ()
+-
+ set(gitignore ${PROJECT_SOURCE_DIR}/.gitignore)
+ if (MASTER_PROJECT AND EXISTS ${gitignore})
+   # Get the list of ignored files from .gitignore.
+diff --git a/include/fmt/chrono.h b/include/fmt/chrono.h
+index cfbcb23d..aebf858e 100644
+--- a/include/fmt/chrono.h
++++ b/include/fmt/chrono.h
+@@ -16,15 +16,6 @@
+ #include <locale>
+ #include <sstream>
+ 
+-// enable safe chrono durations, unless explicitly disabled
+-#ifndef FMT_SAFE_DURATION_CAST
+-#   define FMT_SAFE_DURATION_CAST 1
+-#endif
+-
+-#if FMT_SAFE_DURATION_CAST
+-#  include "safe-duration-cast.h"
+-#endif
+-
+ FMT_BEGIN_NAMESPACE
+ 
+ // Prevents expansion of a preceding token as a function-style macro.
+@@ -394,15 +385,6 @@ inline bool isnan(T value) {
+   return std::isnan(value);
+ }
+ 
+-template <typename T, FMT_ENABLE_IF(std::is_integral<T>::value)>
+-inline bool isfinite(T) {
+-  return true;
+-}
+-template <typename T, FMT_ENABLE_IF(std::is_floating_point<T>::value)>
+-inline bool isfinite(T value) {
+-  return std::isfinite(value);
+-}
+-
+ // Convers value to int and checks that it's in the range [0, upper).
+ template <typename T, FMT_ENABLE_IF(std::is_integral<T>::value)>
+ inline int to_nonnegative_int(T value, int upper) {
+@@ -439,40 +421,12 @@ template <typename T> struct make_unsigned_or_unchanged<T, true> {
+   using type = typename std::make_unsigned<T>::type;
+ };
+ 
+-#if FMT_SAFE_DURATION_CAST
+-// throwing version of safe_duration_cast
+-template <typename To, typename FromRep, typename FromPeriod>
+-To fmt_safe_duration_cast(std::chrono::duration<FromRep, FromPeriod> from) {
+-    int ec;
+-    To to= safe_duration_cast::safe_duration_cast<To>(from,ec);
+-    if (ec) {
+-      FMT_THROW(format_error("cannot format duration"));
+-    }
+-    return to;
+-}
+-#endif
+-
+ template <typename Rep, typename Period,
+           FMT_ENABLE_IF(std::is_integral<Rep>::value)>
+ inline std::chrono::duration<Rep, std::milli> get_milliseconds(
+     std::chrono::duration<Rep, Period> d) {
+-  // this may overflow and/or the result may not fit in the
+-  // target type.
+-#if FMT_SAFE_DURATION_CAST
+-  using CommonSecondsType =
+-      typename std::common_type<decltype(d), std::chrono::seconds>::type;
+-  const auto d_as_common = fmt_safe_duration_cast<CommonSecondsType>(d);
+-  const auto d_as_whole_seconds =
+-          fmt_safe_duration_cast<std::chrono::seconds>(d_as_common);
+-  // this conversion should be nonproblematic
+-  const auto diff = d_as_common - d_as_whole_seconds;
+-  const auto ms =
+-          fmt_safe_duration_cast<std::chrono::duration<Rep, std::milli>>(diff);
+-  return ms;
+-#else
+   auto s = std::chrono::duration_cast<std::chrono::seconds>(d);
+   return std::chrono::duration_cast<std::chrono::milliseconds>(d - s);
+-#endif
+ }
+ 
+ template <typename Rep, typename Period,
+@@ -522,35 +476,8 @@ struct chrono_formatter {
+       val = -val;
+       negative = true;
+     }
+-
+-    // this may overflow and/or the result may not fit in the
+-    // target type.
+-#if FMT_SAFE_DURATION_CAST
+-    // might need checked conversion (rep!=Rep)
+-    auto tmpval = std::chrono::duration<rep, Period>(val);
+-    s = fmt_safe_duration_cast<seconds>(tmpval);
+-#else
+     s = std::chrono::duration_cast<seconds>(
+         std::chrono::duration<rep, Period>(val));
+-#endif
+-  }
+-
+-  // returns true if nan or inf, writes to out.
+-  bool handle_nan_inf() {
+-    if (isfinite(val)) {
+-      return false;
+-    }
+-    if (isnan(val)) {
+-      write_nan();
+-      return true;
+-    }
+-    // must be +-inf
+-    if (val > 0) {
+-      write_pinf();
+-    } else {
+-      write_ninf();
+-    }
+-    return true;
+   }
+ 
+   Rep hour() const { return static_cast<Rep>(mod((s.count() / 3600), 24)); }
+@@ -590,8 +517,6 @@ struct chrono_formatter {
+   }
+ 
+   void write_nan() { std::copy_n("nan", 3, out); }
+-  void write_pinf() { std::copy_n("inf", 3, out); }
+-  void write_ninf() { std::copy_n("-inf", 4, out); }
+ 
+   void format_localized(const tm& time, const char* format) {
+     if (isnan(val)) return write_nan();
+@@ -624,10 +549,6 @@ struct chrono_formatter {
+   void on_tz_name() {}
+ 
+   void on_24_hour(numeric_system ns) {
+-    if (handle_nan_inf()) {
+-      return;
+-    }
+-
+     if (ns == numeric_system::standard) return write(hour(), 2);
+     auto time = tm();
+     time.tm_hour = to_nonnegative_int(hour(), 24);
+@@ -635,10 +556,6 @@ struct chrono_formatter {
+   }
+ 
+   void on_12_hour(numeric_system ns) {
+-    if (handle_nan_inf()) {
+-      return;
+-    }
+-
+     if (ns == numeric_system::standard) return write(hour12(), 2);
+     auto time = tm();
+     time.tm_hour = to_nonnegative_int(hour12(), 12);
+@@ -646,10 +563,6 @@ struct chrono_formatter {
+   }
+ 
+   void on_minute(numeric_system ns) {
+-    if (handle_nan_inf()) {
+-      return;
+-    }
+-
+     if (ns == numeric_system::standard) return write(minute(), 2);
+     auto time = tm();
+     time.tm_min = to_nonnegative_int(minute(), 60);
+@@ -657,21 +570,9 @@ struct chrono_formatter {
+   }
+ 
+   void on_second(numeric_system ns) {
+-    if (handle_nan_inf()) {
+-      return;
+-    }
+-
+     if (ns == numeric_system::standard) {
+       write(second(), 2);
+-#if FMT_SAFE_DURATION_CAST
+-      // convert rep->Rep
+-      using duration_rep = std::chrono::duration<rep, Period>;
+-      using duration_Rep = std::chrono::duration<Rep, Period>;
+-      auto tmpval = fmt_safe_duration_cast<duration_Rep>(duration_rep{val});
+-#else
+-      auto tmpval = std::chrono::duration<Rep, Period>(val);
+-#endif
+-      auto ms = get_milliseconds(tmpval);
++      auto ms = get_milliseconds(std::chrono::duration<Rep, Period>(val));
+       if (ms != std::chrono::milliseconds(0)) {
+         *out++ = '.';
+         write(ms.count(), 3);
+@@ -683,21 +584,9 @@ struct chrono_formatter {
+     format_localized(time, "%OS");
+   }
+ 
+-  void on_12_hour_time() {
+-    if (handle_nan_inf()) {
+-      return;
+-    }
+-
+-    format_localized(time(), "%r");
+-  }
++  void on_12_hour_time() { format_localized(time(), "%r"); }
+ 
+   void on_24_hour_time() {
+-    if (handle_nan_inf()) {
+-      *out++ = ':';
+-      handle_nan_inf();
+-      return;
+-    }
+-
+     write(hour(), 2);
+     *out++ = ':';
+     write(minute(), 2);
+@@ -706,24 +595,12 @@ struct chrono_formatter {
+   void on_iso_time() {
+     on_24_hour_time();
+     *out++ = ':';
+-    if (handle_nan_inf()) {
+-      return;
+-    }
+     write(second(), 2);
+   }
+ 
+-  void on_am_pm() {
+-    if (handle_nan_inf()) {
+-      return;
+-    }
+-
+-    format_localized(time(), "%p");
+-  }
++  void on_am_pm() { format_localized(time(), "%p"); }
+ 
+   void on_duration_value() {
+-    if (handle_nan_inf()) {
+-      return;
+-    }
+     write_sign();
+     out = format_chrono_duration_value(out, val, precision);
+   }
+diff --git a/include/fmt/format-inl.h b/include/fmt/format-inl.h
+index 0ce96b28..cce1a34a 100644
+--- a/include/fmt/format-inl.h
++++ b/include/fmt/format-inl.h
+@@ -244,11 +244,6 @@ template <> FMT_FUNC int count_digits<4>(internal::fallback_uintptr n) {
+ template <typename T>
+ int format_float(char* buf, std::size_t size, const char* format, int precision,
+                  T value) {
+-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+-  if (precision > 100000) {
+-    throw std::runtime_error("fuzz mode - avoid large allocation inside snprintf");
+-  }
+-#endif
+   // Suppress the warning about nonliteral format string.
+   auto snprintf_ptr = FMT_SNPRINTF;
+   return precision < 0 ? snprintf_ptr(buf, size, format, value)
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index 55033807..a931bdcd 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -398,11 +398,6 @@ class basic_memory_buffer : private Allocator, public internal::buffer<T> {
+ 
+ template <typename T, std::size_t SIZE, typename Allocator>
+ void basic_memory_buffer<T, SIZE, Allocator>::grow(std::size_t size) {
+-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+-  if (size > 1000) {
+-    throw std::runtime_error("fuzz mode - won't grow that much");
+-  }
+-#endif
+   std::size_t old_capacity = this->capacity();
+   std::size_t new_capacity = old_capacity + old_capacity / 2;
+   if (size > new_capacity) new_capacity = size;
+@@ -1070,11 +1065,6 @@ It grisu_prettify(const char* digits, int size, int exp, It it,
+     int num_zeros = (std::max)(params.num_digits - full_exp, 1);
+     if (params.trailing_zeros) {
+       *it++ = static_cast<Char>('.');
+-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+-      if (num_zeros > 1000) {
+-        throw std::runtime_error("fuzz mode - avoiding excessive cpu use");
+-      }
+-#endif
+       it = std::fill_n(it, num_zeros, static_cast<Char>('0'));
+     }
+   } else if (full_exp > 0) {
+diff --git a/include/fmt/safe-duration-cast.h b/include/fmt/safe-duration-cast.h
+deleted file mode 100644
+index e69450f4..00000000
+--- a/include/fmt/safe-duration-cast.h
++++ /dev/null
+@@ -1,279 +0,0 @@
+-/*
+- * For conversion between std::chrono::durations without undefined
+- * behaviour or erroneous results.
+- * This is a stripped down version of duration_cast, for inclusion in fmt.
+- * See https://github.com/pauldreik/safe_duration_cast
+- *
+- * Copyright Paul Dreik 2019
+- *
+- * This file is licensed under the fmt license, see format.h
+- */
+-
+-#include <chrono>
+-#include <cmath>
+-#include <limits>
+-#include <type_traits>
+-
+-#include "format.h"
+-
+-FMT_BEGIN_NAMESPACE
+-
+-namespace safe_duration_cast {
+-
+-/**
+- * converts From to To, without loss. If the dynamic value of from
+- * can't be converted to To without loss, ec is set.
+- */
+-template <typename To, typename From,
+-          FMT_ENABLE_IF(!std::is_same<From, To>::value)>
+-FMT_CONSTEXPR To lossless_integral_conversion(const From from, int& ec) {
+-  ec = 0;
+-  using F = std::numeric_limits<From>;
+-  using T = std::numeric_limits<To>;
+-  static_assert(F::is_integer, "From must be integral");
+-  static_assert(T::is_integer, "To must be integral");
+-
+-  if (F::is_signed == T::is_signed) {
+-    // A and B are both signed, or both unsigned.
+-    if (F::digits <= T::digits) {
+-      // From fits in To without any problem
+-    } else {
+-      // From does not always fit in To, resort to a dynamic check.
+-      if (from < T::min() || from > T::max()) {
+-        // outside range.
+-        ec = 1;
+-        return {};
+-      }
+-    }
+-  }
+-
+-  if (F::is_signed && !T::is_signed) {
+-    // From may be negative, not allowed!
+-    if (from < 0) {
+-      ec = 1;
+-      return {};
+-    }
+-
+-    // From is positive. Can it always fit in To?
+-    if (F::digits <= T::digits) {
+-      // yes, From always fits in To.
+-    } else {
+-      // from may not fit in To, we have to do a dynamic check
+-      if (from > T::max()) {
+-        ec = 1;
+-        return {};
+-      }
+-    }
+-  }
+-
+-  if (!F::is_signed && T::is_signed) {
+-    // can from be held in To?
+-    if (F::digits < T::digits) {
+-      // yes, From always fits in To.
+-    } else {
+-      // from may not fit in To, we have to do a dynamic check
+-      if (from > T::max()) {
+-        // outside range.
+-        ec = 1;
+-        return {};
+-      }
+-    }
+-  }
+-
+-  // reaching here means all is ok for lossless conversion.
+-  return static_cast<To>(from);
+-
+-}  // function
+-
+-template <typename To, typename From,
+-          FMT_ENABLE_IF(std::is_same<From, To>::value)>
+-FMT_CONSTEXPR To lossless_integral_conversion(const From from, int& ec) {
+-  ec = 0;
+-  return from;
+-}  // function
+-
+-// clang-format off
+-/**
+- * converts From to To if possible, otherwise ec is set.
+- *
+- * input                            |    output
+- * ---------------------------------|---------------
+- * NaN                              | NaN
+- * Inf                              | Inf
+- * normal, fits in output           | converted (possibly lossy)
+- * normal, does not fit in output   | ec is set
+- * subnormal                        | best effort
+- * -Inf                             | -Inf
+- */
+-// clang-format on
+-template <typename To, typename From,
+-          FMT_ENABLE_IF(!std::is_same<From, To>::value)>
+-FMT_CONSTEXPR To safe_float_conversion(const From from, int& ec) {
+-  ec = 0;
+-  using T = std::numeric_limits<To>;
+-  static_assert(std::is_floating_point<From>::value, "From must be floating");
+-  static_assert(std::is_floating_point<To>::value, "To must be floating");
+-
+-  // catch the only happy case
+-  if (std::isfinite(from)) {
+-    if (from >= T::lowest() && from <= T::max()) {
+-      return static_cast<To>(from);
+-    }
+-    // not within range.
+-    ec = 1;
+-    return {};
+-  }
+-
+-  // nan and inf will be preserved
+-  return static_cast<To>(from);
+-}  // function
+-
+-template <typename To, typename From,
+-          FMT_ENABLE_IF(std::is_same<From, To>::value)>
+-FMT_CONSTEXPR To safe_float_conversion(const From from, int& ec) {
+-  ec = 0;
+-  static_assert(std::is_floating_point<From>::value, "From must be floating");
+-  return from;
+-}
+-
+-/**
+- * safe duration cast between integral durations
+- */
+-template <typename To, typename FromRep, typename FromPeriod,
+-          FMT_ENABLE_IF(std::is_integral<FromRep>::value),
+-          FMT_ENABLE_IF(std::is_integral<typename To::rep>::value)>
+-To safe_duration_cast(std::chrono::duration<FromRep, FromPeriod> from,
+-                      int& ec) {
+-  using From = std::chrono::duration<FromRep, FromPeriod>;
+-  ec = 0;
+-  // the basic idea is that we need to convert from count() in the from type
+-  // to count() in the To type, by multiplying it with this:
+-  using Factor = std::ratio_divide<typename From::period, typename To::period>;
+-
+-  static_assert(Factor::num > 0, "num must be positive");
+-  static_assert(Factor::den > 0, "den must be positive");
+-
+-  // the conversion is like this: multiply from.count() with Factor::num
+-  // /Factor::den and convert it to To::rep, all this without
+-  // overflow/underflow. let's start by finding a suitable type that can hold
+-  // both To, From and Factor::num
+-  using IntermediateRep =
+-      typename std::common_type<typename From::rep, typename To::rep,
+-                                decltype(Factor::num)>::type;
+-
+-  // safe conversion to IntermediateRep
+-  IntermediateRep count =
+-      lossless_integral_conversion<IntermediateRep>(from.count(), ec);
+-  if (ec) {
+-    return {};
+-  }
+-  // multiply with Factor::num without overflow or underflow
+-  if (Factor::num != 1) {
+-    constexpr auto max1 =
+-        std::numeric_limits<IntermediateRep>::max() / Factor::num;
+-    if (count > max1) {
+-      ec = 1;
+-      return {};
+-    }
+-    constexpr auto min1 =
+-        std::numeric_limits<IntermediateRep>::min() / Factor::num;
+-    if (count < min1) {
+-      ec = 1;
+-      return {};
+-    }
+-    count *= Factor::num;
+-  }
+-
+-  // this can't go wrong, right? den>0 is checked earlier.
+-  if (Factor::den != 1) {
+-    count /= Factor::den;
+-  }
+-  // convert to the to type, safely
+-  using ToRep = typename To::rep;
+-  const ToRep tocount = lossless_integral_conversion<ToRep>(count, ec);
+-  if (ec) {
+-    return {};
+-  }
+-  return To{tocount};
+-}
+-
+-/**
+- * safe duration_cast between floating point durations
+- */
+-template <typename To, typename FromRep, typename FromPeriod,
+-          FMT_ENABLE_IF(std::is_floating_point<FromRep>::value),
+-          FMT_ENABLE_IF(std::is_floating_point<typename To::rep>::value)>
+-To safe_duration_cast(std::chrono::duration<FromRep, FromPeriod> from,
+-                      int& ec) {
+-  using From = std::chrono::duration<FromRep, FromPeriod>;
+-  ec = 0;
+-  if (std::isnan(from.count())) {
+-    // nan in, gives nan out. easy.
+-    return To{std::numeric_limits<typename To::rep>::quiet_NaN()};
+-  }
+-  // maybe we should also check if from is denormal, and decide what to do about
+-  // it.
+-
+-  // +-inf should be preserved.
+-  if (std::isinf(from.count())) {
+-    return To{from.count()};
+-  }
+-
+-  // the basic idea is that we need to convert from count() in the from type
+-  // to count() in the To type, by multiplying it with this:
+-  using Factor = std::ratio_divide<typename From::period, typename To::period>;
+-
+-  static_assert(Factor::num > 0, "num must be positive");
+-  static_assert(Factor::den > 0, "den must be positive");
+-
+-  // the conversion is like this: multiply from.count() with Factor::num
+-  // /Factor::den and convert it to To::rep, all this without
+-  // overflow/underflow. let's start by finding a suitable type that can hold
+-  // both To, From and Factor::num
+-  using IntermediateRep =
+-      typename std::common_type<typename From::rep, typename To::rep,
+-                                decltype(Factor::num)>::type;
+-
+-  // force conversion of From::rep -> IntermediateRep to be safe,
+-  // even if it will never happen be narrowing in this context.
+-  IntermediateRep count =
+-      safe_float_conversion<IntermediateRep>(from.count(), ec);
+-  if (ec) {
+-    return {};
+-  }
+-
+-  // multiply with Factor::num without overflow or underflow
+-  if (Factor::num != 1) {
+-    constexpr auto max1 =
+-        std::numeric_limits<IntermediateRep>::max() / Factor::num;
+-    if (count > max1) {
+-      ec = 1;
+-      return {};
+-    }
+-    constexpr auto min1 =
+-        std::numeric_limits<IntermediateRep>::lowest() / Factor::num;
+-    if (count < min1) {
+-      ec = 1;
+-      return {};
+-    }
+-    count *= Factor::num;
+-  }
+-
+-  // this can't go wrong, right? den>0 is checked earlier.
+-  if (Factor::den != 1) {
+-    count /= Factor::den;
+-  }
+-
+-  // convert to the to type, safely
+-  using ToRep = typename To::rep;
+-
+-  const ToRep tocount = safe_float_conversion<ToRep>(count, ec);
+-  if (ec) {
+-    return {};
+-  }
+-  return To{tocount};
+-}
+-
+-}  // namespace safe_duration_cast
+-
+-FMT_END_NAMESPACE
+diff --git a/support/travis-build.py b/support/travis-build.py
+index 669bb71d..d71a7ae6 100755
+--- a/support/travis-build.py
++++ b/support/travis-build.py
+@@ -83,24 +83,19 @@ install_dir    = os.path.join(fmt_dir, "_install")
+ build_dir      = os.path.join(fmt_dir, "_build")
+ test_build_dir = os.path.join(fmt_dir, "_build_test")
+ 
+-# Configure the library.
++# Configure library.
+ makedirs_if_not_exist(build_dir)
+ cmake_flags = [
+     '-DCMAKE_INSTALL_PREFIX=' + install_dir, '-DCMAKE_BUILD_TYPE=' + build,
+     '-DCMAKE_CXX_STANDARD=' + standard
+ ]
+-
+-# make sure the fuzzers still compile
+-if 'ENABLE_FUZZING' in os.environ:
+-    cmake_flags += ['-DFMT_FUZZ=ON', '-DFMT_FUZZ_LINKMAIN=On']
+-
+ check_call(['cmake', '-DFMT_DOC=OFF', '-DFMT_PEDANTIC=ON', '-DFMT_WERROR=ON', fmt_dir] +
+            cmake_flags, cwd=build_dir)
+ 
+-# Build the library.
+-check_call(['cmake', '--build','.'], cwd=build_dir)
++# Build library.
++check_call(['make', '-j4'], cwd=build_dir)
+ 
+-# Test the library.
++# Test library.
+ env = os.environ.copy()
+ env['CTEST_OUTPUT_ON_FAILURE'] = '1'
+ if call(['make', 'test'], env=env, cwd=build_dir):
+@@ -108,7 +103,7 @@ if call(['make', 'test'], env=env, cwd=build_dir):
+         print(f.read())
+     sys.exit(-1)
+ 
+-# Install the library.
++# Install library.
+ check_call(['make', 'install'], cwd=build_dir)
+ 
+ # Test installation.
+diff --git a/test/chrono-test.cc b/test/chrono-test.cc
+index 04b5f2fa..a9412c90 100644
+--- a/test/chrono-test.cc
++++ b/test/chrono-test.cc
+@@ -327,7 +327,7 @@ TEST(ChronoTest, SpecialDurations) {
+       fmt::format("{:%S}", std::chrono::duration<double>(1e20)).substr(0, 3));
+   auto nan = std::numeric_limits<double>::quiet_NaN();
+   EXPECT_EQ(
+-      "nan nan nan nan nan:nan nan",
++      "nan nan nan nan.nan nan:nan nan",
+       fmt::format("{:%I %H %M %S %R %r}", std::chrono::duration<double>(nan)));
+   fmt::format("{:%S}",
+               std::chrono::duration<float, std::atto>(1.79400457e+31f));
+diff --git a/test/fuzzing/.gitignore b/test/fuzzing/.gitignore
+deleted file mode 100644
+index ea410402..00000000
+--- a/test/fuzzing/.gitignore
++++ /dev/null
+@@ -1,3 +0,0 @@
+-# ignore artifacts from the build.sh script
+-build-*/
+-
+diff --git a/test/fuzzing/CMakeLists.txt b/test/fuzzing/CMakeLists.txt
+deleted file mode 100644
+index 3f386828..00000000
+--- a/test/fuzzing/CMakeLists.txt
++++ /dev/null
+@@ -1,38 +0,0 @@
+-# Copyright (c) 2019, Paul Dreik
+-# License: see LICENSE.rst in the fmt root directory
+-
+-# settings this links in a main. useful for reproducing,
+-# kcov, gdb, afl, valgrind.
+-# (note that libFuzzer can also reproduce, just pass it the files)
+-option(FMT_FUZZ_LINKMAIN "enables the reproduce mode, instead of libFuzzer" On)
+-
+-#for oss-fuzz - insert $LIB_FUZZING_ENGINE into the link flags, but only for
+-#the fuzz targets, otherwise the cmake configuration step fails.
+-set(FMT_FUZZ_LDFLAGS "" CACHE STRING "LDFLAGS for the fuzz targets")
+-
+-#find all fuzzers.
+-set(SOURCES
+-chrono_duration.cpp
+-named_arg.cpp
+-one_arg.cpp
+-sprintf.cpp
+-two_args.cpp
+-)
+-
+-macro(implement_fuzzer sourcefile)
+-  get_filename_component(basename ${sourcefile} NAME_WE)
+-  set(name fuzzer_${basename})
+-  add_executable(${name} ${sourcefile} fuzzer_common.h)
+-  if(FMT_FUZZ_LINKMAIN)
+-      target_sources(${name} PRIVATE main.cpp)
+-  endif()
+-  target_link_libraries(${name} PRIVATE fmt)
+-if(FMT_FUZZ_LDFLAGS)
+-  target_link_libraries(${name} PRIVATE ${FMT_FUZZ_LDFLAGS})
+-endif()
+-  target_compile_features(${name} PRIVATE cxx_generic_lambdas)
+-endmacro()
+-
+-foreach(X IN ITEMS ${SOURCES})
+-    implement_fuzzer(${X})
+-endforeach()
+diff --git a/test/fuzzing/README.md b/test/fuzzing/README.md
+deleted file mode 100644
+index d3ea270b..00000000
+--- a/test/fuzzing/README.md
++++ /dev/null
+@@ -1,34 +0,0 @@
+-# FMT Fuzzer
+-Fuzzing has revealed [several bugs](https://github.com/fmtlib/fmt/issues?&q=is%3Aissue+fuzz) in fmt. It is a part of the continous fuzzing at [oss-fuzz](https://github.com/google/oss-fuzz)
+-
+-The source code is modified to make the fuzzing possible without locking up on resource exhaustion:
+-```cpp
+-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+-if(spec.precision>100000) {
+- throw std::runtime_error("fuzz mode - avoiding large precision");
+-}
+-#endif
+-```
+-This macro is the defacto standard for making fuzzing practically possible, see [the libFuzzer documentation](https://llvm.org/docs/LibFuzzer.html#fuzzer-friendly-build-mode).
+-
+-## Running the fuzzers locally
+-There is a [helper script](build.sh) to build the fuzzers, which has only been tested on Debian and Ubuntu linux so far. There should be no problems fuzzing on Windows (using clang>=8) or on Mac, but the script will probably not work out of the box.
+-
+-Something along
+-```sh
+-mkdir build
+-cd build
+-export CXX=clang++
+-export CXXFLAGS="-fsanitize=fuzzer-no-link -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION= -g"
+-cmake ..  -DFMT_SAFE_DURATION_CAST=On -DFMT_FUZZ=On -DFMT_FUZZ_LINKMAIN=Off -DFMT_FUZZ_LDFLAGS="-fsanitize=fuzzer"
+-cmake --build .
+-```
+-should work to build the fuzzers for all platforms which clang supports.
+-
+-Execute a fuzzer with for instance
+-```sh
+-cd build
+-export UBSAN_OPTIONS=halt_on_error=1
+-mkdir out_chrono
+-bin/fuzzer_chrono_duration  out_chrono
+-```
+diff --git a/test/fuzzing/build.sh b/test/fuzzing/build.sh
+deleted file mode 100755
+index 141a50d9..00000000
+--- a/test/fuzzing/build.sh
++++ /dev/null
+@@ -1,110 +0,0 @@
+-#!/bin/sh
+-#
+-# Creates fuzzer builds of various kinds
+-# - reproduce mode (no fuzzing, just enables replaying data through the fuzzers)
+-# - oss-fuzz emulated mode (makes sure a simulated invocation by oss-fuzz works)
+-# - libFuzzer build (you will need clang)
+-# - afl build (you will need afl)
+-#
+-#
+-# Copyright (c) 2019 Paul Dreik
+-#
+-# License: see LICENSE.rst in the fmt root directory
+-
+-set -e
+-me=$(basename $0)
+-root=$(readlink -f "$(dirname "$0")/../..")
+-
+-
+-echo $me: root=$root
+-
+-here=$(pwd)
+-
+-CXXFLAGSALL="-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION= -g"
+-CMAKEFLAGSALL="$root -GNinja -DCMAKE_BUILD_TYPE=Debug -DFMT_DOC=Off -DFMT_TEST=Off -DFMT_FUZZ=On -DCMAKE_CXX_STANDARD=17"
+-
+-#builds the fuzzers as one would do if using afl or just making
+-#binaries for reproducing.
+-builddir=$here/build-fuzzers-reproduce
+-mkdir -p $builddir
+-cd $builddir
+-CXX="ccache g++" CXXFLAGS="$CXXFLAGSALL" cmake \
+-$CMAKEFLAGSALL
+-cmake --build $builddir
+-
+-#for performance analysis of the fuzzers
+-builddir=$here/build-fuzzers-perfanalysis
+-mkdir -p $builddir
+-cd $builddir
+-CXX="ccache g++" CXXFLAGS="$CXXFLAGSALL -g" cmake \
+-$CMAKEFLAGSALL \
+--DFMT_FUZZ_LINKMAIN=On \
+--DCMAKE_BUILD_TYPE=Release
+-
+-cmake --build $builddir
+-
+-#builds the fuzzers as oss-fuzz does
+-builddir=$here/build-fuzzers-ossfuzz
+-mkdir -p $builddir
+-cd $builddir
+-CXX="clang++" \
+-CXXFLAGS="$CXXFLAGSALL -fsanitize=fuzzer-no-link" cmake \
+-cmake $CMAKEFLAGSALL \
+--DFMT_FUZZ_LINKMAIN=Off \
+--DFMT_FUZZ_LDFLAGS="-fsanitize=fuzzer"
+-
+-cmake --build $builddir
+-
+-
+-#builds fuzzers for local fuzzing with libfuzzer with asan+usan
+-builddir=$here/build-fuzzers-libfuzzer
+-mkdir -p $builddir
+-cd $builddir
+-CXX="clang++" \
+-CXXFLAGS="$CXXFLAGSALL -fsanitize=fuzzer-no-link,address,undefined" cmake \
+-cmake $CMAKEFLAGSALL \
+--DFMT_FUZZ_LINKMAIN=Off \
+--DFMT_FUZZ_LDFLAGS="-fsanitize=fuzzer"
+-
+-cmake --build $builddir
+-
+-#builds fuzzers for local fuzzing with libfuzzer with asan only
+-builddir=$here/build-fuzzers-libfuzzer-addr
+-mkdir -p $builddir
+-cd $builddir
+-CXX="clang++" \
+-CXXFLAGS="$CXXFLAGSALL -fsanitize=fuzzer-no-link,undefined" cmake \
+-cmake $CMAKEFLAGSALL \
+--DFMT_FUZZ_LINKMAIN=Off \
+--DFMT_FUZZ_LDFLAGS="-fsanitize=fuzzer"
+-
+-cmake --build $builddir
+-
+-#builds a fast fuzzer for making coverage fast
+-builddir=$here/build-fuzzers-fast
+-mkdir -p $builddir
+-cd $builddir
+-CXX="clang++" \
+-CXXFLAGS="$CXXFLAGSALL -fsanitize=fuzzer-no-link -O3" cmake \
+-cmake $CMAKEFLAGSALL \
+--DFMT_FUZZ_LINKMAIN=Off \
+--DFMT_FUZZ_LDFLAGS="-fsanitize=fuzzer" \
+- -DCMAKE_BUILD_TYPE=Release
+-
+-cmake --build $builddir
+-
+-
+-#builds fuzzers for local fuzzing with afl
+-builddir=$here/build-fuzzers-afl
+-mkdir -p $builddir
+-cd $builddir
+-CXX="afl-g++" \
+-CXXFLAGS="$CXXFLAGSALL -fsanitize=address,undefined" \
+-cmake $CMAKEFLAGSALL \
+--DFMT_FUZZ_LINKMAIN=On
+-
+-cmake --build $builddir
+-
+-
+-echo $me: all good
+-
+diff --git a/test/fuzzing/chrono_duration.cpp b/test/fuzzing/chrono_duration.cpp
+deleted file mode 100644
+index d1de9ae6..00000000
+--- a/test/fuzzing/chrono_duration.cpp
++++ /dev/null
+@@ -1,152 +0,0 @@
+-// Copyright (c) 2019, Paul Dreik
+-// License: see LICENSE.rst in the fmt root directory
+-
+-#include <fmt/chrono.h>
+-#include <cstdint>
+-#include <limits>
+-#include <stdexcept>
+-#include <type_traits>
+-#include <vector>
+-#include "fuzzer_common.h"
+-
+-template <typename Item, typename Ratio>
+-void invoke_inner(fmt::string_view formatstring, const Item item) {
+-  const std::chrono::duration<Item, Ratio> value(item);
+-  try {
+-#if FMT_FUZZ_FORMAT_TO_STRING
+-    std::string message = fmt::format(formatstring, value);
+-#else
+-    fmt::memory_buffer buf;
+-    fmt::format_to(buf, formatstring, value);
+-#endif
+-  } catch (std::exception& /*e*/) {
+-  }
+-}
+-
+-// Item is the underlying type for duration (int, long etc)
+-template <typename Item>
+-void invoke_outer(const uint8_t* Data, std::size_t Size, const int scaling) {
+-  // always use a fixed location of the data
+-  using fmt_fuzzer::Nfixed;
+-
+-  constexpr auto N = sizeof(Item);
+-  static_assert(N <= Nfixed, "fixed size is too small");
+-  if (Size <= Nfixed + 1) {
+-    return;
+-  }
+-
+-  const Item item = fmt_fuzzer::assignFromBuf<Item>(Data);
+-
+-  // fast forward
+-  Data += Nfixed;
+-  Size -= Nfixed;
+-
+-  // Data is already allocated separately in libFuzzer so reading past
+-  // the end will most likely be detected anyway
+-  const auto formatstring = fmt::string_view(fmt_fuzzer::as_chars(Data), Size);
+-
+-  // doit_impl<Item,std::yocto>(buf.data(),item);
+-  // doit_impl<Item,std::zepto>(buf.data(),item);
+-  switch (scaling) {
+-  case 1:
+-    invoke_inner<Item, std::atto>(formatstring, item);
+-    break;
+-  case 2:
+-    invoke_inner<Item, std::femto>(formatstring, item);
+-    break;
+-  case 3:
+-    invoke_inner<Item, std::pico>(formatstring, item);
+-    break;
+-  case 4:
+-    invoke_inner<Item, std::nano>(formatstring, item);
+-    break;
+-  case 5:
+-    invoke_inner<Item, std::micro>(formatstring, item);
+-    break;
+-  case 6:
+-    invoke_inner<Item, std::milli>(formatstring, item);
+-    break;
+-  case 7:
+-    invoke_inner<Item, std::centi>(formatstring, item);
+-    break;
+-  case 8:
+-    invoke_inner<Item, std::deci>(formatstring, item);
+-    break;
+-  case 9:
+-    invoke_inner<Item, std::deca>(formatstring, item);
+-    break;
+-  case 10:
+-    invoke_inner<Item, std::kilo>(formatstring, item);
+-    break;
+-  case 11:
+-    invoke_inner<Item, std::mega>(formatstring, item);
+-    break;
+-  case 12:
+-    invoke_inner<Item, std::giga>(formatstring, item);
+-    break;
+-  case 13:
+-    invoke_inner<Item, std::tera>(formatstring, item);
+-    break;
+-  case 14:
+-    invoke_inner<Item, std::peta>(formatstring, item);
+-    break;
+-  case 15:
+-    invoke_inner<Item, std::exa>(formatstring, item);
+-  }
+-  // doit_impl<Item,std::zeta>(buf.data(),item);
+-  // doit_impl<Item,std::yotta>(buf.data(),item);
+-}
+-
+-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, std::size_t Size) {
+-  if (Size <= 4) {
+-    return 0;
+-  }
+-
+-  const auto representation = Data[0];
+-  const auto scaling = Data[1];
+-  Data += 2;
+-  Size -= 2;
+-
+-  switch (representation) {
+-  case 1:
+-    invoke_outer<char>(Data, Size, scaling);
+-    break;
+-  case 2:
+-    invoke_outer<unsigned char>(Data, Size, scaling);
+-    break;
+-  case 3:
+-    invoke_outer<signed char>(Data, Size, scaling);
+-    break;
+-  case 4:
+-    invoke_outer<short>(Data, Size, scaling);
+-    break;
+-  case 5:
+-    invoke_outer<unsigned short>(Data, Size, scaling);
+-    break;
+-  case 6:
+-    invoke_outer<int>(Data, Size, scaling);
+-    break;
+-  case 7:
+-    invoke_outer<unsigned int>(Data, Size, scaling);
+-    break;
+-  case 8:
+-    invoke_outer<long>(Data, Size, scaling);
+-    break;
+-  case 9:
+-    invoke_outer<unsigned long>(Data, Size, scaling);
+-    break;
+-  case 10:
+-    invoke_outer<float>(Data, Size, scaling);
+-    break;
+-  case 11:
+-    invoke_outer<double>(Data, Size, scaling);
+-    break;
+-  case 12:
+-    invoke_outer<long double>(Data, Size, scaling);
+-    break;
+-  default:
+-    break;
+-  }
+-
+-  return 0;
+-}
+diff --git a/test/fuzzing/fuzzer_common.h b/test/fuzzing/fuzzer_common.h
+deleted file mode 100644
+index 02b3910c..00000000
+--- a/test/fuzzing/fuzzer_common.h
++++ /dev/null
+@@ -1,71 +0,0 @@
+-#ifndef FUZZER_COMMON_H
+-#define FUZZER_COMMON_H
+-
+-// Copyright (c) 2019, Paul Dreik
+-// License: see LICENSE.rst in the fmt root directory
+-
+-#include <cstring>     // memcpy
+-#include <type_traits> // trivially copyable
+-#include <cstdint>     // std::uint8_t
+-
+-// one can format to either a string, or a buf. buf is faster,
+-// but one may be interested in formatting to a string instead to
+-// verify it works as intended. to avoid a combinatoric explosion,
+-// select this at compile time instead of dynamically from the fuzz data
+-#define FMT_FUZZ_FORMAT_TO_STRING 0
+-
+-// if fmt is given a buffer that is separately allocated,
+-// chances that address sanitizer detects out of bound reads is
+-// much higher. However, it slows down the fuzzing.
+-#define FMT_FUZZ_SEPARATE_ALLOCATION 1
+-
+-// To let the the fuzzer mutation be efficient at cross pollinating
+-// between different types, use a fixed size format.
+-// The same bit pattern, interpreted as another type,
+-// is likely interesting.
+-// For this, we must know the size of the largest possible type in use.
+-
+-// There are some problems on travis, claiming Nfixed is not a constant expression
+-// which seems to be an issue with older versions of libstdc++
+-#if  _GLIBCXX_RELEASE >= 7
+-# include <algorithm>
+-namespace fmt_fuzzer {
+-  constexpr auto Nfixed = std::max(sizeof(long double), sizeof(std::intmax_t));
+-}
+-#else
+-namespace fmt_fuzzer {
+-  constexpr auto Nfixed=16;
+-}
+-#endif
+-
+-namespace fmt_fuzzer {
+-// view data as a c char pointer.
+-template <typename T>
+-inline const char* as_chars(const T* data) {
+-    return static_cast<const char*>(static_cast<const void*>(data));
+-}
+-
+-// view data as a byte pointer
+-template <typename T>
+-inline const std::uint8_t* as_bytes(const T* data) {
+-    return static_cast<const std::uint8_t*>(static_cast<const void*>(data));
+-}
+-
+-// blits bytes from Data to form an (assumed trivially constructible) object
+-// of type Item
+-template <class Item>
+-inline Item assignFromBuf(const std::uint8_t* Data) {
+-  Item item{};
+-  std::memcpy(&item, Data, sizeof(Item));
+-  return item;
+-}
+-
+-// reads a boolean value by looking at the first byte from Data
+-template <> inline bool assignFromBuf<bool>(const std::uint8_t* Data) {
+-  return !!Data[0];
+-}
+-
+-} // namespace fmt_fuzzer
+-
+-
+-#endif // FUZZER_COMMON_H
+diff --git a/test/fuzzing/main.cpp b/test/fuzzing/main.cpp
+deleted file mode 100644
+index 52f81f4b..00000000
+--- a/test/fuzzing/main.cpp
++++ /dev/null
+@@ -1,21 +0,0 @@
+-#include <cassert>
+-#include <fstream>
+-#include <sstream>
+-#include <vector>
+-#include "fuzzer_common.h"
+-
+-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, std::size_t Size);
+-int main(int argc, char* argv[]) {
+-  for (int i = 1; i < argc; ++i) {
+-    std::ifstream in(argv[i]);
+-    assert(in);
+-    in.seekg(0, std::ios_base::end);
+-    const auto pos = in.tellg();
+-    assert(pos>=0);
+-    in.seekg(0, std::ios_base::beg);
+-    std::vector<char> buf(static_cast<std::size_t>(pos));
+-    in.read(buf.data(), static_cast<long>(buf.size()));
+-    assert(in.gcount() == pos);
+-    LLVMFuzzerTestOneInput(fmt_fuzzer::as_bytes(buf.data()), buf.size());
+-  }
+-}
+diff --git a/test/fuzzing/named_arg.cpp b/test/fuzzing/named_arg.cpp
+deleted file mode 100644
+index af9890e2..00000000
+--- a/test/fuzzing/named_arg.cpp
++++ /dev/null
+@@ -1,129 +0,0 @@
+-// Copyright (c) 2019, Paul Dreik
+-// License: see LICENSE.rst in the fmt root directory
+-
+-#include <fmt/chrono.h>
+-#include <fmt/core.h>
+-#include <cstdint>
+-#include <stdexcept>
+-#include <type_traits>
+-#include <vector>
+-#include "fuzzer_common.h"
+-
+-template <typename Item1>
+-void invoke_fmt(const uint8_t* Data, std::size_t Size, unsigned int argsize) {
+-  constexpr auto N1 = sizeof(Item1);
+-  static_assert (N1<=fmt_fuzzer::Nfixed,"Nfixed too small");
+-  if (Size <= fmt_fuzzer::Nfixed) {
+-    return;
+-  }
+-  const Item1 item1 = fmt_fuzzer::assignFromBuf<Item1>(Data);
+-
+-  Data += fmt_fuzzer::Nfixed;
+-  Size -= fmt_fuzzer::Nfixed;
+-
+-  // how many chars should be used for the argument name?
+-  if (argsize <= 0 || argsize >= Size) {
+-    return;
+-  }
+-
+-  // allocating buffers separately is slower, but increases chances
+-  // of detecting memory errors
+-#if FMT_FUZZ_SEPARATE_ALLOCATION
+-  std::vector<char> argnamebuffer(argsize);
+-  std::memcpy(argnamebuffer.data(), Data, argsize);
+-  auto argname = fmt::string_view(argnamebuffer.data(), argsize);
+-#else
+-  auto argname = fmt::string_view(fmt_fuzzer::as_chars(Data), argsize);
+-#endif
+-  Data += argsize;
+-  Size -= argsize;
+-
+-#if FMT_FUZZ_SEPARATE_ALLOCATION
+-  // allocates as tight as possible, making it easier to catch buffer overruns.
+-  std::vector<char> fmtstringbuffer(Size);
+-  std::memcpy(fmtstringbuffer.data(), Data, Size);
+-  auto fmtstring = fmt::string_view(fmtstringbuffer.data(), Size);
+-#else
+-  auto fmtstring = fmt::string_view(fmt_fuzzer::as_chars(Data), Size);
+-#endif
+-
+-#if FMT_FUZZ_FORMAT_TO_STRING
+-  std::string message = fmt::format(fmtstring, fmt::arg(argname, item1));
+-#else
+-  fmt::memory_buffer outbuf;
+-  fmt::format_to(outbuf, fmtstring, fmt::arg(argname, item1));
+-#endif
+-}
+-
+-// for dynamic dispatching to an explicit instantiation
+-template <typename Callback> void invoke(int index, Callback callback) {
+-  switch (index) {
+-  case 0:
+-    callback(bool{});
+-    break;
+-  case 1:
+-    callback(char{});
+-    break;
+-  case 2:
+-    using sc = signed char;
+-    callback(sc{});
+-    break;
+-  case 3:
+-    using uc = unsigned char;
+-    callback(uc{});
+-    break;
+-  case 4:
+-    callback(short{});
+-    break;
+-  case 5:
+-    using us = unsigned short;
+-    callback(us{});
+-    break;
+-  case 6:
+-    callback(int{});
+-    break;
+-  case 7:
+-    callback(unsigned{});
+-    break;
+-  case 8:
+-    callback(long{});
+-    break;
+-  case 9:
+-    using ul = unsigned long;
+-    callback(ul{});
+-    break;
+-  case 10:
+-    callback(float{});
+-    break;
+-  case 11:
+-    callback(double{});
+-    break;
+-  case 12:
+-    using LD = long double;
+-    callback(LD{});
+-    break;
+-  }
+-}
+-
+-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, std::size_t Size) {
+-  if (Size <= 3) {
+-    return 0;
+-  }
+-
+-  // switch types depending on the first byte of the input
+-  const auto first = Data[0] & 0x0F;
+-  const unsigned int second = (Data[0] & 0xF0) >> 4;
+-  Data++;
+-  Size--;
+-
+-  auto outerfcn = [=](auto param1) {
+-    invoke_fmt<decltype(param1)>(Data, Size, second);
+-  };
+-
+-  try {
+-    invoke(first, outerfcn);
+-  } catch (std::exception& /*e*/) {
+-  }
+-  return 0;
+-}
+-
+diff --git a/test/fuzzing/one_arg.cpp b/test/fuzzing/one_arg.cpp
+deleted file mode 100644
+index 70b06b9b..00000000
+--- a/test/fuzzing/one_arg.cpp
++++ /dev/null
+@@ -1,131 +0,0 @@
+-// Copyright (c) 2019, Paul Dreik
+-// License: see LICENSE.rst in the fmt root directory
+-
+-#include <fmt/core.h>
+-#include <cstdint>
+-#include <stdexcept>
+-#include <type_traits>
+-#include <vector>
+-
+-#include <fmt/chrono.h>
+-#include "fuzzer_common.h"
+-
+-using fmt_fuzzer::Nfixed;
+-
+-template <typename Item>
+-void invoke_fmt(const uint8_t* Data, std::size_t Size) {
+-  constexpr auto N = sizeof(Item);
+-  static_assert (N<=Nfixed,"Nfixed is too small");
+-  if (Size <= Nfixed) {
+-    return;
+-  }
+-  const Item item = fmt_fuzzer::assignFromBuf<Item>(Data);
+-  Data += Nfixed;
+-  Size -= Nfixed;
+-
+-#if FMT_FUZZ_SEPARATE_ALLOCATION
+-  // allocates as tight as possible, making it easier to catch buffer overruns.
+-  std::vector<char> fmtstringbuffer(Size);
+-  std::memcpy(fmtstringbuffer.data(), Data, Size);
+-  auto fmtstring = fmt::string_view(fmtstringbuffer.data(), Size);
+-#else
+-  auto fmtstring = fmt::string_view(fmt_fuzzer::as_chars(Data), Size);
+-#endif
+-
+-#if FMT_FUZZ_FORMAT_TO_STRING
+-  std::string message = fmt::format(fmtstring, item);
+-#else
+-  fmt::memory_buffer message;
+-  fmt::format_to(message, fmtstring, item);
+-#endif
+-}
+-
+-void invoke_fmt_time(const uint8_t* Data, std::size_t Size) {
+-  using Item = std::time_t;
+-  constexpr auto N = sizeof(Item);
+-  static_assert (N<=Nfixed,"Nfixed too small");
+-  if (Size <= Nfixed) {
+-    return;
+-  }
+-  const Item item = fmt_fuzzer::assignFromBuf<Item>(Data);
+-  Data += Nfixed;
+-  Size -= Nfixed;
+-#if FMT_FUZZ_SEPARATE_ALLOCATION
+-  // allocates as tight as possible, making it easier to catch buffer overruns.
+-  std::vector<char> fmtstringbuffer(Size);
+-  std::memcpy(fmtstringbuffer.data(), Data, Size);
+-  auto fmtstring = fmt::string_view(fmtstringbuffer.data(), Size);
+-#else
+-  auto fmtstring = fmt::string_view(fmt_fuzzer::as_chars(Data), Size);
+-#endif
+-  auto* b = std::localtime(&item);
+-  if (b) {
+-#if FMT_FUZZ_FORMAT_TO_STRING
+-    std::string message = fmt::format(fmtstring, *b);
+-#else
+-    fmt::memory_buffer message;
+-    fmt::format_to(message, fmtstring, *b);
+-#endif
+-  }
+-}
+-
+-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, std::size_t Size) {
+-  if (Size <= 3) {
+-    return 0;
+-  }
+-
+-  const auto first = Data[0];
+-  Data++;
+-  Size--;
+-
+-  try {
+-    switch (first) {
+-    case 0:
+-      invoke_fmt<bool>(Data, Size);
+-      break;
+-    case 1:
+-      invoke_fmt<char>(Data, Size);
+-      break;
+-    case 2:
+-      invoke_fmt<unsigned char>(Data, Size);
+-      break;
+-    case 3:
+-      invoke_fmt<signed char>(Data, Size);
+-      break;
+-    case 4:
+-      invoke_fmt<short>(Data, Size);
+-      break;
+-    case 5:
+-      invoke_fmt<unsigned short>(Data, Size);
+-      break;
+-    case 6:
+-      invoke_fmt<int>(Data, Size);
+-      break;
+-    case 7:
+-      invoke_fmt<unsigned int>(Data, Size);
+-      break;
+-    case 8:
+-      invoke_fmt<long>(Data, Size);
+-      break;
+-    case 9:
+-      invoke_fmt<unsigned long>(Data, Size);
+-      break;
+-    case 10:
+-      invoke_fmt<float>(Data, Size);
+-      break;
+-    case 11:
+-      invoke_fmt<double>(Data, Size);
+-      break;
+-    case 12:
+-      invoke_fmt<long double>(Data, Size);
+-      break;
+-    case 13:
+-      invoke_fmt_time(Data, Size);
+-      break;
+-    default:
+-      break;
+-    }
+-  } catch (std::exception& /*e*/) {
+-  }
+-  return 0;
+-}
+diff --git a/test/fuzzing/sprintf.cpp b/test/fuzzing/sprintf.cpp
+deleted file mode 100644
+index 7dd02221..00000000
+--- a/test/fuzzing/sprintf.cpp
++++ /dev/null
+@@ -1,116 +0,0 @@
+-// Copyright (c) 2019, Paul Dreik
+-// License: see LICENSE.rst in the fmt root directory
+-#include <fmt/format.h>
+-#include <fmt/printf.h>
+-#include <cstdint>
+-#include <stdexcept>
+-
+-#include "fuzzer_common.h"
+-
+-using fmt_fuzzer::Nfixed;
+-
+-template <typename Item1, typename Item2>
+-void invoke_fmt(const uint8_t* Data, std::size_t Size) {
+-  constexpr auto N1 = sizeof(Item1);
+-  constexpr auto N2 = sizeof(Item2);
+-  static_assert(N1 <= Nfixed, "size1 exceeded");
+-  static_assert(N2 <= Nfixed, "size2 exceeded");
+-  if (Size <= Nfixed + Nfixed) {
+-    return;
+-  }
+-  Item1 item1 = fmt_fuzzer::assignFromBuf<Item1>(Data);
+-  Data += Nfixed;
+-  Size -= Nfixed;
+-
+-  Item2 item2 = fmt_fuzzer::assignFromBuf<Item2>(Data);
+-  Data += Nfixed;
+-  Size -= Nfixed;
+-
+-  auto fmtstring = fmt::string_view(fmt_fuzzer::as_chars(Data), Size);
+-
+-#if FMT_FUZZ_FORMAT_TO_STRING
+-  std::string message = fmt::format(fmtstring, item1, item2);
+-#else
+-  fmt::memory_buffer message;
+-  fmt::format_to(message, fmtstring, item1, item2);
+-#endif
+-}
+-
+-// for dynamic dispatching to an explicit instantiation
+-template <typename Callback> void invoke(int index, Callback callback) {
+-  switch (index) {
+-  case 0:
+-    callback(bool{});
+-    break;
+-  case 1:
+-    callback(char{});
+-    break;
+-  case 2:
+-    using sc = signed char;
+-    callback(sc{});
+-    break;
+-  case 3:
+-    using uc = unsigned char;
+-    callback(uc{});
+-    break;
+-  case 4:
+-    callback(short{});
+-    break;
+-  case 5:
+-    using us = unsigned short;
+-    callback(us{});
+-    break;
+-  case 6:
+-    callback(int{});
+-    break;
+-  case 7:
+-    callback(unsigned{});
+-    break;
+-  case 8:
+-    callback(long{});
+-    break;
+-  case 9:
+-    using ul = unsigned long;
+-    callback(ul{});
+-    break;
+-  case 10:
+-    callback(float{});
+-    break;
+-  case 11:
+-    callback(double{});
+-    break;
+-  case 12:
+-    using LD = long double;
+-    callback(LD{});
+-    break;
+-  case 13:
+-    using ptr = void*;
+-    callback(ptr{});
+-    break;
+-  }
+-}
+-
+-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, std::size_t Size) {
+-  if (Size <= 3) {
+-    return 0;
+-  }
+-
+-  // switch types depending on the first byte of the input
+-  const auto first = Data[0] & 0x0F;
+-  const auto second = (Data[0] & 0xF0) >> 4;
+-  Data++;
+-  Size--;
+-
+-  auto outer = [=](auto param1) {
+-    auto inner = [=](auto param2) {
+-      invoke_fmt<decltype(param1), decltype(param2)>(Data, Size);
+-    };
+-    invoke(second, inner);
+-  };
+-
+-  try {
+-    invoke(first, outer);
+-  } catch (std::exception& /*e*/) {
+-  }
+-  return 0;
+-}
+diff --git a/test/fuzzing/two_args.cpp b/test/fuzzing/two_args.cpp
+deleted file mode 100644
+index 8cfc4be8..00000000
+--- a/test/fuzzing/two_args.cpp
++++ /dev/null
+@@ -1,112 +0,0 @@
+-// Copyright (c) 2019, Paul Dreik
+-// License: see LICENSE.rst in the fmt root directory
+-#include <fmt/format.h>
+-#include <cstdint>
+-#include <stdexcept>
+-#include <type_traits>
+-
+-#include "fuzzer_common.h"
+-
+-constexpr auto Nfixed=fmt_fuzzer::Nfixed;
+-
+-template <typename Item1, typename Item2>
+-void invoke_fmt(const uint8_t* Data, std::size_t Size) {
+-  constexpr auto N1 = sizeof(Item1);
+-  constexpr auto N2 = sizeof(Item2);
+-  static_assert(N1 <= Nfixed, "size1 exceeded");
+-  static_assert(N2 <= Nfixed, "size2 exceeded");
+-  if (Size <= Nfixed + Nfixed) {
+-    return;
+-  }
+-  const Item1 item1=fmt_fuzzer::assignFromBuf<Item1>(Data);
+-  Data += Nfixed;
+-  Size -= Nfixed;
+-
+-  const Item2 item2=fmt_fuzzer::assignFromBuf<Item2>(Data);
+-  Data += Nfixed;
+-  Size -= Nfixed;
+-
+-  auto fmtstring = fmt::string_view(fmt_fuzzer::as_chars(Data), Size);
+-
+-#if FMT_FUZZ_FORMAT_TO_STRING
+-  std::string message = fmt::format(fmtstring, item1, item2);
+-#else
+-  fmt::memory_buffer message;
+-  fmt::format_to(message, fmtstring, item1, item2);
+-#endif
+-}
+-
+-// for dynamic dispatching to an explicit instantiation
+-template <typename Callback> void invoke(int index, Callback callback) {
+-  switch (index) {
+-  case 0:
+-    callback(bool{});
+-    break;
+-  case 1:
+-    callback(char{});
+-    break;
+-  case 2:
+-    using sc = signed char;
+-    callback(sc{});
+-    break;
+-  case 3:
+-    using uc = unsigned char;
+-    callback(uc{});
+-    break;
+-  case 4:
+-    callback(short{});
+-    break;
+-  case 5:
+-    using us = unsigned short;
+-    callback(us{});
+-    break;
+-  case 6:
+-    callback(int{});
+-    break;
+-  case 7:
+-    callback(unsigned{});
+-    break;
+-  case 8:
+-    callback(long{});
+-    break;
+-  case 9:
+-    using ul = unsigned long;
+-    callback(ul{});
+-    break;
+-  case 10:
+-    callback(float{});
+-    break;
+-  case 11:
+-    callback(double{});
+-    break;
+-  case 12:
+-    using LD = long double;
+-    callback(LD{});
+-    break;
+-  }
+-}
+-
+-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, std::size_t Size) {
+-  if (Size <= 3) {
+-    return 0;
+-  }
+-
+-  // switch types depending on the first byte of the input
+-  const auto first = Data[0] & 0x0F;
+-  const auto second = (Data[0] & 0xF0) >> 4;
+-  Data++;
+-  Size--;
+-
+-  auto outer = [=](auto param1) {
+-    auto inner = [=](auto param2) {
+-      invoke_fmt<decltype(param1), decltype(param2)>(Data, Size);
+-    };
+-    invoke(second, inner);
+-  };
+-
+-  try {
+-    invoke(first, outer);
+-  } catch (std::exception& /*e*/) {
+-  }
+-  return 0;
+-}

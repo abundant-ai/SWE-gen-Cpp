@@ -1,0 +1,211 @@
+diff --git a/docs/user_guide.md b/docs/user_guide.md
+index e08ed5b..d1a4e1e 100644
+--- a/docs/user_guide.md
++++ b/docs/user_guide.md
+@@ -18,6 +18,8 @@
+ 
+ [Runtime and Reporting Considerations](#runtime-and-reporting-considerations)
+ 
++[Setup/Teardown] (#setup-teardown)
++
+ [Passing Arguments](#passing-arguments)
+ 
+ [Custom Benchmark Name](#custom-benchmark-name)
+@@ -238,6 +240,38 @@ times and statistical results across these repetitions will also be reported.
+ As well as the per-benchmark entries, a preamble in the report will include
+ information about the machine on which the benchmarks are run.
+ 
++<a name="setup-teardown" />
++
++## Setup/Teardown
++
++Global setup/teardown specific to each benchmark can be done by
++passing a callback to Setup/Teardown:
++
++The setup/teardown callbacks will be invoked once for each benchmark.
++If the benchmark is multi-threaded (will run in k threads), they will be invoked exactly once before
++each run with k threads.
++If the benchmark uses different size groups of threads, the above will be true for each size group.
++
++Eg.,
++
++```c++
++static void DoSetup(const benchmark::State& state) {
++}
++
++static void DoTeardown(const benchmark::State& state) {
++}
++
++static void BM_func(benchmark::State& state) {...}
++
++BENCHMARK(BM_func)->Arg(1)->Arg(3)->Threads(16)->Threads(32)->Setup(DoSetup)->Teardown(DoTeardown);
++
++```
++
++In this example, `DoSetup` and `DoTearDown` will be invoked 4 times each,
++specifically, once for each of this family:
++ - BM_func_Arg_1_Threads_16, BM_func_Arg_1_Threads_32
++ - BM_func_Arg_3_Threads_16, BM_func_Arg_3_Threads_32
++
+ <a name="passing-arguments" />
+ 
+ ## Passing Arguments
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 31f6173..4fdb545 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -969,6 +969,23 @@ class Benchmark {
+     return Ranges(ranges);
+   }
+ 
++  // Have "setup" and/or "teardown" invoked once for every benchmark run.
++  // If the benchmark is multi-threaded (will run in k threads concurrently),
++  // the setup callback will be be invoked exactly once (not k times) before
++  // each run with k threads. Time allowing (e.g. for a short benchmark), there
++  // may be multiple such runs per benchmark, each run with its own
++  // "setup"/"teardown".
++  //
++  // If the benchmark uses different size groups of threads (e.g. via
++  // ThreadRange), the above will be true for each size group.
++  //
++  // The callback will be passed a State object, which includes the number
++  // of threads, thread-index, benchmark arguments, etc.
++  //
++  // The callback must not be NULL or self-deleting.
++  Benchmark* Setup(void (*setup)(const benchmark::State&));
++  Benchmark* Teardown(void (*teardown)(const benchmark::State&));
++
+   // Pass this benchmark object to *func, which can customize
+   // the benchmark by calling various methods like Arg, Args,
+   // Threads, etc.
+@@ -1100,6 +1117,10 @@ class Benchmark {
+   std::vector<Statistics> statistics_;
+   std::vector<int> thread_counts_;
+ 
++  typedef void (*callback_function)(const benchmark::State&);
++  callback_function setup_;
++  callback_function teardown_;
++
+   Benchmark& operator=(Benchmark const&);
+ };
+ 
+diff --git a/src/benchmark_api_internal.cc b/src/benchmark_api_internal.cc
+index 89da519..4de36e3 100644
+--- a/src/benchmark_api_internal.cc
++++ b/src/benchmark_api_internal.cc
+@@ -78,6 +78,9 @@ BenchmarkInstance::BenchmarkInstance(Benchmark* benchmark, int family_idx,
+   if (!benchmark_.thread_counts_.empty()) {
+     name_.threads = StrFormat("threads:%d", threads_);
+   }
++
++  setup_ = benchmark_.setup_;
++  teardown_ = benchmark_.teardown_;
+ }
+ 
+ State BenchmarkInstance::Run(
+@@ -90,5 +93,20 @@ State BenchmarkInstance::Run(
+   return st;
+ }
+ 
++void BenchmarkInstance::Setup() const {
++  if (setup_) {
++    State st(/*iters*/ 1, args_, /*thread_id*/ 0, threads_, nullptr, nullptr,
++             nullptr);
++    setup_(st);
++  }
++}
++
++void BenchmarkInstance::Teardown() const {
++  if (teardown_) {
++    State st(/*iters*/ 1, args_, /*thread_id*/ 0, threads_, nullptr, nullptr,
++             nullptr);
++    teardown_(st);
++  }
++}
+ }  // namespace internal
+ }  // namespace benchmark
+diff --git a/src/benchmark_api_internal.h b/src/benchmark_api_internal.h
+index 592dd46..94c2b29 100644
+--- a/src/benchmark_api_internal.h
++++ b/src/benchmark_api_internal.h
+@@ -38,6 +38,8 @@ class BenchmarkInstance {
+   double min_time() const { return min_time_; }
+   IterationCount iterations() const { return iterations_; }
+   int threads() const { return threads_; }
++  void Setup() const;
++  void Teardown() const;
+ 
+   State Run(IterationCount iters, int thread_id, internal::ThreadTimer* timer,
+             internal::ThreadManager* manager,
+@@ -62,6 +64,10 @@ class BenchmarkInstance {
+   double min_time_;
+   IterationCount iterations_;
+   int threads_;  // Number of concurrent threads to us
++
++  typedef void (*callback_function)(const benchmark::State&);
++  callback_function setup_ = nullptr;
++  callback_function teardown_ = nullptr;
+ };
+ 
+ bool FindBenchmarksInternal(const std::string& re,
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index 0b148e2..b3f85dc 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -211,7 +211,9 @@ Benchmark::Benchmark(const char* name)
+       use_real_time_(false),
+       use_manual_time_(false),
+       complexity_(oNone),
+-      complexity_lambda_(nullptr) {
++      complexity_lambda_(nullptr),
++      setup_(nullptr),
++      teardown_(nullptr) {
+   ComputeStatistics("mean", StatisticsMean);
+   ComputeStatistics("median", StatisticsMedian);
+   ComputeStatistics("stddev", StatisticsStdDev);
+@@ -321,6 +323,18 @@ Benchmark* Benchmark::Apply(void (*custom_arguments)(Benchmark* benchmark)) {
+   return this;
+ }
+ 
++Benchmark* Benchmark::Setup(void (*setup)(const benchmark::State&)) {
++  BM_CHECK(setup != nullptr);
++  setup_ = setup;
++  return this;
++}
++
++Benchmark* Benchmark::Teardown(void (*teardown)(const benchmark::State&)) {
++  BM_CHECK(teardown != nullptr);
++  teardown_ = teardown;
++  return this;
++}
++
+ Benchmark* Benchmark::RangeMultiplier(int multiplier) {
+   BM_CHECK(multiplier > 1);
+   range_multiplier_ = multiplier;
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index fd23d46..eac807b 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -279,7 +279,9 @@ void BenchmarkRunner::DoOneRepetition() {
+   // is *only* calculated for the *first* repetition, and other repetitions
+   // simply use that precomputed iteration count.
+   for (;;) {
++    b.Setup();
+     i = DoNIterations();
++    b.Teardown();
+ 
+     // Do we consider the results to be significant?
+     // If we are doing repetitions, and the first repetition was already done,
+@@ -316,10 +318,12 @@ void BenchmarkRunner::DoOneRepetition() {
+     memory_manager->Start();
+     std::unique_ptr<internal::ThreadManager> manager;
+     manager.reset(new internal::ThreadManager(1));
++    b.Setup();
+     RunInThread(&b, memory_iterations, 0, manager.get(),
+                 perf_counters_measurement_ptr);
+     manager->WaitForAllThreads();
+     manager.reset();
++    b.Teardown();
+ 
+     BENCHMARK_DISABLE_DEPRECATED_WARNING
+     memory_manager->Stop(memory_result);

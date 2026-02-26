@@ -1,0 +1,182 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 9e76da895..8926b04e5 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -566,13 +566,7 @@ proto_lang_toolchain(
+     command_line = "--cpp_out=$(OUT)",
+     plugin = "//src/google/protobuf/compiler/cpp:protoc-gen-cpp",
+     plugin_format_flag = "--plugin=protoc-gen-cpp=%s",
+-    protoc_minimal_do_not_use = select({
+-        # Set minimal protoc if prefer_prebuilt_protoc.flag_set is true since a prebuilt for protoc_minimal is not available
+-        # TODO: Add a flag to switch between minimal and full protoc with proto_lang_toolchain once we have a minimal protoc binary.
+-        # Setting this attribute to None will make the toolchain to pick the full protoc binary.
+-        "//bazel/toolchains:prefer_prebuilt_protoc.flag_set": None,
+-        "//conditions:default": "//src/google/protobuf/compiler:protoc_minimal",
+-    }),
++    protoc_minimal_do_not_use = "//src/google/protobuf/compiler:protoc_minimal",
+     runtime = "//src/google/protobuf",
+     visibility = ["//visibility:public"],
+ )
+diff --git a/bazel/tests/BUILD b/bazel/tests/BUILD
+index b07279055..876a9ff8a 100644
+--- a/bazel/tests/BUILD
++++ b/bazel/tests/BUILD
+@@ -1,8 +1,6 @@
+-load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+ load("//bazel:proto_descriptor_set.bzl", "proto_descriptor_set")
+ load("//bazel:proto_library.bzl", "proto_library")
+ load(":bazel_proto_library_tests.bzl", "bazel_proto_library_test_suite")
+-load(":cc_toolchain_tests.bzl", "cc_toolchain_test_suite")
+ load(":java_proto_library_tests.bzl", "java_proto_library_test_suite")
+ load(":proto_common_check_collocated_tests.bzl", "proto_common_check_collocated_test_suite")
+ load(":proto_common_compile_tests.bzl", "proto_common_compile_test_suite")
+@@ -21,8 +19,6 @@ proto_common_check_collocated_test_suite(name = "proto_common_check_collocated_t
+ 
+ bazel_proto_library_test_suite(name = "bazel_proto_library_test_suite")
+ 
+-cc_toolchain_test_suite(name = "cc_toolchain_test_suite")
+-
+ java_proto_library_test_suite(name = "java_proto_library_test_suite")
+ 
+ proto_library(
+diff --git a/bazel/tests/cc_toolchain_tests.bzl b/bazel/tests/cc_toolchain_tests.bzl
+deleted file mode 100644
+index 8e85a691c..000000000
+--- a/bazel/tests/cc_toolchain_tests.bzl
++++ /dev/null
+@@ -1,81 +0,0 @@
+-# Protocol Buffers - Google's data interchange format
+-# Copyright 2025 Google Inc.  All rights reserved.
+-#
+-# Use of this source code is governed by a BSD-style
+-# license that can be found in the LICENSE file or at
+-# https://developers.google.com/open-source/licenses/bsd
+-"""Tests for cc_toolchain prebuilt protoc configuration."""
+-
+-load("@rules_testing//lib:analysis_test.bzl", "analysis_test", "test_suite")
+-load("@rules_testing//lib:truth.bzl", "matching")
+-load("@rules_testing//lib:util.bzl", "util")
+-load("//bazel:proto_library.bzl", "proto_library")
+-load("//bazel/tests/testdata:compile_rule.bzl", "compile_rule")
+-
+-_PREFER_PREBUILT_PROTOC = str(Label("//bazel/toolchains:prefer_prebuilt_protoc"))
+-
+-def cc_toolchain_test_suite(name):
+-    test_suite(
+-        name = name,
+-        tests = [
+-            _test_cc_toolchain_uses_full_protoc_when_prefer_prebuilt_flag_set,
+-            _test_cc_toolchain_uses_protoc_minimal_by_default,
+-        ],
+-    )
+-
+-def _test_cc_toolchain_uses_full_protoc_when_prefer_prebuilt_flag_set(name):
+-    util.helper_target(
+-        proto_library,
+-        name = name + "_proto",
+-        srcs = ["A.proto"],
+-    )
+-    util.helper_target(
+-        compile_rule,
+-        name = name + "_compile",
+-        proto_dep = ":" + name + "_proto",
+-        toolchain = "//:cc_toolchain",
+-    )
+-
+-    analysis_test(
+-        name = name,
+-        target = name + "_compile",
+-        impl = _test_cc_toolchain_uses_full_protoc_when_prefer_prebuilt_flag_set_impl,
+-        config_settings = {_PREFER_PREBUILT_PROTOC: True},
+-    )
+-
+-def _test_cc_toolchain_uses_full_protoc_when_prefer_prebuilt_flag_set_impl(env, target):
+-    # Find the compile action
+-    action = env.expect.that_target(target).action_named("GenProto")
+-
+-    # When prefer_prebuilt_protoc is True, protoc_minimal_do_not_use is None,
+-    # so the cc_toolchain should use the full protoc (not protoc_minimal).
+-    # The protoc path should end with "/protoc" not contain "protoc_minimal"
+-    action.argv().contains_predicate(matching.str_matches("*/protoc"))
+-    action.argv().not_contains_predicate(matching.str_matches("*protoc_minimal*"))
+-
+-def _test_cc_toolchain_uses_protoc_minimal_by_default(name):
+-    util.helper_target(
+-        proto_library,
+-        name = name + "_proto",
+-        srcs = ["A.proto"],
+-    )
+-    util.helper_target(
+-        compile_rule,
+-        name = name + "_compile",
+-        proto_dep = ":" + name + "_proto",
+-        toolchain = "//:cc_toolchain",
+-    )
+-
+-    analysis_test(
+-        name = name,
+-        target = name + "_compile",
+-        impl = _test_cc_toolchain_uses_protoc_minimal_by_default_impl,
+-    )
+-
+-def _test_cc_toolchain_uses_protoc_minimal_by_default_impl(env, target):
+-    # Find the compile action
+-    action = env.expect.that_target(target).action_named("GenProto")
+-
+-    # By default (prefer_prebuilt_protoc is False), protoc_minimal_do_not_use is set,
+-    # so the cc_toolchain should use protoc_minimal.
+-    action.argv().contains_predicate(matching.str_matches("*protoc_minimal*"))
+diff --git a/bazel/toolchains/BUILD b/bazel/toolchains/BUILD
+index c34663cdf..6ebab0a9e 100644
+--- a/bazel/toolchains/BUILD
++++ b/bazel/toolchains/BUILD
+@@ -53,11 +53,7 @@ bool_flag(
+ config_setting(
+     name = "prefer_prebuilt_protoc.flag_set",
+     flag_values = {":prefer_prebuilt_protoc": "true"},
+-    visibility = [
+-        "//bazel/private/toolchains/prebuilt:__pkg__",
+-        # Needed by cc_toolchain to switch between minimal and full protoc
+-        "//:__pkg__",
+-    ],
++    visibility = ["//bazel/private/toolchains/prebuilt:__pkg__"],
+ )
+ 
+ # The public API users set to disable the validation action failing.
+diff --git a/examples/example_without_cc_toolchain/.bazelrc b/examples/example_without_cc_toolchain/.bazelrc
+index 90f2a4414..8653aa707 100644
+--- a/examples/example_without_cc_toolchain/.bazelrc
++++ b/examples/example_without_cc_toolchain/.bazelrc
+@@ -1,6 +1,6 @@
+ # Simulate a non-functional CC toolchain
+-common --per_file_copt=external/.*protobuf.*/src/google/protobuf/compiler/main.cc@--THIS_CC_TOOLCHAIN_IS_BROKEN
+-common --host_per_file_copt=external/.*protobuf.*/src/google/protobuf/compiler/main.cc@--THIS_CC_TOOLCHAIN_IS_BROKEN
++common --per_file_copt=external/.*protobuf.*@--THIS_CC_TOOLCHAIN_IS_BROKEN
++common --host_per_file_copt=external/.*protobuf.*@--THIS_CC_TOOLCHAIN_IS_BROKEN
+ # But, users should be able to use pre-built protoc toolchains instead.
+ common --incompatible_enable_proto_toolchain_resolution
+-common --@com_google_protobuf//bazel/toolchains:prefer_prebuilt_protoc
++common --@com_google_protobuf//bazel/toolchains:prefer_prebuilt_protoc
+\ No newline at end of file
+diff --git a/examples/example_without_cc_toolchain/BUILD.bazel b/examples/example_without_cc_toolchain/BUILD.bazel
+index 4dbbd98fb..ba5d829d7 100644
+--- a/examples/example_without_cc_toolchain/BUILD.bazel
++++ b/examples/example_without_cc_toolchain/BUILD.bazel
+@@ -1,17 +1,6 @@
+-load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+ load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+ 
+ proto_library(
+     name = "empty_proto",
+     srcs = ["empty.proto"],
+ )
+-
+-cc_proto_library(
+-    name = "cc_empty_proto",
+-    # We already have a anaylsis test that asserts that the cc_proto_library
+-    # uses the correct prebuilt toolchain, this cc_proto_library will never
+-    # compile since the prebuilt toolchain is always behind the HEAD therefore
+-    # will end up in version skew compilation errors.
+-    tags = ["manual"],
+-    deps = [":empty_proto"],
+-)

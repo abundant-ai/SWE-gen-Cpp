@@ -1,0 +1,279 @@
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 1a76b58..cedeee3 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -184,10 +184,7 @@ void State::PauseTiming() {
+   BM_CHECK(started_ && !finished_ && !error_occurred_);
+   timer_->StopTimer();
+   if (perf_counters_measurement_) {
+-    std::vector<std::pair<std::string, double>> measurements;
+-    if (!perf_counters_measurement_->Stop(measurements)) {
+-      BM_CHECK(false) << "Perf counters read the value failed.";
+-    }
++    auto measurements = perf_counters_measurement_->StopAndGetMeasurements();
+     for (const auto& name_and_measurement : measurements) {
+       auto name = name_and_measurement.first;
+       auto measurement = name_and_measurement.second;
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index ec7c127..eac807b 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -152,7 +152,8 @@ BenchmarkRunner::BenchmarkRunner(
+       has_explicit_iteration_count(b.iterations() != 0),
+       pool(b.threads() - 1),
+       iters(has_explicit_iteration_count ? b.iterations() : 1),
+-      perf_counters_measurement(StrSplit(FLAGS_benchmark_perf_counters, ',')),
++      perf_counters_measurement(
++          PerfCounters::Create(StrSplit(FLAGS_benchmark_perf_counters, ','))),
+       perf_counters_measurement_ptr(perf_counters_measurement.IsValid()
+                                         ? &perf_counters_measurement
+                                         : nullptr) {
+diff --git a/src/perf_counters.cc b/src/perf_counters.cc
+index 582475f..b2ac768 100644
+--- a/src/perf_counters.cc
++++ b/src/perf_counters.cc
+@@ -15,7 +15,6 @@
+ #include "perf_counters.h"
+ 
+ #include <cstring>
+-#include <memory>
+ #include <vector>
+ 
+ #if defined HAVE_LIBPFM
+@@ -105,7 +104,7 @@ PerfCounters PerfCounters::Create(
+   return PerfCounters(counter_names, std::move(counter_ids));
+ }
+ 
+-void PerfCounters::CloseCounters() const {
++PerfCounters::~PerfCounters() {
+   if (counter_ids_.empty()) {
+     return;
+   }
+@@ -127,44 +126,7 @@ PerfCounters PerfCounters::Create(
+   return NoCounters();
+ }
+ 
+-void PerfCounters::CloseCounters() const {}
++PerfCounters::~PerfCounters() = default;
+ #endif  // defined HAVE_LIBPFM
+-
+-Mutex PerfCountersMeasurement::mutex_;
+-int PerfCountersMeasurement::ref_count_ = 0;
+-PerfCounters PerfCountersMeasurement::counters_ = PerfCounters::NoCounters();
+-
+-PerfCountersMeasurement::PerfCountersMeasurement(
+-    const std::vector<std::string>& counter_names)
+-    : start_values_(counter_names.size()), end_values_(counter_names.size()) {
+-  MutexLock l(mutex_);
+-  if (ref_count_ == 0) {
+-    counters_ = PerfCounters::Create(counter_names);
+-  }
+-  // We chose to increment it even if `counters_` ends up invalid,
+-  // so that we don't keep trying to create, and also since the dtor
+-  // will decrement regardless of `counters_`'s validity
+-  ++ref_count_;
+-
+-  BM_CHECK(!counters_.IsValid() || counters_.names() == counter_names);
+-}
+-
+-PerfCountersMeasurement::~PerfCountersMeasurement() {
+-  MutexLock l(mutex_);
+-  --ref_count_;
+-  if (ref_count_ == 0) {
+-    counters_ = PerfCounters::NoCounters();
+-  }
+-}
+-
+-PerfCounters& PerfCounters::operator=(PerfCounters&& other) noexcept {
+-  if (this != &other) {
+-    CloseCounters();
+-
+-    counter_ids_ = std::move(other.counter_ids_);
+-    counter_names_ = std::move(other.counter_names_);
+-  }
+-  return *this;
+-}
+ }  // namespace internal
+ }  // namespace benchmark
+diff --git a/src/perf_counters.h b/src/perf_counters.h
+index 9a6e46c..47ca138 100644
+--- a/src/perf_counters.h
++++ b/src/perf_counters.h
+@@ -17,13 +17,11 @@
+ 
+ #include <array>
+ #include <cstdint>
+-#include <memory>
+ #include <vector>
+ 
+ #include "benchmark/benchmark.h"
+ #include "check.h"
+ #include "log.h"
+-#include "mutex.h"
+ 
+ #ifndef BENCHMARK_OS_WINDOWS
+ #include <unistd.h>
+@@ -73,14 +71,12 @@ class PerfCounters final {
+   // True iff this platform supports performance counters.
+   static const bool kSupported;
+ 
+-  bool IsValid() const { return !counter_names_.empty(); }
++  bool IsValid() const { return is_valid_; }
+   static PerfCounters NoCounters() { return PerfCounters(); }
+ 
+-  ~PerfCounters() { CloseCounters(); }
++  ~PerfCounters();
+   PerfCounters(PerfCounters&&) = default;
+   PerfCounters(const PerfCounters&) = delete;
+-  PerfCounters& operator=(PerfCounters&&) noexcept;
+-  PerfCounters& operator=(const PerfCounters&) = delete;
+ 
+   // Platform-specific implementations may choose to do some library
+   // initialization here.
+@@ -115,27 +111,24 @@ class PerfCounters final {
+  private:
+   PerfCounters(const std::vector<std::string>& counter_names,
+                std::vector<int>&& counter_ids)
+-      : counter_ids_(std::move(counter_ids)), counter_names_(counter_names) {}
+-  PerfCounters() = default;
+-
+-  void CloseCounters() const;
++      : counter_ids_(std::move(counter_ids)),
++        counter_names_(counter_names),
++        is_valid_(true) {}
++  PerfCounters() : is_valid_(false) {}
+ 
+   std::vector<int> counter_ids_;
+-  std::vector<std::string> counter_names_;
++  const std::vector<std::string> counter_names_;
++  const bool is_valid_;
+ };
+ 
+ // Typical usage of the above primitives.
+ class PerfCountersMeasurement final {
+  public:
+-  PerfCountersMeasurement(const std::vector<std::string>& counter_names);
+-  ~PerfCountersMeasurement();
+-
+-  // The only way to get to `counters_` is after ctor-ing a
+-  // `PerfCountersMeasurement`, which means that `counters_`'s state is, here,
+-  // decided (either invalid or valid) and won't change again even if a ctor is
+-  // concurrently running with this. This is preferring efficiency to
+-  // maintainability, because the address of the static can be known at compile
+-  // time.
++  PerfCountersMeasurement(PerfCounters&& c)
++      : counters_(std::move(c)),
++        start_values_(counters_.IsValid() ? counters_.names().size() : 0),
++        end_values_(counters_.IsValid() ? counters_.names().size() : 0) {}
++
+   bool IsValid() const { return counters_.IsValid(); }
+ 
+   BENCHMARK_ALWAYS_INLINE void Start() {
+@@ -143,33 +136,30 @@ class PerfCountersMeasurement final {
+     // Tell the compiler to not move instructions above/below where we take
+     // the snapshot.
+     ClobberMemory();
+-    valid_read_ &= counters_.Snapshot(&start_values_);
++    counters_.Snapshot(&start_values_);
+     ClobberMemory();
+   }
+ 
+-  BENCHMARK_ALWAYS_INLINE bool Stop(
+-      std::vector<std::pair<std::string, double>>& measurements) {
++  BENCHMARK_ALWAYS_INLINE std::vector<std::pair<std::string, double>>
++  StopAndGetMeasurements() {
+     assert(IsValid());
+     // Tell the compiler to not move instructions above/below where we take
+     // the snapshot.
+     ClobberMemory();
+-    valid_read_ &= counters_.Snapshot(&end_values_);
++    counters_.Snapshot(&end_values_);
+     ClobberMemory();
+ 
++    std::vector<std::pair<std::string, double>> ret;
+     for (size_t i = 0; i < counters_.names().size(); ++i) {
+       double measurement = static_cast<double>(end_values_[i]) -
+                            static_cast<double>(start_values_[i]);
+-      measurements.push_back({counters_.names()[i], measurement});
++      ret.push_back({counters_.names()[i], measurement});
+     }
+-
+-    return valid_read_;
++    return ret;
+   }
+ 
+  private:
+-  static Mutex mutex_;
+-  GUARDED_BY(mutex_) static int ref_count_;
+-  GUARDED_BY(mutex_) static PerfCounters counters_;
+-  bool valid_read_ = true;
++  PerfCounters counters_;
+   PerfCounterValues start_values_;
+   PerfCounterValues end_values_;
+ };
+diff --git a/test/perf_counters_gtest.cc b/test/perf_counters_gtest.cc
+index f9e6a6f..3eac624 100644
+--- a/test/perf_counters_gtest.cc
++++ b/test/perf_counters_gtest.cc
+@@ -11,7 +11,6 @@ struct MsgHandler {
+ #endif
+ 
+ using benchmark::internal::PerfCounters;
+-using benchmark::internal::PerfCountersMeasurement;
+ using benchmark::internal::PerfCounterValues;
+ 
+ namespace {
+@@ -96,53 +95,6 @@ TEST(PerfCountersTest, Read2Counters) {
+   EXPECT_GT(values2[1], 0);
+ }
+ 
+-TEST(PerfCountersTest, ReopenExistingCounters) {
+-  // The test works (i.e. causes read to fail) for the assumptions
+-  // about hardware capabilities (i.e. small number (3-4) hardware
+-  // counters) at this date.
+-  if (!PerfCounters::kSupported) {
+-    GTEST_SKIP() << "Test skipped because libpfm is not supported.\n";
+-  }
+-  EXPECT_TRUE(PerfCounters::Initialize());
+-  std::vector<PerfCounters> counters;
+-  counters.reserve(6);
+-  for (int i = 0; i < 6; i++)
+-    counters.push_back(PerfCounters::Create({kGenericPerfEvent1}));
+-  PerfCounterValues values(1);
+-  EXPECT_TRUE(counters[0].Snapshot(&values));
+-  EXPECT_FALSE(counters[4].Snapshot(&values));
+-  EXPECT_FALSE(counters[5].Snapshot(&values));
+-}
+-
+-TEST(PerfCountersTest, CreateExistingMeasurements) {
+-  // The test works (i.e. causes read to fail) for the assumptions
+-  // about hardware capabilities (i.e. small number (3-4) hardware
+-  // counters) at this date,
+-  // the same as previous test ReopenExistingCounters.
+-  if (!PerfCounters::kSupported) {
+-    GTEST_SKIP() << "Test skipped because libpfm is not supported.\n";
+-  }
+-  EXPECT_TRUE(PerfCounters::Initialize());
+-  std::vector<PerfCountersMeasurement> perf_counter_measurements;
+-  std::vector<std::pair<std::string, double>> measurements;
+-
+-  perf_counter_measurements.reserve(10);
+-  for (int i = 0; i < 10; i++)
+-    perf_counter_measurements.emplace_back(
+-        std::vector<std::string>{kGenericPerfEvent1});
+-
+-  perf_counter_measurements[0].Start();
+-  EXPECT_TRUE(perf_counter_measurements[0].Stop(measurements));
+-
+-  measurements.clear();
+-  perf_counter_measurements[8].Start();
+-  EXPECT_FALSE(perf_counter_measurements[8].Stop(measurements));
+-
+-  measurements.clear();
+-  perf_counter_measurements[9].Start();
+-  EXPECT_FALSE(perf_counter_measurements[9].Stop(measurements));
+-}
+-
+ size_t do_work() {
+   size_t res = 0;
+   for (size_t i = 0; i < 100000000; ++i) res += i * i;

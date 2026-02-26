@@ -1,0 +1,239 @@
+diff --git a/include/fmt/core.h b/include/fmt/core.h
+index 8f755d25..284cf708 100644
+--- a/include/fmt/core.h
++++ b/include/fmt/core.h
+@@ -1198,11 +1198,7 @@ template <typename Context> struct arg_mapper {
+   FMT_CONSTEXPR const void* map(void* val) { return val; }
+   FMT_CONSTEXPR const void* map(const void* val) { return val; }
+   FMT_CONSTEXPR const void* map(std::nullptr_t val) { return val; }
+-
+-  // We use SFINAE instead of a const T* parameter to avoid conflicting with
+-  // the C array overload.
+-  template <typename T>
+-  FMT_CONSTEXPR auto map(T) -> enable_if_t<std::is_pointer<T>::value, int> {
++  template <typename T> FMT_CONSTEXPR int map(const T*) {
+     // Formatting of arbitrary pointers is disallowed. If you want to output
+     // a pointer cast it to "void *" or "const void *". In particular, this
+     // forbids formatting of "[const] volatile char *" which is printed as bool
+@@ -1211,11 +1207,6 @@ template <typename Context> struct arg_mapper {
+     return 0;
+   }
+ 
+-  template <typename T, std::size_t N>
+-  FMT_CONSTEXPR auto map(const T (&values)[N]) -> const T (&)[N] {
+-    return values;
+-  }
+-
+   template <typename T,
+             FMT_ENABLE_IF(std::is_enum<T>::value &&
+                           !has_formatter<T, Context>::value &&
+diff --git a/include/fmt/ranges.h b/include/fmt/ranges.h
+index 650d38c9..b603d637 100644
+--- a/include/fmt/ranges.h
++++ b/include/fmt/ranges.h
+@@ -95,100 +95,12 @@ template <typename... Ts> struct conditional_helper {};
+ template <typename T, typename _ = void> struct is_range_ : std::false_type {};
+ 
+ #if !FMT_MSC_VER || FMT_MSC_VER > 1800
+-
+-#  define FMT_DECLTYPE_RETURN(val)  \
+-    ->decltype(val) { return val; } \
+-    static_assert(                  \
+-        true, "")  // This makes it so that a semicolon is required after the
+-                   // macro, which helps clang-format handle the formatting.
+-
+-// C array overload
+-template <typename T, std::size_t N>
+-auto range_begin(const T (&arr)[N]) -> const T* {
+-  return arr;
+-}
+-template <typename T, std::size_t N>
+-auto range_end(const T (&arr)[N]) -> const T* {
+-  return arr + N;
+-}
+-
+-template <typename T, typename Enable = void>
+-struct has_member_fn_begin_end_t : std::false_type {};
+-
+-template <typename T>
+-struct has_member_fn_begin_end_t<T, void_t<decltype(std::declval<T>().begin()),
+-                                           decltype(std::declval<T>().end())>>
+-    : std::true_type {};
+-
+-// Member function overload
+ template <typename T>
+-auto range_begin(T&& rng) FMT_DECLTYPE_RETURN(static_cast<T&&>(rng).begin());
+-template <typename T>
+-auto range_end(T&& rng) FMT_DECLTYPE_RETURN(static_cast<T&&>(rng).end());
+-
+-// ADL overload. Only participates in overload resolution if member functions
+-// are not found.
+-template <typename T>
+-auto range_begin(T&& rng)
+-    -> enable_if_t<!has_member_fn_begin_end_t<T&&>::value,
+-                   decltype(begin(static_cast<T&&>(rng)))> {
+-  return begin(static_cast<T&&>(rng));
+-}
+-template <typename T>
+-auto range_end(T&& rng) -> enable_if_t<!has_member_fn_begin_end_t<T&&>::value,
+-                                       decltype(end(static_cast<T&&>(rng)))> {
+-  return end(static_cast<T&&>(rng));
+-}
+-
+-template <typename T, typename Enable = void>
+-struct has_const_begin_end : std::false_type {};
+-template <typename T, typename Enable = void>
+-struct has_mutable_begin_end : std::false_type {};
+-
+-template <typename T>
+-struct has_const_begin_end<
+-    T, void_t<decltype(detail::range_begin(
+-                  std::declval<const remove_cvref_t<T>&>())),
+-              decltype(detail::range_begin(
+-                  std::declval<const remove_cvref_t<T>&>()))>>
+-    : std::true_type {};
+-
+-template <typename T>
+-struct has_mutable_begin_end<
+-    T, void_t<decltype(detail::range_begin(std::declval<T>())),
+-              decltype(detail::range_begin(std::declval<T>())),
+-              enable_if_t<std::is_copy_constructible<T>::value>>>
+-    : std::true_type {};
+-
+-template <typename T>
+-struct is_range_<T, void>
+-    : std::integral_constant<bool, (has_const_begin_end<T>::value ||
+-                                    has_mutable_begin_end<T>::value)> {};
+-
+-template <typename T, typename Enable = void> struct range_to_view;
+-template <typename T>
+-struct range_to_view<T, enable_if_t<has_const_begin_end<T>::value>> {
+-  struct view_t {
+-    const T* m_range_ptr;
+-
+-    auto begin() const FMT_DECLTYPE_RETURN(detail::range_begin(*m_range_ptr));
+-    auto end() const FMT_DECLTYPE_RETURN(detail::range_end(*m_range_ptr));
+-  };
+-  static auto view(const T& range) -> view_t { return {&range}; }
+-};
+-
+-template <typename T>
+-struct range_to_view<T, enable_if_t<!has_const_begin_end<T>::value &&
+-                                    has_mutable_begin_end<T>::value>> {
+-  struct view_t {
+-    T m_range_copy;
+-
+-    auto begin() FMT_DECLTYPE_RETURN(detail::range_begin(m_range_copy));
+-    auto end() FMT_DECLTYPE_RETURN(detail::range_end(m_range_copy));
+-  };
+-  static auto view(const T& range) -> view_t { return {range}; }
+-};
+-#  undef FMT_DECLTYPE_RETURN
++struct is_range_<
++    T, conditional_t<false,
++                     conditional_helper<decltype(std::declval<T>().begin()),
++                                        decltype(std::declval<T>().end())>,
++                     void>> : std::true_type {};
+ #endif
+ 
+ /// tuple_size and tuple_element check.
+@@ -246,8 +158,7 @@ template <class Tuple, class F> void for_each(Tuple&& tup, F&& f) {
+ }
+ 
+ template <typename Range>
+-using value_type =
+-    remove_cvref_t<decltype(*detail::range_begin(std::declval<Range>()))>;
++using value_type = remove_cvref_t<decltype(*std::declval<Range>().begin())>;
+ 
+ template <typename Arg, FMT_ENABLE_IF(!is_like_std_string<
+                                       typename std::decay<Arg>::type>::value)>
+@@ -357,9 +268,8 @@ struct formatter<
+   typename FormatContext::iterator format(const T& values, FormatContext& ctx) {
+     auto out = detail::copy(formatting.prefix, ctx.out());
+     size_t i = 0;
+-    auto view = detail::range_to_view<T>::view(values);
+-    auto it = view.begin();
+-    auto end = view.end();
++    auto it = values.begin();
++    auto end = values.end();
+     for (; it != end; ++it) {
+       if (i > 0) {
+         if (formatting.add_prepostfix_space) *out++ = ' ';
+diff --git a/test/ranges-test.cc b/test/ranges-test.cc
+index c05e5fcb..63f9e6e6 100644
+--- a/test/ranges-test.cc
++++ b/test/ranges-test.cc
+@@ -22,18 +22,6 @@
+ #  include <string>
+ #  include <vector>
+ 
+-TEST(RangesTest, FormatArray) {
+-  int32_t ia[] = {1, 2, 3, 5, 7, 11};
+-  auto iaf = fmt::format("{}", ia);
+-  EXPECT_EQ("{1, 2, 3, 5, 7, 11}", iaf);
+-}
+-
+-TEST(RangesTest, Format2dArray) {
+-  int32_t ia[][2] = {{1, 2}, {3, 5}, {7, 11}};
+-  auto iaf = fmt::format("{}", ia);
+-  EXPECT_EQ("{{1, 2}, {3, 5}, {7, 11}}", iaf);
+-}
+-
+ TEST(RangesTest, FormatVector) {
+   std::vector<int32_t> iv{1, 2, 3, 5, 7, 11};
+   auto ivf = fmt::format("{}", iv);
+@@ -189,30 +177,7 @@ template <typename T> class non_const_only_range {
+   const_iterator end() { return vec.end(); }
+ };
+ 
+-template <typename T> class noncopyable_range {
+- private:
+-  std::vector<T> vec;
+-
+- public:
+-  using const_iterator = typename ::std::vector<T>::const_iterator;
+-
+-  template <typename... Args>
+-  explicit noncopyable_range(Args&&... args)
+-      : vec(::std::forward<Args>(args)...) {}
+-
+-  noncopyable_range(noncopyable_range const&) = delete;
+-  noncopyable_range(noncopyable_range&) = delete;
+-
+-  const_iterator begin() const { return vec.begin(); }
+-  const_iterator end() const { return vec.end(); }
+-};
+-
+ TEST(RangesTest, JoinRange) {
+-  noncopyable_range<int> w(3u, 0);
+-  EXPECT_EQ("0,0,0", fmt::format("{}", fmt::join(w, ",")));
+-  EXPECT_EQ("0,0,0",
+-            fmt::format("{}", fmt::join(noncopyable_range<int>(3u, 0), ",")));
+-
+   non_const_only_range<int> x(3u, 0);
+   EXPECT_EQ("0,0,0", fmt::format("{}", fmt::join(x, ",")));
+   EXPECT_EQ(
+@@ -228,23 +193,6 @@ TEST(RangesTest, JoinRange) {
+   EXPECT_EQ("0,0,0", fmt::format("{}", fmt::join(z, ",")));
+ }
+ 
+-TEST(RangesTest, Range) {
+-  noncopyable_range<int> w(3u, 0);
+-  EXPECT_EQ("{0, 0, 0}", fmt::format("{}", w));
+-  EXPECT_EQ("{0, 0, 0}", fmt::format("{}", noncopyable_range<int>(3u, 0)));
+-
+-  non_const_only_range<int> x(3u, 0);
+-  EXPECT_EQ("{0, 0, 0}", fmt::format("{}", x));
+-  EXPECT_EQ("{0, 0, 0}", fmt::format("{}", non_const_only_range<int>(3u, 0)));
+-
+-  std::vector<int> y(3u, 0);
+-  EXPECT_EQ("{0, 0, 0}", fmt::format("{}", y));
+-  EXPECT_EQ("{0, 0, 0}", fmt::format("{}", std::vector<int>(3u, 0)));
+-
+-  const std::vector<int> z(3u, 0);
+-  EXPECT_EQ("{0, 0, 0}", fmt::format("{}", z));
+-}
+-
+ #if !FMT_MSC_VER || FMT_MSC_VER >= 1927
+ struct unformattable {};
+ 

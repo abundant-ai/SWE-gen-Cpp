@@ -1,0 +1,704 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index c154a15..ba997e8 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -280,9 +280,6 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ namespace benchmark {
+ class BenchmarkReporter;
+ 
+-// Default number of minimum benchmark running time in seconds.
+-const char kDefaultMinTimeStr[] = "0.5s";
+-
+ BENCHMARK_EXPORT void PrintDefaultHelp();
+ 
+ BENCHMARK_EXPORT void Initialize(int* argc, char** argv,
+@@ -1102,12 +1099,11 @@ class BENCHMARK_EXPORT Benchmark {
+   Benchmark* MinWarmUpTime(double t);
+ 
+   // Specify the amount of iterations that should be run by this benchmark.
+-  // This option overrides the `benchmark_min_time` flag.
+   // REQUIRES: 'n > 0' and `MinTime` has not been called on this benchmark.
+   //
+   // NOTE: This function should only be used when *exact* iteration control is
+   //   needed and never to control or limit how long a benchmark runs, where
+-  // `--benchmark_min_time=<N>s` or `MinTime(...)` should be used instead.
++  // `--benchmark_min_time=N` or `MinTime(...)` should be used instead.
+   Benchmark* Iterations(IterationCount n);
+ 
+   // Specify the amount of times to repeat this benchmark. This option overrides
+@@ -1743,12 +1739,6 @@ class BENCHMARK_EXPORT BenchmarkReporter {
+   // to skip runs based on the context information.
+   virtual bool ReportContext(const Context& context) = 0;
+ 
+-  // Called once for each group of benchmark runs, gives information about
+-  // the configurations of the runs.
+-  virtual void ReportRunsConfig(double /*min_time*/,
+-                                bool /*has_explicit_iters*/,
+-                                IterationCount /*iters*/) {}
+-
+   // Called once for each group of benchmark runs, gives information about
+   // cpu-time and heap memory usage during the benchmark run. If the group
+   // of runs contained more than two entries then 'report' contains additional
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index e2d85fe..8e7408f 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -65,21 +65,12 @@ BM_DEFINE_bool(benchmark_list_tests, false);
+ // linked into the binary are run.
+ BM_DEFINE_string(benchmark_filter, "");
+ 
+-// Specification of how long to run the benchmark.
+-//
+-// It can be either an exact number of iterations (specified as `<integer>x`),
+-// or a minimum number of seconds (specified as `<float>s`). If the latter
+-// format (ie., min seconds) is used, the system may run the benchmark longer
+-// until the results are considered significant.
+-//
+-// For backward compatibility, the `s` suffix may be omitted, in which case,
+-// the specified number is interpreted as the number of seconds.
+-//
+-// For cpu-time based tests, this is the lower bound
++// Minimum number of seconds we should run benchmark before results are
++// considered significant.  For cpu-time based tests, this is the lower bound
+ // on the total cpu time used by all threads that make up the test.  For
+ // real-time based tests, this is the lower bound on the elapsed time of the
+ // benchmark execution, regardless of number of threads.
+-BM_DEFINE_string(benchmark_min_time, kDefaultMinTimeStr);
++BM_DEFINE_double(benchmark_min_time, 0.5);
+ 
+ // Minimum number of seconds a benchmark should be run before results should be
+ // taken into account. This e.g can be necessary for benchmarks of code which
+@@ -386,12 +377,6 @@ void RunBenchmarks(const std::vector<BenchmarkInstance>& benchmarks,
+       if (runner.HasRepeatsRemaining()) continue;
+       // FIXME: report each repetition separately, not all of them in bulk.
+ 
+-      display_reporter->ReportRunsConfig(
+-          runner.GetMinTime(), runner.HasExplicitIters(), runner.GetIters());
+-      if (file_reporter)
+-        file_reporter->ReportRunsConfig(
+-            runner.GetMinTime(), runner.HasExplicitIters(), runner.GetIters());
+-
+       RunResults run_results = runner.GetResults();
+ 
+       // Maybe calculate complexity report
+@@ -625,7 +610,7 @@ void ParseCommandLineFlags(int* argc, char** argv) {
+     if (ParseBoolFlag(argv[i], "benchmark_list_tests",
+                       &FLAGS_benchmark_list_tests) ||
+         ParseStringFlag(argv[i], "benchmark_filter", &FLAGS_benchmark_filter) ||
+-        ParseStringFlag(argv[i], "benchmark_min_time",
++        ParseDoubleFlag(argv[i], "benchmark_min_time",
+                         &FLAGS_benchmark_min_time) ||
+         ParseDoubleFlag(argv[i], "benchmark_min_warmup_time",
+                         &FLAGS_benchmark_min_warmup_time) ||
+@@ -686,7 +671,7 @@ void PrintDefaultHelp() {
+           "benchmark"
+           " [--benchmark_list_tests={true|false}]\n"
+           "          [--benchmark_filter=<regex>]\n"
+-          "          [--benchmark_min_time=`<integer>x` OR `<float>s` ]\n"
++          "          [--benchmark_min_time=<min_time>]\n"
+           "          [--benchmark_min_warmup_time=<min_warmup_time>]\n"
+           "          [--benchmark_repetitions=<num_repetitions>]\n"
+           "          [--benchmark_enable_random_interleaving={true|false}]\n"
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index eb0d9cb..04e5c2a 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -28,14 +28,11 @@
+ 
+ #include <algorithm>
+ #include <atomic>
+-#include <climits>
+-#include <cmath>
+ #include <condition_variable>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <fstream>
+ #include <iostream>
+-#include <limits>
+ #include <memory>
+ #include <string>
+ #include <thread>
+@@ -65,8 +62,6 @@ MemoryManager* memory_manager = nullptr;
+ namespace {
+ 
+ static constexpr IterationCount kMaxIterations = 1000000000;
+-const double kDefaultMinTime =
+-    std::strtod(::benchmark::kDefaultMinTimeStr, /*p_end*/ nullptr);
+ 
+ BenchmarkReporter::Run CreateRunReport(
+     const benchmark::internal::BenchmarkInstance& b,
+@@ -145,100 +140,23 @@ void RunInThread(const BenchmarkInstance* b, IterationCount iters,
+   manager->NotifyThreadComplete();
+ }
+ 
+-double ComputeMinTime(const benchmark::internal::BenchmarkInstance& b,
+-                      const BenchTimeType& iters_or_time) {
+-  if (!IsZero(b.min_time())) return b.min_time();
+-  // If the flag was used to specify number of iters, then return the default
+-  // min_time.
+-  if (iters_or_time.tag == BenchTimeType::ITERS) return kDefaultMinTime;
+-
+-  return iters_or_time.time;
+-}
+-
+-IterationCount ComputeIters(const benchmark::internal::BenchmarkInstance& b,
+-                            const BenchTimeType& iters_or_time) {
+-  if (b.iterations() != 0) return b.iterations();
+-
+-  // We've already concluded that this flag is currently used to pass
+-  // iters but do a check here again anyway.
+-  BM_CHECK(iters_or_time.tag == BenchTimeType::ITERS);
+-  return iters_or_time.iters;
+-}
+-
+ }  // end namespace
+ 
+-BenchTimeType ParseBenchMinTime(const std::string& value) {
+-  BenchTimeType ret;
+-
+-  if (value.empty()) {
+-    ret.tag = BenchTimeType::TIME;
+-    ret.time = 0.0;
+-    return ret;
+-  }
+-
+-  if (value.back() == 'x') {
+-    const char* iters_str = value.c_str();
+-    char* p_end;
+-    // Reset errno before it's changed by strtol.
+-    errno = 0;
+-    IterationCount num_iters = std::strtol(iters_str, &p_end, 10);
+-
+-    // After a valid parse, p_end should have been set to
+-    // point to the 'x' suffix.
+-    BM_CHECK(errno == 0 && p_end != nullptr && *p_end == 'x')
+-        << "Malformed iters value passed to --benchmark_min_time: `" << value
+-        << "`. Expected --benchmark_min_time=<integer>x.";
+-
+-    ret.tag = BenchTimeType::ITERS;
+-    ret.iters = num_iters;
+-    return ret;
+-  }
+-
+-  const char* time_str = value.c_str();
+-  bool has_suffix = value.back() == 's';
+-  if (!has_suffix) {
+-    BM_VLOG(0) << "Value passed to --benchmark_min_time should have a suffix. "
+-                  "Eg., `30s` for 30-seconds.";
+-  }
+-
+-  char* p_end;
+-  // Reset errno before it's changed by strtod.
+-  errno = 0;
+-  double min_time = std::strtod(time_str, &p_end);
+-
+-  // After a successfull parse, p_end should point to the suffix 's'
+-  // or the end of the string, if the suffix was omitted.
+-  BM_CHECK(errno == 0 && p_end != nullptr &&
+-           (has_suffix && *p_end == 's' || *p_end == '\0'))
+-      << "Malformed seconds value passed to --benchmark_min_time: `" << value
+-      << "`. Expected --benchmark_min_time=<float>x.";
+-
+-  ret.tag = BenchTimeType::TIME;
+-  ret.time = min_time;
+-
+-  return ret;
+-}
+-
+ BenchmarkRunner::BenchmarkRunner(
+     const benchmark::internal::BenchmarkInstance& b_,
+     BenchmarkReporter::PerFamilyRunReports* reports_for_family_)
+     : b(b_),
+       reports_for_family(reports_for_family_),
+-      parsed_benchtime_flag(ParseBenchMinTime(FLAGS_benchmark_min_time)),
+-      min_time(ComputeMinTime(b_, parsed_benchtime_flag)),
++      min_time(!IsZero(b.min_time()) ? b.min_time() : FLAGS_benchmark_min_time),
+       min_warmup_time((!IsZero(b.min_time()) && b.min_warmup_time() > 0.0)
+                           ? b.min_warmup_time()
+                           : FLAGS_benchmark_min_warmup_time),
+       warmup_done(!(min_warmup_time > 0.0)),
+       repeats(b.repetitions() != 0 ? b.repetitions()
+                                    : FLAGS_benchmark_repetitions),
+-      has_explicit_iteration_count(b.iterations() != 0 ||
+-                                   parsed_benchtime_flag.tag ==
+-                                       BenchTimeType::ITERS),
++      has_explicit_iteration_count(b.iterations() != 0),
+       pool(b.threads() - 1),
+-      iters(has_explicit_iteration_count
+-                ? ComputeIters(b_, parsed_benchtime_flag)
+-                : 1),
++      iters(has_explicit_iteration_count ? b.iterations() : 1),
+       perf_counters_measurement(StrSplit(FLAGS_benchmark_perf_counters, ',')),
+       perf_counters_measurement_ptr(perf_counters_measurement.IsValid()
+                                         ? &perf_counters_measurement
+diff --git a/src/benchmark_runner.h b/src/benchmark_runner.h
+index 9d80653..0174bd3 100644
+--- a/src/benchmark_runner.h
++++ b/src/benchmark_runner.h
+@@ -25,7 +25,7 @@
+ 
+ namespace benchmark {
+ 
+-BM_DECLARE_string(benchmark_min_time);
++BM_DECLARE_double(benchmark_min_time);
+ BM_DECLARE_double(benchmark_min_warmup_time);
+ BM_DECLARE_int32(benchmark_repetitions);
+ BM_DECLARE_bool(benchmark_report_aggregates_only);
+@@ -44,17 +44,6 @@ struct RunResults {
+   bool file_report_aggregates_only = false;
+ };
+ 
+-struct BENCHMARK_EXPORT BenchTimeType {
+-  enum { ITERS, TIME } tag;
+-  union {
+-    IterationCount iters;
+-    double time;
+-  };
+-};
+-
+-BENCHMARK_EXPORT
+-BenchTimeType ParseBenchMinTime(const std::string& value);
+-
+ class BenchmarkRunner {
+  public:
+   BenchmarkRunner(const benchmark::internal::BenchmarkInstance& b_,
+@@ -74,19 +63,12 @@ class BenchmarkRunner {
+     return reports_for_family;
+   }
+ 
+-  double GetMinTime() const { return min_time; }
+-
+-  bool HasExplicitIters() const { return has_explicit_iteration_count; }
+-
+-  IterationCount GetIters() const { return iters; }
+-
+  private:
+   RunResults run_results;
+ 
+   const benchmark::internal::BenchmarkInstance& b;
+   BenchmarkReporter::PerFamilyRunReports* reports_for_family;
+ 
+-  BenchTimeType parsed_benchtime_flag;
+   const double min_time;
+   const double min_warmup_time;
+   bool warmup_done;
+diff --git a/test/BUILD b/test/BUILD
+index 8262d08..0a66bf3 100644
+--- a/test/BUILD
++++ b/test/BUILD
+@@ -25,14 +25,14 @@ PER_SRC_COPTS = {
+     "donotoptimize_test.cc": ["-O3"],
+ }
+ 
+-TEST_ARGS = ["--benchmark_min_time=0.01s"]
++TEST_ARGS = ["--benchmark_min_time=0.01"]
+ 
+-PER_SRC_TEST_ARGS = {
++PER_SRC_TEST_ARGS = ({
+     "user_counters_tabular_test.cc": ["--benchmark_counters_tabular=true"],
+     "repetitions_test.cc": [" --benchmark_repetitions=3"],
+-    "spec_arg_test.cc": ["--benchmark_filter=BM_NotChosen"],
+-    "spec_arg_verbosity_test.cc": ["--v=42"],
+-}
++    "spec_arg_test.cc" : ["--benchmark_filter=BM_NotChosen"],
++    "spec_arg_verbosity_test.cc" : ["--v=42"],
++})
+ 
+ cc_library(
+     name = "output_test_helper",
+@@ -58,14 +58,14 @@ cc_library(
+         copts = select({
+             "//:windows": [],
+             "//conditions:default": TEST_COPTS,
+-        }) + PER_SRC_COPTS.get(test_src, []),
++        }) + PER_SRC_COPTS.get(test_src, []) ,
+         deps = [
+             ":output_test_helper",
+             "//:benchmark",
+             "//:benchmark_internal_headers",
+             "@com_google_googletest//:gtest",
+             "@com_google_googletest//:gtest_main",
+-        ],
++        ]
+         # FIXME: Add support for assembly tests to bazel.
+         # See Issue #556
+         # https://github.com/google/benchmark/issues/556
+@@ -85,10 +85,6 @@ cc_test(
+     size = "small",
+     srcs = ["cxx03_test.cc"],
+     copts = TEST_COPTS + ["-std=c++03"],
+-    target_compatible_with = select({
+-        "//:windows": ["@platforms//:incompatible"],
+-        "//conditions:default": [],
+-    }),
+     deps = [
+         ":output_test_helper",
+         "//:benchmark",
+@@ -96,6 +92,10 @@ cc_test(
+         "@com_google_googletest//:gtest",
+         "@com_google_googletest//:gtest_main",
+     ],
++    target_compatible_with = select({
++        "//:windows": ["@platforms//:incompatible"],
++        "//conditions:default": [],
++    })
+ )
+ 
+ cc_test(
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index cfef13b..a49ab19 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -61,7 +61,7 @@ endmacro(compile_output_test)
+ 
+ # Demonstration executable
+ compile_benchmark_test(benchmark_test)
+-add_test(NAME benchmark COMMAND benchmark_test --benchmark_min_time=0.01s)
++add_test(NAME benchmark COMMAND benchmark_test --benchmark_min_time=0.01)
+ 
+ compile_benchmark_test(spec_arg_test)
+ add_test(NAME spec_arg COMMAND spec_arg_test --benchmark_filter=BM_NotChosen)
+@@ -74,16 +74,10 @@ add_test(NAME benchmark_setup_teardown COMMAND benchmark_setup_teardown_test)
+ 
+ compile_benchmark_test(filter_test)
+ macro(add_filter_test name filter expect)
+-  add_test(NAME ${name} COMMAND filter_test --benchmark_min_time=0.01s --benchmark_filter=${filter} ${expect})
++  add_test(NAME ${name} COMMAND filter_test --benchmark_min_time=0.01 --benchmark_filter=${filter} ${expect})
+   add_test(NAME ${name}_list_only COMMAND filter_test --benchmark_list_tests --benchmark_filter=${filter} ${expect})
+ endmacro(add_filter_test)
+ 
+-compile_benchmark_test(benchmark_min_time_flag_time_test)
+-add_test(NAME min_time_flag_time COMMAND benchmark_min_time_flag_time_test)
+-
+-compile_benchmark_test(benchmark_min_time_flag_iters_test)
+-add_test(NAME min_time_flag_iters COMMAND benchmark_min_time_flag_iters_test)
+-
+ add_filter_test(filter_simple "Foo" 3)
+ add_filter_test(filter_simple_negative "-Foo" 2)
+ add_filter_test(filter_suffix "BM_.*" 4)
+@@ -104,19 +98,19 @@ add_filter_test(filter_regex_end ".*Ba$" 1)
+ add_filter_test(filter_regex_end_negative "-.*Ba$" 4)
+ 
+ compile_benchmark_test(options_test)
+-add_test(NAME options_benchmarks COMMAND options_test --benchmark_min_time=0.01s)
++add_test(NAME options_benchmarks COMMAND options_test --benchmark_min_time=0.01)
+ 
+ compile_benchmark_test(basic_test)
+-add_test(NAME basic_benchmark COMMAND basic_test --benchmark_min_time=0.01s)
++add_test(NAME basic_benchmark COMMAND basic_test --benchmark_min_time=0.01)
+ 
+ compile_output_test(repetitions_test)
+-add_test(NAME repetitions_benchmark COMMAND repetitions_test --benchmark_min_time=0.01s --benchmark_repetitions=3)
++add_test(NAME repetitions_benchmark COMMAND repetitions_test --benchmark_min_time=0.01 --benchmark_repetitions=3)
+ 
+ compile_benchmark_test(diagnostics_test)
+-add_test(NAME diagnostics_test COMMAND diagnostics_test --benchmark_min_time=0.01s)
++add_test(NAME diagnostics_test COMMAND diagnostics_test --benchmark_min_time=0.01)
+ 
+ compile_benchmark_test(skip_with_error_test)
+-add_test(NAME skip_with_error_test COMMAND skip_with_error_test --benchmark_min_time=0.01s)
++add_test(NAME skip_with_error_test COMMAND skip_with_error_test --benchmark_min_time=0.01)
+ 
+ compile_benchmark_test(donotoptimize_test)
+ # Some of the issues with DoNotOptimize only occur when optimization is enabled
+@@ -124,55 +118,55 @@ check_cxx_compiler_flag(-O3 BENCHMARK_HAS_O3_FLAG)
+ if (BENCHMARK_HAS_O3_FLAG)
+   set_target_properties(donotoptimize_test PROPERTIES COMPILE_FLAGS "-O3")
+ endif()
+-add_test(NAME donotoptimize_test COMMAND donotoptimize_test --benchmark_min_time=0.01s)
++add_test(NAME donotoptimize_test COMMAND donotoptimize_test --benchmark_min_time=0.01)
+ 
+ compile_benchmark_test(fixture_test)
+-add_test(NAME fixture_test COMMAND fixture_test --benchmark_min_time=0.01s)
++add_test(NAME fixture_test COMMAND fixture_test --benchmark_min_time=0.01)
+ 
+ compile_benchmark_test(register_benchmark_test)
+-add_test(NAME register_benchmark_test COMMAND register_benchmark_test --benchmark_min_time=0.01s)
++add_test(NAME register_benchmark_test COMMAND register_benchmark_test --benchmark_min_time=0.01)
+ 
+ compile_benchmark_test(map_test)
+-add_test(NAME map_test COMMAND map_test --benchmark_min_time=0.01s)
++add_test(NAME map_test COMMAND map_test --benchmark_min_time=0.01)
+ 
+ compile_benchmark_test(multiple_ranges_test)
+-add_test(NAME multiple_ranges_test COMMAND multiple_ranges_test --benchmark_min_time=0.01s)
++add_test(NAME multiple_ranges_test COMMAND multiple_ranges_test --benchmark_min_time=0.01)
+ 
+ compile_benchmark_test(args_product_test)
+-add_test(NAME args_product_test COMMAND args_product_test --benchmark_min_time=0.01s)
++add_test(NAME args_product_test COMMAND args_product_test --benchmark_min_time=0.01)
+ 
+ compile_benchmark_test_with_main(link_main_test)
+-add_test(NAME link_main_test COMMAND link_main_test --benchmark_min_time=0.01s)
++add_test(NAME link_main_test COMMAND link_main_test --benchmark_min_time=0.01)
+ 
+ compile_output_test(reporter_output_test)
+-add_test(NAME reporter_output_test COMMAND reporter_output_test --benchmark_min_time=0.01s)
++add_test(NAME reporter_output_test COMMAND reporter_output_test --benchmark_min_time=0.01)
+ 
+ compile_output_test(templated_fixture_test)
+-add_test(NAME templated_fixture_test COMMAND templated_fixture_test --benchmark_min_time=0.01s)
++add_test(NAME templated_fixture_test COMMAND templated_fixture_test --benchmark_min_time=0.01)
+ 
+ compile_output_test(user_counters_test)
+-add_test(NAME user_counters_test COMMAND user_counters_test --benchmark_min_time=0.01s)
++add_test(NAME user_counters_test COMMAND user_counters_test --benchmark_min_time=0.01)
+ 
+ compile_output_test(perf_counters_test)
+-add_test(NAME perf_counters_test COMMAND perf_counters_test --benchmark_min_time=0.01s --benchmark_perf_counters=CYCLES,BRANCHES)
++add_test(NAME perf_counters_test COMMAND perf_counters_test --benchmark_min_time=0.01 --benchmark_perf_counters=CYCLES,BRANCHES)
+ 
+ compile_output_test(internal_threading_test)
+-add_test(NAME internal_threading_test COMMAND internal_threading_test --benchmark_min_time=0.01s)
++add_test(NAME internal_threading_test COMMAND internal_threading_test --benchmark_min_time=0.01)
+ 
+ compile_output_test(report_aggregates_only_test)
+-add_test(NAME report_aggregates_only_test COMMAND report_aggregates_only_test --benchmark_min_time=0.01s)
++add_test(NAME report_aggregates_only_test COMMAND report_aggregates_only_test --benchmark_min_time=0.01)
+ 
+ compile_output_test(display_aggregates_only_test)
+-add_test(NAME display_aggregates_only_test COMMAND display_aggregates_only_test --benchmark_min_time=0.01s)
++add_test(NAME display_aggregates_only_test COMMAND display_aggregates_only_test --benchmark_min_time=0.01)
+ 
+ compile_output_test(user_counters_tabular_test)
+-add_test(NAME user_counters_tabular_test COMMAND user_counters_tabular_test --benchmark_counters_tabular=true --benchmark_min_time=0.01s)
++add_test(NAME user_counters_tabular_test COMMAND user_counters_tabular_test --benchmark_counters_tabular=true --benchmark_min_time=0.01)
+ 
+ compile_output_test(user_counters_thousands_test)
+-add_test(NAME user_counters_thousands_test COMMAND user_counters_thousands_test --benchmark_min_time=0.01s)
++add_test(NAME user_counters_thousands_test COMMAND user_counters_thousands_test --benchmark_min_time=0.01)
+ 
+ compile_output_test(memory_manager_test)
+-add_test(NAME memory_manager_test COMMAND memory_manager_test --benchmark_min_time=0.01s)
++add_test(NAME memory_manager_test COMMAND memory_manager_test --benchmark_min_time=0.01)
+ 
+ # MSVC does not allow to set the language standard to C++98/03.
+ if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+@@ -197,14 +191,14 @@ if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+     set(DISABLE_LTO_WARNINGS "${DISABLE_LTO_WARNINGS} -Wno-lto-type-mismatch")
+   endif()
+   set_target_properties(cxx03_test PROPERTIES LINK_FLAGS "${DISABLE_LTO_WARNINGS}")
+-  add_test(NAME cxx03 COMMAND cxx03_test --benchmark_min_time=0.01s)
++  add_test(NAME cxx03 COMMAND cxx03_test --benchmark_min_time=0.01)
+ endif()
+ 
+ # Attempt to work around flaky test failures when running on Appveyor servers.
+ if (DEFINED ENV{APPVEYOR})
+-  set(COMPLEXITY_MIN_TIME "0.5s")
++  set(COMPLEXITY_MIN_TIME "0.5")
+ else()
+-  set(COMPLEXITY_MIN_TIME "0.01s")
++  set(COMPLEXITY_MIN_TIME "0.01")
+ endif()
+ compile_output_test(complexity_test)
+ add_test(NAME complexity_benchmark COMMAND complexity_test --benchmark_min_time=${COMPLEXITY_MIN_TIME})
+@@ -233,7 +227,6 @@ if (BENCHMARK_ENABLE_GTEST_TESTS)
+   add_gtest(string_util_gtest)
+   add_gtest(perf_counters_gtest)
+   add_gtest(time_unit_gtest)
+-  add_gtest(min_time_parse_gtest)
+ endif(BENCHMARK_ENABLE_GTEST_TESTS)
+ 
+ ###############################################################################
+diff --git a/test/benchmark_min_time_flag_iters_test.cc b/test/benchmark_min_time_flag_iters_test.cc
+deleted file mode 100644
+index 4ed768c..0000000
+--- a/test/benchmark_min_time_flag_iters_test.cc
++++ /dev/null
+@@ -1,64 +0,0 @@
+-#include <cassert>
+-#include <cstdlib>
+-#include <cstring>
+-#include <iostream>
+-#include <string>
+-#include <vector>
+-
+-#include "benchmark/benchmark.h"
+-
+-// Tests that we can specify the number of iterations with
+-// --benchmark_min_time=<NUM>x.
+-namespace {
+-
+-class TestReporter : public benchmark::ConsoleReporter {
+- public:
+-  virtual bool ReportContext(const Context& context) BENCHMARK_OVERRIDE {
+-    return ConsoleReporter::ReportContext(context);
+-  };
+-
+-  virtual void ReportRuns(const std::vector<Run>& report) BENCHMARK_OVERRIDE {
+-    assert(report.size() == 1);
+-    iter_nums_.push_back(report[0].iterations);
+-    ConsoleReporter::ReportRuns(report);
+-  };
+-
+-  TestReporter() {}
+-
+-  virtual ~TestReporter() {}
+-
+-  const std::vector<int>& GetIters() const { return iter_nums_; }
+-
+- private:
+-  std::vector<int> iter_nums_;
+-};
+-
+-}  // end namespace
+-
+-static void BM_MyBench(benchmark::State& state) {
+-  for (auto s : state) {
+-  }
+-}
+-BENCHMARK(BM_MyBench);
+-
+-int main(int argc, char** argv) {
+-  // Make a fake argv and append the new --benchmark_min_time=<foo> to it.
+-  int fake_argc = argc + 1;
+-  const char** fake_argv = new const char*[fake_argc];
+-  for (int i = 0; i < argc; ++i) fake_argv[i] = argv[i];
+-  fake_argv[argc] = "--benchmark_min_time=4x";
+-
+-  benchmark::Initialize(&fake_argc, const_cast<char**>(fake_argv));
+-
+-  TestReporter test_reporter;
+-  const size_t returned_count =
+-      benchmark::RunSpecifiedBenchmarks(&test_reporter, "BM_MyBench");
+-  assert(returned_count == 1);
+-
+-  // Check the executed iters.
+-  const std::vector<int> iters = test_reporter.GetIters();
+-  assert(!iters.empty() && iters[0] == 4);
+-
+-  delete[] fake_argv;
+-  return 0;
+-}
+diff --git a/test/benchmark_min_time_flag_time_test.cc b/test/benchmark_min_time_flag_time_test.cc
+deleted file mode 100644
+index b602031..0000000
+--- a/test/benchmark_min_time_flag_time_test.cc
++++ /dev/null
+@@ -1,90 +0,0 @@
+-#include <cassert>
+-#include <climits>
+-#include <cmath>
+-#include <cstdlib>
+-#include <cstring>
+-#include <iostream>
+-#include <string>
+-#include <vector>
+-
+-#include "benchmark/benchmark.h"
+-
+-// Tests that we can specify the min time with
+-// --benchmark_min_time=<NUM> (no suffix needed) OR
+-// --benchmark_min_time=<NUM>s
+-namespace {
+-
+-// This is from benchmark.h
+-typedef int64_t IterationCount;
+-
+-class TestReporter : public benchmark::ConsoleReporter {
+- public:
+-  virtual bool ReportContext(const Context& context) BENCHMARK_OVERRIDE {
+-    return ConsoleReporter::ReportContext(context);
+-  };
+-
+-  virtual void ReportRuns(const std::vector<Run>& report) BENCHMARK_OVERRIDE {
+-    assert(report.size() == 1);
+-    ConsoleReporter::ReportRuns(report);
+-  };
+-
+-  virtual void ReportRunsConfig(double min_time, bool has_explicit_iters,
+-                                IterationCount iters) BENCHMARK_OVERRIDE {
+-    min_times_.push_back(min_time);
+-  }
+-
+-  TestReporter() {}
+-
+-  virtual ~TestReporter() {}
+-
+-  const std::vector<double>& GetMinTimes() const { return min_times_; }
+-
+- private:
+-  std::vector<double> min_times_;
+-};
+-
+-bool AlmostEqual(double a, double b) {
+-  return std::fabs(a - b) < std::numeric_limits<double>::epsilon();
+-}
+-
+-void DoTestHelper(int* argc, const char** argv, double expected) {
+-  benchmark::Initialize(argc, const_cast<char**>(argv));
+-
+-  TestReporter test_reporter;
+-  const size_t returned_count =
+-      benchmark::RunSpecifiedBenchmarks(&test_reporter, "BM_MyBench");
+-  assert(returned_count == 1);
+-
+-  // Check the min_time
+-  const std::vector<double>& min_times = test_reporter.GetMinTimes();
+-  assert(!min_times.empty() && AlmostEqual(min_times[0], expected));
+-}
+-
+-}  // end namespace
+-
+-static void BM_MyBench(benchmark::State& state) {
+-  for (auto s : state) {
+-  }
+-}
+-BENCHMARK(BM_MyBench);
+-
+-int main(int argc, char** argv) {
+-  // Make a fake argv and append the new --benchmark_min_time=<foo> to it.
+-  int fake_argc = argc + 1;
+-  const char** fake_argv = new const char*[fake_argc];
+-
+-  for (int i = 0; i < argc; ++i) fake_argv[i] = argv[i];
+-
+-  const char* no_suffix = "--benchmark_min_time=4";
+-  const char* with_suffix = "--benchmark_min_time=4.0s";
+-  double expected = 4.0;
+-
+-  fake_argv[argc] = no_suffix;
+-  DoTestHelper(&fake_argc, fake_argv, expected);
+-
+-  fake_argv[argc] = with_suffix;
+-  DoTestHelper(&fake_argc, fake_argv, expected);
+-
+-  delete[] fake_argv;
+-  return 0;
+-}
+diff --git a/test/min_time_parse_gtest.cc b/test/min_time_parse_gtest.cc
+deleted file mode 100644
+index e2bdf67..0000000
+--- a/test/min_time_parse_gtest.cc
++++ /dev/null
+@@ -1,30 +0,0 @@
+-#include "../src/benchmark_runner.h"
+-#include "gtest/gtest.h"
+-
+-namespace {
+-
+-TEST(ParseMinTimeTest, InvalidInput) {
+-#if GTEST_HAS_DEATH_TEST
+-  // Tests only runnable in debug mode (when BM_CHECK is enabled).
+-#ifndef NDEBUG
+-#ifndef TEST_BENCHMARK_LIBRARY_HAS_NO_ASSERTIONS
+-  ASSERT_DEATH_IF_SUPPORTED(
+-      { benchmark::internal::ParseBenchMinTime("abc"); },
+-      "Malformed seconds value passed to --benchmark_min_time: `abc`");
+-
+-  ASSERT_DEATH_IF_SUPPORTED(
+-      { benchmark::internal::ParseBenchMinTime("123ms"); },
+-      "Malformed seconds value passed to --benchmark_min_time: `123ms`");
+-
+-  ASSERT_DEATH_IF_SUPPORTED(
+-      { benchmark::internal::ParseBenchMinTime("1z"); },
+-      "Malformed seconds value passed to --benchmark_min_time: `1z`");
+-
+-  ASSERT_DEATH_IF_SUPPORTED(
+-      { benchmark::internal::ParseBenchMinTime("1hs"); },
+-      "Malformed seconds value passed to --benchmark_min_time: `1hs`");
+-#endif
+-#endif
+-#endif
+-}
+-}  // namespace

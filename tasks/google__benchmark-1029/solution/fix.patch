@@ -1,0 +1,145 @@
+diff --git a/AUTHORS b/AUTHORS
+index 89205a1..e353b53 100644
+--- a/AUTHORS
++++ b/AUTHORS
+@@ -13,6 +13,7 @@ Alex Steele <steeleal123@gmail.com>
+ Andriy Berestovskyy <berestovskyy@gmail.com>
+ Arne Beer <arne@twobeer.de>
+ Carto
++Christian Wassermann <christian_wassermann@web.de>
+ Christopher Seymour <chris.j.seymour@hotmail.com>
+ Colin Braley <braley.colin@gmail.com>
+ Daniel Harvey <danielharvey458@gmail.com>
+diff --git a/CONTRIBUTORS b/CONTRIBUTORS
+index 88f7eee..6beed71 100644
+--- a/CONTRIBUTORS
++++ b/CONTRIBUTORS
+@@ -28,6 +28,7 @@ Andriy Berestovskyy <berestovskyy@gmail.com>
+ Arne Beer <arne@twobeer.de>
+ Billy Robert O'Neal III <billy.oneal@gmail.com> <bion@microsoft.com>
+ Chris Kennelly <ckennelly@google.com> <ckennelly@ckennelly.com>
++Christian Wassermann <christian_wassermann@web.de>
+ Christopher Seymour <chris.j.seymour@hotmail.com>
+ Colin Braley <braley.colin@gmail.com>
+ Cyrille Faucheux <cyrille.faucheux@gmail.com>
+diff --git a/README.md b/README.md
+index 314feee..41a1bdf 100644
+--- a/README.md
++++ b/README.md
+@@ -548,6 +548,29 @@ pair.
+ BENCHMARK(BM_SetInsert)->Ranges({{1<<10, 8<<10}, {128, 512}});
+ ```
+ 
++Some benchmarks may require specific argument values that cannot be expressed
++with `Ranges`. In this case, `ArgsProduct` offers the ability to generate a
++benchmark input for each combination in the product of the supplied vectors.
++
++```c++
++BENCHMARK(BM_SetInsert)
++    ->ArgsProduct({{1<<10, 3<<10, 8<<10}, {20, 40, 60, 80}})
++// would generate the same benchmark arguments as
++BENCHMARK(BM_SetInsert)
++    ->Args({1<<10, 20})
++    ->Args({3<<10, 20})
++    ->Args({8<<10, 20})
++    ->Args({3<<10, 40})
++    ->Args({8<<10, 40})
++    ->Args({1<<10, 40})
++    ->Args({1<<10, 60})
++    ->Args({3<<10, 60})
++    ->Args({8<<10, 60})
++    ->Args({1<<10, 80})
++    ->Args({3<<10, 80})
++    ->Args({8<<10, 80});
++```
++
+ For more complex patterns of inputs, passing a custom function to `Apply` allows
+ programmatic specification of an arbitrary set of arguments on which to run the
+ benchmark. The following example enumerates a dense range on one parameter,
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index da638f9..01f1262 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -828,6 +828,11 @@ class Benchmark {
+   // REQUIRES: The function passed to the constructor must accept arg1, arg2 ...
+   Benchmark* Ranges(const std::vector<std::pair<int64_t, int64_t> >& ranges);
+ 
++  // Run this benchmark once for each combination of values in the (cartesian)
++  // product of the supplied argument lists.
++  // REQUIRES: The function passed to the constructor must accept arg1, arg2 ...
++  Benchmark* ArgsProduct(const std::vector<std::vector<int64_t> >& arglists);
++
+   // Equivalent to ArgNames({name})
+   Benchmark* ArgName(const std::string& name);
+ 
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index cca39b2..65d9944 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -31,6 +31,7 @@
+ #include <fstream>
+ #include <iostream>
+ #include <memory>
++#include <numeric>
+ #include <sstream>
+ #include <thread>
+ 
+@@ -303,33 +304,41 @@ Benchmark* Benchmark::Ranges(
+     const std::vector<std::pair<int64_t, int64_t>>& ranges) {
+   CHECK(ArgsCnt() == -1 || ArgsCnt() == static_cast<int>(ranges.size()));
+   std::vector<std::vector<int64_t>> arglists(ranges.size());
+-  std::size_t total = 1;
+   for (std::size_t i = 0; i < ranges.size(); i++) {
+     AddRange(&arglists[i], ranges[i].first, ranges[i].second,
+              range_multiplier_);
+-    total *= arglists[i].size();
+   }
+ 
+-  std::vector<std::size_t> ctr(arglists.size(), 0);
++  ArgsProduct(arglists);
+ 
+-  for (std::size_t i = 0; i < total; i++) {
+-    std::vector<int64_t> tmp;
+-    tmp.reserve(arglists.size());
+-
+-    for (std::size_t j = 0; j < arglists.size(); j++) {
+-      tmp.push_back(arglists[j].at(ctr[j]));
+-    }
++  return this;
++}
+ 
+-    args_.push_back(std::move(tmp));
++Benchmark* Benchmark::ArgsProduct(
++    const std::vector<std::vector<int64_t>>& arglists) {
++  CHECK(ArgsCnt() == -1 || ArgsCnt() == static_cast<int>(arglists.size()));
+ 
+-    for (std::size_t j = 0; j < arglists.size(); j++) {
+-      if (ctr[j] + 1 < arglists[j].size()) {
+-        ++ctr[j];
+-        break;
+-      }
+-      ctr[j] = 0;
++  std::vector<std::size_t> indices(arglists.size());
++  const std::size_t total = std::accumulate(
++      std::begin(arglists), std::end(arglists), std::size_t{1},
++      [](const std::size_t res, const std::vector<int64_t>& arglist) {
++        return res * arglist.size();
++      });
++  std::vector<int64_t> args;
++  args.reserve(arglists.size());
++  for (std::size_t i = 0; i < total; i++) {
++    for (std::size_t arg = 0; arg < arglists.size(); arg++) {
++      args.push_back(arglists[arg][indices[arg]]);
+     }
++    args_.push_back(args);
++    args.clear();
++
++    std::size_t arg = 0;
++    do {
++      indices[arg] = (indices[arg] + 1) % arglists[arg].size();
++    } while (indices[arg++] == 0 && arg < arglists.size());
+   }
++
+   return this;
+ }
+ 

@@ -1,0 +1,379 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index ad7c92e..bb29c73 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -667,6 +667,16 @@ enum AggregationReportMode
+       ARM_FileReportAggregatesOnly | ARM_DisplayReportAggregatesOnly
+ };
+ 
++enum Skipped
++#if defined(BENCHMARK_HAS_CXX11)
++    : unsigned
++#endif
++{
++  NotSkipped = 0,
++  SkippedWithMessage,
++  SkippedWithError
++};
++
+ }  // namespace internal
+ 
+ // State is passed to a running Benchmark and contains state for the
+@@ -703,8 +713,8 @@ class BENCHMARK_EXPORT State {
+   //   }
+   bool KeepRunningBatch(IterationCount n);
+ 
+-  // REQUIRES: timer is running and 'SkipWithError(...)' has not been called
+-  //           by the current thread.
++  // REQUIRES: timer is running and 'SkipWithMessage(...)' or
++  //   'SkipWithError(...)' has not been called by the current thread.
+   // Stop the benchmark timer.  If not called, the timer will be
+   // automatically stopped after the last iteration of the benchmark loop.
+   //
+@@ -719,8 +729,8 @@ class BENCHMARK_EXPORT State {
+   // within each benchmark iteration, if possible.
+   void PauseTiming();
+ 
+-  // REQUIRES: timer is not running and 'SkipWithError(...)' has not been called
+-  //           by the current thread.
++  // REQUIRES: timer is not running and 'SkipWithMessage(...)' or
++  //   'SkipWithError(...)' has not been called by the current thread.
+   // Start the benchmark timer.  The timer is NOT running on entrance to the
+   // benchmark function. It begins running after control flow enters the
+   // benchmark loop.
+@@ -730,8 +740,30 @@ class BENCHMARK_EXPORT State {
+   // within each benchmark iteration, if possible.
+   void ResumeTiming();
+ 
+-  // REQUIRES: 'SkipWithError(...)' has not been called previously by the
+-  //            current thread.
++  // REQUIRES: 'SkipWithMessage(...)' or 'SkipWithError(...)' has not been
++  //            called previously by the current thread.
++  // Report the benchmark as resulting in being skipped with the specified
++  // 'msg'.
++  // After this call the user may explicitly 'return' from the benchmark.
++  //
++  // If the ranged-for style of benchmark loop is used, the user must explicitly
++  // break from the loop, otherwise all future iterations will be run.
++  // If the 'KeepRunning()' loop is used the current thread will automatically
++  // exit the loop at the end of the current iteration.
++  //
++  // For threaded benchmarks only the current thread stops executing and future
++  // calls to `KeepRunning()` will block until all threads have completed
++  // the `KeepRunning()` loop. If multiple threads report being skipped only the
++  // first skip message is used.
++  //
++  // NOTE: Calling 'SkipWithMessage(...)' does not cause the benchmark to exit
++  // the current scope immediately. If the function is called from within
++  // the 'KeepRunning()' loop the current iteration will finish. It is the users
++  // responsibility to exit the scope as needed.
++  void SkipWithMessage(const char* msg);
++
++  // REQUIRES: 'SkipWithMessage(...)' or 'SkipWithError(...)' has not been
++  //            called previously by the current thread.
+   // Report the benchmark as resulting in an error with the specified 'msg'.
+   // After this call the user may explicitly 'return' from the benchmark.
+   //
+@@ -751,8 +783,11 @@ class BENCHMARK_EXPORT State {
+   // responsibility to exit the scope as needed.
+   void SkipWithError(const char* msg);
+ 
++  // Returns true if 'SkipWithMessage(...)' or 'SkipWithError(...)' was called.
++  bool skipped() const { return internal::NotSkipped != skipped_; }
++
+   // Returns true if an error has been reported with 'SkipWithError(...)'.
+-  bool error_occurred() const { return error_occurred_; }
++  bool error_occurred() const { return internal::SkippedWithError == skipped_; }
+ 
+   // REQUIRES: called exactly once per iteration of the benchmarking loop.
+   // Set the manually measured time for this benchmark iteration, which
+@@ -878,7 +913,7 @@ class BENCHMARK_EXPORT State {
+  private:
+   bool started_;
+   bool finished_;
+-  bool error_occurred_;
++  internal::Skipped skipped_;
+ 
+   // items we don't need on the first cache line
+   std::vector<int64_t> range_;
+@@ -933,7 +968,7 @@ inline BENCHMARK_ALWAYS_INLINE bool State::KeepRunningInternal(IterationCount n,
+   }
+   if (!started_) {
+     StartKeepRunning();
+-    if (!error_occurred_ && total_iterations_ >= n) {
++    if (!skipped() && total_iterations_ >= n) {
+       total_iterations_ -= n;
+       return true;
+     }
+@@ -963,7 +998,7 @@ struct State::StateIterator {
+ 
+   BENCHMARK_ALWAYS_INLINE
+   explicit StateIterator(State* st)
+-      : cached_(st->error_occurred_ ? 0 : st->max_iterations), parent_(st) {}
++      : cached_(st->skipped() ? 0 : st->max_iterations), parent_(st) {}
+ 
+  public:
+   BENCHMARK_ALWAYS_INLINE
+@@ -1662,7 +1697,7 @@ class BENCHMARK_EXPORT BenchmarkReporter {
+     Run()
+         : run_type(RT_Iteration),
+           aggregate_unit(kTime),
+-          error_occurred(false),
++          skipped(internal::NotSkipped),
+           iterations(1),
+           threads(1),
+           time_unit(GetDefaultTimeUnit()),
+@@ -1685,8 +1720,8 @@ class BENCHMARK_EXPORT BenchmarkReporter {
+     std::string aggregate_name;
+     StatisticUnit aggregate_unit;
+     std::string report_label;  // Empty if not set by benchmark.
+-    bool error_occurred;
+-    std::string error_message;
++    internal::Skipped skipped;
++    std::string skip_message;
+ 
+     IterationCount iterations;
+     int64_t threads;
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index b8eda00..f06f368 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -166,7 +166,7 @@ State::State(std::string name, IterationCount max_iters,
+       max_iterations(max_iters),
+       started_(false),
+       finished_(false),
+-      error_occurred_(false),
++      skipped_(internal::NotSkipped),
+       range_(ranges),
+       complexity_n_(0),
+       name_(std::move(name)),
+@@ -198,9 +198,8 @@ State::State(std::string name, IterationCount max_iters,
+ #endif
+   // Offset tests to ensure commonly accessed data is on the first cache line.
+   const int cache_line_size = 64;
+-  static_assert(offsetof(State, error_occurred_) <=
+-                    (cache_line_size - sizeof(error_occurred_)),
+-                "");
++  static_assert(
++      offsetof(State, skipped_) <= (cache_line_size - sizeof(skipped_)), "");
+ #if defined(__INTEL_COMPILER)
+ #pragma warning pop
+ #elif defined(__GNUC__)
+@@ -213,7 +212,7 @@ State::State(std::string name, IterationCount max_iters,
+ 
+ void State::PauseTiming() {
+   // Add in time accumulated so far
+-  BM_CHECK(started_ && !finished_ && !error_occurred_);
++  BM_CHECK(started_ && !finished_ && !skipped());
+   timer_->StopTimer();
+   if (perf_counters_measurement_) {
+     std::vector<std::pair<std::string, double>> measurements;
+@@ -230,21 +229,35 @@ void State::PauseTiming() {
+ }
+ 
+ void State::ResumeTiming() {
+-  BM_CHECK(started_ && !finished_ && !error_occurred_);
++  BM_CHECK(started_ && !finished_ && !skipped());
+   timer_->StartTimer();
+   if (perf_counters_measurement_) {
+     perf_counters_measurement_->Start();
+   }
+ }
+ 
++void State::SkipWithMessage(const char* msg) {
++  BM_CHECK(msg);
++  skipped_ = internal::SkippedWithMessage;
++  {
++    MutexLock l(manager_->GetBenchmarkMutex());
++    if (internal::NotSkipped == manager_->results.skipped_) {
++      manager_->results.skip_message_ = msg;
++      manager_->results.skipped_ = skipped_;
++    }
++  }
++  total_iterations_ = 0;
++  if (timer_->running()) timer_->StopTimer();
++}
++
+ void State::SkipWithError(const char* msg) {
+   BM_CHECK(msg);
+-  error_occurred_ = true;
++  skipped_ = internal::SkippedWithError;
+   {
+     MutexLock l(manager_->GetBenchmarkMutex());
+-    if (manager_->results.has_error_ == false) {
+-      manager_->results.error_message_ = msg;
+-      manager_->results.has_error_ = true;
++    if (internal::NotSkipped == manager_->results.skipped_) {
++      manager_->results.skip_message_ = msg;
++      manager_->results.skipped_ = skipped_;
+     }
+   }
+   total_iterations_ = 0;
+@@ -263,14 +276,14 @@ void State::SetLabel(const char* label) {
+ void State::StartKeepRunning() {
+   BM_CHECK(!started_ && !finished_);
+   started_ = true;
+-  total_iterations_ = error_occurred_ ? 0 : max_iterations;
++  total_iterations_ = skipped() ? 0 : max_iterations;
+   manager_->StartStopBarrier();
+-  if (!error_occurred_) ResumeTiming();
++  if (!skipped()) ResumeTiming();
+ }
+ 
+ void State::FinishKeepRunning() {
+-  BM_CHECK(started_ && (!finished_ || error_occurred_));
+-  if (!error_occurred_) {
++  BM_CHECK(started_ && (!finished_ || skipped()));
++  if (!skipped()) {
+     PauseTiming();
+   }
+   // Total iterations has now wrapped around past 0. Fix this.
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index 58147ca..62383ea 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -80,8 +80,8 @@ BenchmarkReporter::Run CreateRunReport(
+   report.run_name = b.name();
+   report.family_index = b.family_index();
+   report.per_family_instance_index = b.per_family_instance_index();
+-  report.error_occurred = results.has_error_;
+-  report.error_message = results.error_message_;
++  report.skipped = results.skipped_;
++  report.skip_message = results.skip_message_;
+   report.report_label = results.report_label_;
+   // This is the total iterations across all threads.
+   report.iterations = results.iterations;
+@@ -90,7 +90,7 @@ BenchmarkReporter::Run CreateRunReport(
+   report.repetition_index = repetition_index;
+   report.repetitions = repeats;
+ 
+-  if (!report.error_occurred) {
++  if (!report.skipped) {
+     if (b.use_manual_time()) {
+       report.real_accumulated_time = results.manual_time_used;
+     } else {
+@@ -130,7 +130,7 @@ void RunInThread(const BenchmarkInstance* b, IterationCount iters,
+ 
+   State st =
+       b->Run(iters, thread_id, &timer, manager, perf_counters_measurement);
+-  BM_CHECK(st.error_occurred() || st.iterations() >= st.max_iterations)
++  BM_CHECK(st.skipped() || st.iterations() >= st.max_iterations)
+       << "Benchmark returned before State::KeepRunning() returned false!";
+   {
+     MutexLock l(manager->GetBenchmarkMutex());
+@@ -341,7 +341,7 @@ bool BenchmarkRunner::ShouldReportIterationResults(
+   // Determine if this run should be reported;
+   // Either it has run for a sufficient amount of time
+   // or because an error was reported.
+-  return i.results.has_error_ ||
++  return i.results.skipped_ ||
+          i.iters >= kMaxIterations ||  // Too many iterations already.
+          i.seconds >=
+              GetMinTimeToApply() ||  // The elapsed time is large enough.
+@@ -477,7 +477,7 @@ void BenchmarkRunner::DoOneRepetition() {
+ 
+   if (reports_for_family) {
+     ++reports_for_family->num_runs_done;
+-    if (!report.error_occurred) reports_for_family->Runs.push_back(report);
++    if (!report.skipped) reports_for_family->Runs.push_back(report);
+   }
+ 
+   run_results.non_aggregates.push_back(report);
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index f3d81b2..10e05e1 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -135,9 +135,13 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+   printer(Out, name_color, "%-*s ", name_field_width_,
+           result.benchmark_name().c_str());
+ 
+-  if (result.error_occurred) {
++  if (internal::SkippedWithError == result.skipped) {
+     printer(Out, COLOR_RED, "ERROR OCCURRED: \'%s\'",
+-            result.error_message.c_str());
++            result.skip_message.c_str());
++    printer(Out, COLOR_DEFAULT, "\n");
++    return;
++  } else if (internal::SkippedWithMessage == result.skipped) {
++    printer(Out, COLOR_WHITE, "SKIPPED: \'%s\'", result.skip_message.c_str());
+     printer(Out, COLOR_DEFAULT, "\n");
+     return;
+   }
+diff --git a/src/csv_reporter.cc b/src/csv_reporter.cc
+index 83c9457..7b56da1 100644
+--- a/src/csv_reporter.cc
++++ b/src/csv_reporter.cc
+@@ -109,10 +109,10 @@ BENCHMARK_EXPORT
+ void CSVReporter::PrintRunData(const Run& run) {
+   std::ostream& Out = GetOutputStream();
+   Out << CsvEscape(run.benchmark_name()) << ",";
+-  if (run.error_occurred) {
++  if (run.skipped) {
+     Out << std::string(elements.size() - 3, ',');
+-    Out << "true,";
+-    Out << CsvEscape(run.error_message) << "\n";
++    Out << std::boolalpha << (internal::SkippedWithError == run.skipped) << ",";
++    Out << CsvEscape(run.skip_message) << "\n";
+     return;
+   }
+ 
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index d55a0e6..36efbf0 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -254,9 +254,12 @@ void JSONReporter::PrintRunData(Run const& run) {
+       BENCHMARK_UNREACHABLE();
+     }()) << ",\n";
+   }
+-  if (run.error_occurred) {
+-    out << indent << FormatKV("error_occurred", run.error_occurred) << ",\n";
+-    out << indent << FormatKV("error_message", run.error_message) << ",\n";
++  if (internal::SkippedWithError == run.skipped) {
++    out << indent << FormatKV("error_occurred", true) << ",\n";
++    out << indent << FormatKV("error_message", run.skip_message) << ",\n";
++  } else if (internal::SkippedWithMessage == run.skipped) {
++    out << indent << FormatKV("skipped", true) << ",\n";
++    out << indent << FormatKV("skip_message", run.skip_message) << ",\n";
+   }
+   if (!run.report_big_o && !run.report_rms) {
+     out << indent << FormatKV("iterations", run.iterations) << ",\n";
+diff --git a/src/statistics.cc b/src/statistics.cc
+index 5ba885a..c4b54b2 100644
+--- a/src/statistics.cc
++++ b/src/statistics.cc
+@@ -89,9 +89,8 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+   typedef BenchmarkReporter::Run Run;
+   std::vector<Run> results;
+ 
+-  auto error_count =
+-      std::count_if(reports.begin(), reports.end(),
+-                    [](Run const& run) { return run.error_occurred; });
++  auto error_count = std::count_if(reports.begin(), reports.end(),
++                                   [](Run const& run) { return run.skipped; });
+ 
+   if (reports.size() - error_count < 2) {
+     // We don't report aggregated data if there was a single run.
+@@ -133,7 +132,7 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+   for (Run const& run : reports) {
+     BM_CHECK_EQ(reports[0].benchmark_name(), run.benchmark_name());
+     BM_CHECK_EQ(run_iterations, run.iterations);
+-    if (run.error_occurred) continue;
++    if (run.skipped) continue;
+     real_accumulated_time_stat.emplace_back(run.real_accumulated_time);
+     cpu_accumulated_time_stat.emplace_back(run.cpu_accumulated_time);
+     // user counters
+diff --git a/src/thread_manager.h b/src/thread_manager.h
+index 4680285..819b3c4 100644
+--- a/src/thread_manager.h
++++ b/src/thread_manager.h
+@@ -43,8 +43,8 @@ class ThreadManager {
+     double manual_time_used = 0;
+     int64_t complexity_n = 0;
+     std::string report_label_;
+-    std::string error_message_;
+-    bool has_error_ = false;
++    std::string skip_message_;
++    internal::Skipped skipped_ = internal::NotSkipped;
+     UserCounters counters;
+   };
+   GUARDED_BY(GetBenchmarkMutex()) Result results;

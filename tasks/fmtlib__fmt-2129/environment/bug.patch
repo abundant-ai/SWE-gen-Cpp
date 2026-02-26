@@ -1,0 +1,328 @@
+diff --git a/include/fmt/chrono.h b/include/fmt/chrono.h
+index e7a263df..4b9aeeb1 100644
+--- a/include/fmt/chrono.h
++++ b/include/fmt/chrono.h
+@@ -1157,30 +1157,27 @@ struct formatter<std::chrono::duration<Rep, Period>, Char> {
+   }
+ 
+   template <typename FormatContext>
+-  auto format(const duration& d, FormatContext& ctx) const
+-      -> decltype(ctx.out()) {
+-    auto specs_copy = specs;
+-    auto precision_copy = precision;
++  auto format(const duration& d, FormatContext& ctx) -> decltype(ctx.out()) {
+     auto begin = format_str.begin(), end = format_str.end();
+     // As a possible future optimization, we could avoid extra copying if width
+     // is not specified.
+     basic_memory_buffer<Char> buf;
+     auto out = std::back_inserter(buf);
+-    detail::handle_dynamic_spec<detail::width_checker>(specs_copy.width,
+-                                                       width_ref, ctx);
+-    detail::handle_dynamic_spec<detail::precision_checker>(precision_copy,
++    detail::handle_dynamic_spec<detail::width_checker>(specs.width, width_ref,
++                                                       ctx);
++    detail::handle_dynamic_spec<detail::precision_checker>(precision,
+                                                            precision_ref, ctx);
+     if (begin == end || *begin == '}') {
+-      out = detail::format_duration_value<Char>(out, d.count(), precision_copy);
++      out = detail::format_duration_value<Char>(out, d.count(), precision);
+       detail::format_duration_unit<Char, Period>(out);
+     } else {
+       detail::chrono_formatter<FormatContext, decltype(out), Rep, Period> f(
+           ctx, out, d);
+-      f.precision = precision_copy;
++      f.precision = precision;
+       parse_chrono_format(begin, end, f);
+     }
+     return detail::write(
+-        ctx.out(), basic_string_view<Char>(buf.data(), buf.size()), specs_copy);
++        ctx.out(), basic_string_view<Char>(buf.data(), buf.size()), specs);
+   }
+ };
+ 
+diff --git a/include/fmt/compile.h b/include/fmt/compile.h
+index 08566a4d..2421b6f0 100644
+--- a/include/fmt/compile.h
++++ b/include/fmt/compile.h
+@@ -454,51 +454,15 @@ template <typename Char, typename T, int N> struct field {
+ 
+   template <typename OutputIt, typename... Args>
+   constexpr OutputIt format(OutputIt out, const Args&... args) const {
+-    if constexpr (is_named_arg<typename std::remove_cv<T>::type>::value) {
+-      const auto& arg = get<N>(args...).value;
+-      return write<Char>(out, arg);
+-    } else {
+-      // This ensures that the argument type is convertile to `const T&`.
+-      const T& arg = get<N>(args...);
+-      return write<Char>(out, arg);
+-    }
++    // This ensures that the argument type is convertile to `const T&`.
++    const T& arg = get<N>(args...);
++    return write<Char>(out, arg);
+   }
+ };
+ 
+ template <typename Char, typename T, int N>
+ struct is_compiled_format<field<Char, T, N>> : std::true_type {};
+ 
+-// A replacement field that refers to argument with name.
+-template <typename Char> struct runtime_named_field {
+-  using char_type = Char;
+-  basic_string_view<Char> name;
+-
+-  template <typename OutputIt, typename T>
+-  constexpr static bool try_format_argument(OutputIt& out,
+-                                            basic_string_view<Char> arg_name,
+-                                            const T& arg) {
+-    if constexpr (is_named_arg<typename std::remove_cv<T>::type>::value) {
+-      if (arg_name == arg.name) {
+-        out = write<Char>(out, arg.value);
+-        return true;
+-      }
+-    }
+-    return false;
+-  }
+-
+-  template <typename OutputIt, typename... Args>
+-  constexpr OutputIt format(OutputIt out, const Args&... args) const {
+-    bool found = (try_format_argument(out, name, args) || ...);
+-    if (!found) {
+-      throw format_error("argument with specified name is not found");
+-    }
+-    return out;
+-  }
+-};
+-
+-template <typename Char>
+-struct is_compiled_format<runtime_named_field<Char>> : std::true_type {};
+-
+ // A replacement field that refers to argument N and has format specifiers.
+ template <typename Char, typename T, int N> struct spec_field {
+   using char_type = Char;
+@@ -572,51 +536,15 @@ template <typename T, typename Char> struct parse_specs_result {
+   int next_arg_id;
+ };
+ 
+-constexpr int manual_indexing_id = -1;
+-
+ template <typename T, typename Char>
+ constexpr parse_specs_result<T, Char> parse_specs(basic_string_view<Char> str,
+-                                                  size_t pos, int next_arg_id) {
++                                                  size_t pos, int arg_id) {
+   str.remove_prefix(pos);
+-  auto ctx = basic_format_parse_context<Char>(str, {}, next_arg_id);
++  auto ctx = basic_format_parse_context<Char>(str, {}, arg_id + 1);
+   auto f = formatter<T, Char>();
+   auto end = f.parse(ctx);
+   return {f, pos + fmt::detail::to_unsigned(end - str.data()) + 1,
+-          next_arg_id == 0 ? manual_indexing_id : ctx.next_arg_id()};
+-}
+-
+-template <typename Char> struct arg_id_handler {
+-  constexpr void on_error(const char* message) { throw format_error(message); }
+-
+-  constexpr int on_arg_id() {
+-    FMT_ASSERT(false, "handler cannot be used with automatic indexing");
+-    return 0;
+-  }
+-
+-  constexpr int on_arg_id(int id) {
+-    arg_id = arg_ref<Char>(id);
+-    return 0;
+-  }
+-
+-  constexpr int on_arg_id(basic_string_view<Char> id) {
+-    arg_id = arg_ref<Char>(id);
+-    return 0;
+-  }
+-
+-  arg_ref<Char> arg_id;
+-};
+-
+-template <typename Char> struct parse_arg_id_result {
+-  arg_ref<Char> arg_id;
+-  const Char* arg_id_end;
+-};
+-
+-template <int ID, typename Char>
+-constexpr auto parse_arg_id(const Char* begin, const Char* end) {
+-  auto handler = arg_id_handler<Char>{arg_ref<Char>{}};
+-  auto adapter = id_adapter<arg_id_handler<Char>, Char>{handler, 0};
+-  auto arg_id_end = parse_arg_id(begin, end, adapter);
+-  return parse_arg_id_result<Char>{handler.arg_id, arg_id_end};
++          ctx.next_arg_id()};
+ }
+ 
+ // Compiles a non-empty format string and returns the compiled representation
+@@ -630,52 +558,17 @@ constexpr auto compile_format_string(S format_str) {
+       throw format_error("unmatched '{' in format string");
+     if constexpr (str[POS + 1] == '{') {
+       return parse_tail<Args, POS + 2, ID>(make_text(str, POS, 1), format_str);
+-    } else if constexpr (str[POS + 1] == '}' || str[POS + 1] == ':') {
+-      static_assert(ID != manual_indexing_id,
+-                    "cannot switch from manual to automatic argument indexing");
++    } else if constexpr (str[POS + 1] == '}') {
+       using id_type = get_type<ID, Args>;
+-      if constexpr (str[POS + 1] == '}') {
+-        constexpr auto next_id =
+-            ID != manual_indexing_id ? ID + 1 : manual_indexing_id;
+-        return parse_tail<Args, POS + 2, next_id>(
+-            field<char_type, id_type, ID>(), format_str);
+-      } else {
+-        constexpr auto result = parse_specs<id_type>(str, POS + 2, ID + 1);
+-        return parse_tail<Args, result.end, result.next_arg_id>(
+-            spec_field<char_type, id_type, ID>{result.fmt}, format_str);
+-      }
++      return parse_tail<Args, POS + 2, ID + 1>(field<char_type, id_type, ID>(),
++                                               format_str);
++    } else if constexpr (str[POS + 1] == ':') {
++      using id_type = get_type<ID, Args>;
++      constexpr auto result = parse_specs<id_type>(str, POS + 2, ID);
++      return parse_tail<Args, result.end, result.next_arg_id>(
++          spec_field<char_type, id_type, ID>{result.fmt}, format_str);
+     } else {
+-      constexpr auto arg_id_result =
+-          parse_arg_id<ID>(str.data() + POS + 1, str.data() + str.size());
+-      constexpr auto arg_id_end_pos = arg_id_result.arg_id_end - str.data();
+-      constexpr char_type c =
+-          arg_id_end_pos != str.size() ? str[arg_id_end_pos] : char_type();
+-      static_assert(c == '}' || c == ':', "missing '}' in format string");
+-      if constexpr (arg_id_result.arg_id.kind == arg_id_kind::index) {
+-        static_assert(
+-            ID == manual_indexing_id || ID == 0,
+-            "cannot switch from automatic to manual argument indexing");
+-        constexpr auto arg_index = arg_id_result.arg_id.val.index;
+-        using id_type = get_type<arg_index, Args>;
+-        if constexpr (c == '}') {
+-          return parse_tail<Args, arg_id_end_pos + 1, manual_indexing_id>(
+-              field<char_type, id_type, arg_index>(), format_str);
+-        } else if constexpr (c == ':') {
+-          constexpr auto result =
+-              parse_specs<id_type>(str, arg_id_end_pos + 1, 0);
+-          return parse_tail<Args, result.end, result.next_arg_id>(
+-              spec_field<char_type, id_type, arg_index>{result.fmt},
+-              format_str);
+-        }
+-      } else if constexpr (arg_id_result.arg_id.kind == arg_id_kind::name) {
+-        if constexpr (c == '}') {
+-          return parse_tail<Args, arg_id_end_pos + 1, ID>(
+-              runtime_named_field<char_type>{arg_id_result.arg_id.val.name},
+-              format_str);
+-        } else if constexpr (c == ':') {
+-          return unknown_format();  // no type info for specs parsing
+-        }
+-      }
++      return unknown_format();
+     }
+   } else if constexpr (str[POS] == '}') {
+     if constexpr (POS + 1 == str.size())
+@@ -777,15 +670,8 @@ FMT_INLINE std::basic_string<typename S::char_type> format(const S&,
+ #ifdef __cpp_if_constexpr
+   if constexpr (std::is_same<typename S::char_type, char>::value) {
+     constexpr basic_string_view<typename S::char_type> str = S();
+-    if constexpr (str.size() == 2 && str[0] == '{' && str[1] == '}') {
+-      const auto& first = detail::first(args...);
+-      if constexpr (detail::is_named_arg<
+-                        remove_cvref_t<decltype(first)>>::value) {
+-        return fmt::to_string(first.value);
+-      } else {
+-        return fmt::to_string(first);
+-      }
+-    }
++    if constexpr (str.size() == 2 && str[0] == '{' && str[1] == '}')
++      return fmt::to_string(detail::first(args...));
+   }
+ #endif
+   constexpr auto compiled = detail::compile<Args...>(S());
+diff --git a/test/compile-test.cc b/test/compile-test.cc
+index 48cf3bbe..df76f085 100644
+--- a/test/compile-test.cc
++++ b/test/compile-test.cc
+@@ -13,7 +13,6 @@
+ #  include <windows.h>
+ #endif
+ 
+-#include "fmt/chrono.h"
+ #include "fmt/compile.h"
+ #include "gmock.h"
+ #include "gtest-extra.h"
+@@ -142,65 +141,11 @@ TEST(CompileTest, FormatWideString) {
+ 
+ TEST(CompileTest, FormatSpecs) {
+   EXPECT_EQ("42", fmt::format(FMT_COMPILE("{:x}"), 0x42));
+-  EXPECT_EQ("1.2 ms ",
+-            fmt::format(FMT_COMPILE("{:7.1%Q %q}"),
+-                        std::chrono::duration<double, std::milli>(1.234)));
+ }
+ 
+-TEST(CompileTest, DynamicFormatSpecs) {
+-  EXPECT_EQ("foo  ", fmt::format(FMT_COMPILE("{:{}}"), "foo", 5));
+-  EXPECT_EQ("  3.14", fmt::format(FMT_COMPILE("{:{}.{}f}"), 3.141592, 6, 2));
+-  EXPECT_EQ(
+-      "=1.234ms=",
+-      fmt::format(FMT_COMPILE("{:=^{}.{}}"),
+-                  std::chrono::duration<double, std::milli>(1.234), 9, 3));
+-}
+-
+-TEST(CompileTest, ManualOrdering) {
+-  EXPECT_EQ("42", fmt::format(FMT_COMPILE("{0}"), 42));
+-  EXPECT_EQ(" -42", fmt::format(FMT_COMPILE("{0:4}"), -42));
+-  EXPECT_EQ("41 43", fmt::format(FMT_COMPILE("{0} {1}"), 41, 43));
+-  EXPECT_EQ("41 43", fmt::format(FMT_COMPILE("{1} {0}"), 43, 41));
+-  EXPECT_EQ("41 43", fmt::format(FMT_COMPILE("{0} {2}"), 41, 42, 43));
+-  EXPECT_EQ("  41   43", fmt::format(FMT_COMPILE("{1:{2}} {0:4}"), 43, 41, 4));
+-  EXPECT_EQ("42 1.2 ms ",
+-            fmt::format(FMT_COMPILE("{0} {1:7.1%Q %q}"), 42,
+-                        std::chrono::duration<double, std::milli>(1.234)));
+-  EXPECT_EQ(
+-      "true 42 42 foo 0x1234 foo",
+-      fmt::format(FMT_COMPILE("{0} {1} {2} {3} {4} {5}"), true, 42, 42.0f,
+-                  "foo", reinterpret_cast<void*>(0x1234), test_formattable()));
+-  EXPECT_EQ(L"42", fmt::format(FMT_COMPILE(L"{0}"), 42));
+-}
+-
+-TEST(CompileTest, Named) {
+-  EXPECT_EQ("42", fmt::format(FMT_COMPILE("{}"), fmt::arg("arg", 42)));
+-  EXPECT_EQ("41 43", fmt::format(FMT_COMPILE("{} {}"), fmt::arg("arg", 41),
+-                                 fmt::arg("arg", 43)));
+-
+-  EXPECT_EQ("foobar",
+-            fmt::format(FMT_COMPILE("{a0}{a1}"), fmt::arg("a0", "foo"),
+-                        fmt::arg("a1", "bar")));
+-  EXPECT_EQ("foobar", fmt::format(FMT_COMPILE("{}{a1}"), fmt::arg("a0", "foo"),
+-                                  fmt::arg("a1", "bar")));
+-  EXPECT_EQ("foofoo", fmt::format(FMT_COMPILE("{a0}{}"), fmt::arg("a0", "foo"),
+-                                  fmt::arg("a1", "bar")));
+-  EXPECT_EQ("foobar", fmt::format(FMT_COMPILE("{0}{a1}"), fmt::arg("a0", "foo"),
+-                                  fmt::arg("a1", "bar")));
+-  EXPECT_EQ("foobar", fmt::format(FMT_COMPILE("{a0}{1}"), fmt::arg("a0", "foo"),
+-                                  fmt::arg("a1", "bar")));
+-
+-  EXPECT_EQ("foobar",
+-            fmt::format(FMT_COMPILE("{}{a1}"), "foo", fmt::arg("a1", "bar")));
+-  EXPECT_EQ("foobar",
+-            fmt::format(FMT_COMPILE("{a0}{a1}"), fmt::arg("a1", "bar"),
+-                        fmt::arg("a2", "baz"), fmt::arg("a0", "foo")));
+-  EXPECT_EQ(" bar foo ",
+-            fmt::format(FMT_COMPILE(" {foo} {bar} "), fmt::arg("foo", "bar"),
+-                        fmt::arg("bar", "foo")));
+-
+-  EXPECT_THROW(fmt::format(FMT_COMPILE("{invalid}"), fmt::arg("valid", 42)),
+-               fmt::format_error);
++TEST(CompileTest, DynamicWidth) {
++  EXPECT_EQ("  42foo  ",
++            fmt::format(FMT_COMPILE("{:{}}{:{}}"), 42, 4, "foo", 5));
+ }
+ 
+ TEST(CompileTest, FormatTo) {
+@@ -229,7 +174,9 @@ TEST(CompileTest, TextAndArg) {
+   EXPECT_EQ("42!", fmt::format(FMT_COMPILE("{}!"), 42));
+ }
+ 
+-TEST(CompileTest, Empty) { EXPECT_EQ("", fmt::format(FMT_COMPILE(""))); }
++TEST(CompileTest, Empty) {
++  EXPECT_EQ("", fmt::format(FMT_COMPILE("")));
++}
+ #endif
+ 
+ #if FMT_USE_NONTYPE_TEMPLATE_PARAMETERS

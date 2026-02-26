@@ -1,0 +1,7 @@
+Building projects that use {fmt} with strict warning flags (notably `-Wdeprecated` and `-Wweak-vtables`) can emit warnings stemming from {fmt}’s exception types, specifically `fmt::format_error` and `fmt::system_error`. These warning configurations are common in downstream builds that treat warnings as errors, causing otherwise-correct code to fail to compile.
+
+The problem is that `fmt::format_error` and `fmt::system_error` do not explicitly declare their copy and move operations in a way that avoids triggering these warnings on some compilers/toolchains. As a result, code that throws, copies, or propagates these exceptions (including via standard exception mechanisms) may lead to build warnings.
+
+Update `fmt::format_error` and `fmt::system_error` so they have explicitly defaulted copy constructor, copy assignment operator, move constructor, and move assignment operator (as appropriate for their base classes). After the change, both types should remain usable as normal exceptions (constructible, throwable, catchable as `std::exception`, with their message/state preserved), but compiling with aggressive warning flags should no longer emit `-Wdeprecated` or `-Wweak-vtables` warnings attributable to these types.
+
+A minimal reproduction is any translation unit that includes the public {fmt} headers, throws `fmt::format_error` or `fmt::system_error`, and is compiled with `-Wweak-vtables` and/or `-Wdeprecated` enabled; this should compile cleanly without introducing new warnings, while keeping existing exception behavior intact.

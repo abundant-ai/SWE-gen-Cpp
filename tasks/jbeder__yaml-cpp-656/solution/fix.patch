@@ -1,0 +1,508 @@
+diff --git a/include/yaml-cpp/exceptions.h b/include/yaml-cpp/exceptions.h
+index 87b92f5..25523c9 100644
+--- a/include/yaml-cpp/exceptions.h
++++ b/include/yaml-cpp/exceptions.h
+@@ -114,6 +114,35 @@ inline const std::string KEY_NOT_FOUND_WITH_KEY(
+   stream << KEY_NOT_FOUND << ": " << key;
+   return stream.str();
+ }
++
++template <typename T>
++inline const std::string BAD_SUBSCRIPT_WITH_KEY(
++    const T&, typename disable_if<is_numeric<T>>::type* = 0) {
++  return BAD_SUBSCRIPT;
++}
++
++inline const std::string BAD_SUBSCRIPT_WITH_KEY(const std::string& key) {
++  std::stringstream stream;
++  stream << BAD_SUBSCRIPT << " (key: \"" << key << "\")";
++  return stream.str();
++}
++
++template <typename T>
++inline const std::string BAD_SUBSCRIPT_WITH_KEY(
++    const T& key, typename enable_if<is_numeric<T>>::type* = 0) {
++  std::stringstream stream;
++  stream << BAD_SUBSCRIPT << " (key: \"" << key << "\")";
++  return stream.str();
++}
++
++inline const std::string INVALID_NODE_WITH_KEY(const std::string& key) {
++  std::stringstream stream;
++  if (key.empty()) {
++    return INVALID_NODE;
++  }
++  stream << "invalid node; first invalid key: \"" << key << "\"";
++  return stream.str();
++}
+ }
+ 
+ class YAML_CPP_API Exception : public std::runtime_error {
+@@ -194,8 +223,9 @@ inline TypedKeyNotFound<T> MakeTypedKeyNotFound(const Mark& mark,
+ 
+ class YAML_CPP_API InvalidNode : public RepresentationException {
+  public:
+-  InvalidNode()
+-      : RepresentationException(Mark::null_mark(), ErrorMsg::INVALID_NODE) {}
++  InvalidNode(std::string key)
++      : RepresentationException(Mark::null_mark(),
++                                ErrorMsg::INVALID_NODE_WITH_KEY(key)) {}
+   InvalidNode(const InvalidNode&) = default;
+   virtual ~InvalidNode() YAML_CPP_NOEXCEPT;
+ };
+@@ -224,8 +254,10 @@ class YAML_CPP_API BadDereference : public RepresentationException {
+ 
+ class YAML_CPP_API BadSubscript : public RepresentationException {
+  public:
+-  BadSubscript()
+-      : RepresentationException(Mark::null_mark(), ErrorMsg::BAD_SUBSCRIPT) {}
++  template <typename Key>
++  BadSubscript(const Key& key)
++      : RepresentationException(Mark::null_mark(),
++                                ErrorMsg::BAD_SUBSCRIPT_WITH_KEY(key)) {}
+   BadSubscript(const BadSubscript&) = default;
+   virtual ~BadSubscript() YAML_CPP_NOEXCEPT;
+ };
+diff --git a/include/yaml-cpp/node/detail/impl.h b/include/yaml-cpp/node/detail/impl.h
+index c8853cf..46615a9 100644
+--- a/include/yaml-cpp/node/detail/impl.h
++++ b/include/yaml-cpp/node/detail/impl.h
+@@ -115,7 +115,7 @@ inline node* node_data::get(const Key& key,
+         return pNode;
+       return NULL;
+     case NodeType::Scalar:
+-      throw BadSubscript();
++      throw BadSubscript(key);
+   }
+ 
+   for (node_map::const_iterator it = m_map.begin(); it != m_map.end(); ++it) {
+@@ -143,7 +143,7 @@ inline node& node_data::get(const Key& key, shared_memory_holder pMemory) {
+       convert_to_map(pMemory);
+       break;
+     case NodeType::Scalar:
+-      throw BadSubscript();
++      throw BadSubscript(key);
+   }
+ 
+   for (node_map::const_iterator it = m_map.begin(); it != m_map.end(); ++it) {
+diff --git a/include/yaml-cpp/node/impl.h b/include/yaml-cpp/node/impl.h
+index 8346f40..0b0e296 100644
+--- a/include/yaml-cpp/node/impl.h
++++ b/include/yaml-cpp/node/impl.h
+@@ -12,13 +12,16 @@
+ #include "yaml-cpp/node/detail/node.h"
+ #include "yaml-cpp/node/iterator.h"
+ #include "yaml-cpp/node/node.h"
++#include <sstream>
+ #include <string>
+ 
+ namespace YAML {
+-inline Node::Node() : m_isValid(true), m_pMemory(nullptr), m_pNode(nullptr) {}
++inline Node::Node()
++    : m_isValid(true), m_invalidKey{}, m_pMemory(nullptr), m_pNode(nullptr) {}
+ 
+ inline Node::Node(NodeType::value type)
+     : m_isValid(true),
++      m_invalidKey{},
+       m_pMemory(new detail::memory_holder),
+       m_pNode(&m_pMemory->create_node()) {
+   m_pNode->set_type(type);
+@@ -27,6 +30,7 @@ inline Node::Node(NodeType::value type)
+ template <typename T>
+ inline Node::Node(const T& rhs)
+     : m_isValid(true),
++      m_invalidKey{},
+       m_pMemory(new detail::memory_holder),
+       m_pNode(&m_pMemory->create_node()) {
+   Assign(rhs);
+@@ -34,24 +38,30 @@ inline Node::Node(const T& rhs)
+ 
+ inline Node::Node(const detail::iterator_value& rhs)
+     : m_isValid(rhs.m_isValid),
++      m_invalidKey(rhs.m_invalidKey),
+       m_pMemory(rhs.m_pMemory),
+       m_pNode(rhs.m_pNode) {}
+ 
+ inline Node::Node(const Node& rhs)
+     : m_isValid(rhs.m_isValid),
++      m_invalidKey(rhs.m_invalidKey),
+       m_pMemory(rhs.m_pMemory),
+       m_pNode(rhs.m_pNode) {}
+ 
+-inline Node::Node(Zombie) : m_isValid(false), m_pMemory{}, m_pNode(nullptr) {}
++inline Node::Node(Zombie)
++    : m_isValid(false), m_invalidKey{}, m_pMemory{}, m_pNode(nullptr) {}
++
++inline Node::Node(Zombie, const std::string& key)
++    : m_isValid(false), m_invalidKey(key), m_pMemory{}, m_pNode(NULL) {}
+ 
+ inline Node::Node(detail::node& node, detail::shared_memory_holder pMemory)
+-    : m_isValid(true), m_pMemory(pMemory), m_pNode(&node) {}
++    : m_isValid(true), m_invalidKey{}, m_pMemory(pMemory), m_pNode(&node) {}
+ 
+ inline Node::~Node() {}
+ 
+ inline void Node::EnsureNodeExists() const {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   if (!m_pNode) {
+     m_pMemory.reset(new detail::memory_holder);
+     m_pNode = &m_pMemory->create_node();
+@@ -68,14 +78,14 @@ inline bool Node::IsDefined() const {
+ 
+ inline Mark Node::Mark() const {
+   if (!m_isValid) {
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   }
+   return m_pNode ? m_pNode->mark() : Mark::null_mark();
+ }
+ 
+ inline NodeType::value Node::Type() const {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   return m_pNode ? m_pNode->type() : NodeType::Null;
+ }
+ 
+@@ -142,7 +152,7 @@ struct as_if<std::string, void> {
+ template <typename T>
+ inline T Node::as() const {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   return as_if<T, void>(*this)();
+ }
+ 
+@@ -155,32 +165,32 @@ inline T Node::as(const S& fallback) const {
+ 
+ inline const std::string& Node::Scalar() const {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   return m_pNode ? m_pNode->scalar() : detail::node_data::empty_scalar();
+ }
+ 
+ inline const std::string& Node::Tag() const {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   return m_pNode ? m_pNode->tag() : detail::node_data::empty_scalar();
+ }
+ 
+ inline void Node::SetTag(const std::string& tag) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   m_pNode->set_tag(tag);
+ }
+ 
+ inline EmitterStyle::value Node::Style() const {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   return m_pNode ? m_pNode->style() : EmitterStyle::Default;
+ }
+ 
+ inline void Node::SetStyle(EmitterStyle::value style) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   m_pNode->set_style(style);
+ }
+@@ -188,7 +198,7 @@ inline void Node::SetStyle(EmitterStyle::value style) {
+ // assignment
+ inline bool Node::is(const Node& rhs) const {
+   if (!m_isValid || !rhs.m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   if (!m_pNode || !rhs.m_pNode)
+     return false;
+   return m_pNode->is(*rhs.m_pNode);
+@@ -197,14 +207,14 @@ inline bool Node::is(const Node& rhs) const {
+ template <typename T>
+ inline Node& Node::operator=(const T& rhs) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   Assign(rhs);
+   return *this;
+ }
+ 
+ inline Node& Node::operator=(const Node& rhs) {
+   if (!m_isValid || !rhs.m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   if (is(rhs))
+     return *this;
+   AssignNode(rhs);
+@@ -213,7 +223,7 @@ inline Node& Node::operator=(const Node& rhs) {
+ 
+ inline void Node::reset(const YAML::Node& rhs) {
+   if (!m_isValid || !rhs.m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   m_pMemory = rhs.m_pMemory;
+   m_pNode = rhs.m_pNode;
+ }
+@@ -221,35 +231,35 @@ inline void Node::reset(const YAML::Node& rhs) {
+ template <typename T>
+ inline void Node::Assign(const T& rhs) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   AssignData(convert<T>::encode(rhs));
+ }
+ 
+ template <>
+ inline void Node::Assign(const std::string& rhs) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   m_pNode->set_scalar(rhs);
+ }
+ 
+ inline void Node::Assign(const char* rhs) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   m_pNode->set_scalar(rhs);
+ }
+ 
+ inline void Node::Assign(char* rhs) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   m_pNode->set_scalar(rhs);
+ }
+ 
+ inline void Node::AssignData(const Node& rhs) {
+   if (!m_isValid || !rhs.m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   rhs.EnsureNodeExists();
+ 
+@@ -259,7 +269,7 @@ inline void Node::AssignData(const Node& rhs) {
+ 
+ inline void Node::AssignNode(const Node& rhs) {
+   if (!m_isValid || !rhs.m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   rhs.EnsureNodeExists();
+ 
+   if (!m_pNode) {
+@@ -276,7 +286,7 @@ inline void Node::AssignNode(const Node& rhs) {
+ // size/iterator
+ inline std::size_t Node::size() const {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   return m_pNode ? m_pNode->size() : 0;
+ }
+ 
+@@ -309,13 +319,13 @@ inline iterator Node::end() {
+ template <typename T>
+ inline void Node::push_back(const T& rhs) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   push_back(Node(rhs));
+ }
+ 
+ inline void Node::push_back(const Node& rhs) {
+   if (!m_isValid || !rhs.m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   rhs.EnsureNodeExists();
+ 
+@@ -368,16 +378,21 @@ inline typename to_value_t<T>::return_type to_value(const T& t) {
+ }
+ }  // namespace detail
+ 
++template<typename Key>
++std::string key_to_string(const Key& key) {
++  return streamable_to_string<Key, is_streamable<std::stringstream, Key>::value>().impl(key);
++}
++
+ // indexing
+ template <typename Key>
+ inline const Node Node::operator[](const Key& key) const {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   detail::node* value = static_cast<const detail::node&>(*m_pNode).get(
+       detail::to_value(key), m_pMemory);
+   if (!value) {
+-    return Node(ZombieNode);
++    return Node(ZombieNode, key_to_string(key));
+   }
+   return Node(*value, m_pMemory);
+ }
+@@ -385,7 +400,7 @@ inline const Node Node::operator[](const Key& key) const {
+ template <typename Key>
+ inline Node Node::operator[](const Key& key) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   detail::node& value = m_pNode->get(detail::to_value(key), m_pMemory);
+   return Node(value, m_pMemory);
+@@ -394,28 +409,28 @@ inline Node Node::operator[](const Key& key) {
+ template <typename Key>
+ inline bool Node::remove(const Key& key) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   return m_pNode->remove(detail::to_value(key), m_pMemory);
+ }
+ 
+ inline const Node Node::operator[](const Node& key) const {
+   if (!m_isValid || !key.m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   key.EnsureNodeExists();
+   m_pMemory->merge(*key.m_pMemory);
+   detail::node* value =
+       static_cast<const detail::node&>(*m_pNode).get(*key.m_pNode, m_pMemory);
+   if (!value) {
+-    return Node(ZombieNode);
++    return Node(ZombieNode, key_to_string(key));
+   }
+   return Node(*value, m_pMemory);
+ }
+ 
+ inline Node Node::operator[](const Node& key) {
+   if (!m_isValid || !key.m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   key.EnsureNodeExists();
+   m_pMemory->merge(*key.m_pMemory);
+@@ -425,7 +440,7 @@ inline Node Node::operator[](const Node& key) {
+ 
+ inline bool Node::remove(const Node& key) {
+   if (!m_isValid || !key.m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   key.EnsureNodeExists();
+   return m_pNode->remove(*key.m_pNode, m_pMemory);
+@@ -435,7 +450,7 @@ inline bool Node::remove(const Node& key) {
+ template <typename Key, typename Value>
+ inline void Node::force_insert(const Key& key, const Value& value) {
+   if (!m_isValid)
+-    throw InvalidNode();
++    throw InvalidNode(m_invalidKey);
+   EnsureNodeExists();
+   m_pNode->force_insert(detail::to_value(key), detail::to_value(value),
+                         m_pMemory);
+diff --git a/include/yaml-cpp/node/node.h b/include/yaml-cpp/node/node.h
+index 1ded7d2..49af58e 100644
+--- a/include/yaml-cpp/node/node.h
++++ b/include/yaml-cpp/node/node.h
+@@ -8,6 +8,7 @@
+ #endif
+ 
+ #include <stdexcept>
++#include <string>
+ 
+ #include "yaml-cpp/dll.h"
+ #include "yaml-cpp/emitterstyle.h"
+@@ -116,6 +117,7 @@ class YAML_CPP_API Node {
+  private:
+   enum Zombie { ZombieNode };
+   explicit Node(Zombie);
++  explicit Node(Zombie, const std::string&);
+   explicit Node(detail::node& node, detail::shared_memory_holder pMemory);
+ 
+   void EnsureNodeExists() const;
+@@ -130,6 +132,8 @@ class YAML_CPP_API Node {
+ 
+  private:
+   bool m_isValid;
++  // String representation of invalid key, if the node is invalid.
++  std::string m_invalidKey;
+   mutable detail::shared_memory_holder m_pMemory;
+   mutable detail::node* m_pNode;
+ };
+diff --git a/include/yaml-cpp/traits.h b/include/yaml-cpp/traits.h
+index f33d0e1..36d406b 100644
+--- a/include/yaml-cpp/traits.h
++++ b/include/yaml-cpp/traits.h
+@@ -7,6 +7,11 @@
+ #pragma once
+ #endif
+ 
++#include <type_traits>
++#include <utility>
++#include <string>
++#include <sstream>
++
+ namespace YAML {
+ template <typename>
+ struct is_numeric {
+@@ -100,4 +105,31 @@ template <class Cond, class T = void>
+ struct disable_if : public disable_if_c<Cond::value, T> {};
+ }
+ 
++template <typename S, typename T>
++struct is_streamable {
++  template <typename SS, typename TT>
++  static auto test(int)
++      -> decltype(std::declval<SS&>() << std::declval<TT>(), std::true_type());
++
++  template <typename, typename>
++  static auto test(...) -> std::false_type;
++
++  static const bool value = decltype(test<S, T>(0))::value;
++};
++
++template<typename Key, bool Streamable>
++struct streamable_to_string {
++  static std::string impl(const Key& key) {
++    std::stringstream ss;
++    ss << key;
++    return ss.str();
++  }
++};
++
++template<typename Key>
++struct streamable_to_string<Key, false> {
++  static std::string impl(const Key&) {
++    return "";
++  }
++};
+ #endif  // TRAITS_H_62B23520_7C8E_11DE_8A39_0800200C9A66
+diff --git a/src/node_data.cpp b/src/node_data.cpp
+index c65accb..6cfedfc 100644
+--- a/src/node_data.cpp
++++ b/src/node_data.cpp
+@@ -196,7 +196,7 @@ void node_data::insert(node& key, node& value, shared_memory_holder pMemory) {
+       convert_to_map(pMemory);
+       break;
+     case NodeType::Scalar:
+-      throw BadSubscript();
++      throw BadSubscript(key);
+   }
+ 
+   insert_map_pair(key, value);
+@@ -226,7 +226,7 @@ node& node_data::get(node& key, shared_memory_holder pMemory) {
+       convert_to_map(pMemory);
+       break;
+     case NodeType::Scalar:
+-      throw BadSubscript();
++      throw BadSubscript(key);
+   }
+ 
+   for (node_map::const_iterator it = m_map.begin(); it != m_map.end(); ++it) {

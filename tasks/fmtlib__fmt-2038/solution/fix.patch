@@ -1,0 +1,224 @@
+diff --git a/doc/api.rst b/doc/api.rst
+index 260fd3f7..3542e489 100644
+--- a/doc/api.rst
++++ b/doc/api.rst
+@@ -165,6 +165,11 @@ functions in their ``formatter`` specializations.
+ 
+ .. _udt:
+ 
++To force the use of compile-time checks, define the preprocessor variable
++``FMT_ENFORCE_COMPILE_STRING``. When set, functions accepting ``FMT_STRING``
++will fail to compile with regular strings. Runtime-checked
++formatting is still possible using ``fmt::vformat``, ``fmt::vprint``, etc.
++
+ Formatting User-defined Types
+ -----------------------------
+ 
+diff --git a/include/fmt/chrono.h b/include/fmt/chrono.h
+index d68d8c9a..87f3a46f 100644
+--- a/include/fmt/chrono.h
++++ b/include/fmt/chrono.h
+@@ -768,19 +768,16 @@ inline std::chrono::duration<Rep, std::milli> get_milliseconds(
+ template <typename Char, typename Rep, typename OutputIt,
+           FMT_ENABLE_IF(std::is_integral<Rep>::value)>
+ OutputIt format_duration_value(OutputIt out, Rep val, int) {
+-  static FMT_CONSTEXPR_DECL const Char format[] = {'{', '}', 0};
+-  return format_to(out, compile_string_to_view(format), val);
++  return write<Char>(out, val);
+ }
+ 
+ template <typename Char, typename Rep, typename OutputIt,
+           FMT_ENABLE_IF(std::is_floating_point<Rep>::value)>
+ OutputIt format_duration_value(OutputIt out, Rep val, int precision) {
+-  static FMT_CONSTEXPR_DECL const Char pr_f[] = {'{', ':', '.', '{',
+-                                                 '}', 'f', '}', 0};
+-  if (precision >= 0)
+-    return format_to(out, compile_string_to_view(pr_f), val, precision);
+-  static FMT_CONSTEXPR_DECL const Char fp_f[] = {'{', ':', 'g', '}', 0};
+-  return format_to(out, compile_string_to_view(fp_f), val);
++  basic_format_specs<Char> specs;
++  specs.precision = precision;
++  specs.type = precision > 0 ? 'f' : 'g';
++  return write<Char>(out, val, specs);
+ }
+ 
+ template <typename Char, typename OutputIt>
+@@ -800,13 +797,18 @@ template <typename Char, typename Period, typename OutputIt>
+ OutputIt format_duration_unit(OutputIt out) {
+   if (const char* unit = get_units<Period>())
+     return copy_unit(string_view(unit), out, Char());
+-  static FMT_CONSTEXPR_DECL const Char num_f[] = {'[', '{', '}', ']', 's', 0};
+-  if (const_check(Period::den == 1))
+-    return format_to(out, compile_string_to_view(num_f), Period::num);
+-  static FMT_CONSTEXPR_DECL const Char num_def_f[] = {'[', '{', '}', '/', '{',
+-                                                      '}', ']', 's', 0};
+-  return format_to(out, compile_string_to_view(num_def_f), Period::num,
+-                   Period::den);
++
++  *out++ = '[';
++  out = write<Char>(out, Period::num);
++
++  if (const_check(Period::den != 1)) {
++    *out++ = '/';
++    out = write<Char>(out, Period::den);
++  }
++
++  *out++ = ']';
++  *out++ = 's';
++  return out;
+ }
+ 
+ template <typename FormatContext, typename OutputIt, typename Rep,
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index ceef2ef1..ddf24503 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -3828,7 +3828,7 @@ inline std::string to_string(T value) {
+   Converts *value* to ``std::wstring`` using the default format for type *T*.
+  */
+ template <typename T> inline std::wstring to_wstring(const T& value) {
+-  return format(L"{}", value);
++  return format(FMT_STRING(L"{}"), value);
+ }
+ 
+ template <typename Char, size_t SIZE>
+diff --git a/include/fmt/ranges.h b/include/fmt/ranges.h
+index 732d3209..91f55e0b 100644
+--- a/include/fmt/ranges.h
++++ b/include/fmt/ranges.h
+@@ -37,19 +37,13 @@ struct formatting_range : formatting_base<Char> {
+       FMT_RANGE_OUTPUT_LENGTH_LIMIT;  // output only up to N items from the
+                                       // range.
+   Char prefix = '{';
+-  Char delimiter = ',';
+   Char postfix = '}';
+-  static FMT_CONSTEXPR_DECL const bool add_delimiter_spaces = true;
+-  static FMT_CONSTEXPR_DECL const bool add_prepostfix_space = false;
+ };
+ 
+ template <typename Char, typename Enable = void>
+ struct formatting_tuple : formatting_base<Char> {
+   Char prefix = '(';
+-  Char delimiter = ',';
+   Char postfix = ')';
+-  static FMT_CONSTEXPR_DECL const bool add_delimiter_spaces = true;
+-  static FMT_CONSTEXPR_DECL const bool add_prepostfix_space = false;
+ };
+ 
+ namespace detail {
+@@ -247,31 +241,39 @@ template <typename Range>
+ using value_type =
+     remove_cvref_t<decltype(*detail::range_begin(std::declval<Range>()))>;
+ 
+-template <typename Arg, FMT_ENABLE_IF(!is_like_std_string<
+-                                      typename std::decay<Arg>::type>::value)>
+-FMT_CONSTEXPR const char* format_str_quoted(bool add_space, const Arg&) {
+-  return add_space ? " {}" : "{}";
++template <typename OutputIt> OutputIt write_delimiter(OutputIt out) {
++  *out++ = ',';
++  *out++ = ' ';
++  return out;
+ }
+ 
+-template <typename Arg, FMT_ENABLE_IF(is_like_std_string<
+-                                      typename std::decay<Arg>::type>::value)>
+-FMT_CONSTEXPR const char* format_str_quoted(bool add_space, const Arg&) {
+-  return add_space ? " \"{}\"" : "\"{}\"";
++template <
++    typename Char, typename OutputIt, typename Arg,
++    FMT_ENABLE_IF(is_like_std_string<typename std::decay<Arg>::type>::value)>
++OutputIt write_range_entry(OutputIt out, const Arg& v) {
++  *out++ = '"';
++  out = write<Char>(out, v);
++  *out++ = '"';
++  return out;
+ }
+ 
+-FMT_CONSTEXPR const char* format_str_quoted(bool add_space, const char*) {
+-  return add_space ? " \"{}\"" : "\"{}\"";
+-}
+-FMT_CONSTEXPR const wchar_t* format_str_quoted(bool add_space, const wchar_t*) {
+-  return add_space ? L" \"{}\"" : L"\"{}\"";
++template <typename Char, typename OutputIt, typename Arg,
++          FMT_ENABLE_IF(std::is_same<Arg, Char>::value)>
++OutputIt write_range_entry(OutputIt out, const Arg v) {
++  *out++ = '\'';
++  *out++ = v;
++  *out++ = '\'';
++  return out;
+ }
+ 
+-FMT_CONSTEXPR const char* format_str_quoted(bool add_space, const char) {
+-  return add_space ? " '{}'" : "'{}'";
+-}
+-FMT_CONSTEXPR const wchar_t* format_str_quoted(bool add_space, const wchar_t) {
+-  return add_space ? L" '{}'" : L"'{}'";
++template <
++    typename Char, typename OutputIt, typename Arg,
++    FMT_ENABLE_IF(!is_like_std_string<typename std::decay<Arg>::type>::value &&
++                  !std::is_same<Arg, Char>::value)>
++OutputIt write_range_entry(OutputIt out, const Arg& v) {
++  return write<Char>(out, v);
+ }
++
+ }  // namespace detail
+ 
+ template <typename T> struct is_tuple_like {
+@@ -286,15 +288,10 @@ struct formatter<TupleT, Char, enable_if_t<fmt::is_tuple_like<TupleT>::value>> {
+   template <typename FormatContext> struct format_each {
+     template <typename T> void operator()(const T& v) {
+       if (i > 0) {
+-        if (formatting.add_prepostfix_space) {
+-          *out++ = ' ';
+-        }
+-        out = detail::copy(formatting.delimiter, out);
++        out = write_delimiter(out);
+       }
+-      out = format_to(out,
+-                      detail::format_str_quoted(
+-                          (formatting.add_delimiter_spaces && i > 0), v),
+-                      v);
++
++      out = detail::write_range_entry<Char>(out, v);
+       ++i;
+     }
+ 
+@@ -316,12 +313,9 @@ struct formatter<TupleT, Char, enable_if_t<fmt::is_tuple_like<TupleT>::value>> {
+   auto format(const TupleT& values, FormatContext& ctx) -> decltype(ctx.out()) {
+     auto out = ctx.out();
+     size_t i = 0;
+-    detail::copy(formatting.prefix, out);
+ 
++    detail::copy(formatting.prefix, out);
+     detail::for_each(values, format_each<FormatContext>{formatting, i, out});
+-    if (formatting.add_prepostfix_space) {
+-      *out++ = ' ';
+-    }
+     detail::copy(formatting.postfix, out);
+ 
+     return ctx.out();
+@@ -363,19 +357,16 @@ struct formatter<
+     auto end = view.end();
+     for (; it != end; ++it) {
+       if (i > 0) {
+-        if (formatting.add_prepostfix_space) *out++ = ' ';
+-        out = detail::copy(formatting.delimiter, out);
++        out = detail::write_delimiter(out);
+       }
+-      out = format_to(out,
+-                      detail::format_str_quoted(
+-                          (formatting.add_delimiter_spaces && i > 0), *it),
+-                      *it);
++
++      out = detail::write_range_entry<Char>(out, *it);
++
+       if (++i > formatting.range_length_limit) {
+-        out = format_to(out, " ... <other elements>");
++        out = format_to(out, FMT_STRING("{}"), " ... <other elements>");
+         break;
+       }
+     }
+-    if (formatting.add_prepostfix_space) *out++ = ' ';
+     return detail::copy(formatting.postfix, out);
+   }
+ };

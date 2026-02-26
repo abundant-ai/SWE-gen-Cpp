@@ -1,0 +1,235 @@
+diff --git a/bindings/python/google_benchmark/benchmark.cc b/bindings/python/google_benchmark/benchmark.cc
+index 02b6ed7..1b01fe7 100644
+--- a/bindings/python/google_benchmark/benchmark.cc
++++ b/bindings/python/google_benchmark/benchmark.cc
+@@ -165,12 +165,12 @@ PYBIND11_MODULE(_benchmark, m) {
+                     &State::SetComplexityN)
+       .def_property("items_processed", &State::items_processed,
+                     &State::SetItemsProcessed)
+-      .def("set_label", (void(State::*)(const char*)) & State::SetLabel)
++      .def("set_label", (void (State::*)(const char*)) & State::SetLabel)
+       .def("range", &State::range, py::arg("pos") = 0)
+       .def_property_readonly("iterations", &State::iterations)
+       .def_readwrite("counters", &State::counters)
+-      .def_property_readonly("thread_index", &State::thread_index)
+-      .def_property_readonly("threads", &State::threads);
++      .def_readonly("thread_index", &State::thread_index)
++      .def_readonly("threads", &State::threads);
+ 
+   m.def("Initialize", Initialize);
+   m.def("RegisterBenchmark", RegisterBenchmark,
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 31f2b02..4a4214e 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -140,13 +140,13 @@ thread exits the loop body. As such, any global setup or teardown you want to
+ do can be wrapped in a check against the thread index:
+ 
+ static void BM_MultiThreaded(benchmark::State& state) {
+-  if (state.thread_index() == 0) {
++  if (state.thread_index == 0) {
+     // Setup code here.
+   }
+   for (auto _ : state) {
+     // Run the test as normal.
+   }
+-  if (state.thread_index() == 0) {
++  if (state.thread_index == 0) {
+     // Teardown code here.
+   }
+ }
+@@ -667,14 +667,6 @@ class State {
+   BENCHMARK_DEPRECATED_MSG("use 'range(1)' instead")
+   int64_t range_y() const { return range(1); }
+ 
+-  // Number of threads concurrently executing the benchmark.
+-  BENCHMARK_ALWAYS_INLINE
+-  int threads() const { return threads_; }
+-
+-  // Index of the executing thread. Values from [0, threads).
+-  BENCHMARK_ALWAYS_INLINE
+-  int thread_index() const { return thread_index_; }
+-
+   BENCHMARK_ALWAYS_INLINE
+   IterationCount iterations() const {
+     if (BENCHMARK_BUILTIN_EXPECT(!started_, false)) {
+@@ -683,8 +675,8 @@ class State {
+     return max_iterations - total_iterations_ + batch_leftover_;
+   }
+ 
+- private:
+-  // items we expect on the first cache line (ie 64 bytes of the struct)
++ private
++     :  // items we expect on the first cache line (ie 64 bytes of the struct)
+   // When total_iterations_ is 0, KeepRunning() and friends will return false.
+   // May be larger than max_iterations.
+   IterationCount total_iterations_;
+@@ -710,6 +702,10 @@ class State {
+  public:
+   // Container for user-defined counters.
+   UserCounters counters;
++  // Index of the executing thread. Values from [0, threads).
++  const int thread_index;
++  // Number of threads concurrently executing the benchmark.
++  const int threads;
+ 
+  private:
+   State(IterationCount max_iters, const std::vector<int64_t>& ranges,
+@@ -722,10 +718,6 @@ class State {
+   // is_batch must be true unless n is 1.
+   bool KeepRunningInternal(IterationCount n, bool is_batch);
+   void FinishKeepRunning();
+-
+-  const int thread_index_;
+-  const int threads_;
+-
+   internal::ThreadTimer* const timer_;
+   internal::ThreadManager* const manager_;
+   internal::PerfCountersMeasurement* const perf_counters_measurement_;
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index a086453..493ebbe 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -146,13 +146,13 @@ State::State(IterationCount max_iters, const std::vector<int64_t>& ranges,
+       range_(ranges),
+       complexity_n_(0),
+       counters(),
+-      thread_index_(thread_i),
+-      threads_(n_threads),
++      thread_index(thread_i),
++      threads(n_threads),
+       timer_(timer),
+       manager_(manager),
+       perf_counters_measurement_(perf_counters_measurement) {
+   BM_CHECK(max_iterations != 0) << "At least one iteration must be run";
+-  BM_CHECK_LT(thread_index_, threads_)
++  BM_CHECK_LT(thread_index, threads)
+       << "thread_index must be less than threads";
+ 
+   // Note: The use of offsetof below is technically undefined until C++17
+diff --git a/test/benchmark_test.cc b/test/benchmark_test.cc
+index c63fc31..3cd4f55 100644
+--- a/test/benchmark_test.cc
++++ b/test/benchmark_test.cc
+@@ -126,7 +126,7 @@ static void BM_StringCompare(benchmark::State& state) {
+ BENCHMARK(BM_StringCompare)->Range(1, 1 << 20);
+ 
+ static void BM_SetupTeardown(benchmark::State& state) {
+-  if (state.thread_index() == 0) {
++  if (state.thread_index == 0) {
+     // No need to lock test_vector_mu here as this is running single-threaded.
+     test_vector = new std::vector<int>();
+   }
+@@ -139,7 +139,7 @@ static void BM_SetupTeardown(benchmark::State& state) {
+       test_vector->pop_back();
+     ++i;
+   }
+-  if (state.thread_index() == 0) {
++  if (state.thread_index == 0) {
+     delete test_vector;
+   }
+ }
+@@ -156,11 +156,11 @@ BENCHMARK(BM_LongTest)->Range(1 << 16, 1 << 28);
+ 
+ static void BM_ParallelMemset(benchmark::State& state) {
+   int64_t size = state.range(0) / static_cast<int64_t>(sizeof(int));
+-  int thread_size = static_cast<int>(size) / state.threads();
+-  int from = thread_size * state.thread_index();
++  int thread_size = static_cast<int>(size) / state.threads;
++  int from = thread_size * state.thread_index;
+   int to = from + thread_size;
+ 
+-  if (state.thread_index() == 0) {
++  if (state.thread_index == 0) {
+     test_vector = new std::vector<int>(static_cast<size_t>(size));
+   }
+ 
+@@ -172,7 +172,7 @@ static void BM_ParallelMemset(benchmark::State& state) {
+     }
+   }
+ 
+-  if (state.thread_index() == 0) {
++  if (state.thread_index == 0) {
+     delete test_vector;
+   }
+ }
+@@ -223,14 +223,14 @@ BENCHMARK_CAPTURE(BM_non_template_args, basic_test, 0, 0);
+ static void BM_DenseThreadRanges(benchmark::State& st) {
+   switch (st.range(0)) {
+     case 1:
+-      assert(st.threads() == 1 || st.threads() == 2 || st.threads() == 3);
++      assert(st.threads == 1 || st.threads == 2 || st.threads == 3);
+       break;
+     case 2:
+-      assert(st.threads() == 1 || st.threads() == 3 || st.threads() == 4);
++      assert(st.threads == 1 || st.threads == 3 || st.threads == 4);
+       break;
+     case 3:
+-      assert(st.threads() == 5 || st.threads() == 8 || st.threads() == 11 ||
+-             st.threads() == 14);
++      assert(st.threads == 5 || st.threads == 8 || st.threads == 11 ||
++             st.threads == 14);
+       break;
+     default:
+       assert(false && "Invalid test case number");
+diff --git a/test/fixture_test.cc b/test/fixture_test.cc
+index 452dd87..eba0a42 100644
+--- a/test/fixture_test.cc
++++ b/test/fixture_test.cc
+@@ -9,14 +9,14 @@
+ class FIXTURE_BECHMARK_NAME : public ::benchmark::Fixture {
+  public:
+   void SetUp(const ::benchmark::State& state) BENCHMARK_OVERRIDE {
+-    if (state.thread_index() == 0) {
++    if (state.thread_index == 0) {
+       assert(data.get() == nullptr);
+       data.reset(new int(42));
+     }
+   }
+ 
+   void TearDown(const ::benchmark::State& state) BENCHMARK_OVERRIDE {
+-    if (state.thread_index() == 0) {
++    if (state.thread_index == 0) {
+       assert(data.get() != nullptr);
+       data.reset();
+     }
+@@ -35,7 +35,7 @@ BENCHMARK_F(FIXTURE_BECHMARK_NAME, Foo)(benchmark::State &st) {
+ }
+ 
+ BENCHMARK_DEFINE_F(FIXTURE_BECHMARK_NAME, Bar)(benchmark::State& st) {
+-  if (st.thread_index() == 0) {
++  if (st.thread_index == 0) {
+     assert(data.get() != nullptr);
+     assert(*data == 42);
+   }
+diff --git a/test/skip_with_error_test.cc b/test/skip_with_error_test.cc
+index 4d89671..1156bc0 100644
+--- a/test/skip_with_error_test.cc
++++ b/test/skip_with_error_test.cc
+@@ -97,7 +97,7 @@ ADD_CASES("BM_error_before_running_range_for", {{"", true, "error message"}});
+ void BM_error_during_running(benchmark::State& state) {
+   int first_iter = true;
+   while (state.KeepRunning()) {
+-    if (state.range(0) == 1 && state.thread_index() <= (state.threads() / 2)) {
++    if (state.range(0) == 1 && state.thread_index <= (state.threads / 2)) {
+       assert(first_iter);
+       first_iter = false;
+       state.SkipWithError("error message");
+@@ -142,7 +142,7 @@ void BM_error_after_running(benchmark::State& state) {
+   for (auto _ : state) {
+     benchmark::DoNotOptimize(state.iterations());
+   }
+-  if (state.thread_index() <= (state.threads() / 2))
++  if (state.thread_index <= (state.threads / 2))
+     state.SkipWithError("error message");
+ }
+ BENCHMARK(BM_error_after_running)->ThreadRange(1, 8);
+@@ -154,7 +154,7 @@ ADD_CASES("BM_error_after_running", {{"/threads:1", true, "error message"},
+ void BM_error_while_paused(benchmark::State& state) {
+   bool first_iter = true;
+   while (state.KeepRunning()) {
+-    if (state.range(0) == 1 && state.thread_index() <= (state.threads() / 2)) {
++    if (state.range(0) == 1 && state.thread_index <= (state.threads / 2)) {
+       assert(first_iter);
+       first_iter = false;
+       state.PauseTiming();

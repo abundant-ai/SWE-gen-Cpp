@@ -1,0 +1,284 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index ba997e8..c154a15 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -280,6 +280,9 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ namespace benchmark {
+ class BenchmarkReporter;
+ 
++// Default number of minimum benchmark running time in seconds.
++const char kDefaultMinTimeStr[] = "0.5s";
++
+ BENCHMARK_EXPORT void PrintDefaultHelp();
+ 
+ BENCHMARK_EXPORT void Initialize(int* argc, char** argv,
+@@ -1099,11 +1102,12 @@ class BENCHMARK_EXPORT Benchmark {
+   Benchmark* MinWarmUpTime(double t);
+ 
+   // Specify the amount of iterations that should be run by this benchmark.
++  // This option overrides the `benchmark_min_time` flag.
+   // REQUIRES: 'n > 0' and `MinTime` has not been called on this benchmark.
+   //
+   // NOTE: This function should only be used when *exact* iteration control is
+   //   needed and never to control or limit how long a benchmark runs, where
+-  // `--benchmark_min_time=N` or `MinTime(...)` should be used instead.
++  // `--benchmark_min_time=<N>s` or `MinTime(...)` should be used instead.
+   Benchmark* Iterations(IterationCount n);
+ 
+   // Specify the amount of times to repeat this benchmark. This option overrides
+@@ -1739,6 +1743,12 @@ class BENCHMARK_EXPORT BenchmarkReporter {
+   // to skip runs based on the context information.
+   virtual bool ReportContext(const Context& context) = 0;
+ 
++  // Called once for each group of benchmark runs, gives information about
++  // the configurations of the runs.
++  virtual void ReportRunsConfig(double /*min_time*/,
++                                bool /*has_explicit_iters*/,
++                                IterationCount /*iters*/) {}
++
+   // Called once for each group of benchmark runs, gives information about
+   // cpu-time and heap memory usage during the benchmark run. If the group
+   // of runs contained more than two entries then 'report' contains additional
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 8e7408f..e2d85fe 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -65,12 +65,21 @@ BM_DEFINE_bool(benchmark_list_tests, false);
+ // linked into the binary are run.
+ BM_DEFINE_string(benchmark_filter, "");
+ 
+-// Minimum number of seconds we should run benchmark before results are
+-// considered significant.  For cpu-time based tests, this is the lower bound
++// Specification of how long to run the benchmark.
++//
++// It can be either an exact number of iterations (specified as `<integer>x`),
++// or a minimum number of seconds (specified as `<float>s`). If the latter
++// format (ie., min seconds) is used, the system may run the benchmark longer
++// until the results are considered significant.
++//
++// For backward compatibility, the `s` suffix may be omitted, in which case,
++// the specified number is interpreted as the number of seconds.
++//
++// For cpu-time based tests, this is the lower bound
+ // on the total cpu time used by all threads that make up the test.  For
+ // real-time based tests, this is the lower bound on the elapsed time of the
+ // benchmark execution, regardless of number of threads.
+-BM_DEFINE_double(benchmark_min_time, 0.5);
++BM_DEFINE_string(benchmark_min_time, kDefaultMinTimeStr);
+ 
+ // Minimum number of seconds a benchmark should be run before results should be
+ // taken into account. This e.g can be necessary for benchmarks of code which
+@@ -377,6 +386,12 @@ void RunBenchmarks(const std::vector<BenchmarkInstance>& benchmarks,
+       if (runner.HasRepeatsRemaining()) continue;
+       // FIXME: report each repetition separately, not all of them in bulk.
+ 
++      display_reporter->ReportRunsConfig(
++          runner.GetMinTime(), runner.HasExplicitIters(), runner.GetIters());
++      if (file_reporter)
++        file_reporter->ReportRunsConfig(
++            runner.GetMinTime(), runner.HasExplicitIters(), runner.GetIters());
++
+       RunResults run_results = runner.GetResults();
+ 
+       // Maybe calculate complexity report
+@@ -610,7 +625,7 @@ void ParseCommandLineFlags(int* argc, char** argv) {
+     if (ParseBoolFlag(argv[i], "benchmark_list_tests",
+                       &FLAGS_benchmark_list_tests) ||
+         ParseStringFlag(argv[i], "benchmark_filter", &FLAGS_benchmark_filter) ||
+-        ParseDoubleFlag(argv[i], "benchmark_min_time",
++        ParseStringFlag(argv[i], "benchmark_min_time",
+                         &FLAGS_benchmark_min_time) ||
+         ParseDoubleFlag(argv[i], "benchmark_min_warmup_time",
+                         &FLAGS_benchmark_min_warmup_time) ||
+@@ -671,7 +686,7 @@ void PrintDefaultHelp() {
+           "benchmark"
+           " [--benchmark_list_tests={true|false}]\n"
+           "          [--benchmark_filter=<regex>]\n"
+-          "          [--benchmark_min_time=<min_time>]\n"
++          "          [--benchmark_min_time=`<integer>x` OR `<float>s` ]\n"
+           "          [--benchmark_min_warmup_time=<min_warmup_time>]\n"
+           "          [--benchmark_repetitions=<num_repetitions>]\n"
+           "          [--benchmark_enable_random_interleaving={true|false}]\n"
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index 04e5c2a..eb0d9cb 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -28,11 +28,14 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <climits>
++#include <cmath>
+ #include <condition_variable>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <fstream>
+ #include <iostream>
++#include <limits>
+ #include <memory>
+ #include <string>
+ #include <thread>
+@@ -62,6 +65,8 @@ MemoryManager* memory_manager = nullptr;
+ namespace {
+ 
+ static constexpr IterationCount kMaxIterations = 1000000000;
++const double kDefaultMinTime =
++    std::strtod(::benchmark::kDefaultMinTimeStr, /*p_end*/ nullptr);
+ 
+ BenchmarkReporter::Run CreateRunReport(
+     const benchmark::internal::BenchmarkInstance& b,
+@@ -140,23 +145,100 @@ void RunInThread(const BenchmarkInstance* b, IterationCount iters,
+   manager->NotifyThreadComplete();
+ }
+ 
++double ComputeMinTime(const benchmark::internal::BenchmarkInstance& b,
++                      const BenchTimeType& iters_or_time) {
++  if (!IsZero(b.min_time())) return b.min_time();
++  // If the flag was used to specify number of iters, then return the default
++  // min_time.
++  if (iters_or_time.tag == BenchTimeType::ITERS) return kDefaultMinTime;
++
++  return iters_or_time.time;
++}
++
++IterationCount ComputeIters(const benchmark::internal::BenchmarkInstance& b,
++                            const BenchTimeType& iters_or_time) {
++  if (b.iterations() != 0) return b.iterations();
++
++  // We've already concluded that this flag is currently used to pass
++  // iters but do a check here again anyway.
++  BM_CHECK(iters_or_time.tag == BenchTimeType::ITERS);
++  return iters_or_time.iters;
++}
++
+ }  // end namespace
+ 
++BenchTimeType ParseBenchMinTime(const std::string& value) {
++  BenchTimeType ret;
++
++  if (value.empty()) {
++    ret.tag = BenchTimeType::TIME;
++    ret.time = 0.0;
++    return ret;
++  }
++
++  if (value.back() == 'x') {
++    const char* iters_str = value.c_str();
++    char* p_end;
++    // Reset errno before it's changed by strtol.
++    errno = 0;
++    IterationCount num_iters = std::strtol(iters_str, &p_end, 10);
++
++    // After a valid parse, p_end should have been set to
++    // point to the 'x' suffix.
++    BM_CHECK(errno == 0 && p_end != nullptr && *p_end == 'x')
++        << "Malformed iters value passed to --benchmark_min_time: `" << value
++        << "`. Expected --benchmark_min_time=<integer>x.";
++
++    ret.tag = BenchTimeType::ITERS;
++    ret.iters = num_iters;
++    return ret;
++  }
++
++  const char* time_str = value.c_str();
++  bool has_suffix = value.back() == 's';
++  if (!has_suffix) {
++    BM_VLOG(0) << "Value passed to --benchmark_min_time should have a suffix. "
++                  "Eg., `30s` for 30-seconds.";
++  }
++
++  char* p_end;
++  // Reset errno before it's changed by strtod.
++  errno = 0;
++  double min_time = std::strtod(time_str, &p_end);
++
++  // After a successfull parse, p_end should point to the suffix 's'
++  // or the end of the string, if the suffix was omitted.
++  BM_CHECK(errno == 0 && p_end != nullptr &&
++           (has_suffix && *p_end == 's' || *p_end == '\0'))
++      << "Malformed seconds value passed to --benchmark_min_time: `" << value
++      << "`. Expected --benchmark_min_time=<float>x.";
++
++  ret.tag = BenchTimeType::TIME;
++  ret.time = min_time;
++
++  return ret;
++}
++
+ BenchmarkRunner::BenchmarkRunner(
+     const benchmark::internal::BenchmarkInstance& b_,
+     BenchmarkReporter::PerFamilyRunReports* reports_for_family_)
+     : b(b_),
+       reports_for_family(reports_for_family_),
+-      min_time(!IsZero(b.min_time()) ? b.min_time() : FLAGS_benchmark_min_time),
++      parsed_benchtime_flag(ParseBenchMinTime(FLAGS_benchmark_min_time)),
++      min_time(ComputeMinTime(b_, parsed_benchtime_flag)),
+       min_warmup_time((!IsZero(b.min_time()) && b.min_warmup_time() > 0.0)
+                           ? b.min_warmup_time()
+                           : FLAGS_benchmark_min_warmup_time),
+       warmup_done(!(min_warmup_time > 0.0)),
+       repeats(b.repetitions() != 0 ? b.repetitions()
+                                    : FLAGS_benchmark_repetitions),
+-      has_explicit_iteration_count(b.iterations() != 0),
++      has_explicit_iteration_count(b.iterations() != 0 ||
++                                   parsed_benchtime_flag.tag ==
++                                       BenchTimeType::ITERS),
+       pool(b.threads() - 1),
+-      iters(has_explicit_iteration_count ? b.iterations() : 1),
++      iters(has_explicit_iteration_count
++                ? ComputeIters(b_, parsed_benchtime_flag)
++                : 1),
+       perf_counters_measurement(StrSplit(FLAGS_benchmark_perf_counters, ',')),
+       perf_counters_measurement_ptr(perf_counters_measurement.IsValid()
+                                         ? &perf_counters_measurement
+diff --git a/src/benchmark_runner.h b/src/benchmark_runner.h
+index 0174bd3..9d80653 100644
+--- a/src/benchmark_runner.h
++++ b/src/benchmark_runner.h
+@@ -25,7 +25,7 @@
+ 
+ namespace benchmark {
+ 
+-BM_DECLARE_double(benchmark_min_time);
++BM_DECLARE_string(benchmark_min_time);
+ BM_DECLARE_double(benchmark_min_warmup_time);
+ BM_DECLARE_int32(benchmark_repetitions);
+ BM_DECLARE_bool(benchmark_report_aggregates_only);
+@@ -44,6 +44,17 @@ struct RunResults {
+   bool file_report_aggregates_only = false;
+ };
+ 
++struct BENCHMARK_EXPORT BenchTimeType {
++  enum { ITERS, TIME } tag;
++  union {
++    IterationCount iters;
++    double time;
++  };
++};
++
++BENCHMARK_EXPORT
++BenchTimeType ParseBenchMinTime(const std::string& value);
++
+ class BenchmarkRunner {
+  public:
+   BenchmarkRunner(const benchmark::internal::BenchmarkInstance& b_,
+@@ -63,12 +74,19 @@ class BenchmarkRunner {
+     return reports_for_family;
+   }
+ 
++  double GetMinTime() const { return min_time; }
++
++  bool HasExplicitIters() const { return has_explicit_iteration_count; }
++
++  IterationCount GetIters() const { return iters; }
++
+  private:
+   RunResults run_results;
+ 
+   const benchmark::internal::BenchmarkInstance& b;
+   BenchmarkReporter::PerFamilyRunReports* reports_for_family;
+ 
++  BenchTimeType parsed_benchtime_flag;
+   const double min_time;
+   const double min_warmup_time;
+   bool warmup_done;

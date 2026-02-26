@@ -1,0 +1,12 @@
+The library documentation states that users can build and use the core formatting functionality by including only the minimal subset (notably the main formatting header and its corresponding implementation unit). In practice, this minimal subset is not self-contained: compiling the formatting implementation unit pulls in printf-related headers, which in turn pull in stream/ostream-related headers. This introduces unexpected dependencies and makes it impossible to use the advertised minimal subset without also bringing in printf/ostream components.
+
+Reproduce by attempting to build a small program that uses only the formatting/printing API via the minimal subset, expecting it to compile without including or linking the printf and ostream parts. The build currently fails or forces extra includes because the formatting implementation unit depends on printf-related explicit instantiations (e.g., explicit instantiation of PrintfFormatter for char and wchar_t), which should not be required unless the user explicitly opts into the printf API.
+
+Expected behavior: Building the core formatting implementation should not require including printf-related headers (and therefore should not drag in ostream). Users who only rely on fmt::format / fmt::print-style formatting should be able to compile with the minimal subset as documented. The printf functionality (including any explicit template instantiations for PrintfFormatter<char> and PrintfFormatter<wchar_t>) should only be required when the printf API is used.
+
+Actual behavior: The formatting implementation unit includes printf-related headers for explicit instantiations, causing unintended dependency on ostream headers and preventing the documented minimal subset from being self-contained.
+
+Fix the dependency boundary so that the core formatting implementation no longer requires printf headers. Ensure that:
+- Code using only the core formatting API compiles without needing printf/ostream headers.
+- Code including the printf API header (e.g., including the header that provides fmt::printf / fmt::print overloads tied to printf support) continues to compile and link correctly.
+- Both common integration modes work: adding the project as a subdirectory and consuming it via a package configuration (find_package-style consumption).

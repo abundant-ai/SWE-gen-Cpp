@@ -1,0 +1,210 @@
+diff --git a/fmt/CMakeLists.txt b/fmt/CMakeLists.txt
+index 9e491f93..5a96c412 100644
+--- a/fmt/CMakeLists.txt
++++ b/fmt/CMakeLists.txt
+@@ -1,6 +1,6 @@
+ # Define the fmt library, its includes and the needed defines.
+-# *.cc are added to FMT_HEADERS for the header-only configuration.
+-set(FMT_HEADERS format.h format.cc ostream.h ostream.cc printf.h printf.cc
++# format.cc is added to FMT_HEADERS for the header-only configuration.
++set(FMT_HEADERS format.h format.cc ostream.h ostream.cc printf.h
+                 string.h time.h)
+ if (HAVE_OPEN)
+   set(FMT_HEADERS ${FMT_HEADERS} posix.h)
+diff --git a/fmt/format.cc b/fmt/format.cc
+index ab460242..607314e9 100644
+--- a/fmt/format.cc
++++ b/fmt/format.cc
+@@ -26,6 +26,7 @@
+  */
+ 
+ #include "format.h"
++#include "printf.h"
+ 
+ #include <string.h>
+ 
+@@ -105,6 +106,8 @@ inline int fmt_snprintf(char *buffer, size_t size, const char *format, ...) {
+ # define FMT_SWPRINTF swprintf
+ #endif // defined(_WIN32) && defined(__MINGW32__) && !defined(__NO_ISOCEXT)
+ 
++const char RESET_COLOR[] = "\x1b[0m";
++
+ typedef void (*FormatFunc)(Writer &, int, StringRef);
+ 
+ // Portable thread-safe version of strerror.
+@@ -483,6 +486,34 @@ FMT_FUNC void report_windows_error(
+ }
+ #endif
+ 
++FMT_FUNC void print(std::FILE *f, CStringRef format_str, ArgList args) {
++  MemoryWriter w;
++  w.write(format_str, args);
++  std::fwrite(w.data(), 1, w.size(), f);
++}
++
++FMT_FUNC void print(CStringRef format_str, ArgList args) {
++  print(stdout, format_str, args);
++}
++
++FMT_FUNC void print_colored(Color c, CStringRef format, ArgList args) {
++  char escape[] = "\x1b[30m";
++  escape[3] = static_cast<char>('0' + c);
++  std::fputs(escape, stdout);
++  print(format, args);
++  std::fputs(RESET_COLOR, stdout);
++}
++
++template <typename Char>
++void printf(BasicWriter<Char> &w, BasicCStringRef<Char> format, ArgList args);
++
++FMT_FUNC int fprintf(std::FILE *f, CStringRef format, ArgList args) {
++  MemoryWriter w;
++  printf(w, format, args);
++  std::size_t size = w.size();
++  return std::fwrite(w.data(), 1, size, f) < size ? -1 : static_cast<int>(size);
++}
++
+ #ifndef FMT_HEADER_ONLY
+ 
+ template struct internal::BasicData<void>;
+@@ -493,6 +524,8 @@ template void internal::FixedBuffer<char>::grow(std::size_t);
+ 
+ template void internal::ArgMap<char>::init(const ArgList &args);
+ 
++template void PrintfFormatter<char>::format(CStringRef format);
++
+ template int internal::CharTraits<char>::format_float(
+     char *buffer, std::size_t size, const char *format,
+     unsigned width, int precision, double value);
+@@ -507,6 +540,8 @@ template void internal::FixedBuffer<wchar_t>::grow(std::size_t);
+ 
+ template void internal::ArgMap<wchar_t>::init(const ArgList &args);
+ 
++template void PrintfFormatter<wchar_t>::format(WCStringRef format);
++
+ template int internal::CharTraits<wchar_t>::format_float(
+     wchar_t *buffer, std::size_t size, const wchar_t *format,
+     unsigned width, int precision, double value);
+diff --git a/fmt/printf.cc b/fmt/printf.cc
+deleted file mode 100644
+index be523447..00000000
+--- a/fmt/printf.cc
++++ /dev/null
+@@ -1,56 +0,0 @@
+-/*
+- Formatting library for C++
+-
+- Copyright (c) 2012 - 2016, Victor Zverovich
+- All rights reserved.
+-
+- For the license information refer to format.h.
+- */
+-
+-#include "format.h"
+-#include "printf.h"
+-
+-namespace fmt {
+-
+-namespace {
+-
+-const char RESET_COLOR[] = "\x1b[0m";
+-
+-}  // namespace
+-
+-FMT_FUNC void print(std::FILE *f, CStringRef format_str, ArgList args) {
+-  MemoryWriter w;
+-  w.write(format_str, args);
+-  std::fwrite(w.data(), 1, w.size(), f);
+-}
+-
+-FMT_FUNC void print(CStringRef format_str, ArgList args) {
+-  print(stdout, format_str, args);
+-}
+-
+-FMT_FUNC void print_colored(Color c, CStringRef format, ArgList args) {
+-  char escape[] = "\x1b[30m";
+-  escape[3] = static_cast<char>('0' + c);
+-  std::fputs(escape, stdout);
+-  print(format, args);
+-  std::fputs(RESET_COLOR, stdout);
+-}
+-
+-template <typename Char>
+-void printf(BasicWriter<Char> &w, BasicCStringRef<Char> format, ArgList args);
+-
+-FMT_FUNC int fprintf(std::FILE *f, CStringRef format, ArgList args) {
+-  MemoryWriter w;
+-  printf(w, format, args);
+-  std::size_t size = w.size();
+-  return std::fwrite(w.data(), 1, size, f) < size ? -1 : static_cast<int>(size);
+-}
+-
+-#ifndef FMT_HEADER_ONLY
+-
+-template void PrintfFormatter<char>::format(CStringRef format);
+-template void PrintfFormatter<wchar_t>::format(WCStringRef format);
+-
+-#endif  // FMT_HEADER_ONLY
+-
+-}  // namespace fmt
+diff --git a/fmt/printf.h b/fmt/printf.h
+index 80d22441..0e6af603 100644
+--- a/fmt/printf.h
++++ b/fmt/printf.h
+@@ -555,8 +555,4 @@ inline int fprintf(std::ostream &os, CStringRef format_str, ArgList args) {
+ FMT_VARIADIC(int, fprintf, std::ostream &, CStringRef)
+ }  // namespace fmt
+ 
+-#ifdef FMT_HEADER_ONLY
+-# include "printf.cc"
+-#endif
+-
+ #endif  // FMT_PRINTF_H_
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index b805955e..86e72b97 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -99,7 +99,7 @@ endif ()
+ 
+ if (HAVE_OPEN)
+   add_fmt_executable(posix-mock-test
+-    posix-mock-test.cc ../fmt/format.cc ../fmt/printf.cc ${TEST_MAIN_SRC})
++    posix-mock-test.cc ../fmt/format.cc ${TEST_MAIN_SRC})
+   target_include_directories(posix-mock-test PRIVATE ${PROJECT_SOURCE_DIR})
+   target_compile_definitions(posix-mock-test PRIVATE FMT_USE_FILE_DESCRIPTORS=1)
+   target_link_libraries(posix-mock-test gmock)
+diff --git a/test/add-subdirectory-test/main.cc b/test/add-subdirectory-test/main.cc
+index 4585ea1b..f39f377c 100644
+--- a/test/add-subdirectory-test/main.cc
++++ b/test/add-subdirectory-test/main.cc
+@@ -1,4 +1,4 @@
+-#include "fmt/printf.h"
++#include "fmt/format.h"
+ 
+ int main(int argc, char** argv) {
+   for(int i = 0; i < argc; ++i)
+diff --git a/test/find-package-test/main.cc b/test/find-package-test/main.cc
+index 4585ea1b..f39f377c 100644
+--- a/test/find-package-test/main.cc
++++ b/test/find-package-test/main.cc
+@@ -1,4 +1,4 @@
+-#include "fmt/printf.h"
++#include "fmt/format.h"
+ 
+ int main(int argc, char** argv) {
+   for(int i = 0; i < argc; ++i)
+diff --git a/test/format-impl-test.cc b/test/format-impl-test.cc
+index 9fe2a7ec..e29a6fe6 100644
+--- a/test/format-impl-test.cc
++++ b/test/format-impl-test.cc
+@@ -28,9 +28,8 @@
+ #define FMT_NOEXCEPT
+ #include "test-assert.h"
+ 
+-// Include *.cc instead of *.h to test implementation-specific stuff.
++// Include format.cc instead of format.h to test implementation-specific stuff.
+ #include "fmt/format.cc"
+-#include "fmt/printf.cc"
+ 
+ #include <algorithm>
+ #include <cstring>

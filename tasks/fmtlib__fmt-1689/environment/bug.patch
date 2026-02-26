@@ -1,0 +1,134 @@
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index 4fb44d48..873e98bd 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -291,7 +291,6 @@ template <> constexpr int num_bits<fallback_uintptr>() {
+ // An approximation of iterator_t for pre-C++20 systems.
+ template <typename T>
+ using iterator_t = decltype(std::begin(std::declval<T&>()));
+-template <typename T> using sentinel_t = decltype(std::end(std::declval<T&>()));
+ 
+ // Detect the iterator category of *any* given type in a SFINAE-friendly way.
+ // Unfortunately, older implementations of std::iterator_traits are not safe
+@@ -3210,21 +3209,19 @@ template <> struct formatter<bytes> {
+   detail::dynamic_format_specs<char> specs_;
+ };
+ 
+-template <typename It, typename Sentinel, typename Char>
+-struct arg_join : detail::view {
++template <typename It, typename Char> struct arg_join : detail::view {
+   It begin;
+-  Sentinel end;
++  It end;
+   basic_string_view<Char> sep;
+ 
+-  arg_join(It b, Sentinel e, basic_string_view<Char> s)
+-      : begin(b), end(e), sep(s) {}
++  arg_join(It b, It e, basic_string_view<Char> s) : begin(b), end(e), sep(s) {}
+ };
+ 
+-template <typename It, typename Sentinel, typename Char>
+-struct formatter<arg_join<It, Sentinel, Char>, Char>
++template <typename It, typename Char>
++struct formatter<arg_join<It, Char>, Char>
+     : formatter<typename std::iterator_traits<It>::value_type, Char> {
+   template <typename FormatContext>
+-  auto format(const arg_join<It, Sentinel, Char>& value, FormatContext& ctx)
++  auto format(const arg_join<It, Char>& value, FormatContext& ctx)
+       -> decltype(ctx.out()) {
+     using base = formatter<typename std::iterator_traits<It>::value_type, Char>;
+     auto it = value.begin;
+@@ -3245,13 +3242,13 @@ struct formatter<arg_join<It, Sentinel, Char>, Char>
+   Returns an object that formats the iterator range `[begin, end)` with elements
+   separated by `sep`.
+  */
+-template <typename It, typename Sentinel>
+-arg_join<It, Sentinel, char> join(It begin, Sentinel end, string_view sep) {
++template <typename It>
++arg_join<It, char> join(It begin, It end, string_view sep) {
+   return {begin, end, sep};
+ }
+ 
+-template <typename It, typename Sentinel>
+-arg_join<It, Sentinel, wchar_t> join(It begin, Sentinel end, wstring_view sep) {
++template <typename It>
++arg_join<It, wchar_t> join(It begin, It end, wstring_view sep) {
+   return {begin, end, sep};
+ }
+ 
+@@ -3272,15 +3269,14 @@ arg_join<It, Sentinel, wchar_t> join(It begin, Sentinel end, wstring_view sep) {
+   \endrst
+  */
+ template <typename Range>
+-arg_join<detail::iterator_t<const Range>, detail::sentinel_t<const Range>, char>
+-join(const Range& range, string_view sep) {
++arg_join<detail::iterator_t<const Range>, char> join(const Range& range,
++                                                     string_view sep) {
+   return join(std::begin(range), std::end(range), sep);
+ }
+ 
+ template <typename Range>
+-arg_join<detail::iterator_t<const Range>, detail::sentinel_t<const Range>,
+-         wchar_t>
+-join(const Range& range, wstring_view sep) {
++arg_join<detail::iterator_t<const Range>, wchar_t> join(const Range& range,
++                                                        wstring_view sep) {
+   return join(std::begin(range), std::end(range), sep);
+ }
+ 
+diff --git a/include/fmt/ranges.h b/include/fmt/ranges.h
+index c48f1727..c58b97a1 100644
+--- a/include/fmt/ranges.h
++++ b/include/fmt/ranges.h
+@@ -261,9 +261,7 @@ struct formatter<RangeT, Char,
+                                           FormatContext& ctx) {
+     auto out = detail::copy(formatting.prefix, ctx.out());
+     size_t i = 0;
+-    auto it = values.begin();
+-    auto end = values.end();
+-    for (; it != end; ++it) {
++    for (auto it = values.begin(), end = values.end(); it != end; ++it) {
+       if (i > 0) {
+         if (formatting.add_prepostfix_space) *out++ = ' ';
+         out = detail::copy(formatting.delimiter, out);
+@@ -370,14 +368,14 @@ FMT_CONSTEXPR tuple_arg_join<wchar_t, T...> join(const std::tuple<T...>& tuple,
+   \endrst
+  */
+ template <typename T>
+-arg_join<const T*, const T*, char> join(std::initializer_list<T> list,
+-                                        string_view sep) {
++arg_join<detail::iterator_t<const std::initializer_list<T>>, char> join(
++    std::initializer_list<T> list, string_view sep) {
+   return join(std::begin(list), std::end(list), sep);
+ }
+ 
+ template <typename T>
+-arg_join<const T*, const T*, wchar_t> join(std::initializer_list<T> list,
+-                                           wstring_view sep) {
++arg_join<detail::iterator_t<const std::initializer_list<T>>, wchar_t> join(
++    std::initializer_list<T> list, wstring_view sep) {
+   return join(std::begin(list), std::end(list), sep);
+ }
+ 
+diff --git a/test/ranges-test.cc b/test/ranges-test.cc
+index 46208e8d..462ba7f6 100644
+--- a/test/ranges-test.cc
++++ b/test/ranges-test.cc
+@@ -139,17 +139,3 @@ TEST(RangesTest, FormatStringLike) {
+   EXPECT_EQ("foo", fmt::format("{}", string_like()));
+ }
+ #endif  // FMT_USE_STRING_VIEW
+-
+-struct zstring_sentinel {};
+-bool operator==(const char* p, zstring_sentinel) { return *p == '\0'; }
+-bool operator!=(const char* p, zstring_sentinel) { return *p != '\0'; }
+-struct zstring {
+-  const char* p;
+-  const char* begin() const { return p; }
+-  zstring_sentinel end() const { return {}; }
+-};
+-TEST(RangesTest, JoinSentinel) {
+-  zstring hello{"hello"};
+-  EXPECT_EQ("{'h', 'e', 'l', 'l', 'o'}", fmt::format("{}", hello));
+-  EXPECT_EQ("h_e_l_l_o", fmt::format("{}", fmt::join(hello, "_")));
+-}
