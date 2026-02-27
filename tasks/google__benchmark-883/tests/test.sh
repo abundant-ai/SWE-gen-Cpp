@@ -4,7 +4,7 @@ cd /app/src
 
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test"
-cp "/tests/skip_with_error_test.cc" "test/skip_with_error_test.cc"
+cp "/tests/commandlineflags_gtest.cc" "test/commandlineflags_gtest.cc"
 
 # Rebuild with the fixed test files
 echo "Rebuilding with fixed test files..."
@@ -20,11 +20,12 @@ cmake -B build -G Ninja \
     -DBENCHMARK_ENABLE_WERROR=OFF \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-# Build everything to ensure all dependencies are correct
-cmake --build build --config Debug -j 1
+# Build the commandlineflags_gtest specifically
+cmake --build build --config Debug --target commandlineflags_gtest -j 1
 
-# Run the specific test for this PR
-./build/test/skip_with_error_test
+# Run the commandlineflags_gtest
+echo "Running commandlineflags_gtest..."
+./build/test/commandlineflags_gtest
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

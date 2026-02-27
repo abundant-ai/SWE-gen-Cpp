@@ -1,0 +1,116 @@
+diff --git a/README.md b/README.md
+index f576973..ebbbf15 100644
+--- a/README.md
++++ b/README.md
+@@ -662,9 +662,9 @@ the resulting sum is the value which will be shown for the benchmark.
+ 
+ The `Counter` constructor accepts three parameters: the value as a `double`
+ ; a bit flag which allows you to show counters as rates, and/or as per-thread
+-iteration, and/or as per-thread averages, and/or iteration invariants;
+-and a flag specifying the 'unit' - i.e. is 1k a 1000 (default,
+-`benchmark::Counter::OneK::kIs1000`), or 1024
++iteration, and/or as per-thread averages, and/or iteration invariants,
++and/or finally inverting the result; and a flag specifying the 'unit' - i.e.
++is 1k a 1000 (default, `benchmark::Counter::OneK::kIs1000`), or 1024
+ (`benchmark::Counter::OneK::kIs1024`)?
+ 
+ ```c++
+@@ -673,8 +673,14 @@ and a flag specifying the 'unit' - i.e. is 1k a 1000 (default,
+ 
+   // Set the counter as a rate. It will be presented divided
+   // by the duration of the benchmark.
++  // Meaning: per one second, how many 'foo's are processed?
+   state.counters["FooRate"] = Counter(numFoos, benchmark::Counter::kIsRate);
+ 
++  // Set the counter as a rate. It will be presented divided
++  // by the duration of the benchmark, and the result inverted.
++  // Meaning: how many seconds it takes to process one 'foo'?
++  state.counters["FooInvRate"] = Counter(numFoos, benchmark::Counter::kIsRate | benchmark::Counter::kInvert);
++
+   // Set the counter as a thread-average quantity. It will
+   // be presented divided by the number of threads.
+   state.counters["FooAvg"] = Counter(numFoos, benchmark::Counter::kAvgThreads);
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 856605f..144e212 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -368,7 +368,10 @@ class Counter {
+     // It will be presented divided by the number of iterations.
+     kAvgIterations = 1U << 3U,
+     // Mark the counter as a iteration-average rate. See above.
+-    kAvgIterationsRate = kIsRate | kAvgIterations
++    kAvgIterationsRate = kIsRate | kAvgIterations,
++
++    // In the end, invert the result. This is always done last!
++    kInvert = 1U << 31U
+   };
+ 
+   enum OneK {
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index cc8ae27..6fd7645 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -12,21 +12,21 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-#include "benchmark/benchmark.h"
+-#include "complexity.h"
+-#include "counter.h"
+-
+ #include <algorithm>
+ #include <cstdint>
+ #include <cstdio>
++#include <cstring>
+ #include <iostream>
+ #include <string>
+ #include <tuple>
+ #include <vector>
+ 
++#include "benchmark/benchmark.h"
+ #include "check.h"
+ #include "colorprint.h"
+ #include "commandlineflags.h"
++#include "complexity.h"
++#include "counter.h"
+ #include "internal_macros.h"
+ #include "string_util.h"
+ #include "timers.h"
+@@ -156,16 +156,14 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+     const std::size_t cNameLen = std::max(std::string::size_type(10),
+                                           c.first.length());
+     auto const& s = HumanReadableNumber(c.second.value, c.second.oneK);
++    const char* unit = "";
++    if (c.second.flags & Counter::kIsRate)
++      unit = (c.second.flags & Counter::kInvert) ? "s" : "/s";
+     if (output_options_ & OO_Tabular) {
+-      if (c.second.flags & Counter::kIsRate) {
+-        printer(Out, COLOR_DEFAULT, " %*s/s", cNameLen - 2, s.c_str());
+-      } else {
+-        printer(Out, COLOR_DEFAULT, " %*s", cNameLen, s.c_str());
+-      }
+-    } else {
+-      const char* unit = (c.second.flags & Counter::kIsRate) ? "/s" : "";
+-      printer(Out, COLOR_DEFAULT, " %s=%s%s", c.first.c_str(), s.c_str(),
++      printer(Out, COLOR_DEFAULT, " %*s%s", cNameLen - strlen(unit), s.c_str(),
+               unit);
++    } else {
++      printer(Out, COLOR_DEFAULT, " %s=%s%s", c.first.c_str(), s.c_str(), unit);
+     }
+   }
+ 
+diff --git a/src/counter.cc b/src/counter.cc
+index c248ea1..cf5b78e 100644
+--- a/src/counter.cc
++++ b/src/counter.cc
+@@ -32,6 +32,10 @@ double Finish(Counter const& c, IterationCount iterations, double cpu_time,
+   if (c.flags & Counter::kAvgIterations) {
+     v /= iterations;
+   }
++
++  if (c.flags & Counter::kInvert) {  // Invert is *always* last.
++    v = 1.0 / v;
++  }
+   return v;
+ }
+ 

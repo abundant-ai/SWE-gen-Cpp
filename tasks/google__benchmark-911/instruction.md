@@ -1,0 +1,7 @@
+CPU cache sizes are being interpreted using SI scaling (1 kB = 1000 bytes), but CPU cache sizes on common platforms are reported and expected as binary units (KiB, 1 KiB = 1024 bytes). This causes incorrect cache size values in the benchmark context information and in reporter output.
+
+When retrieving cache information through benchmark::CPUInfo::Get() (specifically the entries in CPUInfo::caches), the computed cache "size" values are currently too small when the platform reports cache sizes using kB-style units that represent binary multiples. As a result, the context printed to stderr (e.g., the “CPU Caches:” lines such as "L1 Data ... KiB") and the cache objects emitted in the JSON context (the "caches" array with fields like "level" and "size") do not match the expected binary-based sizes.
+
+Fix the cache size scaling so that cache sizes expressed in kB are treated as KiB (1024-based) rather than SI kB (1000-based). After the fix, cache sizes shown in the human-readable context must be consistent with the "KiB" label, and the numeric "size" values in the JSON context must reflect the same corrected sizes.
+
+Example expected behavior: if a cache is reported as "32K"/"32kB" (depending on platform source), the stored/emitted size should correspond to 32 * 1024 bytes (and the human-readable output should correctly show 32 KiB). Currently it corresponds to 32 * 1000 bytes, which is incorrect for CPU caches.

@@ -1,0 +1,1186 @@
+diff --git a/cmake/abseil-cpp.cmake b/cmake/abseil-cpp.cmake
+index 9ef06a23d..5944f709e 100644
+--- a/cmake/abseil-cpp.cmake
++++ b/cmake/abseil-cpp.cmake
+@@ -92,6 +92,5 @@ else()
+   )
+   set(protobuf_ABSL_USED_TEST_TARGETS
+     absl::scoped_mock_log
+-    absl::status_matchers
+   )
+ endif ()
+diff --git a/src/google/protobuf/BUILD.bazel b/src/google/protobuf/BUILD.bazel
+index 0a27a990e..b2490b51d 100644
+--- a/src/google/protobuf/BUILD.bazel
++++ b/src/google/protobuf/BUILD.bazel
+@@ -1893,7 +1893,6 @@ cc_test(
+         "@abseil-cpp//absl/log:die_if_null",
+         "@abseil-cpp//absl/memory",
+         "@abseil-cpp//absl/status",
+-        "@abseil-cpp//absl/status:status_matchers",
+         "@abseil-cpp//absl/status:statusor",
+         "@abseil-cpp//absl/strings",
+         "@googletest//:gtest",
+diff --git a/src/google/protobuf/compiler/command_line_interface.cc b/src/google/protobuf/compiler/command_line_interface.cc
+index 99fff616b..b2cac0a7f 100644
+--- a/src/google/protobuf/compiler/command_line_interface.cc
++++ b/src/google/protobuf/compiler/command_line_interface.cc
+@@ -1367,7 +1367,6 @@ int CommandLineInterface::Run(int argc, const char* const argv[]) {
+   descriptor_pool->EnforceWeakDependencies(true);
+   descriptor_pool->EnforceSymbolVisibility(true);
+   descriptor_pool->EnforceNamingStyle(true);
+-  descriptor_pool->EnforceFeatureSupportValidation(true);
+ 
+   if (!SetupFeatureResolution(*descriptor_pool)) {
+     return EXIT_FAILURE;
+diff --git a/src/google/protobuf/compiler/command_line_interface_unittest.cc b/src/google/protobuf/compiler/command_line_interface_unittest.cc
+index 019003ea3..846507c6a 100644
+--- a/src/google/protobuf/compiler/command_line_interface_unittest.cc
++++ b/src/google/protobuf/compiler/command_line_interface_unittest.cc
+@@ -1617,41 +1617,6 @@ TEST_F(CommandLineInterfaceTest, ImportOptions_MissingImport) {
+   ExpectErrorSubstring("options.proto: File not found");
+ }
+ 
+-TEST_F(CommandLineInterfaceTest, ValidateFeatureSupportError) {
+-  CreateTempFile("foo.proto",
+-                 R"schema(
+-    edition = "2023";
+-    option features.field_presence = IMPLICIT;
+-    message Foo {
+-      int32 bar = 1 [
+-        feature_support = {
+-          edition_removed: EDITION_2023
+-        }
+-      ];
+-    })schema");
+-  Run("protocol_compiler --proto_path=$tmpdir --test_out=$tmpdir foo.proto");
+-  ExpectErrorSubstring(
+-      "foo.proto: Foo.bar has been removed but does not specify a removal "
+-      "error.");
+-}
+-
+-TEST_F(CommandLineInterfaceTest, ValidateFeatureSupportValid) {
+-  CreateTempFile("foo.proto",
+-                 R"schema(
+-    edition = "2023";
+-    option features.field_presence = IMPLICIT;
+-    message Foo {
+-      int32 bar = 1 [
+-        feature_support = {
+-          edition_removed: EDITION_2023
+-          removal_error: "Custom removal error"
+-        }
+-      ];
+-    })schema");
+-  Run("protocol_compiler --proto_path=$tmpdir --test_out=$tmpdir foo.proto");
+-  ExpectNoErrors();
+-}
+-
+ TEST_F(CommandLineInterfaceTest, FeatureValidationError) {
+   CreateTempFile("foo.proto",
+                  R"schema(
+diff --git a/src/google/protobuf/descriptor.cc b/src/google/protobuf/descriptor.cc
+index 7311f406e..983ebef17 100644
+--- a/src/google/protobuf/descriptor.cc
++++ b/src/google/protobuf/descriptor.cc
+@@ -1638,9 +1638,7 @@ class DescriptorPool::DeferredValidation {
+   }
+ 
+   bool Validate() {
+-    if (lifetimes_info_map_.empty()) {
+-      return true;
+-    }
++    if (lifetimes_info_map_.empty()) return true;
+ 
+     static absl::string_view feature_set_name = "google.protobuf.FeatureSet";
+     bool has_errors = false;
+@@ -5015,9 +5013,6 @@ class DescriptorBuilder {
+                        const DescriptorProto::ExtensionRange& proto) {}
+   void ValidateExtensionRangeOptions(const DescriptorProto& proto,
+                                      const Descriptor& message);
+-  void MaybeAddFeatureSupportError(const absl::Status& feature_support_status,
+-                                   const Message& proto,
+-                                   absl::string_view full_name);
+   void ValidateExtensionDeclaration(
+       absl::string_view full_name,
+       const RepeatedPtrField<ExtensionRangeOptions_Declaration>& declarations,
+@@ -8508,28 +8503,11 @@ void DescriptorBuilder::ValidateOptions(const OneofDescriptor* /*oneof*/,
+ }
+ 
+ 
+-void DescriptorBuilder::MaybeAddFeatureSupportError(
+-    const absl::Status& feature_support_status, const Message& proto,
+-    absl::string_view full_name) {
+-  if (feature_support_status.ok()) {
+-    return;
+-  }
+-  std::string feature_support_error(feature_support_status.message());
+-  AddError(full_name, proto, DescriptorPool::ErrorCollector::OPTION_NAME,
+-           feature_support_error.c_str());
+-}
+-
+ void DescriptorBuilder::ValidateOptions(const FieldDescriptor* field,
+                                         const FieldDescriptorProto& proto) {
+   if (pool_->lazily_build_dependencies_ && (!field || !field->message_type())) {
+     return;
+   }
+-  if (pool_->enforce_feature_support_validation_) {
+-    absl::Status feature_support_status =
+-        FeatureResolver::ValidateFieldFeatureSupport(*field);
+-    MaybeAddFeatureSupportError(feature_support_status, proto,
+-                                field->full_name());
+-  }
+ 
+   ValidateFieldFeatures(field, proto);
+ 
+@@ -8860,15 +8838,10 @@ void DescriptorBuilder::ValidateOptions(const EnumDescriptor* enm,
+   }
+ }
+ 
+-void DescriptorBuilder::ValidateOptions(const EnumValueDescriptor* enum_value,
+-                                        const EnumValueDescriptorProto& proto) {
+-  if (pool_->enforce_feature_support_validation_) {
+-    absl::Status feature_support_result =
+-        FeatureResolver::ValidateFeatureSupport(
+-            enum_value->options().feature_support(), enum_value->full_name());
+-    MaybeAddFeatureSupportError(feature_support_result, proto,
+-                                enum_value->full_name());
+-  }
++void DescriptorBuilder::ValidateOptions(
++    const EnumValueDescriptor* /* enum_value */,
++    const EnumValueDescriptorProto& /* proto */) {
++  // Nothing to do so far.
+ }
+ 
+ namespace {
+diff --git a/src/google/protobuf/descriptor.h b/src/google/protobuf/descriptor.h
+index ac3573241..cac13c7d7 100644
+--- a/src/google/protobuf/descriptor.h
++++ b/src/google/protobuf/descriptor.h
+@@ -1594,9 +1594,9 @@ class PROTOBUF_EXPORT EnumValueDescriptor : private internal::SymbolBaseN<0>,
+   EnumValueDescriptor& operator=(const EnumValueDescriptor&) = delete;
+ #endif
+ 
+-  absl::string_view name() const;  // Name of this enum constant.
+-  int index() const;               // Index within the enums's Descriptor.
+-  int number() const;              // Numeric value of this enum constant.
++  absl::string_view name() const;   // Name of this enum constant.
++  int index() const;                // Index within the enums's Descriptor.
++  int number() const;               // Numeric value of this enum constant.
+ 
+   // The full_name of an enum value is a sibling symbol of the enum type.
+   // e.g. the full name of FieldDescriptorProto::TYPE_INT32 is actually
+@@ -2365,14 +2365,6 @@ class PROTOBUF_EXPORT DescriptorPool {
+   // of this enforcement.
+   void EnforceNamingStyle(bool enforce) { enforce_naming_style_ = enforce; }
+ 
+-  // Enforce validation of feature support.
+-  //
+-  // This is used to guard feature support validation for the lifetimes of
+-  // options and features.
+-  void EnforceFeatureSupportValidation(bool enforce) {
+-    enforce_feature_support_validation_ = enforce;
+-  }
+-
+   // Enforce symbol visibility rules.  This will enable enforcement of the
+   // `export` and `local` keywords added in edition 2024, honoring the behavior
+   // of the `default_symbol_visibility` feature.
+@@ -2678,7 +2670,6 @@ class PROTOBUF_EXPORT DescriptorPool {
+   bool disallow_enforce_utf8_;
+   bool deprecated_legacy_json_field_conflicts_;
+   bool enforce_naming_style_;
+-  bool enforce_feature_support_validation_ = false;
+   bool enforce_symbol_visibility_ = false;
+   mutable bool build_started_ = false;
+ 
+@@ -3230,8 +3221,8 @@ PROTOBUF_EXPORT inline bool IsTrackingEnabled() {
+ }
+ 
+ template <typename F>
+-auto VisitDescriptorsInFileOrder(const Descriptor* desc, F& f)
+-    -> decltype(f(desc)) {
++auto VisitDescriptorsInFileOrder(const Descriptor* desc,
++                                 F& f) -> decltype(f(desc)) {
+   for (int i = 0; i < desc->nested_type_count(); i++) {
+     if (auto res = VisitDescriptorsInFileOrder(desc->nested_type(i), f)) {
+       return res;
+@@ -3247,8 +3238,8 @@ auto VisitDescriptorsInFileOrder(const Descriptor* desc, F& f)
+ // If any call returns a "truthy" value, it stops visitation and returns that
+ // value right away. Otherwise returns `{}` after visiting all types.
+ template <typename F>
+-auto VisitDescriptorsInFileOrder(const FileDescriptor* file, F f)
+-    -> decltype(f(file->message_type(0))) {
++auto VisitDescriptorsInFileOrder(const FileDescriptor* file,
++                                 F f) -> decltype(f(file->message_type(0))) {
+   for (int i = 0; i < file->message_type_count(); i++) {
+     if (auto res = VisitDescriptorsInFileOrder(file->message_type(i), f)) {
+       return res;
+diff --git a/src/google/protobuf/descriptor_unittest.cc b/src/google/protobuf/descriptor_unittest.cc
+index 01c999503..0f0f64469 100644
+--- a/src/google/protobuf/descriptor_unittest.cc
++++ b/src/google/protobuf/descriptor_unittest.cc
+@@ -4904,154 +4904,6 @@ TEST(CustomOptions, DebugString) {
+       descriptor->DebugString());
+ }
+ 
+-TEST(CustomOptions, FeatureSupportInvalidDeprecatedAfterRemoved) {
+-  DescriptorPool pool;
+-  pool.EnforceFeatureSupportValidation(true);
+-
+-  FileDescriptorProto file_proto;
+-  FileDescriptorProto::descriptor()->file()->CopyTo(&file_proto);
+-  ASSERT_TRUE(pool.BuildFile(file_proto) != nullptr);
+-
+-  ASSERT_TRUE(TextFormat::ParseFromString(
+-      R"pb(
+-        name: "foo.proto"
+-        edition: EDITION_2024
+-        package: "proto2_unittest"
+-        dependency: "google/protobuf/descriptor.proto"
+-        extension {
+-          name: "file_opt1"
+-          number: 7739974
+-          label: LABEL_OPTIONAL
+-          type: TYPE_UINT64
+-          extendee: ".google.protobuf.FieldOptions"
+-          options {
+-            feature_support {
+-              edition_introduced: EDITION_2023
+-              edition_deprecated: EDITION_2024
+-              deprecation_warning: "warning"
+-              edition_removed: EDITION_2024
+-              removal_error: "Custom feature removal error"
+-            }
+-          }
+-        })pb",
+-      &file_proto));
+-
+-  MockErrorCollector error_collector;
+-  EXPECT_FALSE(pool.BuildFileCollectingErrors(file_proto, &error_collector));
+-  EXPECT_EQ(error_collector.text_,
+-            "foo.proto: proto2_unittest.file_opt1: OPTION_NAME: proto"
+-            "2_unittest.file_opt1 was deprecated after it was removed.\n");
+-}
+-
+-TEST(CustomOptions, FeatureSupportInvalidValueDeprecatedAfterOption) {
+-  DescriptorPool pool;
+-  pool.EnforceFeatureSupportValidation(true);
+-
+-  FileDescriptorProto file_proto;
+-  FileDescriptorProto::descriptor()->file()->CopyTo(&file_proto);
+-  ASSERT_TRUE(pool.BuildFile(file_proto) != nullptr);
+-
+-  ASSERT_TRUE(TextFormat::ParseFromString(
+-      R"pb(
+-        name: "foo.proto"
+-        edition: EDITION_2024
+-        package: "proto2_unittest"
+-        dependency: "google/protobuf/descriptor.proto"
+-        enum_type {
+-          name: "Foo"
+-          value { name: "UNKNOWN" number: 0 }
+-          value {
+-            name: "VALUE"
+-            number: 1
+-            options {
+-              feature_support {
+-                edition_deprecated: EDITION_99997_TEST_ONLY
+-                deprecation_warning: "warning"
+-              }
+-            }
+-          }
+-        }
+-        message_type {
+-          name: "Bar"
+-          extension {
+-            name: "bool_field"
+-            number: 7739973
+-            label: LABEL_OPTIONAL
+-            type: TYPE_ENUM
+-            type_name: "Foo"
+-            extendee: ".google.protobuf.FieldOptions"
+-            options {
+-              feature_support {
+-                edition_introduced: EDITION_2023
+-                edition_deprecated: EDITION_2024
+-                deprecation_warning: "warning"
+-              }
+-            }
+-          }
+-        })pb",
+-      &file_proto));
+-
+-  MockErrorCollector error_collector;
+-  EXPECT_FALSE(pool.BuildFileCollectingErrors(file_proto, &error_collector));
+-  EXPECT_THAT(error_collector.text_,
+-              testing::HasSubstr(
+-                  "foo.proto: proto2_unittest.Bar.bool_field: "
+-                  "OPTION_NAME: value proto2_unittest.VALUE was "
+-                  "deprecated after proto2_unittest.Bar.bool_field was.\n"));
+-}
+-
+-TEST(CustomOptions, FeatureSupportValid) {
+-  DescriptorPool pool;
+-  pool.EnforceFeatureSupportValidation(true);
+-
+-  FileDescriptorProto file_proto;
+-  FileDescriptorProto::descriptor()->file()->CopyTo(&file_proto);
+-  ASSERT_TRUE(pool.BuildFile(file_proto) != nullptr);
+-
+-  ASSERT_TRUE(TextFormat::ParseFromString(
+-      R"pb(
+-        name: "foo.proto"
+-        edition: EDITION_2024
+-        package: "proto2_unittest"
+-        dependency: "google/protobuf/descriptor.proto"
+-        enum_type {
+-          name: "Foo"
+-          value { name: "UNKNOWN" number: 0 }
+-          value {
+-            name: "VALUE"
+-            number: 1
+-            options {
+-              feature_support {
+-                edition_introduced: EDITION_2024
+-                edition_deprecated: EDITION_99997_TEST_ONLY
+-                deprecation_warning: "warning"
+-              }
+-            }
+-          }
+-        }
+-        message_type {
+-          name: "Bar"
+-          extension {
+-            name: "bool_field"
+-            number: 7739971
+-            label: LABEL_OPTIONAL
+-            type: TYPE_ENUM
+-            type_name: "Foo"
+-            extendee: ".google.protobuf.FieldOptions"
+-            options {
+-              feature_support {
+-                edition_introduced: EDITION_2023
+-                edition_removed: EDITION_99998_TEST_ONLY
+-                removal_error: "removed"
+-              }
+-            }
+-          }
+-        })pb",
+-      &file_proto));
+-
+-  EXPECT_NE(pool.BuildFile(file_proto), nullptr);
+-}
+-
+ // ===================================================================
+ 
+ TEST_F(ValidationErrorTest, AlreadyDefined) {
+diff --git a/src/google/protobuf/feature_resolver.cc b/src/google/protobuf/feature_resolver.cc
+index 6d9fa94c8..48f4e4349 100644
+--- a/src/google/protobuf/feature_resolver.cc
++++ b/src/google/protobuf/feature_resolver.cc
+@@ -54,7 +54,39 @@ absl::Status Error(Args... args) {
+   return absl::FailedPreconditionError(absl::StrCat(args...));
+ }
+ 
+-absl::Status ValidateFieldDescriptor(const FieldDescriptor& field) {
++absl::Status ValidateFeatureSupport(const FieldOptions::FeatureSupport& support,
++                                    absl::string_view full_name) {
++  if (support.has_edition_deprecated()) {
++    if (support.edition_deprecated() < support.edition_introduced()) {
++      return Error("Feature ", full_name,
++                   " was deprecated before it was introduced.");
++    }
++    if (!support.has_deprecation_warning()) {
++      return Error(
++          "Feature ", full_name,
++          " is deprecated but does not specify a deprecation warning.");
++    }
++  }
++  if (!support.has_edition_deprecated() && support.has_deprecation_warning()) {
++    return Error("Feature ", full_name,
++                 " specifies a deprecation warning but is not marked "
++                 "deprecated in any edition.");
++  }
++  if (support.has_edition_removed()) {
++    if (support.edition_deprecated() >= support.edition_removed()) {
++      return Error("Feature ", full_name,
++                   " was deprecated after it was removed.");
++    }
++    if (support.edition_removed() < support.edition_introduced()) {
++      return Error("Feature ", full_name,
++                   " was removed before it was introduced.");
++    }
++  }
++
++  return absl::OkStatus();
++}
++
++absl::Status ValidateFieldFeatureSupport(const FieldDescriptor& field) {
+   if (!field.options().has_feature_support()) {
+     return Error("Feature field ", field.full_name(),
+                  " has no feature support specified.");
+@@ -66,6 +98,7 @@ absl::Status ValidateFieldDescriptor(const FieldDescriptor& field) {
+     return Error("Feature field ", field.full_name(),
+                  " does not specify the edition it was introduced in.");
+   }
++  RETURN_IF_ERROR(ValidateFeatureSupport(support, field.full_name()));
+ 
+   // Validate edition defaults specification wrt support windows.
+   for (const auto& d : field.options().edition_defaults()) {
+@@ -90,36 +123,49 @@ absl::Status ValidateFieldDescriptor(const FieldDescriptor& field) {
+   return absl::OkStatus();
+ }
+ 
+-absl::Status ValidateEnumValueFeatureSupport(
++absl::Status ValidateValueFeatureSupport(
+     const FieldOptions::FeatureSupport& parent,
+     const EnumValueDescriptor& value, absl::string_view field_name) {
+-  // We allow missing support windows on feature values, and they'll
+-  // inherit from the feature spec.
+-  // We will skip validation when parent has no feature support.
+-  if (!value.options().has_feature_support() ||
+-      &parent == &FieldOptions::FeatureSupport::default_instance()) {
++  if (!value.options().has_feature_support()) {
++    // We allow missing support windows on feature values, and they'll inherit
++    // from the feature spec.
+     return absl::OkStatus();
+   }
+ 
+   FieldOptions::FeatureSupport support = parent;
+   support.MergeFrom(value.options().feature_support());
+-  RETURN_IF_ERROR(
+-      FeatureResolver::ValidateFeatureSupport(support, value.full_name()));
++  RETURN_IF_ERROR(ValidateFeatureSupport(support, value.full_name()));
+ 
+   // Make sure the value doesn't expand any bounds.
+   if (support.edition_introduced() < parent.edition_introduced()) {
+-    return Error("value ", value.full_name(), " was introduced before ",
+-                 field_name, " was.");
++    return Error("Feature value ", value.full_name(),
++                 " was introduced before feature ", field_name, " was.");
+   }
+   if (parent.has_edition_removed() &&
+       support.edition_removed() > parent.edition_removed()) {
+-    return Error("value ", value.full_name(), " was removed after ", field_name,
+-                 " was.");
++    return Error("Feature value ", value.full_name(),
++                 " was removed after feature ", field_name, " was.");
+   }
+   if (parent.has_edition_deprecated() &&
+       support.edition_deprecated() > parent.edition_deprecated()) {
+-    return Error("value ", value.full_name(), " was deprecated after ",
+-                 field_name, " was.");
++    return Error("Feature value ", value.full_name(),
++                 " was deprecated after feature ", field_name, " was.");
++  }
++
++  return absl::OkStatus();
++}
++
++absl::Status ValidateValuesFeatureSupport(const FieldDescriptor& field) {
++  // This only applies to enum features.
++  ABSL_CHECK(field.enum_type() != nullptr);
++
++  const FieldOptions::FeatureSupport& parent =
++      field.options().feature_support();
++
++  for (int i = 0; i < field.enum_type()->value_count(); ++i) {
++    const EnumValueDescriptor& value = *field.enum_type()->value(i);
++    RETURN_IF_ERROR(
++        ValidateValueFeatureSupport(parent, value, field.full_name()));
+   }
+ 
+   return absl::OkStatus();
+@@ -164,7 +210,10 @@ absl::Status ValidateDescriptor(const Descriptor& descriptor) {
+                    "was introduced.");
+     }
+ 
+-    RETURN_IF_ERROR(ValidateFieldDescriptor(field));
++    RETURN_IF_ERROR(ValidateFieldFeatureSupport(field));
++    if (field.enum_type() != nullptr) {
++      RETURN_IF_ERROR(ValidateValuesFeatureSupport(field));
++    }
+   }
+ 
+   return absl::OkStatus();
+@@ -548,61 +597,6 @@ FeatureResolver::ValidationResults FeatureResolver::ValidateFeatureLifetimes(
+   return results;
+ }
+ 
+-absl::Status FeatureResolver::ValidateFeatureSupport(
+-    const FieldOptions::FeatureSupport& support, absl::string_view full_name) {
+-  if (support.has_edition_deprecated()) {
+-    if (support.edition_deprecated() < support.edition_introduced()) {
+-      return Error(full_name, " was deprecated before it was introduced.");
+-    }
+-    if (!support.has_deprecation_warning()) {
+-      return Error(
+-          full_name,
+-          " is deprecated but does not specify a deprecation warning.");
+-    }
+-  }
+-  if (!support.has_edition_deprecated() && support.has_deprecation_warning()) {
+-    return Error(full_name,
+-                 " specifies a deprecation warning but is not marked "
+-                 "deprecated in any edition.");
+-  }
+-  if (support.has_edition_removed()) {
+-    if (support.edition_deprecated() >= support.edition_removed()) {
+-      return Error(full_name, " was deprecated after it was removed.");
+-    }
+-    if (support.edition_removed() < support.edition_introduced()) {
+-      return Error(full_name, " was removed before it was introduced.");
+-    }
+-    // Not enforcing removal errors on features or options that have been
+-    // introduced and removed in the same edition
+-    if ((support.edition_introduced() != support.edition_removed()) &&
+-        !support.has_removal_error()) {
+-      return Error(full_name,
+-                   " has been removed but does not specify a removal error.");
+-    }
+-  } else if (support.has_removal_error()) {
+-    return Error(full_name,
+-                 " specifies a removal error but is not marked removed in any "
+-                 "edition.");
+-  }
+-  return absl::OkStatus();
+-}
+-
+-absl::Status FeatureResolver::ValidateFieldFeatureSupport(
+-    const FieldDescriptor& field) {
+-  const FieldOptions::FeatureSupport& parent =
+-      field.options().feature_support();
+-  RETURN_IF_ERROR(ValidateFeatureSupport(parent, field.full_name()));
+-
+-  if (field.enum_type() != nullptr) {
+-    for (int i = 0; i < field.enum_type()->value_count(); ++i) {
+-      const EnumValueDescriptor& value = *field.enum_type()->value(i);
+-      RETURN_IF_ERROR(
+-          ValidateEnumValueFeatureSupport(parent, value, field.full_name()));
+-    }
+-  }
+-  return absl::OkStatus();
+-}
+-
+ namespace internal {
+ absl::StatusOr<FeatureSet> GetEditionFeatureSetDefaults(
+     Edition edition, const FeatureSetDefaults& defaults) {
+diff --git a/src/google/protobuf/feature_resolver.h b/src/google/protobuf/feature_resolver.h
+index 3b1d2d5c5..985e0bf56 100644
+--- a/src/google/protobuf/feature_resolver.h
++++ b/src/google/protobuf/feature_resolver.h
+@@ -73,21 +73,6 @@ class PROTOBUF_EXPORT FeatureResolver {
+       Edition edition, const Message& option,
+       const Descriptor* pool_descriptor);
+ 
+-  // Validates feature support on features and options
+-  // to enforce feature support to be written correctly.
+-  //
+-  // This will return error status and error message for incorrectly written
+-  // feature support.
+-  static absl::Status ValidateFeatureSupport(
+-      const FieldOptions::FeatureSupport& support, absl::string_view full_name);
+-
+-  // Calls ValidateFeatureSupport on fields during proto parsing.
+-  // This will handle feature validation on fields of different types,
+-  // especially of type ENUM.
+-  //
+-  // This will return error status and error message of ValidateFeatureSupport.
+-  static absl::Status ValidateFieldFeatureSupport(const FieldDescriptor& field);
+-
+  private:
+   explicit FeatureResolver(FeatureSet defaults)
+       : defaults_(std::move(defaults)) {}
+diff --git a/src/google/protobuf/feature_resolver_test.cc b/src/google/protobuf/feature_resolver_test.cc
+index eb86dffd9..131f939fb 100644
+--- a/src/google/protobuf/feature_resolver_test.cc
++++ b/src/google/protobuf/feature_resolver_test.cc
+@@ -18,7 +18,6 @@
+ #include "absl/log/die_if_null.h"
+ #include "absl/memory/memory.h"
+ #include "absl/status/status.h"
+-#include "absl/status/status_matchers.h"
+ #include "absl/status/statusor.h"
+ #include "absl/strings/string_view.h"
+ #include "absl/strings/substitute.h"
+@@ -41,7 +40,6 @@ namespace google {
+ namespace protobuf {
+ namespace {
+ 
+-using ::absl_testing::StatusIs;
+ using ::testing::AllOf;
+ using ::testing::ElementsAre;
+ using ::testing::ExplainMatchResult;
+@@ -61,6 +59,10 @@ MATCHER_P(HasError, msg_matcher, "") {
+                             result_listener);
+ }
+ 
++MATCHER_P(StatusIs, status,
++          absl::StrCat(".status() is ", testing::PrintToString(status))) {
++  return GetStatus(arg).code() == status;
++}
+ #define EXPECT_OK(x) EXPECT_THAT(x, StatusIs(absl::StatusCode::kOk))
+ #define ASSERT_OK(x) ASSERT_THAT(x, StatusIs(absl::StatusCode::kOk))
+ 
+@@ -1227,12 +1229,15 @@ TEST_F(FeatureResolverPoolTest,
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidWithMissingDeprecationWarning) {
++       CompileDefaultsInvalidWithMissingDeprecationWarning) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     message Foo {
+       optional bool bool_field = 1 [
+         targets = TARGET_TYPE_FIELD,
+@@ -1246,20 +1251,22 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-  EXPECT_THAT(FeatureResolver::ValidateFieldFeatureSupport(*field),
+-              StatusIs(absl::StatusCode::kFailedPrecondition,
+-                       AllOf(HasSubstr("test.Foo.bool_field"),
++  const FieldDescriptor* ext = file->extension(0);
++  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
++                                               EDITION_2023, EDITION_2023),
++              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
+                              HasSubstr("deprecation warning"))));
+ }
+ 
+-TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidWithMissingDeprecation) {
++TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidWithMissingDeprecation) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     message Foo {
+       optional bool bool_field = 1 [
+         targets = TARGET_TYPE_FIELD,
+@@ -1273,15 +1280,15 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-  EXPECT_THAT(FeatureResolver::ValidateFieldFeatureSupport(*field),
+-              StatusIs(absl::StatusCode::kFailedPrecondition,
+-                       (AllOf(HasSubstr("test.Foo.bool_field"),
+-                              HasSubstr("is not marked deprecated")))));
++  const FieldDescriptor* ext = file->extension(0);
++  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
++                                               EDITION_2023, EDITION_2023),
++              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
++                             HasSubstr("is not marked deprecated"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidDeprecatedBeforeIntroduced) {
++       CompileDefaultsInvalidDeprecatedBeforeIntroduced) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+@@ -1304,21 +1311,23 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
++  const FieldDescriptor* ext = file->extension(0);
+   EXPECT_THAT(
+-      FeatureResolver::ValidateFieldFeatureSupport(*field),
+-      StatusIs(absl::StatusCode::kFailedPrecondition,
+-               (AllOf(HasSubstr("test.Foo.bool_field"),
+-                      HasSubstr("deprecated before it was introduced")))));
++      FeatureResolver::CompileDefaults(feature_set_, {ext}, EDITION_2023,
++                                       EDITION_2023),
++      HasError(AllOf(HasSubstr("test.Foo.bool_field"),
++                     HasSubstr("deprecated before it was introduced"))));
+ }
+ 
+-TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidDeprecatedAfterRemoved) {
++TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidDeprecatedAfterRemoved) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     message Foo {
+       optional bool bool_field = 1 [
+         targets = TARGET_TYPE_FIELD,
+@@ -1334,20 +1343,22 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-  EXPECT_THAT(FeatureResolver::ValidateFieldFeatureSupport(*field),
+-              StatusIs(absl::StatusCode::kFailedPrecondition,
+-                       (AllOf(HasSubstr("test.Foo.bool_field"),
+-                              HasSubstr("deprecated after it was removed")))));
++  const FieldDescriptor* ext = file->extension(0);
++  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
++                                               EDITION_2023, EDITION_2023),
++              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
++                             HasSubstr("deprecated after it was removed"))));
+ }
+ 
+-TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidRemovedBeforeIntroduced) {
++TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidRemovedBeforeIntroduced) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     message Foo {
+       optional bool bool_field = 1 [
+         targets = TARGET_TYPE_FIELD,
+@@ -1361,11 +1372,11 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-  EXPECT_THAT(FeatureResolver::ValidateFieldFeatureSupport(*field),
+-              StatusIs(absl::StatusCode::kFailedPrecondition,
+-                       (AllOf(HasSubstr("test.Foo.bool_field"),
+-                              HasSubstr("removed before it was introduced")))));
++  const FieldDescriptor* ext = file->extension(0);
++  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
++                                               EDITION_2023, EDITION_2023),
++              HasError(AllOf(HasSubstr("test.Foo.bool_field"),
++                             HasSubstr("removed before it was introduced"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidMissingLegacyDefaults) {
+@@ -1443,7 +1454,6 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidDefaultsAfterRemoved) {
+         feature_support = {
+           edition_introduced: EDITION_PROTO2
+           edition_removed: EDITION_2023
+-          removal_error: "Custom feature removal error"
+         },
+         edition_defaults = { edition: EDITION_LEGACY, value: "true" },
+         edition_defaults = { edition: EDITION_2024, value: "true" }
+@@ -1547,37 +1557,15 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsInvalidDefaultsTooEarly) {
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportIgnoreValueWithMissingParentFeatureSupport) {
++       CompileDefaultsInvalidValueWithMissingDeprecationWarning) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
+-    enum FooValues {
+-      UNKNOWN = 0;
+-      VALUE = 1 [feature_support.edition_introduced = EDITION_2023];
+-    }
+-    message Foo {
+-      optional FooValues bool_field = 1 [
+-        targets = TARGET_TYPE_FIELD,
+-        edition_defaults = { edition: EDITION_LEGACY, value: "UNKNOWN" }
+-      ];
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
+     }
+-  )schema");
+-  ASSERT_NE(file, nullptr);
+-
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-  EXPECT_THAT(FeatureResolver::ValidateFieldFeatureSupport(*field),
+-              StatusIs(absl::StatusCode::kOk));
+-}
+-
+-TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidValueWithMissingDeprecationWarning) {
+-  const FileDescriptor* file = ParseSchema(R"schema(
+-    syntax = "proto2";
+-    package test;
+-    import "google/protobuf/descriptor.proto";
+-
+     enum FooValues {
+       UNKNOWN = 0;
+       VALUE = 1 [feature_support.edition_deprecated = EDITION_2023];
+@@ -1592,20 +1580,23 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-  EXPECT_THAT(FeatureResolver::ValidateFieldFeatureSupport(*field),
+-              StatusIs(absl::StatusCode::kFailedPrecondition,
+-                       (AllOf(HasSubstr("test.VALUE"),
+-                              HasSubstr("deprecation warning")))));
++  const FieldDescriptor* ext = file->extension(0);
++  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
++                                               EDITION_2023, EDITION_2023),
++              HasError(AllOf(HasSubstr("test.VALUE"),
++                             HasSubstr("deprecation warning"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidValueWithMissingDeprecation) {
++       CompileDefaultsInvalidValueWithMissingDeprecation) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     enum FooValues {
+       UNKNOWN = 0;
+       VALUE = 1 [feature_support.deprecation_warning = "some message"];
+@@ -1620,20 +1611,23 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-  EXPECT_THAT(FeatureResolver::ValidateFieldFeatureSupport(*field),
+-              StatusIs(absl::StatusCode::kFailedPrecondition,
+-                       (AllOf(HasSubstr("test.VALUE"),
+-                              HasSubstr("is not marked deprecated")))));
++  const FieldDescriptor* ext = file->extension(0);
++  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
++                                               EDITION_2023, EDITION_2023),
++              HasError(AllOf(HasSubstr("test.VALUE"),
++                             HasSubstr("is not marked deprecated"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidValueDeprecatedBeforeIntroduced) {
++       CompileDefaultsInvalidValueDeprecatedBeforeIntroduced) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     enum FooValues {
+       UNKNOWN = 0;
+       VALUE = 1 [feature_support = {
+@@ -1652,21 +1646,24 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
++  const FieldDescriptor* ext = file->extension(0);
+   EXPECT_THAT(
+-      FeatureResolver::ValidateFieldFeatureSupport(*field),
+-      StatusIs(absl::StatusCode::kFailedPrecondition,
+-               (AllOf(HasSubstr("test.VALUE"),
+-                      HasSubstr("deprecated before it was introduced")))));
++      FeatureResolver::CompileDefaults(feature_set_, {ext}, EDITION_2023,
++                                       EDITION_2023),
++      HasError(AllOf(HasSubstr("test.VALUE"),
++                     HasSubstr("deprecated before it was introduced"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidValueIntroducedInherited) {
++       CompileDefaultsInvalidValueDeprecatedBeforeIntroducedInherited) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     enum FooValues {
+       UNKNOWN = 0;
+       VALUE = 1 [feature_support = {
+@@ -1684,21 +1681,24 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
++  const FieldDescriptor* ext = file->extension(0);
+   EXPECT_THAT(
+-      FeatureResolver::ValidateFieldFeatureSupport(*field),
+-      StatusIs(absl::StatusCode::kFailedPrecondition,
+-               (AllOf(HasSubstr("test.VALUE"),
+-                      HasSubstr("deprecated before it was introduced")))));
++      FeatureResolver::CompileDefaults(feature_set_, {ext}, EDITION_2023,
++                                       EDITION_2023),
++      HasError(AllOf(HasSubstr("test.VALUE"),
++                     HasSubstr("deprecated before it was introduced"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidValueDeprecatedAfterRemoved) {
++       CompileDefaultsInvalidValueDeprecatedAfterRemoved) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     enum FooValues {
+       UNKNOWN = 0;
+       VALUE = 1 [feature_support = {
+@@ -1706,7 +1706,6 @@ TEST_F(FeatureResolverPoolTest,
+         edition_deprecated: EDITION_2024
+         deprecation_warning: "warning"
+         edition_removed: EDITION_2024
+-        removal_error: "Custom removal error"
+       }];
+     }
+     message Foo {
+@@ -1719,26 +1718,28 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-  EXPECT_THAT(FeatureResolver::ValidateFieldFeatureSupport(*field),
+-              StatusIs(absl::StatusCode::kFailedPrecondition,
+-                       (AllOf(HasSubstr("test.VALUE"),
+-                              HasSubstr("deprecated after it was removed")))));
++  const FieldDescriptor* ext = file->extension(0);
++  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
++                                               EDITION_2023, EDITION_2023),
++              HasError(AllOf(HasSubstr("test.VALUE"),
++                             HasSubstr("deprecated after it was removed"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidValueRemovedBeforeIntroduced) {
++       CompileDefaultsInvalidValueRemovedBeforeIntroduced) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     enum FooValues {
+       UNKNOWN = 0;
+       VALUE = 1 [feature_support = {
+         edition_introduced: EDITION_2024
+         edition_removed: EDITION_2023
+-        removal_error: "Custom removal error"
+       }];
+     }
+     message Foo {
+@@ -1751,20 +1752,23 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-  EXPECT_THAT(FeatureResolver::ValidateFieldFeatureSupport(*field),
+-              StatusIs(absl::StatusCode::kFailedPrecondition,
+-                       (AllOf(HasSubstr("test.VALUE"),
+-                              HasSubstr("removed before it was introduced")))));
++  const FieldDescriptor* ext = file->extension(0);
++  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
++                                               EDITION_2023, EDITION_2023),
++              HasError(AllOf(HasSubstr("test.VALUE"),
++                             HasSubstr("removed before it was introduced"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidValueIntroducedBeforeFeature) {
++       CompileDefaultsInvalidValueIntroducedBeforeFeature) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     enum FooValues {
+       UNKNOWN = 0;
+       VALUE = 1 [feature_support = {
+@@ -1781,21 +1785,24 @@ TEST_F(FeatureResolverPoolTest,
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
++  const FieldDescriptor* ext = file->extension(0);
+   EXPECT_THAT(
+-      FeatureResolver::ValidateFieldFeatureSupport(*field),
+-      StatusIs(absl::StatusCode::kFailedPrecondition,
+-               (AllOf(HasSubstr("test.VALUE"), HasSubstr("introduced before"),
+-                      HasSubstr("test.Foo.bool_field")))));
++      FeatureResolver::CompileDefaults(feature_set_, {ext}, EDITION_2023,
++                                       EDITION_2023),
++      HasError(AllOf(HasSubstr("test.VALUE"), HasSubstr("introduced before"),
++                     HasSubstr("test.Foo.bool_field"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidValueIntroducedAfterFeatureRemoved) {
++       CompileDefaultsInvalidValueIntroducedAfterFeatureRemoved) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     enum FooValues {
+       UNKNOWN = 0;
+       VALUE = 1 [feature_support = {
+@@ -1805,68 +1812,66 @@ TEST_F(FeatureResolverPoolTest,
+     message Foo {
+       optional FooValues bool_field = 1 [
+         targets = TARGET_TYPE_FIELD,
+-        feature_support = {
+-          edition_introduced: EDITION_2023
+-          edition_removed: EDITION_2024
+-          removal_error: "Custom removal error"
+-        },
++        feature_support.edition_introduced = EDITION_2023,
++        feature_support.edition_removed = EDITION_2024,
+         edition_defaults = { edition: EDITION_LEGACY, value: "UNKNOWN" }
+       ];
+     }
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-  EXPECT_THAT(FeatureResolver::ValidateFieldFeatureSupport(*field),
+-              StatusIs(absl::StatusCode::kFailedPrecondition,
+-                       (AllOf(HasSubstr("test.VALUE"),
+-                              HasSubstr("removed before it was introduced")))));
++  const FieldDescriptor* ext = file->extension(0);
++  EXPECT_THAT(FeatureResolver::CompileDefaults(feature_set_, {ext},
++                                               EDITION_2023, EDITION_2023),
++              HasError(AllOf(HasSubstr("test.VALUE"),
++                             HasSubstr("removed before it was introduced"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidValueRemovedAfterFeature) {
++       CompileDefaultsInvalidValueRemovedAfterFeature) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     enum FooValues {
+       UNKNOWN = 0;
+       VALUE = 1 [feature_support = {
+         edition_removed: EDITION_99997_TEST_ONLY
+-        removal_error: "Custom removal error"
+-
+       }];
+     }
+     message Foo {
+       optional FooValues bool_field = 1 [
+         targets = TARGET_TYPE_FIELD,
+-        feature_support = {
+-          edition_introduced: EDITION_2023
+-          edition_removed: EDITION_2024
+-          removal_error: "Custom removal error"
+-        },
++        feature_support.edition_introduced = EDITION_2023,
++        feature_support.edition_removed = EDITION_2024,
+         edition_defaults = { edition: EDITION_LEGACY, value: "UNKNOWN" }
+       ];
+     }
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
++  const FieldDescriptor* ext = file->extension(0);
+   EXPECT_THAT(
+-      FeatureResolver::ValidateFieldFeatureSupport(*field),
+-      StatusIs(absl::StatusCode::kFailedPrecondition,
+-               (AllOf(HasSubstr("test.VALUE"), HasSubstr("removed after"),
+-                      HasSubstr("test.Foo.bool_field")))));
++      FeatureResolver::CompileDefaults(feature_set_, {ext}, EDITION_2023,
++                                       EDITION_2023),
++      HasError(AllOf(HasSubstr("test.VALUE"), HasSubstr("removed after"),
++                     HasSubstr("test.Foo.bool_field"))));
+ }
+ 
+ TEST_F(FeatureResolverPoolTest,
+-       ValidateFieldFeatureSupportInvalidValueDeprecatedAfterFeature) {
++       CompileDefaultsInvalidValueDeprecatedAfterFeature) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+     package test;
+     import "google/protobuf/descriptor.proto";
+ 
++    extend google.protobuf.FeatureSet {
++      optional Foo bar = 9999;
++    }
+     enum FooValues {
+       UNKNOWN = 0;
+       VALUE = 1 [feature_support = {
+@@ -1877,25 +1882,23 @@ TEST_F(FeatureResolverPoolTest,
+     message Foo {
+       optional FooValues bool_field = 1 [
+         targets = TARGET_TYPE_FIELD,
+-        feature_support = {
+-          edition_introduced: EDITION_2023
+-          edition_deprecated: EDITION_2024
+-          deprecation_warning: "warning"
+-        },
++        feature_support.edition_introduced = EDITION_2023,
++        feature_support.edition_deprecated = EDITION_2024,
++        feature_support.deprecation_warning = "warning",
+         edition_defaults = { edition: EDITION_LEGACY, value: "UNKNOWN" }
+       ];
+     }
+   )schema");
+   ASSERT_NE(file, nullptr);
+ 
+-  const FieldDescriptor* field = file->message_type(0)->field(0);
+-
++  const FieldDescriptor* ext = file->extension(0);
+   EXPECT_THAT(
+-      FeatureResolver::ValidateFieldFeatureSupport(*field),
+-      StatusIs(absl::StatusCode::kFailedPrecondition,
+-               (AllOf(HasSubstr("test.VALUE"), HasSubstr("deprecated after"),
+-                      HasSubstr("test.Foo.bool_field")))));
++      FeatureResolver::CompileDefaults(feature_set_, {ext}, EDITION_2023,
++                                       EDITION_2023),
++      HasError(AllOf(HasSubstr("test.VALUE"), HasSubstr("deprecated after"),
++                     HasSubstr("test.Foo.bool_field"))));
+ }
++
+ TEST_F(FeatureResolverPoolTest, CompileDefaultsMinimumTooEarly) {
+   const FileDescriptor* file = ParseSchema(R"schema(
+     syntax = "proto2";
+@@ -1939,11 +1942,8 @@ TEST_F(FeatureResolverPoolTest, CompileDefaultsRemovedOnly) {
+     message Foo {
+       optional Bar file_feature = 1 [
+         targets = TARGET_TYPE_FIELD,
+-        feature_support = {
+-          edition_introduced: EDITION_2023
+-          edition_removed: EDITION_99998_TEST_ONLY
+-          removal_error: "Custom feature removal error"
+-        },
++        feature_support.edition_introduced = EDITION_2023,
++        feature_support.edition_removed = EDITION_99998_TEST_ONLY,
+         edition_defaults = { edition: EDITION_LEGACY, value: "VALUE1" }
+       ];
+     }

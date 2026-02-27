@@ -27,7 +27,7 @@ WORKDIR /app
 # Clone repo at HEAD commit (with fix applied)
 RUN git clone https://github.com/google/benchmark.git src && \
     cd src && \
-    (git fetch --depth 1 origin 9d2f62164c0717c1f401f5a2abed865b6ad8a22d || git fetch --depth 1 origin "+refs/pull/938/head:refs/remotes/origin/pr/938") && \
+    (git fetch --depth 1 origin 7bedf1b66cb9fab92e9bc4eb772153f79bdd85f6 || git fetch --depth 1 origin "+refs/pull/883/head:refs/remotes/origin/pr/883") && \
     git checkout --detach FETCH_HEAD && \
     git submodule update --init --recursive
 

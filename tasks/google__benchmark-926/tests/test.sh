@@ -4,7 +4,7 @@ cd /app/src
 
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test"
-cp "/tests/skip_with_error_test.cc" "test/skip_with_error_test.cc"
+cp "/tests/CMakeLists.txt" "test/CMakeLists.txt"
 
 # Rebuild with the fixed test files
 echo "Rebuilding with fixed test files..."
@@ -20,11 +20,8 @@ cmake -B build -G Ninja \
     -DBENCHMARK_ENABLE_WERROR=OFF \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-# Build everything to ensure all dependencies are correct
+# Build everything to verify CMake alias targets work correctly
 cmake --build build --config Debug -j 1
-
-# Run the specific test for this PR
-./build/test/skip_with_error_test
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

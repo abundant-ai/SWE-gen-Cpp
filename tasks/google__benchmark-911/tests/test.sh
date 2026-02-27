@@ -4,7 +4,7 @@ cd /app/src
 
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test"
-cp "/tests/skip_with_error_test.cc" "test/skip_with_error_test.cc"
+cp "/tests/reporter_output_test.cc" "test/reporter_output_test.cc"
 
 # Rebuild with the fixed test files
 echo "Rebuilding with fixed test files..."
@@ -20,11 +20,12 @@ cmake -B build -G Ninja \
     -DBENCHMARK_ENABLE_WERROR=OFF \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-# Build everything to ensure all dependencies are correct
-cmake --build build --config Debug -j 1
+# Build the reporter_output_test specifically
+cmake --build build --config Debug --target reporter_output_test -j 1
 
-# Run the specific test for this PR
-./build/test/skip_with_error_test
+# Run the reporter_output_test
+echo "Running reporter_output_test..."
+./build/test/reporter_output_test
 test_status=$?
 
 if [ $test_status -eq 0 ]; then
