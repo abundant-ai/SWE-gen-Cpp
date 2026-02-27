@@ -1,4 +1,4 @@
-# SWE-gen-C++
+# SWE-gen-C++ (work in progress) 
 
 <p align="center">
   <a href="https://github.com/abundant-ai/SWE-gen-JS">
@@ -6,7 +6,7 @@
   </a>
 </p>
 
-> 1000 C++ tasks generated from X open-source GitHub repos using [SWE-gen](https://github.com/abundant-ai/SWE-gen).
+> X C++ tasks generated from Y open-source GitHub repos using [SWE-gen](https://github.com/abundant-ai/SWE-gen).
 
 ## Each task
 - is a merged GitHub PR with 1-10 source files edited
