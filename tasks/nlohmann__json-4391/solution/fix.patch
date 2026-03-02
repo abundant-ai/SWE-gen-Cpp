@@ -1,0 +1,372 @@
+diff --git a/include/nlohmann/detail/input/binary_reader.hpp b/include/nlohmann/detail/input/binary_reader.hpp
+index a6e100e76..395feccf8 100644
+--- a/include/nlohmann/detail/input/binary_reader.hpp
++++ b/include/nlohmann/detail/input/binary_reader.hpp
+@@ -20,6 +20,9 @@
+ #include <string> // char_traits, string
+ #include <utility> // make_pair, move
+ #include <vector> // vector
++#ifdef __cpp_lib_byteswap
++    #include <bit>  //byteswap
++#endif
+ 
+ #include <nlohmann/detail/exceptions.hpp>
+ #include <nlohmann/detail/input/input_adapters.hpp>
+@@ -2754,6 +2757,29 @@ class binary_reader
+         return current = ia.get_character();
+     }
+ 
++    /*!
++    @brief get_to read into a primitive type
++
++    This function provides the interface to the used input adapter. It does
++    not throw in case the input reached EOF, but returns false instead
++
++    @return bool, whether the read was successful
++    */
++    template<class T>
++    bool get_to(T& dest, const input_format_t format, const char* context)
++    {
++        auto new_chars_read = ia.get_elements(&dest);
++        chars_read += new_chars_read;
++        if (JSON_HEDLEY_UNLIKELY(new_chars_read < sizeof(T)))
++        {
++            // in case of failure, advance position by 1 to report failing location
++            ++chars_read;
++            sax->parse_error(chars_read, "<end of file>", parse_error::create(110, chars_read, exception_message(format, "unexpected end of input", context), nullptr));
++            return false;
++        }
++        return true;
++    }
++
+     /*!
+     @return character read from the input after ignoring all 'N' entries
+     */
+@@ -2768,6 +2794,28 @@ class binary_reader
+         return current;
+     }
+ 
++    template<class NumberType>
++    static void byte_swap(NumberType& number)
++    {
++        constexpr std::size_t sz = sizeof(number);
++#ifdef __cpp_lib_byteswap
++        if constexpr (sz == 1)
++        {
++            return;
++        }
++        if constexpr(std::is_integral_v<NumberType>)
++        {
++            number = std::byteswap(number);
++            return;
++        }
++#endif
++        auto* ptr = reinterpret_cast<std::uint8_t*>(&number);
++        for (std::size_t i = 0; i < sz / 2; ++i)
++        {
++            std::swap(ptr[i], ptr[sz - i - 1]);
++        }
++    }
++
+     /*
+     @brief read a number from the input
+ 
+@@ -2786,29 +2834,16 @@ class binary_reader
+     template<typename NumberType, bool InputIsLittleEndian = false>
+     bool get_number(const input_format_t format, NumberType& result)
+     {
+-        // step 1: read input into array with system's byte order
+-        std::array<std::uint8_t, sizeof(NumberType)> vec{};
+-        for (std::size_t i = 0; i < sizeof(NumberType); ++i)
+-        {
+-            get();
+-            if (JSON_HEDLEY_UNLIKELY(!unexpect_eof(format, "number")))
+-            {
+-                return false;
+-            }
++        // read in the original format
+ 
+-            // reverse byte order prior to conversion if necessary
+-            if (is_little_endian != (InputIsLittleEndian || format == input_format_t::bjdata))
+-            {
+-                vec[sizeof(NumberType) - i - 1] = static_cast<std::uint8_t>(current);
+-            }
+-            else
+-            {
+-                vec[i] = static_cast<std::uint8_t>(current); // LCOV_EXCL_LINE
+-            }
++        if (JSON_HEDLEY_UNLIKELY(!get_to(result, format, "number")))
++        {
++            return false;
++        }
++        if (is_little_endian != (InputIsLittleEndian || format == input_format_t::bjdata))
++        {
++            byte_swap(result);
+         }
+-
+-        // step 2: convert array into number of type T and return
+-        std::memcpy(&result, vec.data(), sizeof(NumberType));
+         return true;
+     }
+ 
+diff --git a/include/nlohmann/detail/input/input_adapters.hpp b/include/nlohmann/detail/input/input_adapters.hpp
+index 58ad59209..f810c1103 100644
+--- a/include/nlohmann/detail/input/input_adapters.hpp
++++ b/include/nlohmann/detail/input/input_adapters.hpp
+@@ -68,6 +68,13 @@ class file_input_adapter
+         return std::fgetc(m_file);
+     }
+ 
++    // returns the number of characters successfully read
++    template<class T>
++    std::size_t get_elements(T* dest, std::size_t count = 1)
++    {
++        return fread(dest, 1, sizeof(T) * count, m_file);
++    }
++
+   private:
+     /// the file pointer to read from
+     std::FILE* m_file;
+@@ -127,6 +134,17 @@ class input_stream_adapter
+         return res;
+     }
+ 
++    template<class T>
++    std::size_t get_elements(T* dest, std::size_t count = 1)
++    {
++        auto res = static_cast<std::size_t>(sb->sgetn(reinterpret_cast<char*>(dest), static_cast<std::streamsize>(count * sizeof(T))));
++        if (JSON_HEDLEY_UNLIKELY(res < count * sizeof(T)))
++        {
++            is->clear(is->rdstate() | std::ios::eofbit);
++        }
++        return res;
++    }
++
+   private:
+     /// the associated input stream
+     std::istream* is = nullptr;
+@@ -158,6 +176,26 @@ class iterator_input_adapter
+         return char_traits<char_type>::eof();
+     }
+ 
++    // for general iterators, we cannot really do something better than falling back to processing the range one-by-one
++    template<class T>
++    std::size_t get_elements(T* dest, std::size_t count = 1)
++    {
++        auto* ptr = reinterpret_cast<char*>(dest);
++        for (std::size_t read_index = 0; read_index < count * sizeof(T); ++read_index)
++        {
++            if (JSON_HEDLEY_LIKELY(current != end))
++            {
++                ptr[read_index] = static_cast<char>(*current);
++                std::advance(current, 1);
++            }
++            else
++            {
++                return read_index;
++            }
++        }
++        return count * sizeof(T);
++    }
++
+   private:
+     IteratorType current;
+     IteratorType end;
+@@ -321,6 +359,13 @@ class wide_string_input_adapter
+         return utf8_bytes[utf8_bytes_index++];
+     }
+ 
++    // parsing binary with wchar doesn't make sense, but since the parsing mode can be runtime, we need something here
++    template<class T>
++    std::size_t get_elements(T* /*dest*/, std::size_t /*count*/ = 1)
++    {
++        JSON_THROW(parse_error::create(112, 1, "wide string type cannot be interpreted as binary data", nullptr));
++    }
++
+   private:
+     BaseInputAdapter base_adapter;
+ 
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index 09fffb3bd..07b2c22c2 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -6220,6 +6220,9 @@ NLOHMANN_JSON_NAMESPACE_END
+ #include <string> // char_traits, string
+ #include <utility> // make_pair, move
+ #include <vector> // vector
++#ifdef __cpp_lib_byteswap
++    #include <bit>  //byteswap
++#endif
+ 
+ // #include <nlohmann/detail/exceptions.hpp>
+ 
+@@ -6298,6 +6301,13 @@ class file_input_adapter
+         return std::fgetc(m_file);
+     }
+ 
++    // returns the number of characters successfully read
++    template<class T>
++    std::size_t get_elements(T* dest, std::size_t count = 1)
++    {
++        return fread(dest, 1, sizeof(T) * count, m_file);
++    }
++
+   private:
+     /// the file pointer to read from
+     std::FILE* m_file;
+@@ -6357,6 +6367,17 @@ class input_stream_adapter
+         return res;
+     }
+ 
++    template<class T>
++    std::size_t get_elements(T* dest, std::size_t count = 1)
++    {
++        auto res = static_cast<std::size_t>(sb->sgetn(reinterpret_cast<char*>(dest), static_cast<std::streamsize>(count * sizeof(T))));
++        if (JSON_HEDLEY_UNLIKELY(res < count * sizeof(T)))
++        {
++            is->clear(is->rdstate() | std::ios::eofbit);
++        }
++        return res;
++    }
++
+   private:
+     /// the associated input stream
+     std::istream* is = nullptr;
+@@ -6388,6 +6409,26 @@ class iterator_input_adapter
+         return char_traits<char_type>::eof();
+     }
+ 
++    // for general iterators, we cannot really do something better than falling back to processing the range one-by-one
++    template<class T>
++    std::size_t get_elements(T* dest, std::size_t count = 1)
++    {
++        auto* ptr = reinterpret_cast<char*>(dest);
++        for (std::size_t read_index = 0; read_index < count * sizeof(T); ++read_index)
++        {
++            if (JSON_HEDLEY_LIKELY(current != end))
++            {
++                ptr[read_index] = static_cast<char>(*current);
++                std::advance(current, 1);
++            }
++            else
++            {
++                return read_index;
++            }
++        }
++        return count * sizeof(T);
++    }
++
+   private:
+     IteratorType current;
+     IteratorType end;
+@@ -6551,6 +6592,13 @@ class wide_string_input_adapter
+         return utf8_bytes[utf8_bytes_index++];
+     }
+ 
++    // parsing binary with wchar doesn't make sense, but since the parsing mode can be runtime, we need something here
++    template<class T>
++    std::size_t get_elements(T* /*dest*/, std::size_t /*count*/ = 1)
++    {
++        JSON_THROW(parse_error::create(112, 1, "wide string type cannot be interpreted as binary data", nullptr));
++    }
++
+   private:
+     BaseInputAdapter base_adapter;
+ 
+@@ -12007,6 +12055,29 @@ class binary_reader
+         return current = ia.get_character();
+     }
+ 
++    /*!
++    @brief get_to read into a primitive type
++
++    This function provides the interface to the used input adapter. It does
++    not throw in case the input reached EOF, but returns false instead
++
++    @return bool, whether the read was successful
++    */
++    template<class T>
++    bool get_to(T& dest, const input_format_t format, const char* context)
++    {
++        auto new_chars_read = ia.get_elements(&dest);
++        chars_read += new_chars_read;
++        if (JSON_HEDLEY_UNLIKELY(new_chars_read < sizeof(T)))
++        {
++            // in case of failure, advance position by 1 to report failing location
++            ++chars_read;
++            sax->parse_error(chars_read, "<end of file>", parse_error::create(110, chars_read, exception_message(format, "unexpected end of input", context), nullptr));
++            return false;
++        }
++        return true;
++    }
++
+     /*!
+     @return character read from the input after ignoring all 'N' entries
+     */
+@@ -12021,6 +12092,28 @@ class binary_reader
+         return current;
+     }
+ 
++    template<class NumberType>
++    static void byte_swap(NumberType& number)
++    {
++        constexpr std::size_t sz = sizeof(number);
++#ifdef __cpp_lib_byteswap
++        if constexpr (sz == 1)
++        {
++            return;
++        }
++        if constexpr(std::is_integral_v<NumberType>)
++        {
++            number = std::byteswap(number);
++            return;
++        }
++#endif
++        auto* ptr = reinterpret_cast<std::uint8_t*>(&number);
++        for (std::size_t i = 0; i < sz / 2; ++i)
++        {
++            std::swap(ptr[i], ptr[sz - i - 1]);
++        }
++    }
++
+     /*
+     @brief read a number from the input
+ 
+@@ -12039,29 +12132,16 @@ class binary_reader
+     template<typename NumberType, bool InputIsLittleEndian = false>
+     bool get_number(const input_format_t format, NumberType& result)
+     {
+-        // step 1: read input into array with system's byte order
+-        std::array<std::uint8_t, sizeof(NumberType)> vec{};
+-        for (std::size_t i = 0; i < sizeof(NumberType); ++i)
+-        {
+-            get();
+-            if (JSON_HEDLEY_UNLIKELY(!unexpect_eof(format, "number")))
+-            {
+-                return false;
+-            }
++        // read in the original format
+ 
+-            // reverse byte order prior to conversion if necessary
+-            if (is_little_endian != (InputIsLittleEndian || format == input_format_t::bjdata))
+-            {
+-                vec[sizeof(NumberType) - i - 1] = static_cast<std::uint8_t>(current);
+-            }
+-            else
+-            {
+-                vec[i] = static_cast<std::uint8_t>(current); // LCOV_EXCL_LINE
+-            }
++        if (JSON_HEDLEY_UNLIKELY(!get_to(result, format, "number")))
++        {
++            return false;
++        }
++        if (is_little_endian != (InputIsLittleEndian || format == input_format_t::bjdata))
++        {
++            byte_swap(result);
+         }
+-
+-        // step 2: convert array into number of type T and return
+-        std::memcpy(&result, vec.data(), sizeof(NumberType));
+         return true;
+     }
+ 

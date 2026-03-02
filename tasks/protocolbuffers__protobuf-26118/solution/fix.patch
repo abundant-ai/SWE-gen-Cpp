@@ -1,0 +1,116 @@
+diff --git a/src/google/protobuf/compiler/command_line_interface_tester.h b/src/google/protobuf/compiler/command_line_interface_tester.h
+index cccccf4ef..86ff7df81 100644
+--- a/src/google/protobuf/compiler/command_line_interface_tester.h
++++ b/src/google/protobuf/compiler/command_line_interface_tester.h
+@@ -131,6 +131,8 @@ class CommandLineInterfaceTester : public testing::Test {
+   void ExpectFileContentNotContainsSubstring(
+       absl::string_view filename, absl::string_view content_substring);
+ 
++  std::string FileContents(absl::string_view filename) const;
++
+  private:
+   // The object we are testing.
+   CommandLineInterface cli_;
+@@ -149,8 +151,6 @@ class CommandLineInterfaceTester : public testing::Test {
+   std::string captured_stdout_;
+ 
+   std::vector<std::unique_ptr<CodeGenerator>> generators_;
+-
+-  std::string FileContents(absl::string_view filename) const;
+ };
+ 
+ }  // namespace compiler
+diff --git a/src/google/protobuf/compiler/rust/context.cc b/src/google/protobuf/compiler/rust/context.cc
+index b3075cb8c..966ce6a82 100644
+--- a/src/google/protobuf/compiler/rust/context.cc
++++ b/src/google/protobuf/compiler/rust/context.cc
+@@ -93,6 +93,12 @@ absl::StatusOr<Options> Options::Parse(absl::string_view param) {
+     opts.force_lite_runtime = lite->second == "true";
+   }
+ 
++  auto annotate_code = absl::c_find_if(
++      args, [](auto& arg) { return arg.first == "annotate_code"; });
++  if (annotate_code != args.end()) {
++    opts.annotate_code = annotate_code->second == "true";
++  }
++
+   return opts;
+ }
+ 
+diff --git a/src/google/protobuf/compiler/rust/context.h b/src/google/protobuf/compiler/rust/context.h
+index 6bdf0c461..5a31062e8 100644
+--- a/src/google/protobuf/compiler/rust/context.h
++++ b/src/google/protobuf/compiler/rust/context.h
+@@ -50,6 +50,7 @@ struct Options {
+   std::string mapping_file_path;
+   bool strip_nonfunctional_codegen = false;
+   bool force_lite_runtime = false;
++  bool annotate_code = false;
+ 
+   // The name to use for the generated entry point rs file.
+   std::string generated_entry_point_rs_file_name = "generated.rs";
+diff --git a/src/google/protobuf/compiler/rust/generator.cc b/src/google/protobuf/compiler/rust/generator.cc
+index bb616ee3c..b9ce6e6b7 100644
+--- a/src/google/protobuf/compiler/rust/generator.cc
++++ b/src/google/protobuf/compiler/rust/generator.cc
+@@ -217,7 +217,14 @@ bool RustGenerator::Generate(const FileDescriptor* file,
+ 
+   auto outfile = absl::WrapUnique(
+       generator_context->Open(GetRsFile(ctx_without_printer, *file)));
+-  io::Printer printer(outfile.get());
++  GeneratedCodeInfo annotations;
++  io::AnnotationProtoCollector<GeneratedCodeInfo> annotation_collector(
++      &annotations);
++  io::Printer::Options printer_options{};
++  if (opts->annotate_code) {
++    printer_options.annotation_collector = &annotation_collector;
++  }
++  io::Printer printer(outfile.get(), printer_options);
+   Context ctx = ctx_without_printer.WithPrinter(&printer);
+ 
+   // Convenience shorthands for common symbols.
+@@ -327,6 +334,12 @@ bool RustGenerator::Generate(const FileDescriptor* file,
+     }
+   }
+ 
++  if (opts->annotate_code) {
++    ctx.printer().PrintRaw(absl::StrCat(
++        "// google.protobuf.GeneratedCodeInfo ",
++        absl::Base64Escape(annotations.SerializeAsString()), "\n"));
++  }
++
+   return true;
+ }
+ 
+diff --git a/src/google/protobuf/compiler/rust/message.cc b/src/google/protobuf/compiler/rust/message.cc
+index d95c3d78e..2a0c05a5e 100644
+--- a/src/google/protobuf/compiler/rust/message.cc
++++ b/src/google/protobuf/compiler/rust/message.cc
+@@ -38,6 +38,8 @@ namespace compiler {
+ namespace rust {
+ namespace {
+ 
++using Sub = ::google::protobuf::io::Printer::Sub;
++
+ void MessageNew(Context& ctx, const Descriptor& msg) {
+   switch (ctx.opts().kernel) {
+     case Kernel::kCpp:
+@@ -409,6 +411,9 @@ void GenerateRs(Context& ctx, const Descriptor& msg, const upb::DefPool& pool) {
+   upb::MessageDefPtr upb_msg = pool.FindMessageByName(msg.full_name().data());
+   ctx.Emit(
+       {
++          // There's also ${$/$}$-style begin and end tokens, but those might
++          // be harder to retrofit here because of the giant-template style.
++          Sub("MsgDefinition", RsSafeName(msg.name())).AnnotatedAs(&msg),
+           {"Msg", RsSafeName(msg.name())},
+           {"Msg::new", [&] { MessageNew(ctx, msg); }},
+           {"Msg::drop", [&] { MessageDrop(ctx, msg); }},
+@@ -520,7 +525,7 @@ void GenerateRs(Context& ctx, const Descriptor& msg, const upb::DefPool& pool) {
+       },
+       R"rs(
+         #[allow(non_camel_case_types)]
+-        pub struct $Msg$ {
++        pub struct $MsgDefinition$ {
+           inner: $pbr$::OwnedMessageInner<$Msg$>
+         }
+ 

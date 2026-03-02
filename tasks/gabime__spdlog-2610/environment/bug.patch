@@ -1,0 +1,188 @@
+diff --git a/README.md b/README.md
+index d650b3ed..b98a920b 100644
+--- a/README.md
++++ b/README.md
+@@ -232,28 +232,6 @@ void multi_sink_example()
+ }
+ ```
+ 
+----
+-#### Logger with a custom callback function that receives the logs
+-```c++
+-
+-// create logger with a lambda function callback, the callback will be called
+-// each time something is logged to the logger
+-void callback_example()
+-{
+-    auto callback_sink = std::make_shared<spdlog::sinks::callback_sink_mt>([](const spdlog::details::log_msg &msg) {
+-         // for example you can be notified by sending an email to yourself
+-    });
+-    callback_sink->set_level(spdlog::level::err);
+-
+-    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+-    spdlog::logger logger("custom_callback_logger", {console_sink, callback_sink});
+-
+-    logger.info("some info log");
+-    logger.debug("some debug log");
+-    logger.error("critical issue"); // will notify you
+-}
+-```
+-
+ ---
+ #### Asynchronous logging
+ ```c++
+diff --git a/example/example.cpp b/example/example.cpp
+index 316a22b1..ccfdcf2f 100644
+--- a/example/example.cpp
++++ b/example/example.cpp
+@@ -12,7 +12,6 @@ void stdout_logger_example();
+ void basic_example();
+ void rotating_example();
+ void daily_example();
+-void callback_example();
+ void async_example();
+ void binary_example();
+ void vector_example();
+@@ -73,7 +72,6 @@ int main(int, char *[])
+         basic_example();
+         rotating_example();
+         daily_example();
+-        callback_example();
+         async_example();
+         binary_example();
+         vector_example();
+@@ -138,15 +136,6 @@ void daily_example()
+     auto daily_logger = spdlog::daily_logger_mt("daily_logger", "logs/daily.txt", 2, 30);
+ }
+ 
+-#include "spdlog/sinks/callback_sink.h"
+-void callback_example()
+-{
+-    // Create the logger
+-    auto logger = spdlog::callback_logger_mt("custom_callback_logger", [](const spdlog::details::log_msg &/*msg*/) {
+-        // do what you need to do with msg
+-    });
+-}
+-
+ #include "spdlog/cfg/env.h"
+ void load_levels_example()
+ {
+diff --git a/include/spdlog/sinks/callback_sink.h b/include/spdlog/sinks/callback_sink.h
+deleted file mode 100644
+index bcd31383..00000000
+--- a/include/spdlog/sinks/callback_sink.h
++++ /dev/null
+@@ -1,61 +0,0 @@
+-// Copyright(c) 2015-present, Gabi Melman & spdlog contributors.
+-// Distributed under the MIT License (http://opensource.org/licenses/MIT)
+-
+-#pragma once
+-
+-#include <spdlog/details/null_mutex.h>
+-#include <spdlog/sinks/base_sink.h>
+-#include <spdlog/details/synchronous_factory.h>
+-
+-#include <mutex>
+-#include <string>
+-
+-namespace spdlog {
+-
+-// callbacks type
+-typedef std::function<void(const details::log_msg &msg)> custom_log_callback;
+-
+-namespace sinks {
+-/*
+- * Trivial callback sink, gets a callback function and calls it on each log
+- */
+-template<typename Mutex>
+-class callback_sink final : public base_sink<Mutex>
+-{
+-public:
+-    explicit callback_sink(const custom_log_callback &callback)
+-        : callback_{callback}
+-    {}
+-
+-protected:
+-    void sink_it_(const details::log_msg &msg) override
+-    {
+-        callback_(msg);
+-    }
+-    void flush_() override{};
+-
+-private:
+-    custom_log_callback callback_;
+-};
+-
+-using callback_sink_mt = callback_sink<std::mutex>;
+-using callback_sink_st = callback_sink<details::null_mutex>;
+-
+-} // namespace sinks
+-
+-//
+-// factory functions
+-//
+-template<typename Factory = spdlog::synchronous_factory>
+-inline std::shared_ptr<logger> callback_logger_mt(const std::string &logger_name, const custom_log_callback &callback)
+-{
+-    return Factory::template create<sinks::callback_sink_mt>(logger_name, callback);
+-}
+-
+-template<typename Factory = spdlog::synchronous_factory>
+-inline std::shared_ptr<logger> callback_logger_st(const std::string &logger_name, const custom_log_callback &callback)
+-{
+-    return Factory::template create<sinks::callback_sink_st>(logger_name, callback);
+-}
+-
+-} // namespace spdlog
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 12204e2b..7fe4791e 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -31,7 +31,6 @@ set(SPDLOG_UTESTS_SOURCES
+     test_stdout_api.cpp
+     test_backtrace.cpp
+     test_create_dir.cpp
+-    test_custom_callbacks.cpp
+     test_cfg.cpp
+     test_time_point.cpp
+     test_stopwatch.cpp)
+diff --git a/tests/test_custom_callbacks.cpp b/tests/test_custom_callbacks.cpp
+deleted file mode 100644
+index 877e1608..00000000
+--- a/tests/test_custom_callbacks.cpp
++++ /dev/null
+@@ -1,34 +0,0 @@
+-/*
+- * This content is released under the MIT License as specified in https://raw.githubusercontent.com/gabime/spdlog/master/LICENSE
+- */
+-#include "includes.h"
+-#include "test_sink.h"
+-#include "spdlog/sinks/callback_sink.h"
+-#include "spdlog/async.h"
+-#include "spdlog/common.h"
+-
+-TEST_CASE("custom_callback_logger", "[custom_callback_logger]]")
+-{
+-    std::vector<std::string> lines;
+-    spdlog::pattern_formatter formatter;
+-    auto callback_logger = std::make_shared<spdlog::sinks::callback_sink_st>([&](const spdlog::details::log_msg &msg) {
+-        spdlog::memory_buf_t formatted;
+-        formatter.format(msg, formatted);
+-        auto eol_len = strlen(spdlog::details::os::default_eol);
+-        lines.emplace_back(formatted.begin(), formatted.end() - eol_len);
+-    });
+-    std::shared_ptr<spdlog::sinks::test_sink_st> test_sink(new spdlog::sinks::test_sink_st);
+-
+-    spdlog::logger logger("test-callback", {callback_logger, test_sink});
+-
+-    logger.info("test message 1");
+-    logger.info("test message 2");
+-    logger.info("test message 3");
+-
+-    std::vector<std::string> ref_lines = test_sink->lines();
+-
+-    REQUIRE(lines[0] == ref_lines[0]);
+-    REQUIRE(lines[1] == ref_lines[1]);
+-    REQUIRE(lines[2] == ref_lines[2]);
+-    spdlog::drop_all();
+-}

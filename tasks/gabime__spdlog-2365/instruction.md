@@ -1,0 +1,11 @@
+Custom pattern flags can’t reliably receive a valid timestamp (`const std::tm&`) unless the pattern string contains one of the built-in time-related flags.
+
+In spdlog, users can extend formatting by implementing a custom pattern flag formatter (a class derived from `spdlog::custom_flag_formatter`) and registering it with `spdlog::pattern_formatter::add_flag(char, std::unique_ptr<custom_flag_formatter>)`. The custom formatter’s `format(...)` overload receives a `const std::tm&` parameter (used for time-based formatting).
+
+Problem: when the pattern string contains no built-in time flags (for example a pattern like `%v`), `spdlog::pattern_formatter` does not compute/update the cached `std::tm` for the log message. As a result, the `const std::tm&` passed into the custom formatter’s `format(...)` is not updated for the current message (it may be default/garbage/stale), making it impossible to write a custom formatter that depends on time unless the user also adds an unrelated built-in time token to the pattern.
+
+Expected behavior: a custom formatter should be able to declare that it needs localtime calculation even when the pattern doesn’t include built-in time flags. If any registered custom flag formatter indicates it needs localtime, `pattern_formatter` must compute the current message’s `std::tm` (based on the configured `spdlog::pattern_time_type`, e.g. local vs utc) and pass the updated value into that custom formatter’s `format(...)`.
+
+Actual behavior: `pattern_formatter` only enables localtime computation based on built-in pattern flags, so custom flags that require time do not get a valid `std::tm` when the pattern has no time tokens.
+
+Implement support for overriding/participating in the “need localtime” decision from custom formatters. Concretely, custom flag formatters should be able to override something like `need_localtime()` (or an equivalent hook) so `pattern_formatter` can detect that a custom flag requires time and ensure `format(...)` receives the correct updated `const std::tm&` even for patterns that otherwise wouldn’t trigger time handling.

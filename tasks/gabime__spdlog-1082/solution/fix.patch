@@ -1,0 +1,300 @@
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 00000000..fe505b27
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1 @@
++* text=false
+diff --git a/.gitignore b/.gitignore
+index b1a41919..fafa874a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,5 +1,5 @@
+ # Auto generated files
+-build/*
++build/*
+ *.slo
+ *.lo
+ *.o
+@@ -65,4 +65,5 @@ install_manifest.txt
+ /tests/logs/*
+ 
+ # idea
+-.idea/
+\ No newline at end of file
++.idea/
++cmake-build-*/
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1ed6a21b..a8e2f2ea 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -38,45 +38,49 @@ include(cmake/sanitizers.cmake)
+ # spdlog target
+ #---------------------------------------------------------------------------------------
+ 
+-# Check if spdlog is being used directly or via add_subdirectory
++# Check if spdlog is being used directly or via add_subdirectory, but allow overriding
++if (NOT DEFINED SPDLOG_MASTER_PROJECT)
+ if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+     set(SPDLOG_MASTER_PROJECT ON)
+ else()
+     set(SPDLOG_MASTER_PROJECT OFF)
+ endif()
++endif ()
+ 
++option(BUILD_SHARED_LIBS "Global flag to cause add_library to create shared libraries if on." ON)
+ option(SPDLOG_BUILD_EXAMPLES "Build examples" ${SPDLOG_MASTER_PROJECT})
+ option(SPDLOG_BUILD_BENCH "Build benchmarks (Requires https://github.com/google/benchmark.git to be installed)" OFF)
+ option(SPDLOG_BUILD_TESTS "Build tests" ON)
+ option(SPDLOG_FMT_EXTERNAL "Use external fmt library instead of bundled" OFF)
+ option(SPDLOG_INSTALL "Generate the install target." ${SPDLOG_MASTER_PROJECT})
+ 
+-set(HEADER_BASE "${CMAKE_CURRENT_SOURCE_DIR}/include/spdlog")
+-
+ message(STATUS "Build type: " ${CMAKE_BUILD_TYPE})
+ 
+-# Build static lib
+-set(SRC_BASE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+-set(STATIC_SRC_FILES "${SRC_BASE}/spdlog.cpp")
+-add_library(spdlog_static STATIC ${STATIC_SRC_FILES})
+-add_library(spdlog::static ALIAS spdlog_static)
+-target_compile_definitions(spdlog_static PUBLIC SPDLOG_STATIC_LIB )
+-target_include_directories(spdlog_static PUBLIC  "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>")
+-set_target_properties(spdlog_static PROPERTIES OUTPUT_NAME "spdlog")
+-set_target_properties(spdlog_static PROPERTIES DEBUG_POSTFIX "-debug")
+-
+-# Headr only
++find_package(Threads REQUIRED)
++
++# Build library
++add_library(spdlog src/spdlog.cpp)
++target_compile_definitions(spdlog PUBLIC SPDLOG_COMPILED_LIB )
++target_include_directories(spdlog PUBLIC
++    "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>"
++    "$<INSTALL_INTERFACE:include>"
++)
++target_link_libraries(spdlog PUBLIC Threads::Threads)
++
++# Header only
+ add_library(spdlog_header_only INTERFACE)
+-target_include_directories(spdlog_header_only INTERFACE "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>")
+-add_library(spdlog::header_only ALIAS spdlog_header_only)
++target_include_directories(spdlog_header_only INTERFACE "${CMAKE_CURRENT_LIST_DIR}/include")
++target_link_libraries(spdlog_header_only INTERFACE Threads::Threads)
+ 
+-if(SPDLOG_FMT_EXTERNAL AND NOT TARGET fmt::fmt)
+-    find_package(fmt REQUIRED CONFIG)
+-endif()
+ 
+ if(SPDLOG_FMT_EXTERNAL)
+-    target_compile_definitions(spdlog_static INTERFACE SPDLOG_FMT_EXTERNAL)
+-    target_link_libraries(spdlog_static INTERFACE fmt::fmt)
++    if (NOT TARGET fmt::fmt)
++        find_package(fmt REQUIRED)
++    endif ()
++
++    target_compile_definitions(spdlog PUBLIC SPDLOG_FMT_EXTERNAL)
++    target_link_libraries(spdlog PUBLIC fmt::fmt)
++
+     target_compile_definitions(spdlog_header_only INTERFACE SPDLOG_FMT_EXTERNAL)
+     target_link_libraries(spdlog_header_only INTERFACE fmt::fmt)
+ endif()
+@@ -94,13 +98,27 @@ if(SPDLOG_BUILD_BENCH)
+     add_subdirectory(bench)
+ endif()
+ 
+-#---------------------------------------------------------------------------------------
+-# install
+-#---------------------------------------------------------------------------------------
+-install(DIRECTORY ${HEADER_BASE} DESTINATION include)
+-install(TARGETS spdlog_static ARCHIVE DESTINATION lib)
++if (SPDLOG_INSTALL)
++    #---------------------------------------------------------------------------------------
++    # install
++    #---------------------------------------------------------------------------------------
++    install(DIRECTORY include/ DESTINATION include)
++    install(TARGETS spdlog EXPORT ${PROJECT_NAME} DESTINATION lib)
++    install(EXPORT ${PROJECT_NAME}
++        DESTINATION lib/${PROJECT_NAME}/cmake
++        NAMESPACE ${PROJECT_NAME}::
++        FILE ${PROJECT_NAME}Config.cmake
++    )
++
++    #---------------------------------------------------------------------------------------
++    # Support creation of installable packages
++    #---------------------------------------------------------------------------------------
++    include(SpdlogCPack.cmake)
++endif ()
+ 
+ #---------------------------------------------------------------------------------------
+-# register project in CMake user registry
++# register project in CMake user registry - disabled by default since the
++# installed/packaged version of the project is preferred.
+ #---------------------------------------------------------------------------------------
++option(CMAKE_EXPORT_NO_PACKAGE_REGISTRY "Disable registration of CMake's build directory." ON)
+ export(PACKAGE ${PROJECT_NAME})
+diff --git a/SpdlogCPack.cmake b/SpdlogCPack.cmake
+new file mode 100644
+index 00000000..432503cb
+--- /dev/null
++++ b/SpdlogCPack.cmake
+@@ -0,0 +1,26 @@
++set(CPACK_GENERATOR
++    TGZ
++    ZIP
++    )
++
++set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY 0)
++set(CPACK_INSTALL_CMAKE_PROJECTS
++    "${CMAKE_BINARY_DIR}"
++    "${PROJECT_NAME}"
++    ALL
++    .
++    )
++
++set(CPACK_PROJECT_URL "https://github.com/gabime/spdlog")
++set(CPACK_PACKAGE_VENDOR "Gabi Melman")
++set(CPACK_PACKAGE_CONTACT "Gabi Melman <gmelman1@gmail.com>")
++set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
++set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
++set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
++set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH})
++if (PROJECT_VERSION_TWEAK)
++    set(CPACK_PACKAGE_VERSION ${CPACK_PACKAGE_VERSION}.${PROJECT_VERSION_TWEAK})
++endif ()
++set(CPACK_PACKAGE_RELOCATABLE ON)
++
++include(CPack)
+diff --git a/bench/CMakeLists.txt b/bench/CMakeLists.txt
+index 9280ebad..dcb03a9e 100644
+--- a/bench/CMakeLists.txt
++++ b/bench/CMakeLists.txt
+@@ -33,16 +33,16 @@ find_package(Threads REQUIRED)
+ find_package(benchmark CONFIG REQUIRED)
+ 
+ add_executable(bench bench.cpp)
+-target_link_libraries(bench PRIVATE spdlog::static Threads::Threads)
++target_link_libraries(bench PRIVATE spdlog::spdlog)
+ 
+ add_executable(async_bench async_bench.cpp)
+-target_link_libraries(async_bench PRIVATE spdlog::static Threads::Threads)
++target_link_libraries(async_bench PRIVATE spdlog::spdlog)
+ 
+ add_executable(latency latency.cpp)
+-target_link_libraries(latency PRIVATE benchmark::benchmark spdlog::static Threads::Threads)
++target_link_libraries(latency PRIVATE benchmark::benchmark spdlog::spdlog)
+ 
+ 
+ add_executable(formatter-bench formatter-bench.cpp)
+-target_link_libraries(formatter-bench PRIVATE benchmark::benchmark spdlog::static Threads::Threads)
++target_link_libraries(formatter-bench PRIVATE benchmark::benchmark spdlog::spdlog)
+ 
+ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/logs")
+diff --git a/example/CMakeLists.txt b/example/CMakeLists.txt
+index f0a917f2..033e7af6 100644
+--- a/example/CMakeLists.txt
++++ b/example/CMakeLists.txt
+@@ -24,26 +24,40 @@
+ cmake_minimum_required(VERSION 3.1)
+ project(SpdlogExamples CXX)
+ 
+-if(NOT TARGET spdlog)
+-  # Stand-alone build
+-  find_package(spdlog CONFIG REQUIRED)
++if(TARGET spdlog)
++    # If we're running this example as part of the primary spdlog applciation
++    # then add an alias. This allows us to use the same "spdlog::spdlog"
++    # below that a user would use (with the namespace)
++    add_library(spdlog::spdlog ALIAS spdlog)
++else()
++    # Stand-alone build
++    find_package(spdlog REQUIRED)
+ endif()
+ 
+ find_package(Threads REQUIRED)
+ 
++# Example of using pre-compiled library
+ add_executable(example example.cpp)
++target_link_libraries(example spdlog::spdlog)
+ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+     find_library(log-lib log)
+-    target_link_libraries(example spdlog::static Threads::Threads log)
+-else()
+-    target_link_libraries(example spdlog::static Threads::Threads)
++    target_link_libraries(example log)
+ endif()
+ 
++# Example of using header-only library
++add_executable(example_header_only example.cpp)
++get_target_property(SPDLOG_INCLUDE_DIRS spdlog::spdlog INTERFACE_INCLUDE_DIRECTORIES)
++target_include_directories(example_header_only PRIVATE ${SPDLOG_INCLUDE_DIRS})
++target_link_libraries(example_header_only Threads::Threads)
++if(CMAKE_SYSTEM_NAME STREQUAL "Android")
++    target_link_libraries(example_header_only log)
++endif ()
+ 
+ add_executable(multisink multisink.cpp)
+-target_link_libraries(multisink spdlog::static Threads::Threads)
++target_link_libraries(multisink spdlog::spdlog)
+ 
+ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/logs")
+ 
+ enable_testing()
+ add_test(NAME example COMMAND example)
++add_test(NAME example_header_only COMMAND example)
+diff --git a/include/spdlog/common.h b/include/spdlog/common.h
+index 819f3abb..ccc1d990 100644
+--- a/include/spdlog/common.h
++++ b/include/spdlog/common.h
+@@ -19,7 +19,7 @@
+ #include <locale>
+ #endif
+ 
+-#ifdef SPDLOG_STATIC_LIB
++#ifdef SPDLOG_COMPILED_LIB
+ #undef SPDLOG_HEADER_ONLY
+ #define SPDLOG_INLINE
+ #else
+@@ -216,4 +216,4 @@ std::unique_ptr<T> make_unique(Args &&... args)
+ 
+ #ifdef SPDLOG_HEADER_ONLY
+ #include "common-inl.h"
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/include/spdlog/sinks/base_sink.h b/include/spdlog/sinks/base_sink.h
+index 2ecf11b1..c9f5670e 100644
+--- a/include/spdlog/sinks/base_sink.h
++++ b/include/spdlog/sinks/base_sink.h
+@@ -37,6 +37,6 @@ protected:
+ } // namespace sinks
+ } // namespace spdlog
+ 
+-#ifndef SPDLOG_STATIC_LIB
++#ifndef SPDLOG_COMPILED_LIB
+ #include "base_sink-inl.h"
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/src/spdlog.cpp b/src/spdlog.cpp
+index d98458ca..d51c6186 100644
+--- a/src/spdlog.cpp
++++ b/src/spdlog.cpp
+@@ -1,8 +1,8 @@
+ // Copyright(c) 2015-present Gabi Melman & spdlog contributors.
+ // Distributed under the MIT License (http://opensource.org/licenses/MIT)
+ 
+-#ifndef SPDLOG_STATIC_LIB
+-#error Please define SPDLOG_STATIC_LIB to compile this file.
++#ifndef SPDLOG_COMPILED_LIB
++#error Please define SPDLOG_COMPILED_LIB to compile this file.
+ #endif
+ 
+ #include <mutex>
+@@ -100,4 +100,4 @@ template FMT_API int internal::char_traits<wchar_t>::format_float(wchar_t *, std
+ template FMT_API std::wstring internal::vformat<wchar_t>(wstring_view, basic_format_args<wformat_context>);
+ FMT_END_NAMESPACE
+ 
+-#endif
+\ No newline at end of file
++#endif

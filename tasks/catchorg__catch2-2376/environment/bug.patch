@@ -1,0 +1,104 @@
+diff --git a/src/catch2/internal/catch_fatal_condition_handler.cpp b/src/catch2/internal/catch_fatal_condition_handler.cpp
+index 410b9b8f..7d3534ca 100644
+--- a/src/catch2/internal/catch_fatal_condition_handler.cpp
++++ b/src/catch2/internal/catch_fatal_condition_handler.cpp
+@@ -40,7 +40,7 @@ namespace Catch {
+     // If neither SEH nor signal handling is required, the handler impls
+     // do not have to do anything, and can be empty.
+     void FatalConditionHandler::engage_platform() {}
+-    void FatalConditionHandler::disengage_platform() noexcept {}
++    void FatalConditionHandler::disengage_platform() {}
+     FatalConditionHandler::FatalConditionHandler() = default;
+     FatalConditionHandler::~FatalConditionHandler() = default;
+ 
+@@ -78,10 +78,10 @@ namespace Catch {
+     // Windows can easily distinguish between SO and SigSegV,
+     // but SigInt, SigTerm, etc are handled differently.
+     static SignalDefs signalDefs[] = {
+-        { EXCEPTION_ILLEGAL_INSTRUCTION,  "SIGILL - Illegal instruction signal" },
+-        { EXCEPTION_STACK_OVERFLOW, "SIGSEGV - Stack overflow" },
+-        { EXCEPTION_ACCESS_VIOLATION, "SIGSEGV - Segmentation violation signal" },
+-        { EXCEPTION_INT_DIVIDE_BY_ZERO, "Divide by zero error" },
++        { static_cast<DWORD>(EXCEPTION_ILLEGAL_INSTRUCTION),  "SIGILL - Illegal instruction signal" },
++        { static_cast<DWORD>(EXCEPTION_STACK_OVERFLOW), "SIGSEGV - Stack overflow" },
++        { static_cast<DWORD>(EXCEPTION_ACCESS_VIOLATION), "SIGSEGV - Segmentation violation signal" },
++        { static_cast<DWORD>(EXCEPTION_INT_DIVIDE_BY_ZERO), "Divide by zero error" },
+     };
+ 
+     static LONG CALLBACK topLevelExceptionFilter(PEXCEPTION_POINTERS ExceptionInfo) {
+@@ -124,11 +124,9 @@ namespace Catch {
+         previousTopLevelExceptionFilter = SetUnhandledExceptionFilter(topLevelExceptionFilter);
+     }
+ 
+-    void FatalConditionHandler::disengage_platform() noexcept {
+-        if (SetUnhandledExceptionFilter(previousTopLevelExceptionFilter) != topLevelExceptionFilter) {
+-            Catch::cerr()
+-                << "Unexpected SEH unhandled exception filter on disengage."
+-                << " The filter was restored, but might be rolled back unexpectedly.";
++    void FatalConditionHandler::disengage_platform() {
++        if (SetUnhandledExceptionFilter(reinterpret_cast<LPTOP_LEVEL_EXCEPTION_FILTER>(previousTopLevelExceptionFilter)) != topLevelExceptionFilter) {
++            CATCH_RUNTIME_ERROR("Could not restore previous top level exception filter");
+         }
+         previousTopLevelExceptionFilter = nullptr;
+     }
+@@ -170,7 +168,7 @@ namespace Catch {
+     static stack_t oldSigStack{};
+     static struct sigaction oldSigActions[sizeof(signalDefs) / sizeof(SignalDefs)]{};
+ 
+-    static void restorePreviousSignalHandlers() noexcept {
++    static void restorePreviousSignalHandlers() {
+         // We set signal handlers back to the previous ones. Hopefully
+         // nobody overwrote them in the meantime, and doesn't expect
+         // their signal handlers to live past ours given that they
+@@ -233,7 +231,7 @@ namespace Catch {
+ #endif
+ 
+ 
+-    void FatalConditionHandler::disengage_platform() noexcept {
++    void FatalConditionHandler::disengage_platform() {
+         restorePreviousSignalHandlers();
+     }
+ 
+diff --git a/src/catch2/internal/catch_fatal_condition_handler.hpp b/src/catch2/internal/catch_fatal_condition_handler.hpp
+index 389dab5d..4a2818cb 100644
+--- a/src/catch2/internal/catch_fatal_condition_handler.hpp
++++ b/src/catch2/internal/catch_fatal_condition_handler.hpp
+@@ -32,7 +32,7 @@ namespace Catch {
+         // Should be if-defed to work on current platform, can assume
+         // engage-disengage 1:1 pairing.
+         void engage_platform();
+-        void disengage_platform() noexcept;
++        void disengage_platform();
+     public:
+         // Should also have platform-specific implementations as needed
+         FatalConditionHandler();
+@@ -44,7 +44,7 @@ namespace Catch {
+             engage_platform();
+         }
+ 
+-        void disengage() noexcept {
++        void disengage() {
+             assert(m_started && "Handler cannot be uninstalled without being installed first");
+             m_started = false;
+             disengage_platform();
+diff --git a/tests/SelfTest/UsageTests/Misc.tests.cpp b/tests/SelfTest/UsageTests/Misc.tests.cpp
+index 33734d43..cf608dd9 100644
+--- a/tests/SelfTest/UsageTests/Misc.tests.cpp
++++ b/tests/SelfTest/UsageTests/Misc.tests.cpp
+@@ -537,16 +537,4 @@ TEST_CASE("Validate SEH behavior - unhandled", "[.approvals][FatalConditionHandl
+     // Validate that Catch2 framework correctly handles tests raising and not handling SEH exceptions.
+     throw_no_catch();
+ }
+-
+-static LONG CALLBACK dummyExceptionFilter(PEXCEPTION_POINTERS ExceptionInfo) {
+-    return EXCEPTION_CONTINUE_SEARCH;
+-}
+-
+-TEST_CASE("Validate SEH behavior - no crash for stack unwinding", "[approvals][!throws][!shouldfail][FatalConditionHandler][CATCH_PLATFORM_WINDOWS]")
+-{
+-    // Trigger stack unwinding with SEH top-level filter changed and validate the test fails expectedly with no application crash
+-    SetUnhandledExceptionFilter(dummyExceptionFilter);
+-    throw 1;
+-}
+-
+ #endif

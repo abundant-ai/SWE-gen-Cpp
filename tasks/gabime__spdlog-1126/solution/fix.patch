@@ -1,0 +1,236 @@
+diff --git a/.gitignore b/.gitignore
+index fafa874a..cf0563ad 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -34,6 +34,9 @@ build/*
+ # Codelite
+ .codelite
+ 
++# KDevelop
++*.kdev4
++
+ # .orig files
+ *.orig
+ 
+@@ -46,6 +49,7 @@ example/*
+ !example/example.sln
+ !example/example.vcxproj
+ !example/CMakeLists.txt
++!example/meson.build
+ !example/multisink.cpp
+ !example/jni
+ 
+diff --git a/bench/meson.build b/bench/meson.build
+new file mode 100644
+index 00000000..e185e689
+--- /dev/null
++++ b/bench/meson.build
+@@ -0,0 +1,13 @@
++benchmark = dependency('benchmark')
++
++bench_matrix = [
++  ['bench',           [spdlog_dep],            []],
++  ['async_bench',     [spdlog_dep],            []],
++  ['formatter-bench', [spdlog_dep, benchmark], ['all']],
++  ['latency',         [spdlog_dep, benchmark], []],
++]
++
++foreach i : bench_matrix
++  bench_exe = executable(i[0], i[0] + '.cpp', dependencies: i[1])
++  benchmark('bench_' + i[0], bench_exe, args: i[2])
++endforeach
+diff --git a/example/meson.build b/example/meson.build
+new file mode 100644
+index 00000000..0a5a53c7
+--- /dev/null
++++ b/example/meson.build
+@@ -0,0 +1,8 @@
++example_matrix =  [
++  ['spdlog-example',    spdlog_dep],
++  ['spdlog-example-ho', spdlog_headeronly_dep],
++]
++
++foreach i : example_matrix
++  test_exe = executable(i[0], ['example.cpp'], dependencies: i[1])
++endforeach
+diff --git a/meson.build b/meson.build
+new file mode 100644
+index 00000000..abb51f71
+--- /dev/null
++++ b/meson.build
+@@ -0,0 +1,111 @@
++project('spdlog', ['cpp'],
++  license         : 'MIT',
++  version         : run_command(find_program('scripts/extract_version.py')).stdout().strip(),
++  default_options : [
++    'warning_level=3',
++    'cpp_std=c++11',
++    'default_library=static',
++    'buildtype=release',
++    'b_colorout=always',
++  ],
++)
++
++# ------------------------
++# ---   Dependencies   ---
++# ------------------------
++
++dep_list = []
++compile_args = []
++
++# Threads
++dep_list += dependency('threads')
++
++# Check for FMT
++if get_option('extrenal_fmt')
++  if not meson.version().version_compare('>=0.49.0')
++    warning('Finding fmt can fail wit meson versions before 0.49.0')
++  endif
++  dep_list     += dependency('fmt')
++  compile_args += '-DSPDLOG_FMT_EXTERNAL'
++endif
++
++# ------------------------------------
++# ---   Compiled library version   ---
++# ------------------------------------
++
++spdlog_inc = include_directories('./include')
++
++spdlog = library('spdlog', ['src/spdlog.cpp'],
++  cpp_args            : [compile_args] + ['-DSPDLOG_COMPILED_LIB'],
++  include_directories : spdlog_inc,
++  dependencies        : dep_list,
++  install             : true,
++)
++
++spdlog_dep = declare_dependency(
++  link_with           : spdlog,
++  include_directories : spdlog_inc,
++  compile_args        : compile_args + ['-DSPDLOG_COMPILED_LIB'],
++  dependencies        : dep_list,
++  version             : meson.project_version(),
++)
++
++# ----------------------------------
++# ---   Header only dependency   ---
++# ----------------------------------
++
++spdlog_headeronly_dep = declare_dependency(
++  include_directories : spdlog_inc,
++  compile_args        : compile_args,
++  dependencies        : dep_list,
++  version             : meson.project_version(),
++)
++
++# ------------------------
++# ---   Installation   ---
++# ------------------------
++
++install_subdir('include/spdlog', install_dir: get_option('includedir'))
++
++pkg = import('pkgconfig')
++pkg.generate(spdlog,
++  name         : 'spdlog',
++  description  : 'Fast C++ logging library',
++  url          : 'https://github.com/gabime/spdlog',
++  extra_cflags : ['-DSPDLOG_COMPILED_LIB']
++)
++
++# -------------------------------------
++# ---   Conditionally add subdirs   ---
++# -------------------------------------
++
++if get_option('enable_tests')
++  subdir('tests')
++endif
++
++if get_option('enable_examples')
++  subdir('example')
++endif
++
++if get_option('enable_benchmarks')
++  subdir('bench')
++endif
++
++# -------------------
++# ---   Summary   ---
++# -------------------
++
++summary_str = '''spdlog build summary:
++
++  - using extrenal fmt:  @0@
++  - building tests:      @1@
++  - building examples:   @2@
++  - building benchmarks: @3@
++'''.format(
++  get_option('extrenal_fmt'),
++  get_option('enable_tests'),
++  get_option('enable_examples'),
++  get_option('enable_benchmarks')
++)
++
++message(summary_str)
+diff --git a/meson_options.txt b/meson_options.txt
+new file mode 100644
+index 00000000..7dafbf51
+--- /dev/null
++++ b/meson_options.txt
+@@ -0,0 +1,4 @@
++option('extrenal_fmt',      type: 'boolean', value: false)
++option('enable_examples',   type: 'boolean', value: false)
++option('enable_benchmarks', type: 'boolean', value: false)
++option('enable_tests',      type: 'boolean', value: false)
+diff --git a/scripts/clang_tidy.sh b/scripts/clang_tidy.sh
+new file mode 100755
+index 00000000..8b1b5f88
+--- /dev/null
++++ b/scripts/clang_tidy.sh
+@@ -0,0 +1,6 @@
++#!/bin/bash
++
++cd "$(dirname "$0")"
++cd ..
++
++clang-tidy example/example.cpp -- -I ./include
+diff --git a/scripts/extract_version.py b/scripts/extract_version.py
+new file mode 100755
+index 00000000..960df51b
+--- /dev/null
++++ b/scripts/extract_version.py
+@@ -0,0 +1,17 @@
++#!/usr/bin/env python3
++
++import os
++import re
++
++base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
++config_h  = os.path.join(base_path, 'include', 'spdlog', 'version.h')
++data      = {'MAJOR': 0, 'MINOR': 0, 'PATCH': 0}
++reg       = re.compile(r'^\s*#define\s+SPDLOG_VER_([A-Z]+)\s+([0-9]+).*$')
++
++with open(config_h, 'r') as fp:
++  for l in fp:
++    m = reg.match(l)
++    if m:
++      data[m.group(1)] = int(m.group(2))
++
++print('{}.{}.{}'.format(data['MAJOR'], data['MINOR'], data['PATCH']))
+diff --git a/scripts/format.sh b/scripts/format.sh
+new file mode 100755
+index 00000000..bffbb4c1
+--- /dev/null
++++ b/scripts/format.sh
+@@ -0,0 +1,13 @@
++#!/bin/bash
++
++cd "$(dirname "$0")"
++cd ..
++
++echo -n "Running dos2unix     "
++find . -name "*\.h" -o -name "*\.cpp"|grep -v bundled|xargs -I {} sh -c "dos2unix '{}' 2>/dev/null; echo -n '.'"
++echo
++echo -n "Running clang-format "
++find . -name "*\.h" -o -name "*\.cpp"|grep -v bundled|xargs -I {} sh -c "clang-format -i {}; echo -n '.'"
++echo
++
++

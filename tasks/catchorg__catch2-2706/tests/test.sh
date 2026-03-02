@@ -44,16 +44,42 @@ cp "/tests/SelfTest/IntrospectiveTests/Json.tests.cpp" "tests/SelfTest/Introspec
 mkdir -p "tests/SelfTest/IntrospectiveTests"
 cp "/tests/SelfTest/IntrospectiveTests/Reporters.tests.cpp" "tests/SelfTest/IntrospectiveTests/Reporters.tests.cpp"
 
-# Rebuild after copying the updated test files
-if ! cmake --build build; then
-    echo "Build failed - test cannot run"
+# Reconfigure CMake to pick up the updated test files
+if ! cmake -Bbuild -H. \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DCATCH_DEVELOPMENT_BUILD=ON \
+    -DCATCH_BUILD_TESTING=ON \
+    -DCATCH_BUILD_EXTRA_TESTS=OFF \
+    -DCMAKE_CXX_FLAGS="-Wno-error=dangling-reference" \
+    -G Ninja 2>&1; then
+    echo "FAIL: CMake reconfiguration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Run tests for JSON functionality (PR #2706 fixes missing include for JSON writer)
-./build/tests/SelfTest "[JSON]"
-test_status=$?
+# Rebuild with the updated test files
+if ! cmake --build build 2>&1; then
+    echo "FAIL: Build failed"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+# Run the Json tests to verify they pass
+if ! ./build/tests/SelfTest "[JsonWriter]" 2>&1; then
+    echo "FAIL: JsonWriter tests did not pass"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+# Run the reporter tests to verify JSON reporter works
+if ! ./build/tests/SelfTest "[reporters]" 2>&1; then
+    echo "FAIL: Reporter tests did not pass"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+echo "SUCCESS: All checks passed"
+test_status=0
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

@@ -1,0 +1,207 @@
+diff --git a/rust/codegen_traits.rs b/rust/codegen_traits.rs
+index 186d334a6..cd29c73d2 100644
+--- a/rust/codegen_traits.rs
++++ b/rust/codegen_traits.rs
+@@ -7,10 +7,6 @@
+ 
+ //! Traits that are implemented by codegen types.
+ 
+-use crate::AsMut;
+-use crate::AsView;
+-use crate::IntoMut;
+-use crate::IntoView;
+ use crate::MutProxied;
+ use crate::__internal::SealedInternal;
+ use create::Parse;
+@@ -22,7 +18,6 @@ use write::{Clear, ClearAndParse, CopyFrom, MergeFrom, TakeFrom};
+ /// A trait that all generated owned message types implement.
+ pub trait Message: SealedInternal
+   + MutProxied
+-  + for<'a> MutProxied<View<'a> = Self::MessageView<'a>, Mut<'a> = Self::MessageMut<'a>>
+   // Create traits:
+   + Parse + Default
+   // Read traits:
+@@ -36,21 +31,10 @@ pub trait Message: SealedInternal
+   // C++ Interop:
+   + OwnedMessageInterop
+ {
+-    /// The same type as `<Self as Proxied>::View`. This is defined as a second redundant associated
+-    /// type and should not be necessary, but the having this available is a hacky workaround
+-    /// that can appease the trait solver in some cases.
+-    type MessageView<'msg>: MessageView<'msg, Message = Self>;
+-
+-    /// The same type as `<Self as Proxied>::Mut`. This is defined as a second redundant associated
+-    /// type and should not be necessary, but the having this available is a hacky workaround
+-    /// that can appease the trait solver in some cases.
+-    type MessageMut<'msg>: MessageMut<'msg, Message = Self>;
+ }
+ 
+ /// A trait that all generated message views implement.
+ pub trait MessageView<'msg>: SealedInternal
+-    + AsView<Proxied = Self::Message>
+-    + IntoView<'msg, Proxied = Self::Message>
+     // Read traits:
+     + Debug + Serialize + Default
+     // Thread safety:
+@@ -60,16 +44,12 @@ pub trait MessageView<'msg>: SealedInternal
+     // C++ Interop:
+     + MessageViewInterop<'msg>
+ {
+-    /// The owned message type that this is a view of.
++    #[doc(hidden)]
+     type Message: Message;
+ }
+ 
+ /// A trait that all generated message muts implement.
+ pub trait MessageMut<'msg>: SealedInternal
+-    + AsView<Proxied = Self::Message>
+-    + IntoView<'msg, Proxied = Self::Message>
+-    + AsMut<MutProxied = Self::Message>
+-    + IntoMut<'msg, MutProxied = Self::Message>
+     // Read traits:
+     + Debug + Serialize
+     // Write traits:
+@@ -81,7 +61,7 @@ pub trait MessageMut<'msg>: SealedInternal
+     // C++ Interop:
+     + MessageMutInterop<'msg>
+ {
+-    /// The owned message type that this is a mut of.
++    #[doc(hidden)]
+     type Message: Message;
+ }
+ 
+diff --git a/rust/test/shared/BUILD b/rust/test/shared/BUILD
+index 2eb6b2c65..38e138d7d 100644
+--- a/rust/test/shared/BUILD
++++ b/rust/test/shared/BUILD
+@@ -509,34 +509,6 @@ rust_test(
+     ],
+ )
+ 
+-rust_test(
+-    name = "message_generics_cpp_test",
+-    srcs = ["message_generics_test.rs"],
+-    aliases = {
+-        "//rust:protobuf_cpp": "protobuf",
+-    },
+-    rustc_flags = ["--cfg=bzl"],
+-    deps = [
+-        "//rust:protobuf_cpp",
+-        "//rust/test:unittest_cpp_rust_proto",
+-        "@crate_index//:googletest",
+-    ],
+-)
+-
+-rust_test(
+-    name = "message_generics_upb_test",
+-    srcs = ["message_generics_test.rs"],
+-    aliases = {
+-        "//rust:protobuf_upb": "protobuf",
+-    },
+-    rustc_flags = ["--cfg=bzl"],
+-    deps = [
+-        "//rust:protobuf_upb",
+-        "//rust/test:unittest_upb_rust_proto",
+-        "@crate_index//:googletest",
+-    ],
+-)
+-
+ rust_test(
+     name = "proto_macro_cpp_test",
+     srcs = ["proto_macro_test.rs"],
+diff --git a/rust/test/shared/message_generics_test.rs b/rust/test/shared/message_generics_test.rs
+deleted file mode 100644
+index eaf93678f..000000000
+--- a/rust/test/shared/message_generics_test.rs
++++ /dev/null
+@@ -1,74 +0,0 @@
+-#[cfg(not(bzl))]
+-mod protos;
+-#[cfg(not(bzl))]
+-use protos::*;
+-
+-use googletest::prelude::*;
+-use protobuf::prelude::*;
+-
+-use protobuf::{AsMut, AsView, Message};
+-use unittest_rust_proto::TestAllTypes;
+-
+-fn f<M: Message, T: AsView<Proxied = M>>(msg_view: T) -> usize {
+-    msg_view.as_view().serialize().unwrap().len()
+-}
+-
+-fn msg_encoded_len<T: Message>(msg: T) -> usize {
+-    f(msg.as_view())
+-        + f(T::View::default())
+-        + f(T::View::default().into_view())
+-        + f(T::View::default().as_view())
+-        + f(msg)
+-}
+-
+-#[gtest]
+-fn msg_used_generically_for_views_test() {
+-    let msg = TestAllTypes::new();
+-    expect_that!(msg_encoded_len(msg), eq(0));
+-}
+-
+-fn as_mut_clear<M: Message, T: AsMut<MutProxied = M>>(mut msg_mut: T) {
+-    msg_mut.as_mut().clear();
+-}
+-
+-fn msg_clear<T: Message>(mut msg: T) {
+-    msg.clear();
+-    as_mut_clear(msg);
+-}
+-
+-#[gtest]
+-fn msg_used_generically_for_muts_test() {
+-    let mut msg = TestAllTypes::new();
+-    msg.set_optional_int32(123);
+-    expect_that!(msg.has_optional_int32(), eq(true));
+-    as_mut_clear(msg.as_mut());
+-    expect_that!(msg.has_optional_int32(), eq(false));
+-
+-    msg_clear(msg);
+-}
+-
+-pub struct ProtoGenericallyStruct<'a, V: Message>(V::View<'a>);
+-
+-impl<'a, V: Message> ProtoGenericallyStruct<'a, V> {
+-    pub fn from_view(provider: &'a impl AsView<Proxied = V>) -> Self {
+-        Self(provider.as_view())
+-    }
+-
+-    fn encode(&self) -> Vec<u8> {
+-        self.0.serialize().unwrap()
+-    }
+-
+-    fn _ptr_for(&self, id: std::any::TypeId) -> Option<*const ()> {
+-        if id != std::any::TypeId::of::<V::View<'static>>() {
+-            return None;
+-        }
+-        Some(&self.0 as *const _ as *const ())
+-    }
+-}
+-
+-#[gtest]
+-fn msg_used_generically_struct_test() {
+-    let msg = TestAllTypes::new();
+-    let proto_send_msg = ProtoGenericallyStruct::from_view(&msg);
+-    expect_that!(proto_send_msg.encode(), eq(&[]));
+-}
+diff --git a/src/google/protobuf/compiler/rust/message.cc b/src/google/protobuf/compiler/rust/message.cc
+index d95c3d78e..729731d80 100644
+--- a/src/google/protobuf/compiler/rust/message.cc
++++ b/src/google/protobuf/compiler/rust/message.cc
+@@ -524,10 +524,7 @@ void GenerateRs(Context& ctx, const Descriptor& msg, const upb::DefPool& pool) {
+           inner: $pbr$::OwnedMessageInner<$Msg$>
+         }
+ 
+-        impl $pb$::Message for $Msg$ {
+-          type MessageView<'msg> = $Msg$View<'msg>;
+-          type MessageMut<'msg> = $Msg$Mut<'msg>;
+-        }
++        impl $pb$::Message for $Msg$ {}
+ 
+         impl $std$::default::Default for $Msg$ {
+           fn default() -> Self {

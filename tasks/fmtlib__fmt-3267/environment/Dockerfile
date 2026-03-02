@@ -1,5 +1,6 @@
 FROM ubuntu:24.04
 
+# Base system packages (common to all languages)
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -8,10 +9,27 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CMake and Clang for building C++ project (Clang needed for _BitInt support)
+# Install software-properties-common for add-apt-repository
+RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    wget \
+    lsb-release \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Clang-18 for C++23 support and _BitInt support (needed for FMT_USE_BITINT)
+RUN wget https://apt.llvm.org/llvm.sh && \
+    chmod +x llvm.sh && \
+    ./llvm.sh 18 && \
+    rm llvm.sh && \
+    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100 && \
+    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100 && \
+    update-alternatives --install /usr/bin/cc cc /usr/bin/clang-18 100 && \
+    update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++-18 100 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install CMake for building the C++ project
 RUN apt-get update && apt-get install -y \
     cmake \
-    clang \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,25 +43,26 @@ RUN git clone https://github.com/fmtlib/fmt.git src && \
 
 WORKDIR /app/src
 
-# Configure the project with CMake (C++23 for std::expected support, Clang for _BitInt)
+# Configure the project with CMake (use Clang for _BitInt support)
 RUN cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=clang++ \
     -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_STANDARD=23 \
     -DFMT_TEST=ON
 
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
 RUN git reset --hard
 
-# Apply bug.patch to revert to buggy state
+# Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Reconfigure after applying bug.patch
+# Reconfigure after applying bug.patch (use Clang for _BitInt support)
 RUN cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=clang++ \
     -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_STANDARD=23 \
     -DFMT_TEST=ON
 

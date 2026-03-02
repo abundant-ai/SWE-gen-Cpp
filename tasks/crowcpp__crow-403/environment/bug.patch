@@ -1,0 +1,1031 @@
+diff --git a/docs/guides/middleware.md b/docs/guides/middleware.md
+index f0b7dcbc4..e29aa6aba 100644
+--- a/docs/guides/middleware.md
++++ b/docs/guides/middleware.md
+@@ -1,78 +1,67 @@
+-Middleware is used for altering and inspecting requests before and after calling the handler. In Crow it's very similar to middleware in other web frameworks.
+-
+-All middleware is registered in the Crow application
+-
+-```cpp
+-crow::App<FirstMW, SecondMW, ThirdMW> app;
+-```
+-
+-and is called in this specified order.
++Middleware is used for altering and inspecting requests before and after the handler call.
+ 
+ Any middleware requires the following 3 members:
+ 
+-* A context struct for storing request local data.
+-* A `before_handle` method, which is called before the handler.
++* A context struct for storing the middleware data.
++* A `before_handle` method, which is called before the handler. If `res.end()` is called, the operation is halted.
+ * A `after_handle` method, which is called after the handler.
+ 
+-!!! warning 
+-
+-    As soon as `response.end()` is called, no other handlers and middleware is run, except for after_handlers of already visited middleware.
+-
++## before_handle
++There are two possible signatures for before_handle
+ 
+-## Example
++1. if you only need to access this middleware's context.
+ 
+-A middleware that can be used to guard admin handlers
++    ```cpp
++    void before_handle(request& req, response& res, context& ctx)
++    ```
+ 
+-```cpp
+-struct AdminAreaGuard
+-{
+-    struct context
+-    {};
++2. To get access to other middlewares context
+ 
+-    void before_handle(crow::request& req, crow::response& res, context& ctx)
++    ``` cpp
++    template <typename AllContext>
++    void before_handle(request& req, response& res, context& ctx, AllContext& all_ctx) 
+     {
+-        if (req.remote_ip_address != ADMIN_IP)
+-        {
+-            res.code = 403;
+-            res.end();
+-        }
++        auto other_ctx = all_ctx.template get<OtherMiddleware>();
+     }
+-
+-    void after_handle(crow::request& req, crow::response& res, context& ctx)
+-    {}
+-};
+-```
++    ```
+ 
+ 
+-### before_handle and after_handle
+-There are two possible signatures for before_handle and after_handle
++## after_handle
++There are two possible signatures for after_handle
+ 
+ 1. if you only need to access this middleware's context.
+ 
+     ```cpp
+-    void before_handle(request& req, response& res, context& ctx)
++    void after_handle(request& req, response& res, context& ctx)
+     ```
+ 
+ 2. To get access to other middlewares context
+ 
+     ``` cpp
+     template <typename AllContext>
+-    void before_handle(request& req, response& res, context& ctx, AllContext& all_ctx) 
++    void after_handle(request& req, response& res, context& ctx, AllContext& all_ctx) 
+     {
+         auto other_ctx = all_ctx.template get<OtherMiddleware>();
+     }
+     ```
+ 
+-## Local middleware
++## Using middleware
+ 
+-By default, every middleware is called for each request. If you want to enable middleware for specific handlers or blueprints, you have to extend it from `crow::ILocalMiddleware`
++All middleware has to be registered in the Crow application and is enabled globally by default.
++
++```cpp
++crow::App<FirstMiddleware, SecondMiddleware> app;
++```
++
++if you want to enable some middleware only for specific handlers, you have to extend it from `crow::ILocalMiddleware`.
+ 
+ ```cpp
+ struct LocalMiddleware : crow::ILocalMiddleware 
+ {
++... 
+ ```
+ 
+-After this, you can enable it for specific handlers
++After this, you can enable it for specific handlers.
+ 
+ ```cpp
+ CROW_ROUTE(app, "/with_middleware")
+@@ -82,14 +71,26 @@ CROW_ROUTE(app, "/with_middleware")
+ });
+ ```
+ 
+-or blueprints
++## Examples
++
++A local middleware that can be used to guard admin handlers
+ 
+ ```cpp
+-Blueprint bp("with_middleware");
+-bp.CROW_MIDDLEWARES(app, FistLocalMiddleware, SecondLocalMiddleware);
+-```
++struct AdminAreaGuard : crow::ILocalMiddleware
++{
++    struct context
++    {};
+ 
+-!!! warning
+-    
+-    Local and global middleware are called separately. First all global middleware is run, then all enabled local middleware for the current handler is run. In both cases middleware is called strongly
+-    in the order listed in the Crow application.
++    void before_handle(crow::request& req, crow::response& res, context& ctx)
++    {
++        if (req.remote_ip_address != ADMIN_IP) 
++        {
++            res.code = 403;
++            res.end();
++        }
++    }
++
++    void after_handle(crow::request& req, crow::response& res, context& ctx)
++    {} 
++};
++```
+diff --git a/examples/example_middleware.cpp b/examples/example_middleware.cpp
+index db88e50be..e53381724 100644
+--- a/examples/example_middleware.cpp
++++ b/examples/example_middleware.cpp
+@@ -5,13 +5,11 @@ struct RequestLogger
+     struct context
+     {};
+ 
+-    // This method is run before handling the request
+     void before_handle(crow::request& req, crow::response& /*res*/, context& /*ctx*/)
+     {
+         CROW_LOG_INFO << "Request to:" + req.url;
+     }
+ 
+-    // This method is run after handling the request
+     void after_handle(crow::request& /*req*/, crow::response& /*res*/, context& /*ctx*/)
+     {}
+ };
+@@ -25,7 +23,6 @@ struct SecretContentGuard : crow::ILocalMiddleware
+ 
+     void before_handle(crow::request& /*req*/, crow::response& res, context& /*ctx*/)
+     {
+-        // A request can be aborted prematurely
+         res.write("SECRET!");
+         res.code = 403;
+         res.end();
+@@ -35,28 +32,10 @@ struct SecretContentGuard : crow::ILocalMiddleware
+     {}
+ };
+ 
+-struct RequestAppend : crow::ILocalMiddleware
+-{
+-    // Values from this context can be accessed from handlers
+-    struct context
+-    {
+-        std::string message;
+-    };
+-
+-    void before_handle(crow::request& /*req*/, crow::response& /*res*/, context& /*ctx*/)
+-    {}
+-
+-    void after_handle(crow::request& /*req*/, crow::response& res, context& ctx)
+-    {
+-        // The response can be modified
+-        res.write(" + (" + ctx.message + ")");
+-    }
+-};
+-
+ int main()
+ {
+     // ALL middleware (including per handler) is listed
+-    crow::App<RequestLogger, SecretContentGuard, RequestAppend> app;
++    crow::App<RequestLogger, SecretContentGuard> app;
+ 
+     CROW_ROUTE(app, "/")
+     ([]() {
+@@ -69,20 +48,7 @@ int main()
+           return "";
+       });
+ 
+-    crow::Blueprint bp("bp", "c", "c");
+-    // Register middleware on all routes on a specific blueprint
+-    // This also applies to sub blueprints
+-    bp.CROW_MIDDLEWARES(app, RequestAppend);
+-
+-    CROW_BP_ROUTE(bp, "/")
+-    ([&](const crow::request& req) {
+-        // Get RequestAppends context
+-        auto& ctx = app.get_context<RequestAppend>(req);
+-        ctx.message = "World";
+-        return "Hello:";
+-    });
+-    app.register_blueprint(bp);
+-
+     app.port(18080).run();
++
+     return 0;
+ }
+diff --git a/include/crow/app.h b/include/crow/app.h
+index 35811b46f..a6ab3951c 100644
+--- a/include/crow/app.h
++++ b/include/crow/app.h
+@@ -73,7 +73,7 @@ namespace crow
+         /// Process the request and generate a response for it
+         void handle(request& req, response& res)
+         {
+-            router_.handle<self_t>(req, res);
++            router_.handle(req, res);
+         }
+ 
+         /// Create a dynamic route using a rule (**Use CROW_ROUTE instead**)
+diff --git a/include/crow/http_connection.h b/include/crow/http_connection.h
+index b548c6e28..c24b9d906 100644
+--- a/include/crow/http_connection.h
++++ b/include/crow/http_connection.h
+@@ -161,7 +161,7 @@ namespace crow
+                 req.io_service = &adaptor_.get_io_service();
+ 
+                 detail::middleware_call_helper<detail::middleware_call_criteria_only_global,
+-                                               0, decltype(ctx_), decltype(*middlewares_)>({}, *middlewares_, req, res, ctx_);
++                                               0, decltype(ctx_), decltype(*middlewares_)>(*middlewares_, req, res, ctx_);
+ 
+                 if (!res.completed_)
+                 {
+@@ -198,7 +198,7 @@ namespace crow
+                   detail::middleware_call_criteria_only_global,
+                   (static_cast<int>(sizeof...(Middlewares)) - 1),
+                   decltype(ctx_),
+-                  decltype(*middlewares_)>({}, *middlewares_, ctx_, req_, res);
++                  decltype(*middlewares_)>(*middlewares_, ctx_, req_, res);
+             }
+ #ifdef CROW_ENABLE_COMPRESSION
+             if (handler_->compression_used())
+diff --git a/include/crow/http_response.h b/include/crow/http_response.h
+index ec667b9a4..58562a4ae 100644
+--- a/include/crow/http_response.h
++++ b/include/crow/http_response.h
+@@ -19,7 +19,11 @@ namespace crow
+     template<typename Adaptor, typename Handler, typename... Middlewares>
+     class Connection;
+ 
+-    class Router;
++    namespace detail
++    {
++        template<typename F, typename App, typename... Middlewares>
++        struct handler_middleware_wrapper;
++    } // namespace detail
+ 
+     /// HTTP response
+     struct response
+@@ -27,7 +31,8 @@ namespace crow
+         template<typename Adaptor, typename Handler, typename... Middlewares>
+         friend class crow::Connection;
+ 
+-        friend class Router;
++        template<typename F, typename App, typename... Middlewares>
++        friend struct crow::detail::handler_middleware_wrapper;
+ 
+         int code{200};    ///< The Status code for the response.
+         std::string body; ///< The actual payload containing the response data.
+diff --git a/include/crow/middleware.h b/include/crow/middleware.h
+index cdacf303e..32cf10cb6 100644
+--- a/include/crow/middleware.h
++++ b/include/crow/middleware.h
+@@ -92,18 +92,6 @@ namespace crow
+             static constexpr bool value = decltype(f<T>(nullptr))::value;
+         };
+ 
+-        template<typename MW>
+-        struct is_middleware_global
+-        {
+-            template<typename C>
+-            static std::false_type f(typename check_global_call_false<MW>::template get<C>*);
+-
+-            template<typename C>
+-            static std::true_type f(...);
+-
+-            static const bool value = decltype(f<MW>(nullptr))::value;
+-        };
+-
+         template<typename MW, typename Context, typename ParentContext>
+         typename std::enable_if<!is_before_handle_arity_3_impl<MW>::value>::type
+           before_handler_call(MW& mw, request& req, response& res, Context& ctx, ParentContext& /*parent_ctx*/)
+@@ -133,17 +121,17 @@ namespace crow
+         }
+ 
+ 
+-        template<typename CallCriteria,
++        template<template<typename QueryMW> class CallCriteria, // Checks if QueryMW should be called in this context
+                  int N, typename Context, typename Container>
+         typename std::enable_if<(N < std::tuple_size<typename std::remove_reference<Container>::type>::value), bool>::type
+-          middleware_call_helper(const CallCriteria& cc, Container& middlewares, request& req, response& res, Context& ctx)
++          middleware_call_helper(Container& middlewares, request& req, response& res, Context& ctx)
+         {
+ 
+             using CurrentMW = typename std::tuple_element<N, typename std::remove_reference<Container>::type>::type;
+ 
+-            if (!cc.template enabled<CurrentMW>(N))
++            if (!CallCriteria<CurrentMW>::value)
+             {
+-                return middleware_call_helper<CallCriteria, N + 1, Context, Container>(cc, middlewares, req, res, ctx);
++                return middleware_call_helper<CallCriteria, N + 1, Context, Container>(middlewares, req, res, ctx);
+             }
+ 
+             using parent_context_t = typename Context::template partial<N - 1>;
+@@ -154,7 +142,7 @@ namespace crow
+                 return true;
+             }
+ 
+-            if (middleware_call_helper<CallCriteria, N + 1, Context, Container>(cc, middlewares, req, res, ctx))
++            if (middleware_call_helper<CallCriteria, N + 1, Context, Container>(middlewares, req, res, ctx))
+             {
+                 after_handler_call<CurrentMW, Context, parent_context_t>(std::get<N>(middlewares), req, res, ctx, static_cast<parent_context_t&>(ctx));
+                 return true;
+@@ -163,50 +151,53 @@ namespace crow
+             return false;
+         }
+ 
+-        template<typename CallCriteria, int N, typename Context, typename Container>
++        template<template<typename QueryMW> class CallCriteria, int N, typename Context, typename Container>
+         typename std::enable_if<(N >= std::tuple_size<typename std::remove_reference<Container>::type>::value), bool>::type
+-          middleware_call_helper(const CallCriteria& /*cc*/, Container& /*middlewares*/, request& /*req*/, response& /*res*/, Context& /*ctx*/)
++          middleware_call_helper(Container& /*middlewares*/, request& /*req*/, response& /*res*/, Context& /*ctx*/)
+         {
+             return false;
+         }
+ 
+-        template<typename CallCriteria, int N, typename Context, typename Container>
++        template<template<typename QueryMW> class CallCriteria, int N, typename Context, typename Container>
+         typename std::enable_if<(N < 0)>::type
+-          after_handlers_call_helper(const CallCriteria& /*cc*/, Container& /*middlewares*/, Context& /*context*/, request& /*req*/, response& /*res*/)
++          after_handlers_call_helper(Container& /*middlewares*/, Context& /*context*/, request& /*req*/, response& /*res*/)
+         {
+         }
+ 
+-        template<typename CallCriteria, int N, typename Context, typename Container>
+-        typename std::enable_if<(N == 0)>::type after_handlers_call_helper(const CallCriteria& cc, Container& middlewares, Context& ctx, request& req, response& res)
++        template<template<typename QueryMW> class CallCriteria, int N, typename Context, typename Container>
++        typename std::enable_if<(N == 0)>::type after_handlers_call_helper(Container& middlewares, Context& ctx, request& req, response& res)
+         {
+             using parent_context_t = typename Context::template partial<N - 1>;
+             using CurrentMW = typename std::tuple_element<N, typename std::remove_reference<Container>::type>::type;
+-            if (cc.template enabled<CurrentMW>(N))
++            if (CallCriteria<CurrentMW>::value)
+             {
+                 after_handler_call<CurrentMW, Context, parent_context_t>(std::get<N>(middlewares), req, res, ctx, static_cast<parent_context_t&>(ctx));
+             }
+         }
+ 
+-        template<typename CallCriteria, int N, typename Context, typename Container>
+-        typename std::enable_if<(N > 0)>::type after_handlers_call_helper(const CallCriteria& cc, Container& middlewares, Context& ctx, request& req, response& res)
++        template<template<typename QueryMW> class CallCriteria, int N, typename Context, typename Container>
++        typename std::enable_if<(N > 0)>::type after_handlers_call_helper(Container& middlewares, Context& ctx, request& req, response& res)
+         {
+             using parent_context_t = typename Context::template partial<N - 1>;
+             using CurrentMW = typename std::tuple_element<N, typename std::remove_reference<Container>::type>::type;
+-            if (cc.template enabled<CurrentMW>(N))
++            if (CallCriteria<CurrentMW>::value)
+             {
+                 after_handler_call<CurrentMW, Context, parent_context_t>(std::get<N>(middlewares), req, res, ctx, static_cast<parent_context_t&>(ctx));
+             }
+-            after_handlers_call_helper<CallCriteria, N - 1, Context, Container>(cc, middlewares, ctx, req, res);
++            after_handlers_call_helper<CallCriteria, N - 1, Context, Container>(middlewares, ctx, req, res);
+         }
+ 
+         // A CallCriteria that accepts only global middleware
++        template<typename MW>
+         struct middleware_call_criteria_only_global
+         {
+-            template<typename MW>
+-            constexpr bool enabled(int) const
+-            {
+-                return is_middleware_global<MW>::value;
+-            }
++            template<typename C>
++            static std::false_type f(typename check_global_call_false<MW>::template get<C>*);
++
++            template<typename C>
++            static std::true_type f(...);
++
++            static const bool value = decltype(f<MW>(nullptr))::value;
+         };
+ 
+         template<typename F, typename... Args>
+@@ -279,52 +270,69 @@ namespace crow
+             f(req, res, std::forward<Args>(args)...);
+         }
+ 
+-        template<bool Reversed>
+-        struct middleware_call_criteria_dynamic
+-        {};
+-
+-        template<>
+-        struct middleware_call_criteria_dynamic<false>
++        template<typename F, typename App, typename... Middlewares>
++        struct handler_middleware_wrapper
+         {
+-            middleware_call_criteria_dynamic(const std::vector<int>& indices):
+-              indices(indices), slider(0) {}
++            // CallCriteria bound to the current Middlewares pack
++            template<typename MW>
++            struct middleware_call_criteria
++            {
++                static constexpr bool value = black_magic::has_type<MW, std::tuple<Middlewares...>>::value;
++            };
+ 
+-            template<typename>
+-            bool enabled(int mw_index) const
++            template<typename... Args>
++            void operator()(crow::request& req, crow::response& res, Args&&... args) const
+             {
+-                if (slider < int(indices.size()) && indices[slider] == mw_index)
++                auto& ctx = *reinterpret_cast<typename App::context_t*>(req.middleware_context);
++                auto& container = *reinterpret_cast<typename App::mw_container_t*>(req.middleware_container);
++
++                auto glob_completion_handler = std::move(res.complete_request_handler_);
++                res.complete_request_handler_ = [] {};
++
++                middleware_call_helper<middleware_call_criteria,
++                                       0, typename App::context_t, typename App::mw_container_t>(container, req, res, ctx);
++
++                if (res.completed_)
+                 {
+-                    slider++;
+-                    return true;
++                    glob_completion_handler();
++                    return;
+                 }
+-                return false;
++
++                res.complete_request_handler_ = [&ctx, &container, &req, &res, &glob_completion_handler] {
++                    after_handlers_call_helper<
++                      middleware_call_criteria,
++                      std::tuple_size<typename App::mw_container_t>::value - 1,
++                      typename App::context_t,
++                      typename App::mw_container_t>(container, ctx, req, res);
++                    glob_completion_handler();
++                };
++
++                wrapped_handler_call(req, res, f, std::forward<Args>(args)...);
+             }
+ 
+-        private:
+-            const std::vector<int>& indices;
+-            mutable int slider;
++            F f;
+         };
+ 
+-        template<>
+-        struct middleware_call_criteria_dynamic<true>
++        template<typename Route, typename App, typename... Middlewares>
++        struct handler_call_bridge
+         {
+-            middleware_call_criteria_dynamic(const std::vector<int>& indices):
+-              indices(indices), slider(int(indices.size()) - 1) {}
++            template<typename MW>
++            using check_app_contains = typename black_magic::has_type<MW, typename App::mw_container_t>;
+ 
+-            template<typename>
+-            bool enabled(int mw_index) const
++            static_assert(black_magic::all_true<(std::is_base_of<crow::ILocalMiddleware, Middlewares>::value)...>::value,
++                          "Local middleware has to inherit crow::ILocalMiddleware");
++
++            static_assert(black_magic::all_true<(check_app_contains<Middlewares>::value)...>::value,
++                          "Local middleware has to be listed in app middleware");
++
++            template<typename F>
++            void operator()(F&& f) const
+             {
+-                if (slider >= 0 && indices[slider] == mw_index)
+-                {
+-                    slider--;
+-                    return true;
+-                }
+-                return false;
++                auto wrapped = handler_middleware_wrapper<F, App, Middlewares...>{std::forward<F>(f)};
++                tptr->operator()(std::move(wrapped));
+             }
+ 
+-        private:
+-            const std::vector<int>& indices;
+-            mutable int slider;
++            Route* tptr;
+         };
+ 
+     } // namespace detail
+diff --git a/include/crow/middleware_context.h b/include/crow/middleware_context.h
+index 9587bc4f0..6d9c3b122 100644
+--- a/include/crow/middleware_context.h
++++ b/include/crow/middleware_context.h
+@@ -38,14 +38,14 @@ namespace crow
+         struct context : private partial_context<Middlewares...>
+         //struct context : private Middlewares::context... // simple but less type-safe
+         {
+-            template<typename CallCriteria, int N, typename Context, typename Container>
+-            friend typename std::enable_if<(N == 0)>::type after_handlers_call_helper(const CallCriteria& cc, Container& middlewares, Context& ctx, request& req, response& res);
+-            template<typename CallCriteria, int N, typename Context, typename Container>
+-            friend typename std::enable_if<(N > 0)>::type after_handlers_call_helper(const CallCriteria& cc, Container& middlewares, Context& ctx, request& req, response& res);
++            template<template<typename QueryMW> class CallCriteria, int N, typename Context, typename Container>
++            friend typename std::enable_if<(N == 0)>::type after_handlers_call_helper(Container& middlewares, Context& ctx, request& req, response& res);
++            template<template<typename QueryMW> class CallCriteria, int N, typename Context, typename Container>
++            friend typename std::enable_if<(N > 0)>::type after_handlers_call_helper(Container& middlewares, Context& ctx, request& req, response& res);
+ 
+-            template<typename CallCriteria, int N, typename Context, typename Container>
++            template<template<typename QueryMW> class CallCriteria, int N, typename Context, typename Container>
+             friend typename std::enable_if<(N < std::tuple_size<typename std::remove_reference<Container>::type>::value), bool>::type
+-              middleware_call_helper(const CallCriteria& cc, Container& middlewares, request& req, response& res, Context& ctx);
++              middleware_call_helper(Container& middlewares, request& req, response& res, Context& ctx);
+ 
+             template<typename T>
+             typename T::context& get()
+diff --git a/include/crow/routing.h b/include/crow/routing.h
+index 5e069ca26..b44c3228b 100644
+--- a/include/crow/routing.h
++++ b/include/crow/routing.h
+@@ -7,8 +7,6 @@
+ #include <memory>
+ #include <boost/lexical_cast.hpp>
+ #include <vector>
+-#include <algorithm>
+-#include <type_traits>
+ 
+ #include "crow/common.h"
+ #include "crow/http_response.h"
+@@ -24,63 +22,6 @@ namespace crow
+ 
+     constexpr const uint16_t INVALID_BP_ID{((uint16_t)-1)};
+ 
+-    namespace detail
+-    {
+-        /// Typesafe wrapper for storing lists of middleware as their indices in the App
+-        struct middleware_indices
+-        {
+-            template<typename App>
+-            void push()
+-            {}
+-
+-            template<typename App, typename MW, typename... Middlewares>
+-            void push()
+-            {
+-                using MwContainer = typename App::mw_container_t;
+-                static_assert(black_magic::has_type<MW, MwContainer>::value, "Middleware must be present in app");
+-                static_assert(std::is_base_of<crow::ILocalMiddleware, MW>::value, "Middleware must extend ILocalMiddleware");
+-                int idx = black_magic::tuple_index<MW, MwContainer>::value;
+-                indices_.push_back(idx);
+-                push<App, Middlewares...>();
+-            }
+-
+-            void merge_front(const detail::middleware_indices& other)
+-            {
+-                indices_.insert(indices_.begin(), other.indices_.cbegin(), other.indices_.cend());
+-            }
+-
+-            void merge_back(const detail::middleware_indices& other)
+-            {
+-                indices_.insert(indices_.end(), other.indices_.cbegin(), other.indices_.cend());
+-            }
+-
+-            void pop_back(const detail::middleware_indices& other)
+-            {
+-                indices_.resize(indices_.size() - other.indices_.size());
+-            }
+-
+-            bool empty() const
+-            {
+-                return indices_.empty();
+-            }
+-
+-            // Sorts indices and filters out duplicates to allow fast lookups with traversal
+-            void pack()
+-            {
+-                std::sort(indices_.begin(), indices_.end());
+-                indices_.erase(std::unique(indices_.begin(), indices_.end()), indices_.end());
+-            }
+-
+-            const std::vector<int>& indices()
+-            {
+-                return indices_;
+-            }
+-
+-        private:
+-            std::vector<int> indices_;
+-        };
+-    } // namespace detail
+-
+     /// A base class for all rules.
+ 
+     ///
+@@ -133,6 +74,7 @@ namespace crow
+             }
+         }
+ 
++
+         std::string custom_templates_base;
+ 
+         const std::string& rule() { return rule_; }
+@@ -145,8 +87,6 @@ namespace crow
+ 
+         std::unique_ptr<BaseRule> rule_to_upgrade_;
+ 
+-        detail::middleware_indices mw_indices_;
+-
+         friend class Router;
+         friend class Blueprint;
+         template<typename T>
+@@ -551,14 +491,6 @@ namespace crow
+             static_cast<self_t*>(this)->methods_ |= 1 << static_cast<int>(method);
+             return static_cast<self_t&>(*this);
+         }
+-
+-        /// Enable local middleware for this handler
+-        template<typename App, typename... Middlewares>
+-        self_t& middlewares()
+-        {
+-            static_cast<self_t*>(this)->mw_indices_.template push<App, Middlewares...>();
+-            return static_cast<self_t&>(*this);
+-        }
+     };
+ 
+     /// A rule that can change its parameters during runtime.
+@@ -692,6 +624,16 @@ namespace crow
+               detail::routing_handler_call_helper::call_params<decltype(handler_)>{handler_, params, req, res});
+         }
+ 
++        /// Enable local middleware for this handler
++        template<typename App, typename... Middlewares>
++        crow::detail::handler_call_bridge<TaggedRule<Args...>, App, Middlewares...>
++          middlewares()
++        {
++            // the handler_call_bridge allows the functor to be placed directly after this function
++            // instead of wrapping it with more parentheses
++            return {this};
++        }
++
+     private:
+         std::function<void(crow::request&, crow::response&, Args...)> handler_;
+     };
+@@ -1203,12 +1145,6 @@ namespace crow
+             return catchall_rule_;
+         }
+ 
+-        template<typename App, typename... Middlewares>
+-        void middlewares()
+-        {
+-            mw_indices_.push<App, Middlewares...>();
+-        }
+-
+     private:
+         void apply_blueprint(Blueprint& blueprint)
+         {
+@@ -1234,7 +1170,6 @@ namespace crow
+         std::vector<std::unique_ptr<BaseRule>> all_rules_;
+         CatchallRule catchall_rule_;
+         std::vector<Blueprint*> blueprints_;
+-        detail::middleware_indices mw_indices_;
+ 
+         friend class Router;
+     };
+@@ -1281,8 +1216,6 @@ namespace crow
+                 rule_without_trailing_slash.pop_back();
+             }
+ 
+-            ruleObject->mw_indices_.pack();
+-
+             ruleObject->foreach_method([&](int method) {
+                 per_methods_[method].rules.emplace_back(ruleObject);
+                 per_methods_[method].trie.add(rule, per_methods_[method].rules.size() - 1, BP_index != INVALID_BP_ID ? blueprints[BP_index]->prefix().length() : 0, BP_index);
+@@ -1291,7 +1224,7 @@ namespace crow
+                 //   request to '/about' url matches '/about/' rule
+                 if (has_trailing_slash)
+                 {
+-                    per_methods_[method].trie.add(rule_without_trailing_slash, RULE_SPECIAL_REDIRECT_SLASH, BP_index != INVALID_BP_ID ? blueprints[BP_index]->prefix().length() : 0, BP_index);
++                    per_methods_[method].trie.add(rule_without_trailing_slash, RULE_SPECIAL_REDIRECT_SLASH, BP_index != INVALID_BP_ID ? blueprints_[BP_index]->prefix().length() : 0, BP_index);
+                 }
+             });
+         }
+@@ -1328,7 +1261,7 @@ namespace crow
+             }
+         }
+ 
+-        void validate_bp(std::vector<Blueprint*> blueprints, detail::middleware_indices& current_mw)
++        void validate_bp(std::vector<Blueprint*> blueprints)
+         {
+             for (unsigned i = 0; i < blueprints.size(); i++)
+             {
+@@ -1343,8 +1276,6 @@ namespace crow
+                         per_methods_[i].trie.add(blueprint->prefix(), 0, blueprint->prefix().length(), i);
+                     }
+                 }
+-
+-                current_mw.merge_back(blueprint->mw_indices_);
+                 for (auto& rule : blueprint->all_rules_)
+                 {
+                     if (rule)
+@@ -1353,20 +1284,17 @@ namespace crow
+                         if (upgraded)
+                             rule = std::move(upgraded);
+                         rule->validate();
+-                        rule->mw_indices_.merge_front(current_mw);
+                         internal_add_rule_object(rule->rule(), rule.get(), i, blueprints);
+                     }
+                 }
+-                validate_bp(blueprint->blueprints_, current_mw);
+-                current_mw.pop_back(blueprint->mw_indices_);
++                validate_bp(blueprint->blueprints_);
+             }
+         }
+ 
+         void validate()
+         {
+             //Take all the routes from the registered blueprints and add them to `all_rules_` to be processed.
+-            detail::middleware_indices blueprint_mw;
+-            validate_bp(blueprints_, blueprint_mw);
++            validate_bp(blueprints_);
+ 
+             for (auto& rule : all_rules_)
+             {
+@@ -1531,7 +1459,6 @@ namespace crow
+             return std::string();
+         }
+ 
+-        template<typename App>
+         void handle(request& req, response& res)
+         {
+             HTTPMethod method_actual = req.method;
+@@ -1642,8 +1569,7 @@ namespace crow
+             // any uncaught exceptions become 500s
+             try
+             {
+-                auto& rule = rules[rule_index];
+-                handle_rule<App>(rule, req, res, std::get<2>(found));
++                rules[rule_index]->handle(req, res, std::get<2>(found));
+             }
+             catch (std::exception& e)
+             {
+@@ -1661,49 +1587,6 @@ namespace crow
+             }
+         }
+ 
+-        template<typename App>
+-        typename std::enable_if<std::tuple_size<typename App::mw_container_t>::value != 0, void>::type
+-          handle_rule(BaseRule* rule, crow::request& req, crow::response& res, const crow::routing_params& rp)
+-        {
+-            if (!rule->mw_indices_.empty())
+-            {
+-                auto& ctx = *reinterpret_cast<typename App::context_t*>(req.middleware_context);
+-                auto& container = *reinterpret_cast<typename App::mw_container_t*>(req.middleware_container);
+-                detail::middleware_call_criteria_dynamic<false> crit_fwd(rule->mw_indices_.indices());
+-
+-                auto glob_completion_handler = std::move(res.complete_request_handler_);
+-                res.complete_request_handler_ = [] {};
+-
+-                detail::middleware_call_helper<decltype(crit_fwd),
+-                                               0, typename App::context_t, typename App::mw_container_t>(crit_fwd, container, req, res, ctx);
+-
+-                if (res.completed_)
+-                {
+-                    glob_completion_handler();
+-                    return;
+-                }
+-
+-                res.complete_request_handler_ = [&rule, &ctx, &container, &req, &res, &glob_completion_handler] {
+-                    detail::middleware_call_criteria_dynamic<true> crit_bwd(rule->mw_indices_.indices());
+-
+-                    detail::after_handlers_call_helper<
+-                      decltype(crit_bwd),
+-                      std::tuple_size<typename App::mw_container_t>::value - 1,
+-                      typename App::context_t,
+-                      typename App::mw_container_t>(crit_bwd, container, ctx, req, res);
+-                    glob_completion_handler();
+-                };
+-            }
+-            rule->handle(req, res, rp);
+-        }
+-
+-        template<typename App>
+-        typename std::enable_if<std::tuple_size<typename App::mw_container_t>::value == 0, void>::type
+-          handle_rule(BaseRule* rule, crow::request& req, crow::response& res, const crow::routing_params& rp)
+-        {
+-            rule->handle(req, res, rp);
+-        }
+-
+         void debug_print()
+         {
+             for (int i = 0; i < static_cast<int>(HTTPMethod::InternalMethodCount); i++)
+diff --git a/include/crow/utility.h b/include/crow/utility.h
+index e9b7823c1..6cd37214a 100644
+--- a/include/crow/utility.h
++++ b/include/crow/utility.h
+@@ -265,22 +265,6 @@ namespace crow
+         struct has_type<T, std::tuple<T, Ts...>> : std::true_type
+         {};
+ 
+-        // Find index of type in tuple
+-        template<class T, class Tuple>
+-        struct tuple_index;
+-
+-        template<class T, class... Types>
+-        struct tuple_index<T, std::tuple<T, Types...>>
+-        {
+-            static const int value = 0;
+-        };
+-
+-        template<class T, class U, class... Types>
+-        struct tuple_index<T, std::tuple<U, Types...>>
+-        {
+-            static const int value = 1 + tuple_index<T, std::tuple<Types...>>::value;
+-        };
+-
+         // Kind of fold expressions in C++11
+         template<bool...>
+         struct bool_pack;
+diff --git a/tests/unittest.cpp b/tests/unittest.cpp
+index d37156c97..6a65fdc4a 100644
+--- a/tests/unittest.cpp
++++ b/tests/unittest.cpp
+@@ -8,7 +8,6 @@
+ #include <vector>
+ #include <thread>
+ #include <chrono>
+-#include <type_traits>
+ 
+ #include "catch.hpp"
+ #include "crow.h"
+@@ -1309,11 +1308,7 @@ struct IntSettingMiddleware
+ 
+ std::vector<std::string> test_middleware_context_vector;
+ 
+-struct empty_type
+-{};
+-
+-template<bool Local>
+-struct FirstMW : public std::conditional<Local, crow::ILocalMiddleware, empty_type>::type
++struct FirstMW
+ {
+     struct context
+     {
+@@ -1332,40 +1327,38 @@ struct FirstMW : public std::conditional<Local, crow::ILocalMiddleware, empty_ty
+     }
+ };
+ 
+-template<bool Local>
+-struct SecondMW : public std::conditional<Local, crow::ILocalMiddleware, empty_type>::type
++struct SecondMW
+ {
+     struct context
+     {};
+     template<typename AllContext>
+     void before_handle(request& req, response& res, context&, AllContext& all_ctx)
+     {
+-        all_ctx.template get<FirstMW<Local>>().v.push_back("2 before");
+-        if (req.url.find("/break") != std::string::npos) res.end();
++        all_ctx.template get<FirstMW>().v.push_back("2 before");
++        if (req.url == "/break") res.end();
+     }
+ 
+     template<typename AllContext>
+     void after_handle(request&, response&, context&, AllContext& all_ctx)
+     {
+-        all_ctx.template get<FirstMW<Local>>().v.push_back("2 after");
++        all_ctx.template get<FirstMW>().v.push_back("2 after");
+     }
+ };
+ 
+-template<bool Local>
+-struct ThirdMW : public std::conditional<Local, crow::ILocalMiddleware, empty_type>::type
++struct ThirdMW
+ {
+     struct context
+     {};
+     template<typename AllContext>
+     void before_handle(request&, response&, context&, AllContext& all_ctx)
+     {
+-        all_ctx.template get<FirstMW<Local>>().v.push_back("3 before");
++        all_ctx.template get<FirstMW>().v.push_back("3 before");
+     }
+ 
+     template<typename AllContext>
+     void after_handle(request&, response&, context&, AllContext& all_ctx)
+     {
+-        all_ctx.template get<FirstMW<Local>>().v.push_back("3 after");
++        all_ctx.template get<FirstMW>().v.push_back("3 after");
+     }
+ };
+ 
+@@ -1378,7 +1371,7 @@ TEST_CASE("middleware_context")
+     // or change the order of FirstMW and SecondMW
+     // App<IntSettingMiddleware, SecondMW, FirstMW> app;
+ 
+-    App<IntSettingMiddleware, FirstMW<false>, SecondMW<false>, ThirdMW<false>> app;
++    App<IntSettingMiddleware, FirstMW, SecondMW, ThirdMW> app;
+ 
+     int x{};
+     CROW_ROUTE(app, "/")
+@@ -1388,7 +1381,7 @@ TEST_CASE("middleware_context")
+             x = ctx.val;
+         }
+         {
+-            auto& ctx = app.get_context<FirstMW<false>>(req);
++            auto& ctx = app.get_context<FirstMW>(req);
+             ctx.v.push_back("handle");
+         }
+ 
+@@ -1397,7 +1390,7 @@ TEST_CASE("middleware_context")
+     CROW_ROUTE(app, "/break")
+     ([&](const request& req) {
+         {
+-            auto& ctx = app.get_context<FirstMW<false>>(req);
++            auto& ctx = app.get_context<FirstMW>(req);
+             ctx.v.push_back("handle");
+         }
+ 
+@@ -1514,91 +1507,6 @@ TEST_CASE("local_middleware")
+     app.stop();
+ } // local_middleware
+ 
+-TEST_CASE("middleware_blueprint")
+-{
+-    // Same logic as middleware_context, but middleware is added with blueprints
+-    static char buf[2048];
+-
+-    App<FirstMW<true>, SecondMW<true>, ThirdMW<true>> app;
+-
+-    Blueprint bp1("a", "c1", "c1");
+-    bp1.CROW_MIDDLEWARES(app, FirstMW<true>);
+-
+-    Blueprint bp2("b", "c2", "c2");
+-    bp2.CROW_MIDDLEWARES(app, SecondMW<true>);
+-
+-    Blueprint bp3("c", "c3", "c3");
+-
+-    CROW_BP_ROUTE(bp2, "/")
+-      .CROW_MIDDLEWARES(app, ThirdMW<true>)([&app](const crow::request& req) {
+-          {
+-              auto& ctx = app.get_context<FirstMW<true>>(req);
+-              ctx.v.push_back("handle");
+-          }
+-          return "";
+-      });
+-
+-    CROW_BP_ROUTE(bp3, "/break")
+-      .CROW_MIDDLEWARES(app, SecondMW<true>, ThirdMW<true>)([&app](const crow::request& req) {
+-          {
+-              auto& ctx = app.get_context<FirstMW<true>>(req);
+-              ctx.v.push_back("handle");
+-          }
+-          return "";
+-      });
+-
+-    bp1.register_blueprint(bp3);
+-    bp1.register_blueprint(bp2);
+-    app.register_blueprint(bp1);
+-
+-    auto _ = app.bindaddr(LOCALHOST_ADDRESS).port(45451).run_async();
+-    app.wait_for_server_start();
+-
+-    asio::io_service is;
+-    {
+-        asio::ip::tcp::socket c(is);
+-        c.connect(asio::ip::tcp::endpoint(
+-          asio::ip::address::from_string(LOCALHOST_ADDRESS), 45451));
+-
+-        c.send(asio::buffer("GET /a/b/\r\n\r\n"));
+-
+-        c.receive(asio::buffer(buf, 2048));
+-        c.close();
+-    }
+-    {
+-        auto& out = test_middleware_context_vector;
+-        CHECK(7 == out.size());
+-        CHECK("1 before" == out[0]);
+-        CHECK("2 before" == out[1]);
+-        CHECK("3 before" == out[2]);
+-        CHECK("handle" == out[3]);
+-        CHECK("3 after" == out[4]);
+-        CHECK("2 after" == out[5]);
+-        CHECK("1 after" == out[6]);
+-    }
+-    {
+-        asio::ip::tcp::socket c(is);
+-        c.connect(asio::ip::tcp::endpoint(
+-          asio::ip::address::from_string(LOCALHOST_ADDRESS), 45451));
+-
+-        c.send(asio::buffer("GET /a/c/break\r\n\r\n"));
+-
+-        c.receive(asio::buffer(buf, 2048));
+-        c.close();
+-    }
+-    {
+-        auto& out = test_middleware_context_vector;
+-        CHECK(4 == out.size());
+-        CHECK("1 before" == out[0]);
+-        CHECK("2 before" == out[1]);
+-        CHECK("2 after" == out[2]);
+-        CHECK("1 after" == out[3]);
+-    }
+-
+-    app.stop();
+-} // middleware_blueprint
+-
+-
+ TEST_CASE("middleware_cookieparser_parse")
+ {
+     static char buf[2048];

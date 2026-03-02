@@ -1,0 +1,218 @@
+diff --git a/include/fmt/core.h b/include/fmt/core.h
+index 106fd6fe..1c81bbd2 100644
+--- a/include/fmt/core.h
++++ b/include/fmt/core.h
+@@ -1260,7 +1260,7 @@ template <typename Context> class value {
+ };
+ 
+ template <typename Context, typename T>
+-FMT_CONSTEXPR auto make_arg(T&& value) -> basic_format_arg<Context>;
++FMT_CONSTEXPR auto make_arg(const T& value) -> basic_format_arg<Context>;
+ 
+ // To minimize the number of types we need to deal with, long is translated
+ // either to int or to long long depending on its size.
+@@ -1513,7 +1513,7 @@ template <typename Context> class basic_format_arg {
+   detail::type type_;
+ 
+   template <typename ContextType, typename T>
+-  friend FMT_CONSTEXPR auto detail::make_arg(T&& value)
++  friend FMT_CONSTEXPR auto detail::make_arg(const T& value)
+       -> basic_format_arg<ContextType>;
+ 
+   template <typename Visitor, typename Ctx>
+@@ -1674,7 +1674,19 @@ constexpr auto encode_types() -> unsigned long long {
+ }
+ 
+ template <typename Context, typename T>
+-FMT_CONSTEXPR FMT_INLINE auto make_value(T&& val) -> value<Context> {
++FMT_CONSTEXPR auto make_arg(const T& value) -> basic_format_arg<Context> {
++  basic_format_arg<Context> arg;
++  arg.type_ = mapped_type_constant<T, Context>::value;
++  arg.value_ = arg_mapper<Context>().map(value);
++  return arg;
++}
++
++// The type template parameter is there to avoid an ODR violation when using
++// a fallback formatter in one translation unit and an implicit conversion in
++// another (not recommended).
++template <bool IS_PACKED, typename Context, type, typename T,
++          FMT_ENABLE_IF(IS_PACKED)>
++FMT_CONSTEXPR FMT_INLINE auto make_arg(T&& val) -> value<Context> {
+   const auto& arg = arg_mapper<Context>().map(std::forward<T>(val));
+ 
+   constexpr bool formattable_char =
+@@ -1703,26 +1715,9 @@ FMT_CONSTEXPR FMT_INLINE auto make_value(T&& val) -> value<Context> {
+   return {arg};
+ }
+ 
+-template <typename Context, typename T>
+-FMT_CONSTEXPR auto make_arg(T&& value) -> basic_format_arg<Context> {
+-  basic_format_arg<Context> arg;
+-  arg.type_ = mapped_type_constant<T, Context>::value;
+-  arg.value_ = make_value<Context>(value);
+-  return arg;
+-}
+-
+-// The type template parameter is there to avoid an ODR violation when using
+-// a fallback formatter in one translation unit and an implicit conversion in
+-// another (not recommended).
+-template <bool IS_PACKED, typename Context, type, typename T,
+-          FMT_ENABLE_IF(IS_PACKED)>
+-FMT_CONSTEXPR FMT_INLINE auto make_arg(T&& val) -> value<Context> {
+-  return make_value<Context>(val);
+-}
+-
+ template <bool IS_PACKED, typename Context, type, typename T,
+           FMT_ENABLE_IF(!IS_PACKED)>
+-FMT_CONSTEXPR inline auto make_arg(T&& value) -> basic_format_arg<Context> {
++inline auto make_arg(const T& value) -> basic_format_arg<Context> {
+   return make_arg<Context>(value);
+ }
+ FMT_END_DETAIL_NAMESPACE
+@@ -2652,27 +2647,17 @@ FMT_CONSTEXPR FMT_INLINE void parse_format_string(
+   }
+ }
+ 
+-template <typename T, bool = is_named_arg<T>::value> struct strip_named_arg {
+-  using type = T;
+-};
+-
+-template <typename T> struct strip_named_arg<T, true> {
+-  using type = remove_cvref_t<decltype(T::value)>;
+-};
+-
+ template <typename T, typename ParseContext>
+ FMT_CONSTEXPR auto parse_format_specs(ParseContext& ctx)
+     -> decltype(ctx.begin()) {
+   using char_type = typename ParseContext::char_type;
+   using context = buffer_context<char_type>;
+-  using stripped_type = typename strip_named_arg<T>::type;
+   using mapped_type = conditional_t<
+       mapped_type_constant<T, context>::value != type::custom_type,
+-      decltype(arg_mapper<context>().map(std::declval<const T&>())),
+-      stripped_type>;
++      decltype(arg_mapper<context>().map(std::declval<const T&>())), T>;
+   auto f = conditional_t<has_formatter<mapped_type, context>::value,
+                          formatter<mapped_type, char_type>,
+-                         fallback_formatter<stripped_type, char_type>>();
++                         fallback_formatter<T, char_type>>();
+   return f.parse(ctx);
+ }
+ 
+diff --git a/include/fmt/ostream.h b/include/fmt/ostream.h
+index f996d43d..567303d3 100644
+--- a/include/fmt/ostream.h
++++ b/include/fmt/ostream.h
+@@ -11,7 +11,6 @@
+ #include <ostream>
+ 
+ #include "format.h"
+-#include "xchar.h"
+ 
+ FMT_BEGIN_NAMESPACE
+ 
+@@ -116,8 +115,7 @@ struct fallback_formatter<T, Char, enable_if_t<is_streamable<T, Char>::value>>
+ 
+ FMT_MODULE_EXPORT
+ template <typename Char>
+-void vprint(std::basic_ostream<Char>& os,
+-            basic_string_view<type_identity_t<Char>> format_str,
++void vprint(std::basic_ostream<Char>& os, basic_string_view<Char> format_str,
+             basic_format_args<buffer_context<type_identity_t<Char>>> args) {
+   auto buffer = basic_memory_buffer<Char>();
+   detail::vformat_to(buffer, format_str, args);
+@@ -134,17 +132,12 @@ void vprint(std::basic_ostream<Char>& os,
+   \endrst
+  */
+ FMT_MODULE_EXPORT
+-template <typename... Args>
+-void print(std::ostream& os, format_string<Args...> fmt, Args&&... args) {
+-  vprint(os, fmt, fmt::make_format_args(args...));
++template <typename S, typename... Args,
++          typename Char = enable_if_t<detail::is_string<S>::value, char_t<S>>>
++void print(std::basic_ostream<Char>& os, const S& format_str, Args&&... args) {
++  vprint(os, to_string_view(format_str),
++         fmt::make_format_args<buffer_context<Char>>(args...));
+ }
+-
+-FMT_MODULE_EXPORT
+-template <typename... Args>
+-void print(std::wostream& os, wformat_string<Args...> fmt, Args&&... args) {
+-  vprint(os, fmt, fmt::make_wformat_args(args...));
+-}
+-
+ FMT_END_NAMESPACE
+ 
+ #endif  // FMT_OSTREAM_H_
+diff --git a/test/compile-error-test/CMakeLists.txt b/test/compile-error-test/CMakeLists.txt
+index 3847a5d0..db7a9429 100644
+--- a/test/compile-error-test/CMakeLists.txt
++++ b/test/compile-error-test/CMakeLists.txt
+@@ -6,8 +6,6 @@ project(compile-error-test CXX)
+ set(fmt_headers "
+   #include <fmt/format.h>
+   #include <fmt/xchar.h>
+-  #include <fmt/ostream.h>
+-  #include <iostream>
+ ")
+ 
+ set(error_test_names "")
+@@ -156,16 +154,6 @@ expect_compile(format-function-error "
+   fmt::format(\"{}\", f);
+ " ERROR)
+ 
+-# Formatting an unformattable argument should always be a compile time error
+-expect_compile(format-lots-of-arguments-with-unformattable "
+-  struct E {};
+-  fmt::format(\"\", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, E());
+-" ERROR)
+-expect_compile(format-lots-of-arguments-with-function "
+-  void (*f)();
+-  fmt::format(\"\", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, f);
+-" ERROR)
+-
+ # Make sure that compiler features detected in the header
+ # match the features detected in CMake.
+ if (SUPPORTS_USER_DEFINED_LITERALS)
+@@ -193,20 +181,6 @@ if (CMAKE_CXX_STANDARD GREATER_EQUAL 20)
+       #error
+     #endif
+   " ERROR)
+-  expect_compile(print-string-number-spec-error "
+-    #ifdef FMT_HAS_CONSTEVAL
+-      fmt::print(\"{:d}\", \"I am not a number\");
+-    #else
+-      #error
+-    #endif
+-  " ERROR)
+-  expect_compile(print-stream-string-number-spec-error "
+-  #ifdef FMT_HAS_CONSTEVAL
+-    fmt::print(std::cout, \"{:d}\", \"I am not a number\");
+-  #else
+-    #error
+-  #endif
+-  " ERROR)
+ 
+   # Compile-time argument name check
+   expect_compile(format-string-name "
+diff --git a/test/format-test.cc b/test/format-test.cc
+index 09553af4..e7f65daf 100644
+--- a/test/format-test.cc
++++ b/test/format-test.cc
+@@ -1816,7 +1816,6 @@ TEST(format_test, compile_time_string) {
+                                   "foo"_a = "foo"));
+   EXPECT_EQ("", fmt::format(FMT_STRING("")));
+   EXPECT_EQ("", fmt::format(FMT_STRING(""), "arg"_a = 42));
+-  EXPECT_EQ("42", fmt::format(FMT_STRING("{answer}"), "answer"_a = Answer()));
+ #endif
+ 
+   (void)static_with_null;
+@@ -1886,8 +1885,6 @@ TEST(format_test, named_arg_udl) {
+       fmt::format("{first}{second}{first}{third}", fmt::arg("first", "abra"),
+                   fmt::arg("second", "cad"), fmt::arg("third", 99)),
+       udl_a);
+-
+-  EXPECT_EQ("42", fmt::format("{answer}", "answer"_a = Answer()));
+ }
+ #endif  // FMT_USE_USER_DEFINED_LITERALS
+ 

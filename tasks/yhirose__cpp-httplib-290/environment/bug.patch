@@ -1,0 +1,147 @@
+diff --git a/README.md b/README.md
+index 501305b..4b4cdea 100644
+--- a/README.md
++++ b/README.md
+@@ -392,12 +392,6 @@ res = cli.Get("/");
+ res->status; // 200
+ ```
+ 
+-### Use a specitic network interface
+-
+-```cpp
+-cli.set_interface("eth0"); // Interface name, IP address or host name
+-```
+-
+ OpenSSL Support
+ ---------------
+ 
+diff --git a/httplib.h b/httplib.h
+index 2b32b0d..59acc84 100644
+--- a/httplib.h
++++ b/httplib.h
+@@ -114,7 +114,6 @@ using socket_t = SOCKET;
+ 
+ #include <arpa/inet.h>
+ #include <cstring>
+-#include <ifaddrs.h>
+ #include <netdb.h>
+ #include <netinet/in.h>
+ #ifdef CPPHTTPLIB_USE_POLL
+@@ -744,8 +743,6 @@ public:
+ 
+   void set_compress(bool on);
+ 
+-  void set_interface(const char *intf);
+-
+ protected:
+   bool process_request(Stream &strm, const Request &req, Response &res,
+                        bool last_connection, bool &connection_close);
+@@ -761,7 +758,6 @@ protected:
+   std::string username_;
+   std::string password_;
+   bool compress_;
+-  std::string interface_;
+ 
+ private:
+   socket_t create_client_socket() const;
+@@ -1352,62 +1348,10 @@ inline bool is_connection_error() {
+ #endif
+ }
+ 
+-inline bool bind_ip_address(socket_t sock, const char *host) {
+-  struct addrinfo hints;
+-  struct addrinfo *result;
+-
+-  memset(&hints, 0, sizeof(struct addrinfo));
+-  hints.ai_family = AF_UNSPEC;
+-  hints.ai_socktype = SOCK_STREAM;
+-  hints.ai_protocol = 0;
+-
+-  if (getaddrinfo(host, "0", &hints, &result)) { return false; }
+-
+-  bool ret = false;
+-  for (auto rp = result; rp; rp = rp->ai_next) {
+-    const auto &ai = *rp;
+-    if (!::bind(sock, ai.ai_addr, static_cast<int>(ai.ai_addrlen))) {
+-      ret = true;
+-      break;
+-    }
+-  }
+-
+-  freeaddrinfo(result);
+-  return ret;
+-}
+-
+-inline std::string if2ip(const std::string &ifn) {
+-#ifndef _WIN32
+-  struct ifaddrs *ifap;
+-  getifaddrs(&ifap);
+-  for (auto ifa = ifap; ifa; ifa = ifa->ifa_next) {
+-    if (ifa->ifa_addr && ifn == ifa->ifa_name) {
+-      if (ifa->ifa_addr->sa_family == AF_INET) {
+-        auto sa = reinterpret_cast<struct sockaddr_in *>(ifa->ifa_addr);
+-        char buf[INET_ADDRSTRLEN];
+-        if (inet_ntop(AF_INET, &sa->sin_addr, buf, INET_ADDRSTRLEN)) {
+-          freeifaddrs(ifap);
+-          return std::string(buf, INET_ADDRSTRLEN);
+-        }
+-      }
+-    }
+-  }
+-  freeifaddrs(ifap);
+-#endif
+-  return std::string();
+-}
+-
+ inline socket_t create_client_socket(const char *host, int port,
+-                                     time_t timeout_sec,
+-                                     const std::string &intf) {
++                                     time_t timeout_sec) {
+   return create_socket(
+-      host, port, [&](socket_t sock, struct addrinfo &ai) -> bool {
+-        if (!intf.empty()) {
+-          auto ip = if2ip(intf);
+-          if (ip.empty()) { ip = intf; }
+-          if (!bind_ip_address(sock, ip.c_str())) { return false; }
+-        }
+-
++      host, port, [=](socket_t sock, struct addrinfo &ai) -> bool {
+         set_nonblocking(sock, true);
+ 
+         auto ret = ::connect(sock, ai.ai_addr, static_cast<int>(ai.ai_addrlen));
+@@ -3368,8 +3312,7 @@ inline Client::~Client() {}
+ inline bool Client::is_valid() const { return true; }
+ 
+ inline socket_t Client::create_client_socket() const {
+-  return detail::create_client_socket(host_.c_str(), port_, timeout_sec_,
+-                                      interface_);
++  return detail::create_client_socket(host_.c_str(), port_, timeout_sec_);
+ }
+ 
+ inline bool Client::read_response_line(Stream &strm, Response &res) {
+@@ -3999,10 +3942,6 @@ inline void Client::set_follow_location(bool on) { follow_location_ = on; }
+ 
+ inline void Client::set_compress(bool on) { compress_ = on; }
+ 
+-inline void Client::set_interface(const char *intf) {
+-  interface_ = intf;
+-}
+-
+ /*
+  * SSL Implementation
+  */
+diff --git a/test/test.cc b/test/test.cc
+index d436646..83dfe92 100644
+--- a/test/test.cc
++++ b/test/test.cc
+@@ -1817,8 +1817,8 @@ TEST_F(ServerTest, MultipartFormDataGzip) {
+ 
+ // Sends a raw request to a server listening at HOST:PORT.
+ static bool send_request(time_t read_timeout_sec, const std::string &req) {
+-  auto client_sock = detail::create_client_socket(HOST, PORT, /*timeout_sec=*/5,
+-                                                  std::string());
++  auto client_sock =
++      detail::create_client_socket(HOST, PORT, /*timeout_sec=*/5);
+ 
+   if (client_sock == INVALID_SOCKET) { return false; }
+ 

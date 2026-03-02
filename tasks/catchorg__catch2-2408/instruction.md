@@ -1,15 +1,11 @@
-Catch2 currently provides benchmarking macros (e.g., BENCHMARK and BENCHMARK_ADVANCED) that execute benchmark measurements during a normal test run. There is no way to disable execution of benchmarks at runtime without using compile-time switches or restructuring tests (e.g., tags/duplicate setup code). This is a problem when developers want to run assertions and test logic but avoid the extra time spent in benchmarks, and they want to do so without triggering a full recompilation.
+Catch2 currently has no dedicated way to disable benchmarks at runtime without changing compilation flags or restructuring tests. Add a new command-line option `--skip-benchmarks` that causes Catch2 to run zero benchmarks when the option is provided.
 
-Add a new command-line option `--skip-benchmarks` that, when provided, causes Catch2 to run zero benchmarks. The rest of the test cases must still run normally, including any assertions before/after benchmark blocks.
+When a test case contains benchmark invocations (e.g., `BENCHMARK(...)` or `BENCHMARK_ADVANCED(...)`), running the test executable with `--skip-benchmarks` should still execute the normal test assertions/sections, but all benchmark measurements must be skipped (i.e., benchmark bodies must not be executed and no benchmark results should be produced).
 
-Expected behavior:
-- Running a test binary with `--skip-benchmarks` should not execute any benchmark measurements registered via `BENCHMARK(...) { ... }` or `BENCHMARK_ADVANCED(...)(Catch::Benchmark::Chronometer ...) { ... }`.
-- Skipping benchmarks must not skip the surrounding test cases themselves. For example, a test case that contains both `CHECK(...)`/`REQUIRE(...)` assertions and one or more BENCHMARK blocks should still evaluate the assertions and report their results; only the benchmark runs should be suppressed.
-- The option should integrate with normal command line handling (it must be accepted by the parser, appear in `--help` output if applicable, and not be treated as an unrecognized argument).
-- When `--skip-benchmarks` is not provided, benchmarking behavior should remain unchanged.
+The option must be recognized by the command-line parser (it should be accepted as a valid flag alongside existing options), and it must be propagated into the runtime configuration so that the benchmark runner can decide to bypass running benchmarks.
 
-Actual behavior to fix:
-- Passing `--skip-benchmarks` is currently unsupported and benchmarks still run (or the option is rejected/ignored). Users cannot disable benchmarks at runtime without compile-time configuration or test restructuring.
+Expected behavior examples:
+- Running without `--skip-benchmarks` executes benchmarks normally and produces benchmark output/results.
+- Running with `--skip-benchmarks` executes the surrounding test case logic (e.g., `CHECK`/`REQUIRE` statements and non-benchmark sections) but does not execute any benchmark functions and does not report benchmark timings.
 
-Reproduction example:
-- Create a test case that contains assertions plus multiple `BENCHMARK`/`BENCHMARK_ADVANCED` blocks. Running the binary normally executes the benchmarks. Running the binary with `--skip-benchmarks` should execute the assertions but none of the benchmark blocks should run or be reported as executed.
+The new flag should be stable in combination with other typical CLI options (such as selecting test cases by name or tags) and should not require users to add tags or duplicate code just to avoid running benchmarks.

@@ -1,0 +1,450 @@
+diff --git a/include/nlohmann/detail/input/binary_reader.hpp b/include/nlohmann/detail/input/binary_reader.hpp
+index 395feccf8..a6e100e76 100644
+--- a/include/nlohmann/detail/input/binary_reader.hpp
++++ b/include/nlohmann/detail/input/binary_reader.hpp
+@@ -20,9 +20,6 @@
+ #include <string> // char_traits, string
+ #include <utility> // make_pair, move
+ #include <vector> // vector
+-#ifdef __cpp_lib_byteswap
+-    #include <bit>  //byteswap
+-#endif
+ 
+ #include <nlohmann/detail/exceptions.hpp>
+ #include <nlohmann/detail/input/input_adapters.hpp>
+@@ -2757,29 +2754,6 @@ class binary_reader
+         return current = ia.get_character();
+     }
+ 
+-    /*!
+-    @brief get_to read into a primitive type
+-
+-    This function provides the interface to the used input adapter. It does
+-    not throw in case the input reached EOF, but returns false instead
+-
+-    @return bool, whether the read was successful
+-    */
+-    template<class T>
+-    bool get_to(T& dest, const input_format_t format, const char* context)
+-    {
+-        auto new_chars_read = ia.get_elements(&dest);
+-        chars_read += new_chars_read;
+-        if (JSON_HEDLEY_UNLIKELY(new_chars_read < sizeof(T)))
+-        {
+-            // in case of failure, advance position by 1 to report failing location
+-            ++chars_read;
+-            sax->parse_error(chars_read, "<end of file>", parse_error::create(110, chars_read, exception_message(format, "unexpected end of input", context), nullptr));
+-            return false;
+-        }
+-        return true;
+-    }
+-
+     /*!
+     @return character read from the input after ignoring all 'N' entries
+     */
+@@ -2794,28 +2768,6 @@ class binary_reader
+         return current;
+     }
+ 
+-    template<class NumberType>
+-    static void byte_swap(NumberType& number)
+-    {
+-        constexpr std::size_t sz = sizeof(number);
+-#ifdef __cpp_lib_byteswap
+-        if constexpr (sz == 1)
+-        {
+-            return;
+-        }
+-        if constexpr(std::is_integral_v<NumberType>)
+-        {
+-            number = std::byteswap(number);
+-            return;
+-        }
+-#endif
+-        auto* ptr = reinterpret_cast<std::uint8_t*>(&number);
+-        for (std::size_t i = 0; i < sz / 2; ++i)
+-        {
+-            std::swap(ptr[i], ptr[sz - i - 1]);
+-        }
+-    }
+-
+     /*
+     @brief read a number from the input
+ 
+@@ -2834,16 +2786,29 @@ class binary_reader
+     template<typename NumberType, bool InputIsLittleEndian = false>
+     bool get_number(const input_format_t format, NumberType& result)
+     {
+-        // read in the original format
+-
+-        if (JSON_HEDLEY_UNLIKELY(!get_to(result, format, "number")))
++        // step 1: read input into array with system's byte order
++        std::array<std::uint8_t, sizeof(NumberType)> vec{};
++        for (std::size_t i = 0; i < sizeof(NumberType); ++i)
+         {
+-            return false;
+-        }
+-        if (is_little_endian != (InputIsLittleEndian || format == input_format_t::bjdata))
+-        {
+-            byte_swap(result);
++            get();
++            if (JSON_HEDLEY_UNLIKELY(!unexpect_eof(format, "number")))
++            {
++                return false;
++            }
++
++            // reverse byte order prior to conversion if necessary
++            if (is_little_endian != (InputIsLittleEndian || format == input_format_t::bjdata))
++            {
++                vec[sizeof(NumberType) - i - 1] = static_cast<std::uint8_t>(current);
++            }
++            else
++            {
++                vec[i] = static_cast<std::uint8_t>(current); // LCOV_EXCL_LINE
++            }
+         }
++
++        // step 2: convert array into number of type T and return
++        std::memcpy(&result, vec.data(), sizeof(NumberType));
+         return true;
+     }
+ 
+diff --git a/include/nlohmann/detail/input/input_adapters.hpp b/include/nlohmann/detail/input/input_adapters.hpp
+index f810c1103..58ad59209 100644
+--- a/include/nlohmann/detail/input/input_adapters.hpp
++++ b/include/nlohmann/detail/input/input_adapters.hpp
+@@ -68,13 +68,6 @@ class file_input_adapter
+         return std::fgetc(m_file);
+     }
+ 
+-    // returns the number of characters successfully read
+-    template<class T>
+-    std::size_t get_elements(T* dest, std::size_t count = 1)
+-    {
+-        return fread(dest, 1, sizeof(T) * count, m_file);
+-    }
+-
+   private:
+     /// the file pointer to read from
+     std::FILE* m_file;
+@@ -134,17 +127,6 @@ class input_stream_adapter
+         return res;
+     }
+ 
+-    template<class T>
+-    std::size_t get_elements(T* dest, std::size_t count = 1)
+-    {
+-        auto res = static_cast<std::size_t>(sb->sgetn(reinterpret_cast<char*>(dest), static_cast<std::streamsize>(count * sizeof(T))));
+-        if (JSON_HEDLEY_UNLIKELY(res < count * sizeof(T)))
+-        {
+-            is->clear(is->rdstate() | std::ios::eofbit);
+-        }
+-        return res;
+-    }
+-
+   private:
+     /// the associated input stream
+     std::istream* is = nullptr;
+@@ -176,26 +158,6 @@ class iterator_input_adapter
+         return char_traits<char_type>::eof();
+     }
+ 
+-    // for general iterators, we cannot really do something better than falling back to processing the range one-by-one
+-    template<class T>
+-    std::size_t get_elements(T* dest, std::size_t count = 1)
+-    {
+-        auto* ptr = reinterpret_cast<char*>(dest);
+-        for (std::size_t read_index = 0; read_index < count * sizeof(T); ++read_index)
+-        {
+-            if (JSON_HEDLEY_LIKELY(current != end))
+-            {
+-                ptr[read_index] = static_cast<char>(*current);
+-                std::advance(current, 1);
+-            }
+-            else
+-            {
+-                return read_index;
+-            }
+-        }
+-        return count * sizeof(T);
+-    }
+-
+   private:
+     IteratorType current;
+     IteratorType end;
+@@ -359,13 +321,6 @@ class wide_string_input_adapter
+         return utf8_bytes[utf8_bytes_index++];
+     }
+ 
+-    // parsing binary with wchar doesn't make sense, but since the parsing mode can be runtime, we need something here
+-    template<class T>
+-    std::size_t get_elements(T* /*dest*/, std::size_t /*count*/ = 1)
+-    {
+-        JSON_THROW(parse_error::create(112, 1, "wide string type cannot be interpreted as binary data", nullptr));
+-    }
+-
+   private:
+     BaseInputAdapter base_adapter;
+ 
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index 07b2c22c2..09fffb3bd 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -6220,9 +6220,6 @@ NLOHMANN_JSON_NAMESPACE_END
+ #include <string> // char_traits, string
+ #include <utility> // make_pair, move
+ #include <vector> // vector
+-#ifdef __cpp_lib_byteswap
+-    #include <bit>  //byteswap
+-#endif
+ 
+ // #include <nlohmann/detail/exceptions.hpp>
+ 
+@@ -6301,13 +6298,6 @@ class file_input_adapter
+         return std::fgetc(m_file);
+     }
+ 
+-    // returns the number of characters successfully read
+-    template<class T>
+-    std::size_t get_elements(T* dest, std::size_t count = 1)
+-    {
+-        return fread(dest, 1, sizeof(T) * count, m_file);
+-    }
+-
+   private:
+     /// the file pointer to read from
+     std::FILE* m_file;
+@@ -6367,17 +6357,6 @@ class input_stream_adapter
+         return res;
+     }
+ 
+-    template<class T>
+-    std::size_t get_elements(T* dest, std::size_t count = 1)
+-    {
+-        auto res = static_cast<std::size_t>(sb->sgetn(reinterpret_cast<char*>(dest), static_cast<std::streamsize>(count * sizeof(T))));
+-        if (JSON_HEDLEY_UNLIKELY(res < count * sizeof(T)))
+-        {
+-            is->clear(is->rdstate() | std::ios::eofbit);
+-        }
+-        return res;
+-    }
+-
+   private:
+     /// the associated input stream
+     std::istream* is = nullptr;
+@@ -6409,26 +6388,6 @@ class iterator_input_adapter
+         return char_traits<char_type>::eof();
+     }
+ 
+-    // for general iterators, we cannot really do something better than falling back to processing the range one-by-one
+-    template<class T>
+-    std::size_t get_elements(T* dest, std::size_t count = 1)
+-    {
+-        auto* ptr = reinterpret_cast<char*>(dest);
+-        for (std::size_t read_index = 0; read_index < count * sizeof(T); ++read_index)
+-        {
+-            if (JSON_HEDLEY_LIKELY(current != end))
+-            {
+-                ptr[read_index] = static_cast<char>(*current);
+-                std::advance(current, 1);
+-            }
+-            else
+-            {
+-                return read_index;
+-            }
+-        }
+-        return count * sizeof(T);
+-    }
+-
+   private:
+     IteratorType current;
+     IteratorType end;
+@@ -6592,13 +6551,6 @@ class wide_string_input_adapter
+         return utf8_bytes[utf8_bytes_index++];
+     }
+ 
+-    // parsing binary with wchar doesn't make sense, but since the parsing mode can be runtime, we need something here
+-    template<class T>
+-    std::size_t get_elements(T* /*dest*/, std::size_t /*count*/ = 1)
+-    {
+-        JSON_THROW(parse_error::create(112, 1, "wide string type cannot be interpreted as binary data", nullptr));
+-    }
+-
+   private:
+     BaseInputAdapter base_adapter;
+ 
+@@ -12055,29 +12007,6 @@ class binary_reader
+         return current = ia.get_character();
+     }
+ 
+-    /*!
+-    @brief get_to read into a primitive type
+-
+-    This function provides the interface to the used input adapter. It does
+-    not throw in case the input reached EOF, but returns false instead
+-
+-    @return bool, whether the read was successful
+-    */
+-    template<class T>
+-    bool get_to(T& dest, const input_format_t format, const char* context)
+-    {
+-        auto new_chars_read = ia.get_elements(&dest);
+-        chars_read += new_chars_read;
+-        if (JSON_HEDLEY_UNLIKELY(new_chars_read < sizeof(T)))
+-        {
+-            // in case of failure, advance position by 1 to report failing location
+-            ++chars_read;
+-            sax->parse_error(chars_read, "<end of file>", parse_error::create(110, chars_read, exception_message(format, "unexpected end of input", context), nullptr));
+-            return false;
+-        }
+-        return true;
+-    }
+-
+     /*!
+     @return character read from the input after ignoring all 'N' entries
+     */
+@@ -12092,28 +12021,6 @@ class binary_reader
+         return current;
+     }
+ 
+-    template<class NumberType>
+-    static void byte_swap(NumberType& number)
+-    {
+-        constexpr std::size_t sz = sizeof(number);
+-#ifdef __cpp_lib_byteswap
+-        if constexpr (sz == 1)
+-        {
+-            return;
+-        }
+-        if constexpr(std::is_integral_v<NumberType>)
+-        {
+-            number = std::byteswap(number);
+-            return;
+-        }
+-#endif
+-        auto* ptr = reinterpret_cast<std::uint8_t*>(&number);
+-        for (std::size_t i = 0; i < sz / 2; ++i)
+-        {
+-            std::swap(ptr[i], ptr[sz - i - 1]);
+-        }
+-    }
+-
+     /*
+     @brief read a number from the input
+ 
+@@ -12132,16 +12039,29 @@ class binary_reader
+     template<typename NumberType, bool InputIsLittleEndian = false>
+     bool get_number(const input_format_t format, NumberType& result)
+     {
+-        // read in the original format
+-
+-        if (JSON_HEDLEY_UNLIKELY(!get_to(result, format, "number")))
+-        {
+-            return false;
+-        }
+-        if (is_little_endian != (InputIsLittleEndian || format == input_format_t::bjdata))
++        // step 1: read input into array with system's byte order
++        std::array<std::uint8_t, sizeof(NumberType)> vec{};
++        for (std::size_t i = 0; i < sizeof(NumberType); ++i)
+         {
+-            byte_swap(result);
++            get();
++            if (JSON_HEDLEY_UNLIKELY(!unexpect_eof(format, "number")))
++            {
++                return false;
++            }
++
++            // reverse byte order prior to conversion if necessary
++            if (is_little_endian != (InputIsLittleEndian || format == input_format_t::bjdata))
++            {
++                vec[sizeof(NumberType) - i - 1] = static_cast<std::uint8_t>(current);
++            }
++            else
++            {
++                vec[i] = static_cast<std::uint8_t>(current); // LCOV_EXCL_LINE
++            }
+         }
++
++        // step 2: convert array into number of type T and return
++        std::memcpy(&result, vec.data(), sizeof(NumberType));
+         return true;
+     }
+ 
+diff --git a/tests/benchmarks/src/benchmarks.cpp b/tests/benchmarks/src/benchmarks.cpp
+index ce8bbcbdc..0210b9fea 100644
+--- a/tests/benchmarks/src/benchmarks.cpp
++++ b/tests/benchmarks/src/benchmarks.cpp
+@@ -140,46 +140,6 @@ BENCHMARK_CAPTURE(ToCbor, signed_ints,       TEST_DATA_DIRECTORY "/regression/si
+ BENCHMARK_CAPTURE(ToCbor, unsigned_ints,     TEST_DATA_DIRECTORY "/regression/unsigned_ints.json");
+ BENCHMARK_CAPTURE(ToCbor, small_signed_ints, TEST_DATA_DIRECTORY "/regression/small_signed_ints.json");
+ 
+-//////////////////////////////////////////////////////////////////////////////
+-// Parse Msgpack
+-//////////////////////////////////////////////////////////////////////////////
+-
+-static void FromMsgpack(benchmark::State& state, const char* filename)
+-{
+-    std::ifstream f(filename);
+-    std::string str((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+-    auto bytes = json::to_msgpack(json::parse(str));
+-    std::ofstream o("test.msgpack");
+-    o.write((char*)bytes.data(), bytes.size());
+-    o.flush();
+-    o.close();
+-    for (auto _ : state)
+-    {
+-        state.PauseTiming();
+-        auto* j = new json();
+-        auto file = fopen("test.msgpack", "rb");
+-        state.ResumeTiming();
+-
+-        *j = json::from_msgpack(file);
+-
+-        state.PauseTiming();
+-        fclose(file);
+-        delete j;
+-        state.ResumeTiming();
+-    }
+-
+-    state.SetBytesProcessed(state.iterations() * bytes.size());
+-}
+-
+-BENCHMARK_CAPTURE(FromMsgpack, jeopardy, TEST_DATA_DIRECTORY "/jeopardy/jeopardy.json");
+-BENCHMARK_CAPTURE(FromMsgpack, canada, TEST_DATA_DIRECTORY "/nativejson-benchmark/canada.json");
+-BENCHMARK_CAPTURE(FromMsgpack, citm_catalog, TEST_DATA_DIRECTORY "/nativejson-benchmark/citm_catalog.json");
+-BENCHMARK_CAPTURE(FromMsgpack, twitter, TEST_DATA_DIRECTORY "/nativejson-benchmark/twitter.json");
+-BENCHMARK_CAPTURE(FromMsgpack, floats, TEST_DATA_DIRECTORY "/regression/floats.json");
+-BENCHMARK_CAPTURE(FromMsgpack, signed_ints, TEST_DATA_DIRECTORY "/regression/signed_ints.json");
+-BENCHMARK_CAPTURE(FromMsgpack, unsigned_ints, TEST_DATA_DIRECTORY "/regression/unsigned_ints.json");
+-BENCHMARK_CAPTURE(FromMsgpack, small_signed_ints, TEST_DATA_DIRECTORY "/regression/small_signed_ints.json");
+-
+ //////////////////////////////////////////////////////////////////////////////
+ // serialize binary CBOR
+ //////////////////////////////////////////////////////////////////////////////
+diff --git a/tests/src/unit-msgpack.cpp b/tests/src/unit-msgpack.cpp
+index 3e2cb3a5d..e91aab49d 100644
+--- a/tests/src/unit-msgpack.cpp
++++ b/tests/src/unit-msgpack.cpp
+@@ -1508,22 +1508,6 @@ TEST_CASE("MessagePack")
+             CHECK(json::from_msgpack(std::vector<uint8_t>({0xc4}), true, false).is_discarded());
+         }
+ 
+-        SECTION("unexpected end inside int with stream")
+-        {
+-            json _;
+-            const std::string data = {static_cast<char>(0xd2u), static_cast<char>(0x12u), static_cast<char>(0x34u), static_cast<char>(0x56u)};
+-            CHECK_THROWS_WITH_AS(_ = json::from_msgpack(std::istringstream(data, std::ios::binary)),
+-                                 "[json.exception.parse_error.110] parse error at byte 5: syntax error while parsing MessagePack number: unexpected end of input", json::parse_error&);
+-        }
+-        SECTION("misuse wchar for binary")
+-        {
+-            json _;
+-            // creates 0xd2 after UTF-8 decoding, triggers get_elements in wide_string_input_adapter for code coverage
+-            const std::u32string data = {static_cast<char32_t>(0x0280)};
+-            CHECK_THROWS_WITH_AS(_ = json::from_msgpack(data),
+-                                 "[json.exception.parse_error.112] parse error at byte 1: wide string type cannot be interpreted as binary data", json::parse_error&);
+-        }
+-
+         SECTION("unsupported bytes")
+         {
+             SECTION("concrete examples")

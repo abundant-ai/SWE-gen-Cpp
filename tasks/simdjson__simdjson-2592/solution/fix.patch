@@ -1,0 +1,303 @@
+diff --git a/doc/basics.md b/doc/basics.md
+index 5804aaac..d3354e51 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -169,8 +169,10 @@ For efficiency reasons, simdjson requires a string with a few bytes (`simdjson::
+ at the end, these bytes may be read but their content does not affect the parsing. In practice,
+ it means that the JSON inputs should be stored in a memory region with `simdjson::SIMDJSON_PADDING`
+ extra bytes at the end. You do not have to set these bytes to specific values though you may
+-want to if you want to avoid runtime warnings with some sanitizers. Advanced users may want to
+-read the section Free Padding in [our performance notes](performance.md).
++want to if you want to avoid runtime warnings with some sanitizers. We expect the user
++of the library to load the data (from disk or from the network) into a padded buffer. To make
++this easy, we provide the `padded_string::load` function which loads files from disk in a padded buffer.
++[You can similarly fetch a file from a URL to a padded string](https://github.com/simdjson/curltostring) using our `simdjson::padded_string_builder`. Advanced users may want to read the section Free Padding in [our performance notes](performance.md).
+ 
+ The simdjson library offers a tree-like [API](https://en.wikipedia.org/wiki/API), which you can
+ access by creating a `ondemand::parser` and calling the `iterate()` method. The iterate method
+diff --git a/doc/dom.md b/doc/dom.md
+index c936e6a3..bbd8c074 100644
+--- a/doc/dom.md
++++ b/doc/dom.md
+@@ -62,6 +62,8 @@ auto json = padded_string::load("twitter.json"); // load JSON file 'twitter.json
+ dom::element doc = parser.parse(json);
+ ```
+ 
++[You can similarly fetch a file from a URL to a padded string](https://github.com/simdjson/curltostring) using our `simdjson::padded_string_builder`.
++
+ (Windows users compiling with C++17 or better may use `wchar_t` strings to support non-ASCII
+ filenames: `padded_string::load(L"twitter.json")`.)
+ 
+diff --git a/include/simdjson/padded_string-inl.h b/include/simdjson/padded_string-inl.h
+index edc8de10..92881469 100644
+--- a/include/simdjson/padded_string-inl.h
++++ b/include/simdjson/padded_string-inl.h
+@@ -126,6 +126,33 @@ inline const char *padded_string::data() const noexcept { return data_ptr; }
+ 
+ inline char *padded_string::data() noexcept { return data_ptr; }
+ 
++inline bool padded_string::append(const char *data, size_t length) noexcept {
++  if (length == 0) {
++    return true; // Nothing to append
++  }
++  size_t new_size = viable_size + length;
++  if (new_size < viable_size) {
++    // Overflow, cannot append
++    return false;
++  }
++  char *new_data_ptr = internal::allocate_padded_buffer(new_size);
++  if (new_data_ptr == nullptr) {
++    // Allocation failed, cannot append
++    return false;
++  }
++  // Copy existing data
++  if (viable_size > 0) {
++    std::memcpy(new_data_ptr, data_ptr, viable_size);
++  }
++  // Copy new data
++  std::memcpy(new_data_ptr + viable_size, data, length);
++  // Update
++  delete[] data_ptr;
++  data_ptr = new_data_ptr;
++  viable_size = new_size;
++  return true;
++}
++
+ inline padded_string::operator std::string_view() const simdjson_lifetime_bound { return std::string_view(data(), length()); }
+ 
+ inline padded_string::operator padded_string_view() const noexcept simdjson_lifetime_bound {
+@@ -242,6 +269,103 @@ inline simdjson_result<padded_string> padded_string::load(std::wstring_view file
+ }
+ #endif
+ 
++// padded_string_builder implementations
++
++inline padded_string_builder::padded_string_builder() noexcept = default;
++
++inline padded_string_builder::padded_string_builder(size_t new_capacity) noexcept {
++  if (new_capacity > 0) {
++    data = internal::allocate_padded_buffer(new_capacity);
++    if (data != nullptr) {
++      this->capacity = new_capacity;
++    }
++  }
++}
++
++inline padded_string_builder::padded_string_builder(padded_string_builder &&o) noexcept
++    : size(o.size), capacity(o.capacity), data(o.data) {
++  o.size = 0;
++  o.capacity = 0;
++  o.data = nullptr;
++}
++
++inline padded_string_builder &padded_string_builder::operator=(padded_string_builder &&o) noexcept {
++  if (this != &o) {
++    delete[] data;
++    size = o.size;
++    capacity = o.capacity;
++    data = o.data;
++    o.size = 0;
++    o.capacity = 0;
++    o.data = nullptr;
++  }
++  return *this;
++}
++
++inline padded_string_builder::~padded_string_builder() noexcept {
++  delete[] data;
++}
++
++inline bool padded_string_builder::append(const char *newdata, size_t length) noexcept {
++  if (length == 0) {
++    return true;
++  }
++  if (!reserve(length)) {
++    return false;
++  }
++  std::memcpy(data + size, newdata, length);
++  size += length;
++  return true;
++}
++
++inline bool padded_string_builder::append(std::string_view sv) noexcept {
++  return append(sv.data(), sv.size());
++}
++
++inline size_t padded_string_builder::length() const noexcept {
++  return size;
++}
++
++inline padded_string padded_string_builder::build() const noexcept {
++  return padded_string(data, size);
++}
++
++inline padded_string padded_string_builder::convert() noexcept {
++  padded_string result{};
++  result.data_ptr = data;
++  result.viable_size = size;
++  data = nullptr;
++  size = 0;
++  capacity = 0;
++  return result;
++}
++
++inline bool padded_string_builder::reserve(size_t additional) noexcept {
++  size_t needed = size + additional;
++  if (needed <= capacity) {
++    return true;
++  }
++  size_t new_capacity = needed;
++  // We are going to grow the capacity exponentially to avoid
++  // repeated allocations.
++  if (new_capacity < 4096) {
++    new_capacity *= 2;
++  } else {
++    new_capacity += new_capacity/2; // grow by 1.5x
++  }
++  char *new_data = internal::allocate_padded_buffer(new_capacity);
++  if (new_data == nullptr) {
++    return false; // Allocation failed
++  }
++  if (size > 0) {
++    std::memcpy(new_data, data, size);
++  }
++  delete[] data;
++  data = new_data;
++  capacity = new_capacity;
++  return true;
++}
++
+ } // namespace simdjson
+ 
+ inline simdjson::padded_string operator ""_padded(const char *str, size_t len) {
+diff --git a/include/simdjson/padded_string.h b/include/simdjson/padded_string.h
+index 9f42530b..c036c2ea 100644
+--- a/include/simdjson/padded_string.h
++++ b/include/simdjson/padded_string.h
+@@ -98,6 +98,16 @@ struct padded_string final {
+    **/
+   char *data() noexcept;
+ 
++  /**
++   * Append data to the padded string. Return true on success, false on failure.
++   * The complexity is O(n) where n is the new size of the string. If you are
++   * doing multiple appends, consider using padded_string_builder for better performance.
++   *
++   * @param data the buffer to append
++   * @param length the number of bytes to append
++   */
++  inline bool append(const char *data, size_t length) noexcept;
++
+   /**
+    * Create a std::string_view with the same content.
+    */
+@@ -141,6 +151,7 @@ struct padded_string final {
+   #endif
+ 
+ private:
++  friend class padded_string_builder;
+   padded_string &operator=(const padded_string &o) = delete;
+   padded_string(const padded_string &o) = delete;
+ 
+@@ -149,6 +160,101 @@ private:
+ 
+ }; // padded_string
+ 
++/**
++ * Builder for constructing padded_string incrementally.
++ *
++ * This class allows efficient appending of data and then building a padded_string.
++ */
++class padded_string_builder {
++public:
++  /**
++   * Create a new, empty padded string builder.
++   */
++  inline padded_string_builder() noexcept;
++
++  /**
++   * Create a new padded string builder with initial capacity.
++   *
++   * @param capacity the initial capacity of the builder.
++   */
++  inline padded_string_builder(size_t capacity) noexcept;
++
++  /**
++   * Move constructor.
++   */
++  inline padded_string_builder(padded_string_builder &&o) noexcept;
++
++  /**
++   * Move assignment.
++   */
++  inline padded_string_builder &operator=(padded_string_builder &&o) noexcept;
++
++  /**
++   * Copy constructor (deleted).
++   */
++  padded_string_builder(const padded_string_builder &) = delete;
++
++  /**
++   * Copy assignment (deleted).
++   */
++  padded_string_builder &operator=(const padded_string_builder &) = delete;
++
++  /**
++   * Destructor.
++   */
++  inline ~padded_string_builder() noexcept;
++
++  /**
++   * Append data to the builder.
++   *
++   * @param newdata the buffer to append
++   * @param length the number of bytes to append
++   * @return true if the append succeeded, false if allocation failed
++   */
++  inline bool append(const char *newdata, size_t length) noexcept;
++
++  /**
++   * Append a string view to the builder.
++   *
++   * @param sv the string view to append
++   * @return true if the append succeeded, false if allocation failed
++   */
++  inline bool append(std::string_view sv) noexcept;
++
++  /**
++   * Get the current length of the built string.
++   */
++  inline size_t length() const noexcept;
++
++  /**
++   * Build a padded_string from the current content. The builder's content
++   * is not modified. If you want to avoid the copy, use convert() instead.
++   *
++   * @return a padded_string containing a copy of the built content.
++   */
++  inline padded_string build() const noexcept;
++
++  /**
++   * Convert the current content into a padded_string. The
++   * builder's content is emptied, the capacity is lost.
++   *
++   * @return a padded_string containing the built content.
++   */
++  inline padded_string convert() noexcept;
++private:
++  size_t size{0};
++  size_t capacity{0};
++  char *data{nullptr};
++
++  /**
++   * Ensure the builder has enough capacity.
++   *
++   * @param additional the additional capacity needed.
++   * @return true if the reservation succeeded, false if allocation failed
++   */
++  inline bool reserve(size_t additional) noexcept;
++};
++
+ /**
+  * Send padded_string instance to an output stream.
+  *

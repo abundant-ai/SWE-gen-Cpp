@@ -39,7 +39,7 @@ ENV CI=true
 # Clean Bazel cache before applying patches
 RUN bazel clean --expunge || true
 
-# Reset git to ensure clean state for patching
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)

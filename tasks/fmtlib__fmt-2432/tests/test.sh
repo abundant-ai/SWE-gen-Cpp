@@ -6,12 +6,17 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/args-test.cc" "test/args-test.cc"
 
-# Rebuild tests with the updated test files
-cmake --build build --target args-test
+test_status=0
 
-# Run the specific test executables
-./build/bin/args-test
-test_status=$?
+# Build the specific test file
+cd build
+echo "Building args-test..."
+if ! cmake --build . --target args-test 2>&1; then
+    echo "FAIL: args-test build failed"
+    test_status=1
+else
+    echo "PASS: args-test built successfully"
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

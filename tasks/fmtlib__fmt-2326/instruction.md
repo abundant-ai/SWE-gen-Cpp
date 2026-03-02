@@ -1,8 +1,12 @@
-Custom types with user-defined `fmt::formatter<T>` do not work correctly with compile-time formatting via `FMT_COMPILE()`. When a type has a custom formatter with a `constexpr` `parse` function and a `format` member that is `const`-qualified (e.g., `template <typename FormatContext> constexpr auto format(T, FormatContext& ctx) const -> decltype(ctx.out())`), formatting with `fmt::format(FMT_COMPILE("{}"), value)` should successfully compile and produce the same output as runtime formatting.
+`FMT_COMPILE()` currently fails to work correctly with user-defined/custom types that provide a `fmt::formatter<T>` specialization. In particular, when formatting with a compile-time format string via `fmt::format(FMT_COMPILE("{}"), value)`, a custom type that is otherwise formattable at runtime does not format correctly at compile time.
 
-Currently, `FMT_COMPILE()` fails to format such custom types: compile-time formatting either fails to compile or fails to dispatch to the user-defined `formatter<T>::format` as expected. This makes compile-time formatting unusable for user-defined types and contradicts the expected behavior that `FMT_COMPILE` should support the same formatter customization mechanism as normal `fmt::format`.
+A common failing scenario is a custom formatter whose `format` member function is `const`-qualified (e.g., `template <typename FormatContext> constexpr auto format(T, FormatContext& ctx) const -> decltype(ctx.out())`). This const-qualified `format` method is the standard shape used by many custom formatters, and it should be supported by compile-time formatting just as it is by runtime formatting.
 
-Reproduction example:
+Expected behavior: When a type `T` has a valid `fmt::formatter<T>` specialization with a `constexpr parse(...)` and a `const`-qualified `format(...)`, calling `fmt::format(FMT_COMPILE("{}"), T{})` should compile and produce the same output as runtime formatting with `"{}"`. The custom formatting logic should be honored (including any parsed specifiers), and the call should not fall back to runtime formatting in C++17+ environments where `if constexpr` is available.
+
+Actual behavior: With `FMT_COMPILE`, the custom formatter path is not correctly selected/instantiated for such custom types, so formatting either fails to compile or does not use the custom formatter at compile time.
+
+Reproduction example (should work):
 
 ```cpp
 struct test_formattable {};
@@ -13,7 +17,7 @@ template <> struct fmt::formatter<test_formattable> : fmt::formatter<const char*
   constexpr auto parse(fmt::format_parse_context& ctx) {
     auto it = ctx.begin(), end = ctx.end();
     if (it == end || *it == '}') return it;
-    if (it != end && (*it == 'f' || *it == 'b')) word_spec = *it++;
+    if (*it == 'f' || *it == 'b') word_spec = *it++;
     if (it != end && *it != '}') throw fmt::format_error("invalid format");
     return it;
   }
@@ -25,16 +29,8 @@ template <> struct fmt::formatter<test_formattable> : fmt::formatter<const char*
   }
 };
 
-auto s = fmt::format(FMT_COMPILE("{}"), test_formattable{});
-// expected: "foo"
+auto s1 = fmt::format(FMT_COMPILE("{}"), test_formattable{});      // should be "foo"
+auto s2 = fmt::format(FMT_COMPILE("{:b}"), test_formattable{});    // should be "bar"
 ```
 
-Expected behavior:
-- `fmt::format(FMT_COMPILE("{}"), test_formattable{})` compiles.
-- It uses the custom formatter and returns `"foo"` by default.
-- Specifiers handled in `parse` are honored under `FMT_COMPILE`, e.g. `fmt::format(FMT_COMPILE("{:b}"), test_formattable{})` returns `"bar"`.
-
-Actual behavior:
-- `FMT_COMPILE` does not correctly support custom formatters for user-defined types (either compilation fails or formatting doesn’t route through the custom `formatter<T>`), even when the formatter is `constexpr`-friendly and the `format` method is `const`-qualified.
-
-Fix compile-time formatting so that `FMT_COMPILE()` supports custom types using the standard `fmt::formatter<T>` customization point (including `const`-qualified `format` methods) and produces the same results as runtime formatting for these cases.
+Implement/restore proper `FMT_COMPILE` support for custom formatters so that const-qualified `formatter<T>::format(...)` works in compile-time formatting and produces the expected output for both default formatting and when a simple custom specifier is used.

@@ -4,23 +4,19 @@ cd /app/src
 
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test"
-cp "/tests/format-test.cc" "test/format-test.cc"
-mkdir -p "test"
+cp "/tests/CMakeLists.txt" "test/CMakeLists.txt"
 cp "/tests/locale-test.cc" "test/locale-test.cc"
 
-# Reconfigure with the updated test files
-cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_STANDARD=20 \
-    -DFMT_TEST=ON
+# Remove test/format file to avoid header collision with std::format
+rm -f test/format
 
-# Build locale-test only (format-test is too large and times out)
-cmake --build build --target locale-test --parallel $(nproc)
+# Rebuild the specific test
+cd build
+cmake ..
+make locale-test
 
-# Run locale-test
-./build/bin/locale-test
+# Run the specific test (binary is in bin/ directory)
+./bin/locale-test
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

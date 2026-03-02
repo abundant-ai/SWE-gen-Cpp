@@ -11,8 +11,11 @@ cp "/tests/java/core/src/test/java/com/google/protobuf/LazyFieldLiteTest.java" "
 mkdir -p "java/core/src/test/java/com/google/protobuf"
 cp "/tests/java/core/src/test/java/com/google/protobuf/LazyFieldTest.java" "java/core/src/test/java/com/google/protobuf/LazyFieldTest.java"
 
-# Run the specific Java tests using Bazel
-bazel test //java/core:LazyFieldLiteTest //java/core:LazyFieldTest --test_output=errors
+# Clean Bazel cache to ensure changes are picked up
+bazel clean --expunge || true
+
+# Run the specific test targets for LazyField tests using Bazel
+bazel test //java/core:LazyFieldTest //java/core:LazyFieldLiteTest --test_output=errors
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

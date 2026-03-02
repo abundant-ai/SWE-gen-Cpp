@@ -1,0 +1,156 @@
+diff --git a/doc/builder.md b/doc/builder.md
+index 6b19e191..324a7d9d 100644
+--- a/doc/builder.md
++++ b/doc/builder.md
+@@ -34,12 +34,13 @@ It has the following methods to add content to the string:
+ - `append_null()`: Appends the string "null" to the JSON buffer.
+ - `clear()`: Clears the contents of the JSON buffer, resetting the position to 0 while retaining the allocated capacity.
+ - `escape_and_append(std::string_view input)`: Appends a string view to the JSON buffer after escaping special characters (e.g., quotes, backslashes) as required by JSON.
+-- `escape_and_append_with_quotes(std::string_view input)` Appends a string view surrounded by double quotes (e.g., "input") to the JSON buffer after escaping special characters.
+-Parameters:
++- `escape_and_append_with_quotes(std::string_view input)` Appends a string view surrounded by double quotes (e.g., "input") to the JSON buffer after escaping special characters. For constant strings, you may also do `escape_and_append_with_quotes<"mystring">()`.
+ - `escape_and_append_with_quotes(char input)`: Appends a single character surrounded by double quotes (e.g., "c") to the JSON buffer after escaping it if necessary.
+ - `append_raw(const char *c)`: Appends a null-terminated C string directly to the JSON buffer without escaping.
+ - `append_raw(std::string_view input)`: Appends a string view directly to the JSON buffer without escaping.
+ - `append_raw(const char *str, size_t len)`: Appends a specified number of characters from a C string directly to the JSON
++- `append_key_value(key,value)`: Appends a key and a value (`"json":somevalue`)
++- `append_key_value<"mykey">(value)`: Appends a key and a value (`"json":somevalue`), useful when the key is a compile-time constant (C++20).
+ 
+ After writing the content, if you have reasons to believe that the content might violate UTF-8 conventions, you can check it as follows:
+ 
+@@ -52,7 +53,7 @@ Once you are satisfied, you can recover the string as follows:
+ 
+ - `operator std::string()`: Converts the JSON buffer to an std::string. (Might throw if an error occurred.)
+ - `operator std::string_view()`: Converts the JSON buffer to an std::string_view.  (Might throw if an error occurred.)
+-- `view()`: Returns a view of the written JSON buffer as a `simdjson_result<std::string_view>`.
++- `view()`: Returns a view of the written JSON buffer as a `simdjson_result<std::string_view>` (C++20).
+ 
+ The later method (`view()`) is recommended.  For performance reasons, we expect you to explicitly call `validate_unicode()` as needed (e.g., prior to calling `view()`).
+ 
+@@ -131,20 +132,20 @@ In all cases, the `std::string_view` instance depends the corresponding `string_
+ 
+ 
+ 
+-If you have C++20, you can simplify the code, as the `std::vector<double>` is automatically
+-supported.
++If you have C++20, you can simplify the code, as the `std::vector<double>` is automatically supported. Further, we can pass the keys (which are compile-time
++constant) as template parameter (for improved performance).
+ 
+ ```cpp
+     Car c = {"Toyota", "Corolla", 2017, {30.0,30.2,30.513,30.79}};
+     simdjson::builder::string_builder sb;
+     sb.start_object();
+-    sb.append_key_value("make", c.make);
++    sb.append_key_value<"make">(c.make);
+     sb.append_comma();
+-    sb.append_key_value("model", c.model);
++    sb.append_key_value<"model">(c.model);
+     sb.append_comma();
+-    sb.append_key_value("year", c.year);
++    sb.append_key_value<"year">(c.year);
+     sb.append_comma();
+-    sb.append_key_value("tire_pressure", c.tire_pressure);
++    sb.append_key_value<"tire_pressure">(c.tire_pressure);
+     sb.end_object();
+     std::string_view p = sb.view();
+ ```
+diff --git a/include/simdjson/generic/ondemand/json_string_builder-inl.h b/include/simdjson/generic/ondemand/json_string_builder-inl.h
+index ebfe8a92..27d8768d 100644
+--- a/include/simdjson/generic/ondemand/json_string_builder-inl.h
++++ b/include/simdjson/generic/ondemand/json_string_builder-inl.h
+@@ -475,6 +475,12 @@ simdjson_inline void string_builder::escape_and_append_with_quotes(const char* i
+   std::string_view cinput(input);
+   escape_and_append_with_quotes(cinput);
+ }
++#if SIMDJSON_SUPPORTS_CONCEPTS
++template<internal::fixed_string key>
++simdjson_inline void string_builder::escape_and_append_with_quotes()  noexcept {
++  escape_and_append_with_quotes(internal::string_constant<key>::value);
++}
++#endif
+ 
+ simdjson_inline void string_builder::append_raw(const char *c) noexcept {
+   size_t len = std::strlen(c);
+@@ -654,6 +660,25 @@ simdjson_inline void string_builder::append_key_value(key_type key, value_type v
+   }
+ }
+ 
++#if SIMDJSON_SUPPORTS_CONCEPTS
++template<internal::fixed_string key, typename value_type>
++simdjson_inline void string_builder::append_key_value(value_type value) noexcept {
++  escape_and_append_with_quotes<key>();
++  append_colon();
++  SIMDJSON_IF_CONSTEXPR(std::is_same<value_type, std::nullptr_t>::value) {
++    append_null();
++  } else SIMDJSON_IF_CONSTEXPR(std::is_same<value_type, char>::value) {
++    escape_and_append_with_quotes(value);
++  } else SIMDJSON_IF_CONSTEXPR(std::is_convertible<value_type, std::string_view>::value) {
++    escape_and_append_with_quotes(value);
++  } else SIMDJSON_IF_CONSTEXPR(std::is_same<value_type, const char*>::value) {
++    escape_and_append_with_quotes(value);
++  } else {
++    append(value);
++  }
++}
++#endif
++
+ } // namespace builder
+ } // namespace SIMDJSON_IMPLEMENTATION
+ } // namespace simdjson
+diff --git a/include/simdjson/generic/ondemand/json_string_builder.h b/include/simdjson/generic/ondemand/json_string_builder.h
+index da27fa92..f4a5665a 100644
+--- a/include/simdjson/generic/ondemand/json_string_builder.h
++++ b/include/simdjson/generic/ondemand/json_string_builder.h
+@@ -12,7 +12,26 @@
+ namespace simdjson {
+ namespace SIMDJSON_IMPLEMENTATION {
+ namespace builder {
++#if SIMDJSON_SUPPORTS_CONCEPTS
++// Helper to create string constants
++namespace internal {
++template <std::size_t N>
++struct fixed_string {
++    constexpr fixed_string(const char (&str)[N]) {
++        for (std::size_t i = 0; i < N; ++i) {
++            data[i] = str[i];
++        }
++    }
++    char data[N];
++    constexpr std::string_view view() const { return {data, N - 1}; }
++};
+ 
++template <fixed_string str>
++struct string_constant {
++    static constexpr std::string_view value = str.view();
++};
++} // namespace internal
++#endif // SIMDJSON_SUPPORTS_CONCEPTS
+ /**
+  * A builder for JSON strings representing documents. This is a low-level
+  * builder that is not meant to be used directly by end-users. Though it
+@@ -62,7 +81,10 @@ public:
+    * There is no UTF-8 validation.
+    */
+   simdjson_inline void escape_and_append_with_quotes(std::string_view input)  noexcept;
+-
++#if SIMDJSON_SUPPORTS_CONCEPTS
++  template<internal::fixed_string key>
++  simdjson_inline void escape_and_append_with_quotes()  noexcept;
++#endif
+   /**
+    * Append the character surrounded by double quotes, after escaping it.
+    * There is no UTF-8 validation.
+@@ -116,9 +138,12 @@ public:
+    * The key is escaped and surrounded by double quotes.
+    * The value is escaped if it is a string.
+    */
+-   template<typename key_type, typename value_type>
++  template<typename key_type, typename value_type>
+   simdjson_inline void append_key_value(key_type key, value_type value) noexcept;
+ #if SIMDJSON_SUPPORTS_CONCEPTS
++  template<internal::fixed_string key, typename value_type>
++  simdjson_inline void append_key_value(value_type value) noexcept;
++
+   // Support for optional types (std::optional, etc.)
+   template <concepts::optional_type T>
+   simdjson_inline void append(const T &opt);

@@ -1,0 +1,257 @@
+diff --git a/bench/bench.cpp b/bench/bench.cpp
+index 7ba0acf9..0386be80 100644
+--- a/bench/bench.cpp
++++ b/bench/bench.cpp
+@@ -29,7 +29,6 @@ using namespace utils;
+ void bench(int howmany, std::shared_ptr<spdlog::logger> log);
+ void bench_mt(int howmany, std::shared_ptr<spdlog::logger> log, int thread_count);
+ void bench_default_api(int howmany, std::shared_ptr<spdlog::logger> log);
+-void bench_c_string(int howmany, std::shared_ptr<spdlog::logger> log);
+ 
+ int main(int argc, char *argv[])
+ {
+@@ -82,21 +81,6 @@ int main(int argc, char *argv[])
+ 
+         bench_default_api(howmany, spdlog::create<null_sink_st>("null_st"));
+ 
+-        spdlog::info("**************************************************************");
+-        spdlog::info("C-string. Single thread, {:n} iterations", howmany);
+-        spdlog::info("**************************************************************");
+-
+-        basic_st = spdlog::basic_logger_st("basic_st", "logs/basic_cs.log", true);
+-        bench_c_string(howmany, std::move(basic_st));
+-
+-        rotating_st = spdlog::rotating_logger_st("rotating_st", "logs/rotating_cs.log", file_size, rotating_files);
+-        bench_c_string(howmany, std::move(rotating_st));
+-
+-        daily_st = spdlog::daily_logger_st("daily_st", "logs/daily_cs.log");
+-        bench_c_string(howmany, std::move(daily_st));
+-
+-        bench_c_string(howmany, spdlog::create<null_sink_st>("null_st"));
+-
+         spdlog::info("**************************************************************");
+         spdlog::info("{:n} threads sharing same logger, {:n} iterations", threads, howmany);
+         spdlog::info("**************************************************************");
+@@ -189,26 +173,3 @@ void bench_default_api(int howmany, std::shared_ptr<spdlog::logger> log)
+     spdlog::set_default_logger(std::move(orig_default));
+     spdlog::info("{:<16} Elapsed: {:0.2f} secs {:>16n}/sec", log->name(), delta_d, int(howmany / delta_d));
+ }
+-
+-void bench_c_string(int howmany, std::shared_ptr<spdlog::logger> log)
+-{
+-    const char *msg = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum pharetra metus cursus " \
+-        "lacus placerat congue. Nulla egestas, mauris a tincidunt tempus, enim lectus volutpat mi, eu consequat sem " \
+-        "libero nec massa. In dapibus ipsum a diam rhoncus gravida. Etiam non dapibus eros. Donec fringilla dui sed " \
+-        "augue pretium, nec scelerisque est maximus. Nullam convallis, sem nec blandit maximus, nisi turpis ornare " \
+-        "nisl, sit amet volutpat neque massa eu odio. Maecenas malesuada quam ex, posuere congue nibh turpis duis.";
+-    using std::chrono::high_resolution_clock;
+-    auto orig_default = spdlog::default_logger();
+-    spdlog::set_default_logger(log);
+-    auto start = high_resolution_clock::now();
+-    for (auto i = 0; i < howmany; ++i)
+-    {
+-        spdlog::log(level::info, msg);
+-    }
+-
+-    auto delta = high_resolution_clock::now() - start;
+-    auto delta_d = duration_cast<duration<double>>(delta).count();
+-    spdlog::drop(log->name());
+-    spdlog::set_default_logger(std::move(orig_default));
+-    spdlog::info("{:<16} Elapsed: {:0.2f} secs {:>16n}/sec", log->name(), delta_d, int(howmany / delta_d));
+-}
+diff --git a/include/spdlog/details/fmt_helper.h b/include/spdlog/details/fmt_helper.h
+index 8ce61df8..1518b2c0 100644
+--- a/include/spdlog/details/fmt_helper.h
++++ b/include/spdlog/details/fmt_helper.h
+@@ -5,7 +5,6 @@
+ #pragma once
+ 
+ #include "chrono"
+-#include "spdlog/details/log_msg.h"
+ #include "spdlog/fmt/fmt.h"
+ 
+ // Some fmt helpers to efficiently format and pad ints and strings
+@@ -41,17 +40,6 @@ inline void append_int(T n, fmt::basic_memory_buffer<char, Buffer_Size> &dest)
+     dest.append(i.data(), i.data() + i.size());
+ }
+ 
+-template<size_t Buffer_Size>
+-inline void append_msg(const details::log_msg &msg, fmt::basic_memory_buffer<char, Buffer_Size> &dest)
+-{
+-    auto *c_buf = msg.c_string.data();
+-    if (c_buf != nullptr) {
+-        dest.append(c_buf, c_buf + msg.c_string.size());
+-    } else {
+-        append_buf(msg.raw, dest);
+-    }
+-}
+-
+ template<size_t Buffer_Size>
+ inline void pad2(int n, fmt::basic_memory_buffer<char, Buffer_Size> &dest)
+ {
+diff --git a/include/spdlog/details/log_msg.h b/include/spdlog/details/log_msg.h
+index 5e4bc37c..49987515 100644
+--- a/include/spdlog/details/log_msg.h
++++ b/include/spdlog/details/log_msg.h
+@@ -39,9 +39,6 @@ struct log_msg
+     log_clock::time_point time;
+     size_t thread_id;
+     fmt::memory_buffer raw;
+-    // if c_string.data() is not nullptr, c_string should be used as the message
+-    // instead of raw above 
+-    fmt::string_view c_string;
+     size_t msg_id;
+ 
+     // info about wrapping the formatted text with color (updated by pattern_formatter).
+diff --git a/include/spdlog/details/logger_impl.h b/include/spdlog/details/logger_impl.h
+index d3cc62db..46301ea1 100644
+--- a/include/spdlog/details/logger_impl.h
++++ b/include/spdlog/details/logger_impl.h
+@@ -20,7 +20,7 @@ inline spdlog::logger::logger(std::string logger_name, It begin, It end)
+     , flush_level_(level::off)
+     , last_err_time_(0)
+     , msg_counter_(1) // message counter will start from 1. 0-message id will be
+-                      // reserved for control messages
++                      // reserved for controll messages
+ {
+     err_handler_ = [this](const std::string &msg) { this->default_err_handler_(msg); };
+ }
+@@ -70,12 +70,8 @@ inline void spdlog::logger::log(level::level_enum lvl, const char *fmt, const Ar
+     SPDLOG_CATCH_AND_HANDLE
+ }
+ 
++template<typename... Args>
+ inline void spdlog::logger::log(level::level_enum lvl, const char *msg)
+-{
+-    logn(lvl, msg, std::char_traits<char>::length(msg));
+-}
+-
+-inline void spdlog::logger::logn(level::level_enum lvl, const char *msg, size_t msg_len)
+ {
+     if (!should_log(lvl))
+     {
+@@ -84,7 +80,7 @@ inline void spdlog::logger::logn(level::level_enum lvl, const char *msg, size_t
+     try
+     {
+         details::log_msg log_msg(&name_, lvl);
+-        log_msg.c_string = fmt::string_view(msg, msg_len);
++        details::fmt_helper::append_c_str(msg, log_msg.raw);
+         sink_it_(log_msg);
+     }
+     SPDLOG_CATCH_AND_HANDLE
+diff --git a/include/spdlog/details/pattern_formatter.h b/include/spdlog/details/pattern_formatter.h
+index a8afa2b3..f5a8406e 100644
+--- a/include/spdlog/details/pattern_formatter.h
++++ b/include/spdlog/details/pattern_formatter.h
+@@ -401,7 +401,7 @@ class v_formatter final : public flag_formatter
+ {
+     void format(const details::log_msg &msg, const std::tm &, fmt::memory_buffer &dest) override
+     {
+-        fmt_helper::append_msg(msg, dest);
++        fmt_helper::append_buf(msg.raw, dest);
+     }
+ };
+ 
+@@ -524,7 +524,7 @@ class full_formatter final : public flag_formatter
+         msg.color_range_end = dest.size();
+         dest.push_back(']');
+         dest.push_back(' ');
+-        fmt_helper::append_msg(msg, dest);
++        fmt_helper::append_buf(msg.raw, dest);
+     }
+ 
+ private:
+diff --git a/include/spdlog/details/thread_pool.h b/include/spdlog/details/thread_pool.h
+index b886e42f..0c716c3b 100644
+--- a/include/spdlog/details/thread_pool.h
++++ b/include/spdlog/details/thread_pool.h
+@@ -1,6 +1,5 @@
+ #pragma once
+ 
+-#include "spdlog/details/fmt_helper.h"
+ #include "spdlog/details/log_msg.h"
+ #include "spdlog/details/mpmc_blocking_q.h"
+ #include "spdlog/details/os.h"
+@@ -78,7 +77,7 @@ struct async_msg
+         , msg_id(m.msg_id)
+         , worker_ptr(std::move(worker))
+     {
+-        fmt_helper::append_msg(m, raw);
++        fmt_helper::append_buf(m.raw, raw);
+     }
+ 
+     async_msg(async_logger_ptr &&worker, async_msg_type the_type)
+diff --git a/include/spdlog/logger.h b/include/spdlog/logger.h
+index 289296fd..1bcf4bc2 100644
+--- a/include/spdlog/logger.h
++++ b/include/spdlog/logger.h
+@@ -46,10 +46,9 @@ public:
+     template<typename... Args>
+     void log(level::level_enum lvl, const char *fmt, const Args &... args);
+ 
++    template<typename... Args>
+     void log(level::level_enum lvl, const char *msg);
+ 
+-    void logn(level::level_enum lvl, const char *msg, size_t msg_len);
+-
+     template<typename... Args>
+     void trace(const char *fmt, const Args &... args);
+ 
+diff --git a/include/spdlog/sinks/android_sink.h b/include/spdlog/sinks/android_sink.h
+index 86837db9..8c3383c1 100644
+--- a/include/spdlog/sinks/android_sink.h
++++ b/include/spdlog/sinks/android_sink.h
+@@ -47,7 +47,7 @@ protected:
+         fmt::memory_buffer formatted;
+         if (use_raw_msg_)
+         {
+-            details::fmt_helper::append_msg(msg, formatted);
++            details::fmt_helper::append_buf(msg.raw, formatted);
+         }
+         else
+         {
+diff --git a/include/spdlog/sinks/syslog_sink.h b/include/spdlog/sinks/syslog_sink.h
+index 36537e77..cb76613d 100644
+--- a/include/spdlog/sinks/syslog_sink.h
++++ b/include/spdlog/sinks/syslog_sink.h
+@@ -53,12 +53,7 @@ public:
+ protected:
+     void sink_it_(const details::log_msg &msg) override
+     {
+-        if (msg.c_string.data() != nullptr)
+-        {
+-            ::syslog(syslog_prio_from_level(msg), "%.*s", static_cast<int>(msg.c_string.size()), msg.c_string.data());
+-        } else {
+-            ::syslog(syslog_prio_from_level(msg), "%s", fmt::to_string(msg.raw).c_str());
+-        }
++        ::syslog(syslog_prio_from_level(msg), "%s", fmt::to_string(msg.raw).c_str());
+     }
+ 
+     void flush_() override {}
+diff --git a/tests/test_misc.cpp b/tests/test_misc.cpp
+index 5b3b427b..f69a3487 100644
+--- a/tests/test_misc.cpp
++++ b/tests/test_misc.cpp
+@@ -231,22 +231,3 @@ TEST_CASE("default logger API", "[default logger]")
+     spdlog::drop_all();
+     spdlog::set_pattern("%v");
+ }
+-
+-TEST_CASE("C string", "[c_string]")
+-{
+-    std::ostringstream oss;
+-    auto oss_sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(oss);
+-
+-    spdlog::logger oss_logger("oss", oss_sink);
+-    oss_logger.set_level(spdlog::level::debug);
+-    oss_logger.set_pattern("*** %v");
+-
+-    const char *test_string = "Lorem ipsum dolor sit amet, consectetur adipiscing elit massa nunc";
+-
+-    oss_logger.log(spdlog::level::debug, test_string);
+-    REQUIRE(oss.str() == "*** " + std::string(test_string) + std::string(spdlog::details::os::default_eol));
+-
+-    oss.str("");
+-    oss_logger.logn(spdlog::level::debug, test_string, 11);
+-    REQUIRE(oss.str() == "*** " + std::string(test_string, 11) + std::string(spdlog::details::os::default_eol));
+-}

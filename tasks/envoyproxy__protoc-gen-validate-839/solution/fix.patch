@@ -1,0 +1,110 @@
+diff --git a/templates/cc/register.go b/templates/cc/register.go
+index 4881de0..e376be8 100644
+--- a/templates/cc/register.go
++++ b/templates/cc/register.go
+@@ -295,6 +295,20 @@ func (fns CCFuncs) inType(f pgs.Field, x interface{}) string {
+ 		default:
+ 			return fns.className(f.Type().Element().Embed())
+ 		}
++	case pgs.EnumT:
++		var fldEn = f.Type().Enum()
++		if f.Type().IsRepeated() {
++			fldEn = f.Type().Element().Enum()
++		}
++
++		if fns.ImportPath(f) == fns.ImportPath(fldEn) {
++			if f.Type().IsRepeated() {
++				return fns.cTypeOfString(fns.Type(f).Value().String()[2:])
++			}
++			return fns.cTypeOfString(fns.Type(f).Value().String())
++		}
++
++		return fns.PackageName(fldEn).String() + "::" + fns.Type(f).Value().String()
+ 	default:
+ 		return fns.cType(f.Type())
+ 	}
+@@ -355,7 +369,7 @@ func (fns CCFuncs) inKey(f pgs.Field, x interface{}) string {
+ 			return fns.lit(x)
+ 		}
+ 	case pgs.EnumT:
+-		return fmt.Sprintf("%s(%d)", fns.cType(f.Type()), x.(int32))
++		return fmt.Sprintf("%s(%d)", fns.inType(f, x), x.(int32))
+ 	default:
+ 		return fns.lit(x)
+ 	}
+@@ -429,7 +443,8 @@ func (fns CCFuncs) output(file pgs.File, ext string) string {
+ func (fns CCFuncs) Type(f pgs.Field) pgsgo.TypeName {
+ 	typ := fns.Context.Type(f)
+ 
+-	if f.Type().IsEnum() {
++	// Adaptation of repeated types
++	if f.Type().ProtoType() == pgs.EnumT {
+ 		parts := strings.Split(typ.String(), ".")
+ 		typ = pgsgo.TypeName(parts[len(parts)-1])
+ 	}
+diff --git a/templates/goshared/register.go b/templates/goshared/register.go
+index 12b975a..6e3a52b 100644
+--- a/templates/goshared/register.go
++++ b/templates/goshared/register.go
+@@ -223,6 +223,22 @@ func (fns goSharedFuncs) inType(f pgs.Field, x interface{}) string {
+ 			return pgsgo.TypeName(fmt.Sprintf("%T", x)).Element().String()
+ 		}
+ 	case pgs.EnumT:
++		ens := fns.enumPackages(fns.externalEnums(f.File()))
++		// Check if the imported name of the enum has collided and been renamed
++		if len(ens) != 0 {
++			var enType = f.Type().Enum()
++			if f.Type().IsRepeated() {
++				enType = f.Type().Element().Enum()
++			}
++
++			enImportPath := fns.ImportPath(enType)
++			for pkg, en := range ens {
++				if en.FilePath == enImportPath {
++					return pkg.String() + "." + fns.enumName(enType)
++				}
++			}
++		}
++
+ 		if f.Type().IsRepeated() {
+ 			return strings.TrimLeft(fns.Type(f).String(), "[]")
+ 		} else {
+@@ -320,7 +336,7 @@ func (fns goSharedFuncs) externalEnums(file pgs.File) []pgs.Enum {
+ 				en = fld.Type().Element().Enum()
+ 			}
+ 
+-			if en != nil && en.Package().ProtoName() != fld.Package().ProtoName() && fns.PackageName(en) != fns.PackageName(fld) {
++			if en != nil && en.File().Package().ProtoName() != msg.File().Package().ProtoName() {
+ 				out = append(out, en)
+ 			}
+ 		}
+@@ -352,21 +368,27 @@ func (fns goSharedFuncs) enumPackages(enums []pgs.Enum) map[pgs.Name]NormalizedE
+ 	out := make(map[pgs.Name]NormalizedEnum, len(enums))
+ 
+ 	nameCollision := make(map[pgs.Name]int)
++	nameNormalized := make(map[pgs.FilePath]struct{})
+ 
+ 	for _, en := range enums {
++		enImportPath := fns.ImportPath(en)
++		if _, ok := nameNormalized[enImportPath]; ok {
++			continue
++		}
+ 
+ 		pkgName := fns.PackageName(en)
+ 
+ 		if normalized, ok := out[pkgName]; ok {
+-			if normalized.FilePath != fns.ImportPath(en) {
++			if normalized.FilePath != enImportPath {
+ 				nameCollision[pkgName] = nameCollision[pkgName] + 1
+ 				pkgName = pkgName + pgs.Name(strconv.Itoa(nameCollision[pkgName]))
+ 			}
+ 		}
+ 
++		nameNormalized[enImportPath] = struct{}{}
+ 		out[pkgName] = NormalizedEnum{
+ 			Name:     fns.enumName(en),
+-			FilePath: fns.ImportPath(en),
++			FilePath: enImportPath,
+ 		}
+ 
+ 	}

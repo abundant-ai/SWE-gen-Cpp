@@ -1,0 +1,322 @@
+diff --git a/.gitmodules b/.gitmodules
+new file mode 100644
+index 00000000..0a9050b3
+--- /dev/null
++++ b/.gitmodules
+@@ -0,0 +1,12 @@
++[submodule "vendor/zf_log"]
++	path = vendor/zf_log
++	url = https://github.com/wonder-mice/zf_log.git
++[submodule "vendor/glog"]
++	path = vendor/glog
++	url = https://github.com/google/glog.git
++[submodule "vendor/easyloggingpp"]
++	path = vendor/easyloggingpp
++	url = https://github.com/easylogging/easyloggingpp.git
++[submodule "vendor/g3log"]
++	path = vendor/g3log
++	url = https://github.com/KjellKod/g3log.git
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f11d7327..4c85f7ca 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,6 +12,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ add_library(spdlog INTERFACE)
+ 
+ option(SPDLOG_BUILD_EXAMPLES "Build examples" OFF)
++option(SPDLOG_BUILD_TESTS "Build tests" OFF)
++option(SPDLOG_BUILD_BENCHMARKS "Build comparison benchmarks for various logging libraries" OFF)
+ 
+ target_include_directories(
+     spdlog
+@@ -20,9 +22,20 @@ target_include_directories(
+     "$<INSTALL_INTERFACE:include>"
+ )
+ 
++set(HEADER_BASE "${CMAKE_CURRENT_SOURCE_DIR}/include")
++
++include(CTest)
+ if(SPDLOG_BUILD_EXAMPLES)
+-  enable_testing()
+-  add_subdirectory(example)
++    add_subdirectory(example)
++endif()
++
++if(SPDLOG_BUILD_TESTS)
++    add_subdirectory(tests)
++endif()
++
++if(SPDLOG_BUILD_BENCHMARKS)
++    add_subdirectory(vendor)
++    add_subdirectory(bench)
+ endif()
+ 
+ ### Install ###
+diff --git a/bench/CMakeLists.txt b/bench/CMakeLists.txt
+new file mode 100644
+index 00000000..563f5b65
+--- /dev/null
++++ b/bench/CMakeLists.txt
+@@ -0,0 +1,73 @@
++#
++# Benchmarks against various logging systems
++#
++
++#
++# Dependencies
++#
++
++find_package(Threads)
++
++enable_testing()
++
++# Helper function for building benchmark programs
++function(add_benchmark _target)
++    set(options "") # no options
++    set(singleValueArgs "") # no single-value arguments
++    set(multiValueArgs LIBS SOURCES INCLUDES DEFINITIONS) # lists of additional libraries, source files, and include directories
++    cmake_parse_arguments(_benchmark "${options}" "${singleValueArgs}" "${multiValueArgs}" ${ARGN})
++
++    add_executable(${_target} ${_target}.cpp ${_benchmark_SOURCES})
++    target_include_directories(
++        ${_target}
++        PUBLIC
++        ${HEADER_BASE}
++        ${_benchmark_INCLUDES}
++    )
++
++    target_link_libraries(
++        ${_target}
++        ${CMAKE_THREAD_LIBS_INIT}
++        ${_benchmark_LIBS}
++    )
++
++    if(_benchmark_DEFINITIONS)
++        target_compile_definitions(${_target} PUBLIC ${_benchmark_DEFINITIONS})
++    endif()
++
++    add_test(NAME test_benchmark_${_target} COMMAND ${_target})
++endfunction()
++
++# Benchmark programs
++add_benchmark(spdlog-bench)
++add_benchmark(spdlog-bench-mt)
++add_benchmark(spdlog-async)
++
++if(TARGET zf_log)
++    add_benchmark(zf_log-bench LIBS zf_log)
++    add_benchmark(zf_log-bench-mt LIBS zf_log)
++endif()
++
++find_package(Boost QUIET COMPONENTS log)
++if(Boost_FOUND)
++    set(BOOST_DEFS "-DBOOST_LOG_DYN_LINK=1")
++    add_benchmark(boost-bench LIBS ${Boost_LIBRARIES} INCLUDES ${Boost_INCLUDE_DIRS} DEFINITIONS ${BOOST_DEFS})
++    add_benchmark(boost-bench-mt LIBS ${Boost_LIBRARIES} INCLUDES ${Boost_INCLUDE_DIRS} DEFINITIONS ${BOOST_DEFS})
++endif()
++
++if(TARGET glog)
++    add_benchmark(glog-bench LIBS glog)
++    add_benchmark(glog-bench-mt LIBS glog)
++endif()
++
++if(TARGET g3logger)
++    add_benchmark(g3log-async LIBS g3logger INCLUDES "${g3log_SOURCE_DIR}/src")
++endif()
++
++if(TARGET easylogging)
++    add_benchmark(easylogging-bench LIBS easylogging)
++    add_benchmark(easylogging-bench-mt LIBS easylogging)
++endif()
++
++file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/logs")
++
+diff --git a/bench/easylogging-bench-mt.cpp b/bench/easylogging-bench-mt.cpp
+index 98d1ae35..18d81618 100644
+--- a/bench/easylogging-bench-mt.cpp
++++ b/bench/easylogging-bench-mt.cpp
+@@ -9,7 +9,7 @@
+ 
+ #define _ELPP_THREAD_SAFE
+ #include "easylogging++.h"
+-_INITIALIZE_EASYLOGGINGPP
++INITIALIZE_EASYLOGGINGPP
+ 
+ using namespace std;
+ 
+diff --git a/bench/easylogging-bench.cpp b/bench/easylogging-bench.cpp
+index a952cbd5..fa20032e 100644
+--- a/bench/easylogging-bench.cpp
++++ b/bench/easylogging-bench.cpp
+@@ -6,7 +6,7 @@
+ 
+ #include "easylogging++.h"
+ 
+-_INITIALIZE_EASYLOGGINGPP
++INITIALIZE_EASYLOGGINGPP
+ 
+ int main(int, char* [])
+ {
+diff --git a/bench/g3log-async.cpp b/bench/g3log-async.cpp
+new file mode 100644
+index 00000000..f1e5c17f
+--- /dev/null
++++ b/bench/g3log-async.cpp
+@@ -0,0 +1,63 @@
++//
++// Copyright(c) 2015 Gabi Melman.
++// Distributed under the MIT License (http://opensource.org/licenses/MIT)
++//
++
++#include <thread>
++#include <vector>
++#include <atomic>
++#include <iostream>
++#include <chrono>
++
++#include <g3log/logworker.hpp>
++#include <g3log/g3log.hpp>
++
++using namespace std;
++template<typename T> std::string format(const T& value);
++
++int main(int argc, char* argv[])
++{
++    using namespace std::chrono;
++    using clock=steady_clock;
++    int thread_count = 10;
++
++    if(argc > 1)
++        thread_count = atoi(argv[1]);
++    int howmany = 1000000;
++
++    auto g3log = g3::LogWorker::createLogWorker();
++    auto defaultHandler = g3log->addDefaultLogger(argv[0], "logs");
++    g3::initializeLogging(g3log.get());
++
++
++    std::atomic<int > msg_counter {0};
++    vector<thread> threads;
++    auto start = clock::now();
++    for (int t = 0; t < thread_count; ++t)
++    {
++        threads.push_back(std::thread([&]()
++        {
++            while (true)
++            {
++                int counter = ++msg_counter;
++                if (counter > howmany) break;
++                LOG(INFO) << "g3log message #" << counter << ": This is some text for your pleasure";
++            }
++        }));
++    }
++
++
++    for(auto &t:threads)
++    {
++        t.join();
++    };
++
++    duration<float> delta = clock::now() - start;
++    float deltaf = delta.count();
++    auto rate = howmany/deltaf;
++
++    cout << "Total: " << howmany << std::endl;
++    cout << "Threads: " << thread_count << std::endl;
++    std::cout << "Delta = " << deltaf << " seconds" << std::endl;
++    std::cout << "Rate = " << rate << "/sec" << std::endl;
++}
+diff --git a/bench/zf_log-bench-mt.cpp b/bench/zf_log-bench-mt.cpp
+index aace2770..12cb48ac 100644
+--- a/bench/zf_log-bench-mt.cpp
++++ b/bench/zf_log-bench-mt.cpp
+@@ -9,7 +9,7 @@
+ const char g_path[] = "logs/zf_log.txt";
+ int g_fd;
+ 
+-static void output_callback(zf_log_message *msg)
++static void output_callback(const zf_log_message* msg, void* arg)
+ {
+     *msg->p = '\n';
+     write(g_fd, msg->buf, msg->p - msg->buf + 1);
+@@ -25,7 +25,7 @@ int main(int argc, char* argv[])
+         ZF_LOGE_AUX(ZF_LOG_STDERR, "Failed to open log file: %s", g_path);
+         return -1;
+     }
+-    zf_log_set_output_callback(ZF_LOG_PUT_STD, output_callback);
++    ZF_LOG_DEFINE_GLOBAL_OUTPUT = {ZF_LOG_PUT_STD, nullptr, &output_callback};
+ 
+     int thread_count = 10;
+     if(argc > 1)
+diff --git a/bench/zf_log-bench.cpp b/bench/zf_log-bench.cpp
+index a6e3e1ff..d6024cf5 100644
+--- a/bench/zf_log-bench.cpp
++++ b/bench/zf_log-bench.cpp
+@@ -4,7 +4,7 @@
+ const char g_path[] = "logs/zf_log.txt";
+ static FILE *g_f;
+ 
+-static void output_callback(zf_log_message *msg)
++static void output_callback(const zf_log_message* msg, void* arg)
+ {
+     *msg->p = '\n';
+     fwrite(msg->buf, msg->p - msg->buf + 1, 1, g_f);
+@@ -18,7 +18,7 @@ int main(int, char* [])
+         ZF_LOGE_AUX(ZF_LOG_STDERR, "Failed to open log file: %s", g_path);
+         return -1;
+     }
+-    zf_log_set_output_callback(ZF_LOG_PUT_STD, output_callback);
++    ZF_LOG_DEFINE_GLOBAL_OUTPUT = {ZF_LOG_PUT_STD, nullptr, &output_callback};
+ 
+     const int howmany = 1000000;
+     for(int i  = 0 ; i < howmany; ++i)
+diff --git a/example/CMakeLists.txt b/example/CMakeLists.txt
+index 6ef158e1..5abefefb 100644
+--- a/example/CMakeLists.txt
++++ b/example/CMakeLists.txt
+@@ -21,29 +21,16 @@
+ # * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                */
+ # *************************************************************************/
+ 
+-cmake_minimum_required(VERSION 3.0)
+-project(SpdlogExamples)
+-
+-if(TARGET spdlog)
+-  # Part of the main project
+-  add_library(spdlog::spdlog ALIAS spdlog)
+-else()
+-  # Stand-alone build
+-  find_package(spdlog CONFIG REQUIRED)
+-endif()
+-
+-if (CMAKE_COMPILER_IS_GNUCXX)
+-  set ( CMAKE_CXX_FLAGS "--std=c++11 -pthread")  
+-  set ( CMAKE_EXE_LIKKER_FLAGS "-pthread")  
+-endif ()
++find_package(Threads)
+ 
+ add_executable(example example.cpp)
+-target_link_libraries(example spdlog::spdlog)
++target_link_libraries(example spdlog ${CMAKE_THREAD_LIBS_INIT})
+ 
+ add_executable(benchmark bench.cpp)
+-target_link_libraries(benchmark spdlog::spdlog)
++target_link_libraries(benchmark spdlog ${CMAKE_THREAD_LIBS_INIT})
+ 
+ enable_testing()
+ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/logs")
+ add_test(NAME RunExample COMMAND example)
+ add_test(NAME RunBenchmark COMMAND benchmark)
++
+diff --git a/include/spdlog/sinks/stdout_sinks.h b/include/spdlog/sinks/stdout_sinks.h
+index ca4c55ac..1921bce2 100644
+--- a/include/spdlog/sinks/stdout_sinks.h
++++ b/include/spdlog/sinks/stdout_sinks.h
+@@ -5,6 +5,7 @@
+ 
+ #pragma once
+ 
++#include <spdlog/sinks/base_sink.h>
+ #include <spdlog/details/null_mutex.h>
+ 
+ #include <cstdio>

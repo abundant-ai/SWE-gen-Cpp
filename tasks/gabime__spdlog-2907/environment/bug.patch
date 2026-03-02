@@ -1,0 +1,253 @@
+diff --git a/include/spdlog/mdc.h b/include/spdlog/mdc.h
+deleted file mode 100644
+index c70da856..00000000
+--- a/include/spdlog/mdc.h
++++ /dev/null
+@@ -1,31 +0,0 @@
+-#include <spdlog/common.h>
+-#include <map>
+-
+-namespace spdlog {
+-
+-class SPDLOG_API mdc {
+-public:
+-    static void put(const std::string &key, const std::string &value) {
+-        get_context()[key] = value;
+-    }
+-
+-    static std::string get(const std::string &key) {
+-        auto &context = get_context();
+-        auto it = context.find(key);
+-        if (it != context.end()) {
+-            return it->second;
+-        }
+-        return "";
+-    }
+-
+-    static void remove(const std::string &key) { get_context().erase(key); }
+-
+-    static void clear() { get_context().clear(); }
+-
+-    static std::map<std::string, std::string> &get_context() {
+-        static thread_local std::map<std::string, std::string> context;
+-        return context;
+-    }
+-};
+-
+-}  // namespace spdlog
+\ No newline at end of file
+diff --git a/include/spdlog/pattern_formatter-inl.h b/include/spdlog/pattern_formatter-inl.h
+index ca835b01..a5875a11 100644
+--- a/include/spdlog/pattern_formatter-inl.h
++++ b/include/spdlog/pattern_formatter-inl.h
+@@ -10,7 +10,6 @@
+ #include <spdlog/details/fmt_helper.h>
+ #include <spdlog/details/log_msg.h>
+ #include <spdlog/details/os.h>
+-#include <spdlog/mdc.h>
+ #include <spdlog/fmt/fmt.h>
+ #include <spdlog/formatter.h>
+ 
+@@ -868,43 +867,6 @@ private:
+     memory_buf_t cached_datetime_;
+ };
+ 
+-// Class for formatting Mapped Diagnostic Context (MDC) in log messages.
+-// Example: [logger-name] [info] [mdc_key_1:mdc_value_1 mdc_key_2:mdc_value_2] some message
+-template <typename ScopedPadder>
+-class mdc_formatter : public flag_formatter {
+-public:
+-    explicit mdc_formatter(padding_info padinfo)
+-        : flag_formatter(padinfo) {}
+-
+-    void format(const details::log_msg &, const std::tm &, memory_buf_t &dest) override {
+-        auto mdc_map = mdc::get_context();
+-        if (mdc_map.empty()) {
+-            ScopedPadder p(0, padinfo_, dest);
+-            return;
+-        } else {
+-            auto last_element = --mdc_map.end();
+-            for (auto it = mdc_map.begin(); it != mdc_map.end(); ++it) {
+-                auto &pair = *it;
+-                const auto &key = pair.first;
+-                const auto &value = pair.second;
+-                size_t content_size = key.size() + value.size() + 1;  // 1 for ':'
+-
+-                if (it != last_element) {
+-                    content_size++;  // 1 for ' '
+-                }
+-
+-                ScopedPadder p(content_size, padinfo_, dest);
+-                fmt_helper::append_string_view(key, dest);
+-                fmt_helper::append_string_view(":", dest);
+-                fmt_helper::append_string_view(value, dest);
+-                if (it != last_element) {
+-                    fmt_helper::append_string_view(" ", dest);
+-                }
+-            }
+-        }
+-    }
+-};
+-
+ }  // namespace details
+ 
+ SPDLOG_INLINE pattern_formatter::pattern_formatter(std::string pattern,
+@@ -1197,10 +1159,6 @@ SPDLOG_INLINE void pattern_formatter::handle_flag_(char flag, details::padding_i
+                     padding));
+             break;
+ 
+-        case ('&'):
+-            formatters_.push_back(details::make_unique<details::mdc_formatter<Padder>>(padding));
+-            break;
+-
+         default:  // Unknown flag appears as is
+             auto unknown_flag = details::make_unique<details::aggregate_formatter>();
+ 
+diff --git a/tests/includes.h b/tests/includes.h
+index 14e988b9..8514d642 100644
+--- a/tests/includes.h
++++ b/tests/includes.h
+@@ -26,7 +26,6 @@
+ #include "spdlog/spdlog.h"
+ #include "spdlog/async.h"
+ #include "spdlog/details/fmt_helper.h"
+-#include "spdlog/mdc.h"
+ #include "spdlog/sinks/basic_file_sink.h"
+ #include "spdlog/sinks/daily_file_sink.h"
+ #include "spdlog/sinks/null_sink.h"
+diff --git a/tests/test_pattern_formatter.cpp b/tests/test_pattern_formatter.cpp
+index c0eaa111..350b973b 100644
+--- a/tests/test_pattern_formatter.cpp
++++ b/tests/test_pattern_formatter.cpp
+@@ -500,131 +500,3 @@ TEST_CASE("override need_localtime", "[pattern_formatter]") {
+         REQUIRE(to_string_view(formatted) == oss.str());
+     }
+ }
+-
+-TEST_CASE("mdc formatter test-1", "[pattern_formatter]") {
+-    spdlog::mdc::put("mdc_key_1", "mdc_value_1");
+-    spdlog::mdc::put("mdc_key_2", "mdc_value_2");
+-
+-    auto formatter = std::make_shared<spdlog::pattern_formatter>();
+-    formatter->set_pattern("[%n] [%l] [%&] %v");
+-
+-    memory_buf_t formatted;
+-    spdlog::details::log_msg msg(spdlog::source_loc{}, "logger-name", spdlog::level::info,
+-                                 "some message");
+-    formatter->format(msg, formatted);
+-
+-    auto expected = spdlog::fmt_lib::format(
+-        "[logger-name] [info] [mdc_key_1:mdc_value_1 mdc_key_2:mdc_value_2] some message{}",
+-        spdlog::details::os::default_eol);
+-    REQUIRE(to_string_view(formatted) == expected);
+-
+-    SECTION("Tear down") { spdlog::mdc::clear(); }
+-}
+-
+-TEST_CASE("mdc formatter value update", "[pattern_formatter]") {
+-    spdlog::mdc::put("mdc_key_1", "mdc_value_1");
+-    spdlog::mdc::put("mdc_key_2", "mdc_value_2");
+-
+-    auto formatter = std::make_shared<spdlog::pattern_formatter>();
+-    formatter->set_pattern("[%n] [%l] [%&] %v");
+-
+-    memory_buf_t formatted_1;
+-    spdlog::details::log_msg msg(spdlog::source_loc{}, "logger-name", spdlog::level::info,
+-                                 "some message");
+-    formatter->format(msg, formatted_1);
+-
+-    auto expected = spdlog::fmt_lib::format(
+-        "[logger-name] [info] [mdc_key_1:mdc_value_1 mdc_key_2:mdc_value_2] some message{}",
+-        spdlog::details::os::default_eol);
+-
+-    REQUIRE(to_string_view(formatted_1) == expected);
+-
+-    spdlog::mdc::put("mdc_key_1", "new_mdc_value_1");
+-    memory_buf_t formatted_2;
+-    formatter->format(msg, formatted_2);
+-    expected = spdlog::fmt_lib::format(
+-        "[logger-name] [info] [mdc_key_1:new_mdc_value_1 mdc_key_2:mdc_value_2] some message{}",
+-        spdlog::details::os::default_eol);
+-
+-    REQUIRE(to_string_view(formatted_2) == expected);
+-
+-    SECTION("Tear down") { spdlog::mdc::clear(); }
+-}
+-
+-TEST_CASE("mdc different threads", "[pattern_formatter]") {
+-    auto formatter = std::make_shared<spdlog::pattern_formatter>();
+-    formatter->set_pattern("[%n] [%l] [%&] %v");
+-    spdlog::details::log_msg msg(spdlog::source_loc{}, "logger-name", spdlog::level::info,
+-                                 "some message");
+-
+-    memory_buf_t formatted_2;
+-
+-    auto lambda_1 = [formatter, msg]() {
+-        spdlog::mdc::put("mdc_key", "thread_1_id");
+-        memory_buf_t formatted;
+-        formatter->format(msg, formatted);
+-
+-        auto expected =
+-            spdlog::fmt_lib::format("[logger-name] [info] [mdc_key:thread_1_id] some message{}",
+-                                    spdlog::details::os::default_eol);
+-
+-        REQUIRE(to_string_view(formatted) == expected);
+-    };
+-
+-    auto lambda_2 = [formatter, msg]() {
+-        spdlog::mdc::put("mdc_key", "thread_2_id");
+-        memory_buf_t formatted;
+-        formatter->format(msg, formatted);
+-
+-        auto expected =
+-            spdlog::fmt_lib::format("[logger-name] [info] [mdc_key:thread_2_id] some message{}",
+-                                    spdlog::details::os::default_eol);
+-
+-        REQUIRE(to_string_view(formatted) == expected);
+-    };
+-
+-    std::thread thread_1(lambda_1);
+-    std::thread thread_2(lambda_2);
+-
+-    thread_1.join();
+-    thread_2.join();
+-
+-    SECTION("Tear down") { spdlog::mdc::clear(); }
+-}
+-
+-TEST_CASE("mdc remove key", "[pattern_formatter]") {
+-    spdlog::mdc::put("mdc_key_1", "mdc_value_1");
+-    spdlog::mdc::put("mdc_key_2", "mdc_value_2");
+-    spdlog::mdc::remove("mdc_key_1");
+-
+-    auto formatter = std::make_shared<spdlog::pattern_formatter>();
+-    formatter->set_pattern("[%n] [%l] [%&] %v");
+-
+-    memory_buf_t formatted;
+-    spdlog::details::log_msg msg(spdlog::source_loc{}, "logger-name", spdlog::level::info,
+-                                 "some message");
+-    formatter->format(msg, formatted);
+-
+-    auto expected =
+-        spdlog::fmt_lib::format("[logger-name] [info] [mdc_key_2:mdc_value_2] some message{}",
+-                                spdlog::details::os::default_eol);
+-    REQUIRE(to_string_view(formatted) == expected);
+-
+-    SECTION("Tear down") { spdlog::mdc::clear(); }
+-}
+-
+-TEST_CASE("mdc empty", "[pattern_formatter]") {
+-    auto formatter = std::make_shared<spdlog::pattern_formatter>();
+-    formatter->set_pattern("[%n] [%l] [%&] %v");
+-
+-    memory_buf_t formatted;
+-    spdlog::details::log_msg msg(spdlog::source_loc{}, "logger-name", spdlog::level::info,
+-                                 "some message");
+-    formatter->format(msg, formatted);
+-
+-    auto expected = spdlog::fmt_lib::format("[logger-name] [info] [] some message{}",
+-                                            spdlog::details::os::default_eol);
+-    REQUIRE(to_string_view(formatted) == expected);
+-
+-    SECTION("Tear down") { spdlog::mdc::clear(); }
+-}

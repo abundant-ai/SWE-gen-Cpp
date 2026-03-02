@@ -1,0 +1,333 @@
+diff --git a/docs/guides/routes.md b/docs/guides/routes.md
+index 977df25e1..da8e81650 100644
+--- a/docs/guides/routes.md
++++ b/docs/guides/routes.md
+@@ -46,7 +46,7 @@ Alternatively, you can define the response in the body and return it (`#!cpp ([]
+ 
+ For more information on `crow::response` go [here](../../reference/structcrow_1_1response.html).<br><br>
+ 
+-###Return statement
++###return statement
+ A `crow::response` is very strictly tied to a route. If you can have something in a response constructor, you can return it in a handler.<br><br>
+ The main return type is `std::string`. although you could also return a `crow::json::wvalue` or `crow::multipart::message` directly.<br><br>
+ For more information on the specific constructors for a `crow::response` go [here](../../reference/structcrow_1_1response.html).
+@@ -71,6 +71,3 @@ class a : public crow::returnable
+     }
+ }
+ ```
+-
+-##Catchall routes
+-By default, any request that Crow can't find a route for will return a simple 404 response. You can change that to return a default route using the `CROW_CATCHALL_ROUTE(app)` macro. Defining it is identical to a normal route, even when it comes to the `const crow::request&` and `crow::response&` parameters being optional.
+diff --git a/examples/CMakeLists.txt b/examples/CMakeLists.txt
+index f260e9556..aaece1996 100644
+--- a/examples/CMakeLists.txt
++++ b/examples/CMakeLists.txt
+@@ -65,10 +65,6 @@ else ()
+   target_compile_options(example_chat PRIVATE "${compiler_options}")
+   target_link_libraries(example_chat PUBLIC ${REQUIRED_LIBRARIES})
+ 
+-  add_executable(example_catchall example_catchall.cpp)
+-  target_compile_options(example_catchall PRIVATE "${compiler_options}")
+-  target_link_libraries(example_catchall PUBLIC ${REQUIRED_LIBRARIES})
+-
+   add_custom_command(OUTPUT example_chat.html
+     COMMAND ${CMAKE_COMMAND} -E
+     copy ${PROJECT_SOURCE_DIR}/example_chat.html ${CMAKE_CURRENT_BINARY_DIR}/example_chat.html
+diff --git a/examples/example_catchall.cpp b/examples/example_catchall.cpp
+deleted file mode 100644
+index 150ff3f72..000000000
+--- a/examples/example_catchall.cpp
++++ /dev/null
+@@ -1,20 +0,0 @@
+-#define CROW_MAIN
+-#include <crow.h>
+-
+-
+-
+-int main()
+-{
+-    crow::SimpleApp app;
+-
+-    CROW_ROUTE(app, "/")([](){return "Hello";});
+-
+-    //Setting a custom route for any URL that isn't defined, instead of a simple 404.
+-    CROW_CATCHALL_ROUTE(app)
+-            ([](crow::response& res) {
+-                res.body = "The URL does not seem to be correct.";
+-                res.end();
+-            });
+-
+-    app.port(18080).run();
+-}
+diff --git a/include/crow/app.h b/include/crow/app.h
+index 02a82879e..f6582bd9c 100644
+--- a/include/crow/app.h
++++ b/include/crow/app.h
+@@ -26,7 +26,6 @@
+ #else
+ #define CROW_ROUTE(app, url) app.route<crow::black_magic::get_parameter_tag(url)>(url)
+ #endif
+-#define CROW_CATCHALL_ROUTE(app) app.catchall_route()
+ 
+ namespace crow
+ {
+@@ -87,12 +86,6 @@ namespace crow
+             return router_.new_rule_tagged<Tag>(std::move(rule));
+         }
+ 
+-        ///Create a route for any requests without a proper route (**Use CROW_CATCHALL_ROUTE instead**)
+-        CatchallRule& catchall_route()
+-        {
+-            return router_.catchall_rule();
+-        }
+-
+         self_t& signal_clear()
+         {
+             signals_.clear();
+diff --git a/include/crow/routing.h b/include/crow/routing.h
+index bd31ad984..240615d36 100644
+--- a/include/crow/routing.h
++++ b/include/crow/routing.h
+@@ -271,101 +271,6 @@ namespace crow
+         }
+     }
+ 
+-
+-    class CatchallRule
+-    {
+-    public:
+-        CatchallRule(){}
+-
+-        template <typename Func>
+-        typename std::enable_if<black_magic::CallHelper<Func, black_magic::S<>>::value, void>::type
+-        operator()(Func&& f)
+-        {
+-            static_assert(!std::is_same<void, decltype(f())>::value,
+-                "Handler function cannot have void return type; valid return types: string, int, crow::response, crow::returnable");
+-
+-            handler_ = (
+-#ifdef CROW_CAN_USE_CPP14
+-                [f = std::move(f)]
+-#else
+-                [f]
+-#endif
+-                (const request&, response& res){
+-                    res = response(f());
+-                    res.end();
+-                });
+-
+-        }
+-
+-        template <typename Func>
+-        typename std::enable_if<
+-            !black_magic::CallHelper<Func, black_magic::S<>>::value &&
+-            black_magic::CallHelper<Func, black_magic::S<crow::request>>::value,
+-            void>::type
+-        operator()(Func&& f)
+-        {
+-            static_assert(!std::is_same<void, decltype(f(std::declval<crow::request>()))>::value,
+-                "Handler function cannot have void return type; valid return types: string, int, crow::response, crow::returnable");
+-
+-            handler_ = (
+-#ifdef CROW_CAN_USE_CPP14
+-                [f = std::move(f)]
+-#else
+-                [f]
+-#endif
+-                (const crow::request& req, crow::response& res){
+-                    res = response(f(req));
+-                    res.end();
+-                });
+-        }
+-
+-        template <typename Func>
+-        typename std::enable_if<
+-            !black_magic::CallHelper<Func, black_magic::S<>>::value &&
+-            !black_magic::CallHelper<Func, black_magic::S<crow::request>>::value &&
+-            black_magic::CallHelper<Func, black_magic::S<crow::response&>>::value,
+-        void>::type
+-        operator()(Func&& f)
+-        {
+-          static_assert(std::is_same<void, decltype(f(std::declval<crow::response&>()))>::value,
+-                        "Handler function with response argument should have void return type");
+-          handler_ = (
+-#ifdef CROW_CAN_USE_CPP14
+-                [f = std::move(f)]
+-#else
+-                [f]
+-#endif
+-                (const crow::request&, crow::response& res){
+-                  f(res);
+-                });
+-        }
+-
+-        template <typename Func>
+-        typename std::enable_if<
+-            !black_magic::CallHelper<Func, black_magic::S<>>::value &&
+-            !black_magic::CallHelper<Func, black_magic::S<crow::request>>::value &&
+-            !black_magic::CallHelper<Func, black_magic::S<crow::response&>>::value,
+-            void>::type
+-        operator()(Func&& f)
+-        {
+-            static_assert(std::is_same<void, decltype(f(std::declval<crow::request>(), std::declval<crow::response&>()))>::value,
+-                "Handler function with response argument should have void return type");
+-
+-                handler_ = std::move(f);
+-        }
+-
+-        bool has_handler()
+-        {
+-            return (handler_ != nullptr);
+-        }
+-
+-    protected:
+-        friend class Router;
+-    private:
+-        std::function<void(const crow::request&, crow::response&)> handler_;
+-    };
+-
+-
+     /// A rule dealing with websockets.
+ 
+     /// Provides the interface for the user to put in the necessary handlers for a websocket to work.
+@@ -582,7 +487,7 @@ namespace crow
+                 black_magic::CallHelper<Func, black_magic::S<crow::request, Args...>>::value ,
+                 "Handler type is mismatched with URL parameters");
+             static_assert(!std::is_same<void, decltype(f(std::declval<Args>()...))>::value,
+-                "Handler function cannot have void return type; valid return types: string, int, crow::response, crow::returnable");
++                "Handler function cannot have void return type; valid return types: string, int, crow::resposne, crow::json::wvalue");
+ 
+             handler_ = (
+ #ifdef CROW_CAN_USE_CPP14
+@@ -607,7 +512,7 @@ namespace crow
+                 black_magic::CallHelper<Func, black_magic::S<crow::request, Args...>>::value,
+                 "Handler type is mismatched with URL parameters");
+             static_assert(!std::is_same<void, decltype(f(std::declval<crow::request>(), std::declval<Args>()...))>::value,
+-                "Handler function cannot have void return type; valid return types: string, int, crow::response, crow::returnable");
++                "Handler function cannot have void return type; valid return types: string, int, crow::resposne, crow::json::wvalue");
+ 
+             handler_ = (
+ #ifdef CROW_CAN_USE_CPP14
+@@ -1029,7 +934,6 @@ namespace crow
+         std::vector<Node> nodes_;
+     };
+ 
+-
+     /// Handles matching requests to existing rules and upgrade requests.
+     class Router
+     {
+@@ -1057,11 +961,6 @@ namespace crow
+             return *ruleObject;
+         }
+ 
+-        CatchallRule& catchall_rule()
+-        {
+-            return catchall_rule_;
+-        }
+-
+         void internal_add_rule_object(const std::string& rule, BaseRule* ruleObject)
+         {
+             bool has_trailing_slash = false;
+@@ -1260,16 +1159,8 @@ namespace crow
+                     }
+                 }
+ 
+-                if (catchall_rule_.has_handler())
+-                {
+-                    CROW_LOG_DEBUG << "Cannot match rules " << req.url << ". Redirecting to Catchall rule";
+-                    catchall_rule_.handler_(req, res);
+-                }
+-                else
+-                {
+-                    CROW_LOG_DEBUG << "Cannot match rules " << req.url;
+-                    res = response(404);
+-                }
++                CROW_LOG_DEBUG << "Cannot match rules " << req.url;
++                res = response(404);
+                 res.end();
+                 return;
+             }
+@@ -1328,8 +1219,6 @@ namespace crow
+         }
+ 
+     private:
+-        CatchallRule catchall_rule_;
+-
+         struct PerMethod
+         {
+             std::vector<BaseRule*> rules;
+@@ -1340,6 +1229,5 @@ namespace crow
+         };
+         std::array<PerMethod, static_cast<int>(HTTPMethod::InternalMethodCount)> per_methods_;
+         std::vector<std::unique_ptr<BaseRule>> all_rules_;
+-
+     };
+ }
+diff --git a/tests/unittest.cpp b/tests/unittest.cpp
+index 8d5f1829c..16eeabc49 100644
+--- a/tests/unittest.cpp
++++ b/tests/unittest.cpp
+@@ -1750,63 +1750,3 @@ TEST_CASE("zlib_compression")
+     app_deflate.stop();
+     app_gzip.stop();
+ }
+-
+-TEST_CASE("catchall")
+-{
+-    SimpleApp app;
+-    SimpleApp app2;
+-
+-    CROW_ROUTE(app, "/place")([](){return "place";});
+-
+-    CROW_CATCHALL_ROUTE(app)([](){return "!place";});
+-
+-    CROW_ROUTE(app2, "/place")([](){return "place";});
+-
+-    app.validate();
+-    app2.validate();
+-
+-    {
+-      request req;
+-      response res;
+-
+-      req.url = "/place";
+-
+-      app.handle(req, res);
+-
+-      CHECK(200 == res.code);
+-    }
+-
+-    {
+-      request req;
+-      response res;
+-
+-      req.url = "/another_place";
+-
+-      app.handle(req, res);
+-
+-      CHECK(200 == res.code);
+-      CHECK("!place" == res.body);
+-    }
+-
+-    {
+-      request req;
+-      response res;
+-
+-      req.url = "/place";
+-
+-      app2.handle(req, res);
+-
+-      CHECK(200 == res.code);
+-    }
+-
+-    {
+-      request req;
+-      response res;
+-
+-      req.url = "/another_place";
+-
+-      app2.handle(req, res);
+-
+-      CHECK(404 == res.code);
+-    }
+-}

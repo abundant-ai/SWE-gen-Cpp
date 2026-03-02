@@ -1,21 +1,20 @@
-The pub/sub topic functionality should support publishing a message to all subscribers of a topic except the publishing sender, and this behavior must be consistent across normal publishes and wildcard/intersection topic matching.
+The pub/sub TopicTree publish behavior is missing support for excluding the publishing subscriber (“sender”) from receiving its own published message. This causes incorrect delivery semantics when applications publish a message on a topic while also being subscribed to that same topic.
 
-Currently, when publishing with a non-null sender, the sender may still receive its own published message (or sender-exclusion is not correctly applied in all publish paths). This breaks the expected semantics that a publisher can broadcast to a topic while excluding itself.
+When calling `uWS::TopicTree::publish(topic, dataChannels, sender)`, delivery should work as follows:
 
-Update the topic publish API so that when calling `uWS::TopicTree::publish(topic, data, sender)` with `sender != nullptr`, the message is delivered to every subscriber of `topic` except `sender`. When `sender == nullptr`, the message must be delivered to all subscribers.
+- If `sender` is `nullptr`, all subscribers to `topic` must receive the published message.
+- If `sender` is a non-null `uWS::Subscriber*`, every subscriber to `topic` except `sender` must receive the published message. The `sender` must not receive its own message.
 
-This sender-exclusion must hold in these scenarios:
+This exclusion must apply consistently even when multiple subscribers are present and even when the sender is subscribed to the topic.
 
-- Publishing to a topic with no current subscribers should deliver to nobody and must not affect later subscriptions (subscribers added after a publish must not receive old messages).
-- If a subscriber is subscribed to a topic and then calls publish with itself as sender, it must not receive that message.
-- If multiple subscribers are subscribed to the same topic, publishing with one subscriber as sender must deliver the message to all other subscribers but not the sender.
-- Publishing multiple messages in sequence should preserve message ordering per subscriber, and the concatenated payload received by each subscriber must match exactly what was published to them.
-- Sender exclusion must also work when delivery is performed via intersection logic: when iterating delivery using `uWS::Intersection::forSubscriber(...)` and `topicTree->getSenderFor(subscriber)` as the sender context, the delivery callback must not be invoked for the sender itself, while still invoking for other subscribers.
+In addition, when delivering a message to a subscriber via the TopicTree callback mechanism, the callback may use `topicTree->getSenderFor(subscriber)` to obtain the sender associated with that delivery. For correct behavior, `getSenderFor(s)` must reflect the sender passed to `publish` for deliveries produced by that `publish` call (and be `nullptr` when `publish` was called with a null sender).
 
-Example of expected behavior with two subscribers `s1` and `s2` subscribed to the same topic:
+A concrete scenario that must behave correctly:
 
-- `publish("topic", {"A","B"}, nullptr)` => both `s1` and `s2` receive `"A"` on the first channel and `"B"` on the second channel.
-- `publish("topic", {"X","Y"}, s1)` => only `s2` receives `"X"`/`"Y"`; `s1` receives nothing from this publish.
-- `publish("topic", {"M","N"}, s2)` => only `s1` receives `"M"`/`"N"`.
+1) Publish to a topic with no subscribers: nobody receives anything.
+2) Subscribe `s1` to a topic, then publish to that topic with `sender == s1`: `s1` must not receive the message.
+3) Subscribe `s2` to the same topic, then publish with `sender == nullptr`: both `s1` and `s2` must receive the message.
+4) Publish with `sender == s2`: `s1` receives it and `s2` does not.
+5) Publish with `sender == s1`: `s2` receives it and `s1` does not.
 
-The delivery mechanism also exposes a `fin` flag when streaming/segmenting payload. For any given publish stream to a subscriber, `fin == true` must only occur on the last segment, and no additional bytes may arrive for that subscriber after `fin` has been observed for that publish stream.
+The implementation must ensure that message segmentation/iteration over intersections still terminates correctly (i.e., the per-subscriber delivery iterator provides a final segment where `fin == true`, and no additional data is delivered after that final segment).

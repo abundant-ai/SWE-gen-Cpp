@@ -1,0 +1,203 @@
+diff --git a/docs/guides/websockets.md b/docs/guides/websockets.md
+index 94693064d..11ecb645d 100644
+--- a/docs/guides/websockets.md
++++ b/docs/guides/websockets.md
+@@ -4,11 +4,6 @@ To create a websocket in Crow, you need a websocket route.<br>
+ A websocket route differs from a normal route quite a bit. While it uses the same `CROW_ROUTE(app, "/url")` macro, that's about where the similarities end.<br>
+ A websocket route follows the macro with `.websocket()` which is then followed by a series of methods (with handlers inside) for each event. These are (sorted by order of execution):
+ 
+-!!! Warning
+-
+-    By default, Crow allows Clients to send unmasked websocket messages, which is useful for debugging but goes against the protocol specification. Production Crow applications should enforce the protocol by adding `#!cpp #define CROW_ENFORCE_WS_SPEC` to their source code.
+-
+-
+ - `#!cpp onaccept([&](const crow::request&){handler code goes here})` (This handler has to return bool)
+ - `#!cpp onopen([&](crow::websocket::connection& conn){handler code goes here})`
+ - `#!cpp onmessage([&](crow::websocket::connection& conn, const std::string message, bool is_binary){handler code goes here})`
+diff --git a/examples/example.cpp b/examples/example.cpp
+index 2fb29df6f..3218edca1 100644
+--- a/examples/example.cpp
++++ b/examples/example.cpp
+@@ -104,7 +104,7 @@ int main()
+     });
+ 
+     // Same as above, but using crow::status
+-    CROW_ROUTE(app,"/hello_status/<int>")
++    CROW_ROUTE(app,"/hello/<int>")
+     ([](int count){
+         if (count > 100)
+             return crow::response(crow::status::BAD_REQUEST);
+diff --git a/include/crow/settings.h b/include/crow/settings.h
+index bdbd068b0..598ed9543 100644
+--- a/include/crow/settings.h
++++ b/include/crow/settings.h
+@@ -11,9 +11,6 @@
+ /* #ifdef - enables ssl */
+ //#define CROW_ENABLE_SSL
+ 
+-/* #ifdef - enforces section 5.2 and 6.1 of RFC6455 (only accepting masked messages from clients) */
+-//#define CROW_ENFORCE_WS_SPEC
+-
+ /* #define - specifies log level */
+ /*
+     Debug       = 0
+diff --git a/include/crow/websocket.h b/include/crow/websocket.h
+index 18751c009..86120735f 100644
+--- a/include/crow/websocket.h
++++ b/include/crow/websocket.h
+@@ -21,12 +21,12 @@ namespace crow
+         ///A base class for websocket connection.
+ 		struct connection
+ 		{
+-            virtual void send_binary(const std::string& msg)    = 0;
+-            virtual void send_text(const std::string& msg)      = 0;
+-            virtual void send_ping(const std::string& msg)      = 0;
+-            virtual void send_pong(const std::string& msg)      = 0;
++            virtual void send_binary(const std::string& msg) = 0;
++            virtual void send_text(const std::string& msg) = 0;
++            virtual void send_ping(const std::string& msg) = 0;
++            virtual void send_pong(const std::string& msg) = 0;
+             virtual void close(const std::string& msg = "quit") = 0;
+-            virtual std::string get_remote_ip()                 = 0;
++            virtual std::string get_remote_ip() = 0;
+             virtual ~connection(){}
+ 
+             void userdata(void* u) { userdata_ = u; }
+@@ -36,9 +36,6 @@ namespace crow
+             void* userdata_;
+ 		};
+ 
+-        // Modified version of the illustration in RFC6455 Section-5.2
+-        //
+-        //
+         //  0               1               2               3               -byte
+         //  0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 -bit
+         // +-+-+-+-+-------+-+-------------+-------------------------------+
+@@ -57,7 +54,6 @@ namespace crow
+         // + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
+         // |                     Payload Data continued ...                |
+         // +---------------------------------------------------------------+
+-        //
+ 
+         /// A websocket connection.
+ 		template <typename Adaptor>
+@@ -65,6 +61,7 @@ namespace crow
+         {
+ 			public:
+                 /// Constructor for a connection.
++
+                 ///
+                 /// Requires a request with an "Upgrade: websocket" header.<br>
+                 /// Automatically handles the handshake.
+@@ -119,6 +116,7 @@ namespace crow
+                 }
+ 
+                 /// Send a "Ping" message.
++
+                 ///
+                 /// Usually invoked to check if the other point is still online.
+                 void send_ping(const std::string& msg) override
+@@ -132,6 +130,7 @@ namespace crow
+                 }
+ 
+                 /// Send a "Pong" message.
++
+                 ///
+                 /// Usually automatically invoked as a response to a "Ping" message.
+                 void send_pong(const std::string& msg) override
+@@ -167,6 +166,7 @@ namespace crow
+                 }
+ 
+                 /// Send a close signal.
++
+                 ///
+                 /// Sets a flag to destroy the object once the message is sent.
+                 void close(const std::string& msg) override
+@@ -218,6 +218,7 @@ namespace crow
+                 }
+ 
+                 /// Send the HTTP upgrade response.
++
+                 ///
+                 /// Finishes the handshake process, then starts reading messages from the socket.
+                 void start(std::string&& hello)
+@@ -238,6 +239,7 @@ namespace crow
+                 }
+ 
+                 /// Read a websocket message.
++
+                 ///
+                 /// Involves:<br>
+                 /// Handling headers (opcodes, size).<br>
+@@ -274,18 +276,6 @@ namespace crow
+                                         {
+                                             if ((mini_header_ & 0x80) == 0x80)
+                                                 has_mask_ = true;
+-                                            else //if the websocket specification is enforced and the message isn't masked, terminate the connection
+-                                            {
+-#ifndef CROW_ENFORCE_WS_SPEC
+-                                                has_mask_ = false;
+-#else
+-                                                close_connection_ = true;
+-                                                adaptor_.close();
+-                                                if (error_handler_)
+-                                                    error_handler_(*this);
+-                                                check_destroy();
+-#endif
+-                                            }
+ 
+                                             if ((mini_header_ & 0x7f) == 127)
+                                             {
+@@ -471,6 +461,7 @@ namespace crow
+                 }
+ 
+                 /// Process the payload fragment.
++
+                 ///
+                 /// Unmasks the fragment, checks the opcode, merges fragments into 1 message body, and calls the appropriate handler.
+                 void handle_fragment()
+@@ -556,6 +547,7 @@ namespace crow
+                 }
+ 
+                 /// Send the buffers' data through the socket.
++
+                 ///
+                 /// Also destroyes the object if the Close flag is set.
+                 void do_write()
+diff --git a/tests/unittest.cpp b/tests/unittest.cpp
+index 8d84c60e0..5937bff7e 100644
+--- a/tests/unittest.cpp
++++ b/tests/unittest.cpp
+@@ -1909,32 +1909,6 @@ TEST_CASE("websocket")
+     std::string checkstring4(std::string(buf).substr(0, 16));
+     CHECK(checkstring4 == "\x82\x0EHello back bin");
+   }
+-  //----------16bit Length Text----------
+-  {
+-    std::fill_n (buf, 2048, 0);
+-    char b16_text_message[2+2+5+1]("\x81\x7E"
+-        "\x00\x05"
+-        "Hello");
+-
+-    c.send(asio::buffer(b16_text_message, 9));
+-    c.receive(asio::buffer(buf, 2048));
+-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+-    std::string checkstring(std::string(buf).substr(0, 12));
+-    CHECK(checkstring == "\x81\x0AHello back");
+-  }
+-  //----------64bit Length Text----------
+-  {
+-    std::fill_n (buf, 2048, 0);
+-    char b64text_message[2+8+5+1]("\x81\x7F"
+-        "\x00\x00\x00\x00\x00\x00\x00\x05"
+-        "Hello");
+-
+-    c.send(asio::buffer(b64text_message, 15));
+-    c.receive(asio::buffer(buf, 2048));
+-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+-    std::string checkstring(std::string(buf).substr(0, 12));
+-    CHECK(checkstring == "\x81\x0AHello back");
+-  }
+   //----------Close----------
+   {
+     std::fill_n (buf, 2048, 0);

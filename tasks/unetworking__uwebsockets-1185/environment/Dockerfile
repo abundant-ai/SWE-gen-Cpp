@@ -1,13 +1,11 @@
 FROM ubuntu:24.04
 
-# Base system packages (common to all languages)
 RUN apt-get update && apt-get install -y \
     git \
     curl \
     ca-certificates \
     patch \
     build-essential \
-    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -21,15 +19,18 @@ RUN git clone https://github.com/uNetworking/uWebSockets.git src && \
 
 WORKDIR /app/src
 
-# Build uSockets dependency
-RUN cd uSockets && make
+# Build the project and submodules
+RUN make
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+# Reset tracked files so bug.patch applies cleanly
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
+
+# Rebuild after applying bug.patch
+RUN make
 
 RUN rm -rf /app/src/.git
 

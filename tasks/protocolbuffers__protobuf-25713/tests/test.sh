@@ -9,7 +9,7 @@ export CI=true
 mkdir -p "python/google/protobuf/internal"
 cp "/tests/python/google/protobuf/internal/message_test.py" "python/google/protobuf/internal/message_test.py"
 
-# Run the specific Bazel test for message_test
+# Run the specific test for message_test using Bazel
 bazel test //python:message_test --test_output=errors
 test_status=$?
 

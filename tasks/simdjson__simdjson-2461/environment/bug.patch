@@ -1,0 +1,120 @@
+diff --git a/doc/basics.md b/doc/basics.md
+index 118c38b2..bcb52e77 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -1400,9 +1400,6 @@ maps it to parsing code. We call the default constructor,
+ and then assign values to the public members.
+ 
+ 
+-If a key is missing in the JSON document, an error is generated (`NO_SUCH_FIELD`),
+-except if the attribute is of a type like `std::optional` (`simdjson::concepts::optional_type`).
+-
+ #### Special cases
+ 
+ However, there are instances where the construction cannot
+diff --git a/include/simdjson/concepts.h b/include/simdjson/concepts.h
+index c4e207d3..818e9b25 100644
+--- a/include/simdjson/concepts.h
++++ b/include/simdjson/concepts.h
+@@ -122,7 +122,6 @@ concept optional_type = requires(std::remove_cvref_t<T> obj) {
+     } -> std::convertible_to<typename std::remove_cvref_t<T>::value_type>;
+   };
+   { static_cast<bool>(obj) } -> std::same_as<bool>; // convertible to bool
+-  { obj.reset() } noexcept -> std::same_as<void>;
+ };
+ 
+ 
+diff --git a/include/simdjson/generic/ondemand/std_deserialize.h b/include/simdjson/generic/ondemand/std_deserialize.h
+index 2c9f7106..07dc5904 100644
+--- a/include/simdjson/generic/ondemand/std_deserialize.h
++++ b/include/simdjson/generic/ondemand/std_deserialize.h
+@@ -286,26 +286,18 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   } else {
+     SIMDJSON_TRY(val.get_object().get(obj));
+   }
++  error_code e = simdjson::SUCCESS;
+   template for (constexpr auto mem : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
+     if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+-      if constexpr (concepts::optional_type<decltype(out.[:mem:])>) {
+-        // for optional members, it's ok if the key is missing
+-        auto error = obj[key].get(out.[:mem:]);
+-        if (error && error != NO_SUCH_FIELD) {
+-          if(error == NO_SUCH_FIELD) {
+-            out.[:mem:].reset();
+-            continue;
+-          }
+-          return error;
+-        }
+-      } else {
+-        // for non-optional members, the key must be present
+-        SIMDJSON_TRY(obj[key].get(out.[:mem:]));
++      // Note: removed static assert as optional types are now handled generically
++      // as long we are successful or the field is not found, we continue
++      if(e == simdjson::SUCCESS || e == simdjson::NO_SUCH_FIELD) {
++        e = obj[key].get(out.[:mem:]);
+       }
+     }
+   };
+-  return simdjson::SUCCESS;
++  return e;
+ }
+ 
+ // Support for enum deserialization - deserialize from string representation using expand approach from P2996R12
+diff --git a/tests/ondemand/ondemand_convert_tests.cpp b/tests/ondemand/ondemand_convert_tests.cpp
+index 4c8fadd6..bc9c8328 100644
+--- a/tests/ondemand/ondemand_convert_tests.cpp
++++ b/tests/ondemand/ondemand_convert_tests.cpp
+@@ -151,42 +151,13 @@ simdjson::padded_string json_cars =
+     }
+     TEST_SUCCEED();
+   }
+-  struct Player {
+-      std::string username;
+-      int level;
+-      double health;
+-  };
++
+   struct BadPlayer {
+       int username;  // Oops, should be string!
+       int level;
+       double health;
+   };
+-  struct OptionalPlayer {
+-      std::string username;
+-      std::optional<int> level;
+-      double health;
+-  };
+ #if SIMDJSON_STATIC_REFLECTION
+-  bool missing_key_player() {
+-    TEST_START();
+-    std::string json = R"({"username":"Alice","health":100.0})";
+-    simdjson::padded_string padded(json);
+-    Player p;
+-    simdjson::ondemand::parser parser;
+-    auto doc = parser.iterate(padded);
+-    ASSERT_ERROR(doc.get(p), simdjson::NO_SUCH_FIELD);
+-    TEST_SUCCEED();
+-  }
+-  bool missing_key_optional_player() {
+-    TEST_START();
+-    std::string json = R"({"username":"Alice","health":100.0})";
+-    simdjson::padded_string padded(json);
+-    OptionalPlayer p;
+-    simdjson::ondemand::parser parser;
+-    auto doc = parser.iterate(padded);
+-    ASSERT_SUCCESS(doc.get(p));
+-    TEST_SUCCEED();
+-  }
+   bool bad_player() {
+     TEST_START();
+     // username is a string but we declared it as an int
+@@ -507,7 +478,7 @@ bool test_to_vs_from_equivalence() {
+ bool run() {
+   return
+ #if SIMDJSON_STATIC_REFLECTION
+-      missing_key_optional_player() && missing_key_player() && meeting_time_test() && meeting_test() && bad_player() && good_player() && complicated_weather_test() &&
++      meeting_time_test() && meeting_test() && bad_player() && good_player() && complicated_weather_test() &&
+ #endif
+ #if SIMDJSON_SUPPORTS_CONCEPTS
+       simple_no_except() &&

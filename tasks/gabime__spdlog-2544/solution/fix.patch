@@ -1,0 +1,232 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4260a1fe..a66e8405 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -83,7 +83,7 @@ option(SPDLOG_BUILD_WARNINGS "Enable compiler warnings" OFF)
+ 
+ # install options
+ option(SPDLOG_INSTALL "Generate the install target" ${SPDLOG_MASTER_PROJECT})
+-option(SPDLOG_USE_STD_FORMAT "Use std::format instead of fmt library. No compile-time format string checking." OFF)
++option(SPDLOG_USE_STD_FORMAT "Use std::format instead of fmt library." OFF)
+ option(SPDLOG_FMT_EXTERNAL "Use external fmt library instead of bundled" OFF)
+ option(SPDLOG_FMT_EXTERNAL_HO "Use external fmt header-only library instead of bundled" OFF)
+ option(SPDLOG_NO_EXCEPTIONS "Compile with -fno-exceptions. Call abort() on any spdlog exceptions" OFF)
+diff --git a/appveyor.yml b/appveyor.yml
+index 705fbc6b..4ae8cb5e 100644
+--- a/appveyor.yml
++++ b/appveyor.yml
+@@ -92,7 +92,7 @@ environment:
+       WCHAR_FILES: 'OFF'
+       BUILD_EXAMPLE: 'OFF'
+       USE_STD_FORMAT: 'ON'
+-      CXX_STANDARD: 23 # std::format is only available with /std:c++latest at the moment.
++      CXX_STANDARD: 20
+       APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2022
+     - GENERATOR: '"Visual Studio 17 2022" -A x64'
+       BUILD_TYPE: Release
+@@ -102,7 +102,7 @@ environment:
+       WCHAR_FILES: 'ON'
+       BUILD_EXAMPLE: 'OFF'
+       USE_STD_FORMAT: 'ON'
+-      CXX_STANDARD: 23 # std::format is only available with /std:c++latest at the moment.
++      CXX_STANDARD: 20
+       APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2022
+ build_script:
+   - cmd: >-
+diff --git a/include/spdlog/common.h b/include/spdlog/common.h
+index f97fd48c..e69201a8 100644
+--- a/include/spdlog/common.h
++++ b/include/spdlog/common.h
+@@ -17,7 +17,12 @@
+ #include <cstdio>
+ 
+ #ifdef SPDLOG_USE_STD_FORMAT
+-#    include <string_view>
++#    include <version>
++#    if __cpp_lib_format >= 202207L
++#        include <format>
++#    else
++#        include <string_view>
++#    endif
+ #endif
+ 
+ #ifdef SPDLOG_COMPILED_LIB
+@@ -59,14 +64,14 @@
+ #if defined(_MSC_VER) && (_MSC_VER < 1900)
+ #    define SPDLOG_NOEXCEPT _NOEXCEPT
+ #    define SPDLOG_CONSTEXPR
+-#    define SPDLOG_CONSTEXPR_FUNC
++#    define SPDLOG_CONSTEXPR_FUNC inline
+ #else
+ #    define SPDLOG_NOEXCEPT noexcept
+ #    define SPDLOG_CONSTEXPR constexpr
+ #    if __cplusplus >= 201402L
+ #        define SPDLOG_CONSTEXPR_FUNC constexpr
+ #    else
+-#        define SPDLOG_CONSTEXPR_FUNC
++#        define SPDLOG_CONSTEXPR_FUNC inline
+ #    endif
+ #endif
+ 
+@@ -134,7 +139,11 @@ using string_view_t = std::string_view;
+ using memory_buf_t = std::string;
+ 
+ template<typename... Args>
++#    if __cpp_lib_format >= 202207L
++using format_string_t = std::format_string<Args...>;
++#    else
+ using format_string_t = std::string_view;
++#    endif
+ 
+ template<class T, class Char = char>
+ struct is_convertible_to_basic_format_string : std::integral_constant<bool, std::is_convertible<T, std::basic_string_view<Char>>::value>
+@@ -145,7 +154,11 @@ using wstring_view_t = std::wstring_view;
+ using wmemory_buf_t = std::wstring;
+ 
+ template<typename... Args>
++#        if __cpp_lib_format >= 202207L
++using wformat_string_t = std::wformat_string<Args...>;
++#        else
+ using wformat_string_t = std::wstring_view;
++#        endif
+ #    endif
+ #    define SPDLOG_BUF_TO_STRING(x) x
+ #else // use fmt lib instead of std::format
+@@ -323,6 +336,44 @@ struct file_event_handlers
+ 
+ namespace details {
+ 
++// to_string_view
++
++SPDLOG_CONSTEXPR_FUNC spdlog::string_view_t to_string_view(const memory_buf_t &buf) SPDLOG_NOEXCEPT
++{
++    return spdlog::string_view_t{buf.data(), buf.size()};
++}
++
++SPDLOG_CONSTEXPR_FUNC spdlog::string_view_t to_string_view(spdlog::string_view_t str) SPDLOG_NOEXCEPT
++{
++    return str;
++}
++
++#if defined(SPDLOG_WCHAR_FILENAMES) || defined(SPDLOG_WCHAR_TO_UTF8_SUPPORT)
++SPDLOG_CONSTEXPR_FUNC spdlog::wstring_view_t to_string_view(const wmemory_buf_t &buf) SPDLOG_NOEXCEPT
++{
++    return spdlog::wstring_view_t{buf.data(), buf.size()};
++}
++
++SPDLOG_CONSTEXPR_FUNC spdlog::wstring_view_t to_string_view(spdlog::wstring_view_t str) SPDLOG_NOEXCEPT
++{
++    return str;
++}
++#endif
++
++#ifndef SPDLOG_USE_STD_FORMAT
++template<typename T, typename... Args>
++inline fmt::basic_string_view<T> to_string_view(fmt::basic_format_string<T, Args...> fmt)
++{
++    return fmt;
++}
++#elif __cpp_lib_format >= 202207L
++template<typename T, typename... Args>
++SPDLOG_CONSTEXPR_FUNC std::basic_string_view<T> to_string_view(std::basic_format_string<T, Args...> fmt) SPDLOG_NOEXCEPT
++{
++    return fmt.get();
++}
++#endif
++
+ // make_unique support for pre c++14
+ 
+ #if __cplusplus >= 201402L // C++14 and beyond
+diff --git a/include/spdlog/details/fmt_helper.h b/include/spdlog/details/fmt_helper.h
+index d3c355d5..d9867180 100644
+--- a/include/spdlog/details/fmt_helper.h
++++ b/include/spdlog/details/fmt_helper.h
+@@ -18,11 +18,6 @@ namespace spdlog {
+ namespace details {
+ namespace fmt_helper {
+ 
+-inline spdlog::string_view_t to_string_view(const memory_buf_t &buf) SPDLOG_NOEXCEPT
+-{
+-    return spdlog::string_view_t{buf.data(), buf.size()};
+-}
+-
+ inline void append_string_view(spdlog::string_view_t view, memory_buf_t &dest)
+ {
+     auto *buf_ptr = view.data();
+diff --git a/include/spdlog/logger.h b/include/spdlog/logger.h
+index 71544e84..1fafdabd 100644
+--- a/include/spdlog/logger.h
++++ b/include/spdlog/logger.h
+@@ -87,7 +87,7 @@ public:
+     template<typename... Args>
+     void log(source_loc loc, level::level_enum lvl, format_string_t<Args...> fmt, Args &&... args)
+     {
+-        log_(loc, lvl, fmt, std::forward<Args>(args)...);
++        log_(loc, lvl, details::to_string_view(fmt), std::forward<Args>(args)...);
+     }
+ 
+     template<typename... Args>
+@@ -180,7 +180,7 @@ public:
+     template<typename... Args>
+     void log(source_loc loc, level::level_enum lvl, wformat_string_t<Args...> fmt, Args &&... args)
+     {
+-        log_(loc, lvl, fmt, std::forward<Args>(args)...);
++        log_(loc, lvl, details::to_string_view(fmt), std::forward<Args>(args)...);
+     }
+ 
+     template<typename... Args>
+@@ -394,12 +394,8 @@ protected:
+         {
+             // format to wmemory_buffer and convert to utf8
+             wmemory_buf_t wbuf;
+-#    ifdef SPDLOG_USE_STD_FORMAT
+             fmt_lib::vformat_to(
+                 std::back_inserter(wbuf), fmt, fmt_lib::make_format_args<fmt_lib::wformat_context>(std::forward<Args>(args)...));
+-#    else
+-            fmt::vformat_to(std::back_inserter(wbuf), fmt, fmt::make_format_args<fmt::wformat_context>(std::forward<Args>(args)...));
+-#    endif
+ 
+             memory_buf_t buf;
+             details::os::wstr_to_utf8buf(wstring_view_t(wbuf.data(), wbuf.size()), buf);
+@@ -408,27 +404,6 @@ protected:
+         }
+         SPDLOG_LOGGER_CATCH(loc)
+     }
+-
+-    // T can be statically converted to wstring_view, and no formatting needed.
+-    template<class T, typename std::enable_if<std::is_convertible<const T &, spdlog::wstring_view_t>::value, int>::type = 0>
+-    void log_(source_loc loc, level::level_enum lvl, const T &msg)
+-    {
+-        bool log_enabled = should_log(lvl);
+-        bool traceback_enabled = tracer_.enabled();
+-        if (!log_enabled && !traceback_enabled)
+-        {
+-            return;
+-        }
+-        SPDLOG_TRY
+-        {
+-            memory_buf_t buf;
+-            details::os::wstr_to_utf8buf(msg, buf);
+-            details::log_msg log_msg(loc, name_, lvl, string_view_t(buf.data(), buf.size()));
+-            log_it_(log_msg, log_enabled, traceback_enabled);
+-        }
+-        SPDLOG_LOGGER_CATCH(loc)
+-    }
+-
+ #endif // SPDLOG_WCHAR_TO_UTF8_SUPPORT
+ 
+     // log the given message (if the given log level is high enough),
+diff --git a/include/spdlog/tweakme.h b/include/spdlog/tweakme.h
+index 5c118858..5bcb5ff4 100644
+--- a/include/spdlog/tweakme.h
++++ b/include/spdlog/tweakme.h
+@@ -82,8 +82,7 @@
+ ///////////////////////////////////////////////////////////////////////////////
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+-// Uncomment to use C++20 std::format instead of fmt. This removes compile
+-// time checking of format strings, but doesn't depend on the fmt library.
++// Uncomment to use C++20 std::format instead of fmt.
+ //
+ // #define SPDLOG_USE_STD_FORMAT
+ ///////////////////////////////////////////////////////////////////////////////

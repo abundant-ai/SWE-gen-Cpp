@@ -8,7 +8,6 @@
 #include <string>
 #include <type_traits>
 #if __cplusplus >= 202002L
-#  include <array>
 #  include <string_view>
 #endif
 
@@ -179,16 +178,16 @@ TEST(CompileTest, TextAndArg) {
 #if __cplusplus >= 202002L
 template <size_t max_string_length> struct test_string {
   template <typename T> constexpr bool operator==(const T& rhs) const noexcept {
-    return (std::string_view(rhs).compare(buffer.data()) == 0);
+    return (std::string_view(rhs).compare(buffer) == 0);
   }
 
-  std::array<char, max_string_length> buffer{};
+  char buffer[max_string_length]{};
 };
 
 template <size_t max_string_length, typename... Args>
 consteval auto test_format(auto format, const Args&... args) {
   test_string<max_string_length> string{};
-  fmt::format_to(string.buffer.data(), format, args...);
+  fmt::format_to(string.buffer, format, args...);
   return string;
 }
 

@@ -1,0 +1,236 @@
+diff --git a/include/crow/app.h b/include/crow/app.h
+index 9a7e5e980..7b1513a73 100644
+--- a/include/crow/app.h
++++ b/include/crow/app.h
+@@ -252,24 +252,6 @@ namespace crow
+             return *this;
+         }
+ 
+-        /// Set the function to call to handle uncaught exceptions generated in routes (Default generates error 500).
+-
+-        ///
+-        /// The function must have the following signature: void(crow::response&).
+-        /// It must set the response passed in argument to the function, which will be sent back to the client.
+-        /// See Router::default_exception_handler() for the default implementation.
+-        template<typename Func>
+-        self_t& exception_handler(Func&& f)
+-        {
+-            router_.exception_handler() = std::forward<Func>(f);
+-            return *this;
+-        }
+-
+-        std::function<void(crow::response&)>& exception_handler()
+-        {
+-            return router_.exception_handler();
+-        }
+-
+         /// Set a custom duration and function to run on every tick
+         template<typename Duration, typename Func>
+         self_t& tick(Duration d, Func f)
+diff --git a/include/crow/routing.h b/include/crow/routing.h
+index 043294c40..7998e49a4 100644
+--- a/include/crow/routing.h
++++ b/include/crow/routing.h
+@@ -1431,13 +1431,22 @@ namespace crow
+ 
+             CROW_LOG_DEBUG << "Matched rule (upgrade) '" << rules[rule_index]->rule_ << "' " << static_cast<uint32_t>(req.method) << " / " << rules[rule_index]->get_methods();
+ 
++            // any uncaught exceptions become 500s
+             try
+             {
+                 rules[rule_index]->handle_upgrade(req, res, std::move(adaptor));
+             }
++            catch (std::exception& e)
++            {
++                CROW_LOG_ERROR << "An uncaught exception occurred: " << e.what();
++                res = response(500);
++                res.end();
++                return;
++            }
+             catch (...)
+             {
+-                exception_handler_(res);
++                CROW_LOG_ERROR << "An uncaught exception occurred. The type was unknown so no information was available.";
++                res = response(500);
+                 res.end();
+                 return;
+             }
+@@ -1495,14 +1504,7 @@ namespace crow
+                 std::vector<uint16_t> bpi = found.blueprint_indices;
+                 if (bps_found[i]->catchall_rule().has_handler())
+                 {
+-                    try
+-                    {
+-                        bps_found[i]->catchall_rule().handler_(req, res);
+-                    }
+-                    catch (...)
+-                    {
+-                        exception_handler_(res);
+-                    }
++                    bps_found[i]->catchall_rule().handler_(req, res);
+ #ifdef CROW_ENABLE_DEBUG
+                     return std::string("Redirected to Blueprint \"" + bps_found[i]->prefix() + "\" Catchall rule");
+ #else
+@@ -1512,14 +1514,7 @@ namespace crow
+             }
+             if (catchall_rule_.has_handler())
+             {
+-                try
+-                {
+-                    catchall_rule_.handler_(req, res);
+-                }
+-                catch (...)
+-                {
+-                    exception_handler_(res);
+-                }
++                catchall_rule_.handler_(req, res);
+ #ifdef CROW_ENABLE_DEBUG
+                 return std::string("Redirected to global Catchall rule");
+ #else
+@@ -1679,14 +1674,23 @@ namespace crow
+ 
+             CROW_LOG_DEBUG << "Matched rule '" << rules[rule_index]->rule_ << "' " << static_cast<uint32_t>(req.method) << " / " << rules[rule_index]->get_methods();
+ 
++            // any uncaught exceptions become 500s
+             try
+             {
+                 auto& rule = rules[rule_index];
+                 handle_rule<App>(rule, req, res, found.r_params);
+             }
++            catch (std::exception& e)
++            {
++                CROW_LOG_ERROR << "An uncaught exception occurred: " << e.what();
++                res = response(500);
++                res.end();
++                return;
++            }
+             catch (...)
+             {
+-                exception_handler_(res);
++                CROW_LOG_ERROR << "An uncaught exception occurred. The type was unknown so no information was available.";
++                res = response(500);
+                 res.end();
+                 return;
+             }
+@@ -1753,30 +1757,6 @@ namespace crow
+             return blueprints_;
+         }
+ 
+-        std::function<void(crow::response&)>& exception_handler()
+-        {
+-            return exception_handler_;
+-        }
+-
+-        static void default_exception_handler(response& res)
+-        {
+-            // any uncaught exceptions become 500s
+-            res = response(500);
+-
+-            try
+-            {
+-                throw;
+-            }
+-            catch (const std::exception& e)
+-            {
+-                CROW_LOG_ERROR << "An uncaught exception occurred: " << e.what();
+-            }
+-            catch (...)
+-            {
+-                CROW_LOG_ERROR << "An uncaught exception occurred. The type was unknown so no information was available.";
+-            }
+-        }
+-
+     private:
+         CatchallRule catchall_rule_;
+ 
+@@ -1792,6 +1772,5 @@ namespace crow
+         std::array<PerMethod, static_cast<int>(HTTPMethod::InternalMethodCount)> per_methods_;
+         std::vector<std::unique_ptr<BaseRule>> all_rules_;
+         std::vector<Blueprint*> blueprints_;
+-        std::function<void(crow::response&)> exception_handler_ = &default_exception_handler;
+     };
+ } // namespace crow
+diff --git a/tests/unittest.cpp b/tests/unittest.cpp
+index 3b99065cb..b280f07d6 100644
+--- a/tests/unittest.cpp
++++ b/tests/unittest.cpp
+@@ -3221,79 +3221,6 @@ TEST_CASE("blueprint")
+     }
+ } // blueprint
+ 
+-TEST_CASE("exception_handler")
+-{
+-    SimpleApp app;
+-
+-    CROW_ROUTE(app, "/get_error")
+-    ([&]() -> std::string {
+-        throw std::runtime_error("some error occurred");
+-    });
+-
+-    CROW_ROUTE(app, "/get_no_error")
+-    ([&]() {
+-        return "Hello world";
+-    });
+-
+-    app.validate();
+-
+-    {
+-        request req;
+-        response res;
+-
+-        req.url = "/get_error";
+-        app.handle_full(req, res);
+-
+-        CHECK(500 == res.code);
+-        CHECK(res.body.empty());
+-    }
+-
+-    {
+-        request req;
+-        response res;
+-
+-        req.url = "/get_no_error";
+-        app.handle_full(req, res);
+-
+-        CHECK(200 == res.code);
+-        CHECK(res.body.find("Hello world") != std::string::npos);
+-    }
+-
+-    app.exception_handler([](crow::response& res) {
+-        try
+-        {
+-            throw;
+-        }
+-        catch (const std::exception& e)
+-        {
+-            res = response(501, e.what());
+-        }
+-    });
+-
+-    {
+-        request req;
+-        response res;
+-
+-        req.url = "/get_error";
+-        app.handle_full(req, res);
+-
+-        CHECK(501 == res.code);
+-        CHECK(res.body.find("some error occurred") != std::string::npos);
+-    }
+-
+-    {
+-        request req;
+-        response res;
+-
+-        req.url = "/get_no_error";
+-        app.handle_full(req, res);
+-
+-        CHECK(200 == res.code);
+-        CHECK(res.body.find("some error occurred") == std::string::npos);
+-        CHECK(res.body.find("Hello world") != std::string::npos);
+-    }
+-} // exception_handler
+-
+ TEST_CASE("base64")
+ {
+     unsigned char sample_bin[] = {0x14, 0xfb, 0x9c, 0x03, 0xd9, 0x7e};

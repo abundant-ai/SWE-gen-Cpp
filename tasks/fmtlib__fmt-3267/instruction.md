@@ -1,18 +1,22 @@
-The library is missing a convenience printing API that appends a newline, analogous to the C++ iostream.format `println` functions. Users expect to be able to call `fmt::println` to format a string with arguments, write it to the default output stream, and automatically append a line break, but the function does not exist (or is incomplete), forcing users to call `fmt::print("{}\n", ...)` manually.
+The library is missing a convenient `fmt::println` API analogous to `print` but with an automatic trailing newline, despite this being a natural and commonly requested addition (similar to the C++ iostream formatting print/println facilities). Add support for `fmt::println` so users can write formatted text followed by a newline without manually appending "\n" to the format string.
 
-Implement `fmt::println` as a public API, with behavior consistent with `fmt::print` plus an appended newline. It should support both compile-time format strings (e.g. `fmt::println("{}", 42)`) and runtime format strings via `fmt::runtime(...)`. It must also support wide-character format strings and output (e.g. `fmt::println(L"{}", 42)`), matching the existing wide-character formatting APIs.
+Implement `fmt::println` overloads that behave like the existing `fmt::print` family, but always append a single newline after the formatted output. The API should work with both narrow and wide character output and should integrate with existing formatting features such as compile-time format strings and runtime format strings (e.g., via `fmt::runtime`). It should also support printing to `std::ostream`/`std::wostream` in the same way the library supports `fmt::print` to streams.
 
-The formatting rules should be identical to `fmt::format`/`fmt::print`:
-- Correctly format arbitrary formattable arguments.
-- Reject invalid format specifiers by throwing `fmt::format_error` with the same messages as existing formatting/printing APIs.
+Expected behavior examples:
 
-The new API should integrate cleanly with the existing ostream-related functionality so that projects including both the core formatting header and ostream support do not run into specialization/overload issues.
-
-Example expected usage:
 ```cpp
-fmt::println("Hello, {}!", "world"); // writes "Hello, world!\n" to standard output
-fmt::println(fmt::runtime("value={}"), 10); // runtime format string support
-fmt::println(L"{}", 42); // writes wide output with trailing newline
+fmt::println("Hello");            // writes "Hello\n"
+fmt::println("{} {}", 1, 2);      // writes "1 2\n"
+fmt::println(fmt::runtime("{}"), 42); // writes "42\n"
+
+std::ostringstream os;
+fmt::println(os, "{}", 7);        // appends "7\n" to os
+
+fmt::println(L"{}", 42);          // writes L"42\n" to wide output
 ```
 
-Currently, attempting to use `fmt::println(...)` fails because the function is not provided. After the change, these calls should compile and behave as described, including newline emission and correct error handling for invalid format strings/specifiers.
+The newline should be appended regardless of whether the format string already ends with a newline; `println` should not attempt to detect or avoid double-newlines—its contract is to always add exactly one newline after formatting.
+
+The change should compile cleanly when including `fmt/format.h` and later including stream support, and it must not introduce specialization/ODR issues with existing formatters such as `ostream_formatter` and types formatted through `operator<<`.
+
+After adding `fmt::println`, formatting to strings (`fmt::format`) must remain unchanged; only the printing APIs should gain the new `println` variants.

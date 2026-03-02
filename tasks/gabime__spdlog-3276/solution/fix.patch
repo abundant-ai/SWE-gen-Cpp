@@ -1,0 +1,170 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 611c9426..e56c5699 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -108,15 +108,15 @@ endif()
+ if(WIN32)
+     option(SPDLOG_WCHAR_SUPPORT "Support wchar api" OFF)
+     option(SPDLOG_WCHAR_FILENAMES "Support wchar filenames" OFF)
+-    option(SPDLOG_WCHAR_CONSOLE "Support wchar output to console" OFF)    
++    option(SPDLOG_WCHAR_CONSOLE "Support wchar output to console" OFF)
+ else()
+     set(SPDLOG_WCHAR_SUPPORT OFF CACHE BOOL "non supported option" FORCE)
+     set(SPDLOG_WCHAR_FILENAMES OFF CACHE BOOL "non supported option" FORCE)
+     set(SPDLOG_WCHAR_CONSOLE OFF CACHE BOOL "non supported option" FORCE)
+ endif()
+ 
+-if(MSVC)    
+-    option(SPDLOG_MSVC_UTF8 "Enable/disable msvc /utf-8 flag required by fmt lib" ON)   
++if(MSVC)
++    option(SPDLOG_MSVC_UTF8 "Enable/disable msvc /utf-8 flag required by fmt lib" ON)
+ endif()
+ 
+ if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+@@ -238,6 +238,20 @@ if(SPDLOG_FMT_EXTERNAL OR SPDLOG_FMT_EXTERNAL_HO)
+     set(PKG_CONFIG_REQUIRES fmt) # add dependency to pkg-config
+ endif()
+ 
++# ---------------------------------------------------------------------------------------
++# Check if fwrite_unlocked/_fwrite_nolock is available
++# ---------------------------------------------------------------------------------------
++include(CheckSymbolExists)
++if(WIN32)
++    check_symbol_exists(_fwrite_nolock "stdio.h" HAVE_FWRITE_UNLOCKED)
++else ()
++    check_symbol_exists(fwrite_unlocked "stdio.h" HAVE_FWRITE_UNLOCKED)
++endif()
++if(HAVE_FWRITE_UNLOCKED)
++    target_compile_definitions(spdlog PRIVATE SPDLOG_FWRITE_UNLOCKED)
++    target_compile_definitions(spdlog_header_only INTERFACE SPDLOG_FWRITE_UNLOCKED)
++endif()
++
+ # ---------------------------------------------------------------------------------------
+ # Add required libraries for Android CMake build
+ # ---------------------------------------------------------------------------------------
+@@ -276,9 +290,9 @@ if(MSVC)
+     if(SPDLOG_MSVC_UTF8)
+         # fmtlib requires the /utf-8 flag when building with msvc.
+ 	    # see https://github.com/fmtlib/fmt/pull/4159 on the purpose of the additional
+-        # "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>" 
++        # "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>"
+ 	    target_compile_options(spdlog PUBLIC $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/utf-8>)
+-	    target_compile_options(spdlog_header_only INTERFACE $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/utf-8>)    
++	    target_compile_options(spdlog_header_only INTERFACE $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/utf-8>)
+      endif()
+ endif()
+ 
+diff --git a/include/spdlog/details/file_helper-inl.h b/include/spdlog/details/file_helper-inl.h
+index 37d1d46f..8742b96c 100644
+--- a/include/spdlog/details/file_helper-inl.h
++++ b/include/spdlog/details/file_helper-inl.h
+@@ -101,7 +101,8 @@ SPDLOG_INLINE void file_helper::write(const memory_buf_t &buf) {
+     if (fd_ == nullptr) return;
+     size_t msg_size = buf.size();
+     auto data = buf.data();
+-    if (std::fwrite(data, 1, msg_size, fd_) != msg_size) {
++
++    if (!details::os::fwrite_bytes(data, msg_size, fd_)) {
+         throw_spdlog_ex("Failed writing to file " + os::filename_to_str(filename_), errno);
+     }
+ }
+diff --git a/include/spdlog/details/os-inl.h b/include/spdlog/details/os-inl.h
+index e4d4771b..8ee42304 100644
+--- a/include/spdlog/details/os-inl.h
++++ b/include/spdlog/details/os-inl.h
+@@ -589,6 +589,18 @@ SPDLOG_INLINE bool fsync(FILE *fp) {
+ #endif
+ }
+ 
++// Do non-locking fwrite if possible by the os or use the regular locking fwrite
++// Return true on success.
++SPDLOG_INLINE bool fwrite_bytes(const void *ptr, const size_t n_bytes, FILE *fp) {
++    #if defined(_WIN32) && defined(SPDLOG_FWRITE_UNLOCKED)
++    return _fwrite_nolock(ptr, 1, n_bytes, fp) == n_bytes;
++    #elif defined(SPDLOG_FWRITE_UNLOCKED)
++    return ::fwrite_unlocked(ptr, 1, n_bytes, fp) == n_bytes;
++    #else
++    return std::fwrite(ptr, 1, n_bytes, fp) == n_bytes;
++    #endif
++}
++
+ }  // namespace os
+ }  // namespace details
+ }  // namespace spdlog
+diff --git a/include/spdlog/details/os.h b/include/spdlog/details/os.h
+index b1069edc..5fd12bac 100644
+--- a/include/spdlog/details/os.h
++++ b/include/spdlog/details/os.h
+@@ -114,6 +114,10 @@ SPDLOG_API std::string getenv(const char *field);
+ // Return true on success.
+ SPDLOG_API bool fsync(FILE *fp);
+ 
++// Do non-locking fwrite if possible by the os or use the regular locking fwrite
++// Return true on success.
++SPDLOG_API bool fwrite_bytes(const void *ptr, const size_t n_bytes, FILE *fp);
++
+ }  // namespace os
+ }  // namespace details
+ }  // namespace spdlog
+diff --git a/include/spdlog/sinks/ansicolor_sink-inl.h b/include/spdlog/sinks/ansicolor_sink-inl.h
+index 2194f67b..8fd3078a 100644
+--- a/include/spdlog/sinks/ansicolor_sink-inl.h
++++ b/include/spdlog/sinks/ansicolor_sink-inl.h
+@@ -106,14 +106,14 @@ SPDLOG_INLINE void ansicolor_sink<ConsoleMutex>::set_color_mode(color_mode mode)
+ 
+ template <typename ConsoleMutex>
+ SPDLOG_INLINE void ansicolor_sink<ConsoleMutex>::print_ccode_(const string_view_t &color_code) {
+-    fwrite(color_code.data(), sizeof(char), color_code.size(), target_file_);
++    details::os::fwrite_bytes(color_code.data(), color_code.size(), target_file_);
+ }
+ 
+ template <typename ConsoleMutex>
+ SPDLOG_INLINE void ansicolor_sink<ConsoleMutex>::print_range_(const memory_buf_t &formatted,
+                                                               size_t start,
+                                                               size_t end) {
+-    fwrite(formatted.data() + start, sizeof(char), end - start, target_file_);
++    details::os::fwrite_bytes(formatted.data() + start, end - start, target_file_);
+ }
+ 
+ template <typename ConsoleMutex>
+diff --git a/include/spdlog/sinks/stdout_sinks-inl.h b/include/spdlog/sinks/stdout_sinks-inl.h
+index f98244db..dcb21d84 100644
+--- a/include/spdlog/sinks/stdout_sinks-inl.h
++++ b/include/spdlog/sinks/stdout_sinks-inl.h
+@@ -10,6 +10,7 @@
+ #include <memory>
+ #include <spdlog/details/console_globals.h>
+ #include <spdlog/pattern_formatter.h>
++#include <spdlog/details/os.h>
+ 
+ #ifdef _WIN32
+     // under windows using fwrite to non-binary stream results in \r\r\n (see issue #1675)
+@@ -22,7 +23,7 @@
+ 
+     #include <io.h>     // _get_osfhandle(..)
+     #include <stdio.h>  // _fileno(..)
+-#endif                  // WIN32
++#endif                  // _WIN32
+ 
+ namespace spdlog {
+ 
+@@ -44,7 +45,7 @@ SPDLOG_INLINE stdout_sink_base<ConsoleMutex>::stdout_sink_base(FILE *file)
+     if (handle_ == INVALID_HANDLE_VALUE && file != stdout && file != stderr) {
+         throw_spdlog_ex("spdlog::stdout_sink_base: _get_osfhandle() failed", errno);
+     }
+-#endif  // WIN32
++#endif  // _WIN32
+ }
+ 
+ template <typename ConsoleMutex>
+@@ -67,8 +68,8 @@ SPDLOG_INLINE void stdout_sink_base<ConsoleMutex>::log(const details::log_msg &m
+     std::lock_guard<mutex_t> lock(mutex_);
+     memory_buf_t formatted;
+     formatter_->format(msg, formatted);
+-    ::fwrite(formatted.data(), sizeof(char), formatted.size(), file_);
+-#endif                // WIN32
++    details::os::fwrite_bytes(formatted.data(), formatted.size(), file_);
++#endif                // _WIN32
+     ::fflush(file_);  // flush every line to terminal
+ }
+ 

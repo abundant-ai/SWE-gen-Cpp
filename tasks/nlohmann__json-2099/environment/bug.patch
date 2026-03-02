@@ -1,0 +1,2123 @@
+diff --git a/include/nlohmann/detail/input/binary_reader.hpp b/include/nlohmann/detail/input/binary_reader.hpp
+index 25de9bdab..b8d9bec0a 100644
+--- a/include/nlohmann/detail/input/binary_reader.hpp
++++ b/include/nlohmann/detail/input/binary_reader.hpp
+@@ -1500,6 +1500,11 @@ class binary_reader
+     */
+     bool get_msgpack_binary(internal_binary_t& result)
+     {
++        if (JSON_HEDLEY_UNLIKELY(not unexpect_eof(input_format_t::msgpack, "binary")))
++        {
++            return false;
++        }
++
+         switch (current)
+         {
+             case 0xC4: // bin 8
+@@ -1577,8 +1582,11 @@ class binary_reader
+                 return get_number(input_format_t::msgpack, result.subtype) and get_binary(input_format_t::msgpack, 16, result);
+             }
+ 
+-            default:            // LCOV_EXCL_LINE
+-                assert(false);  // LCOV_EXCL_LINE
++            default:
++            {
++                auto last_token = get_token_string();
++                return sax->parse_error(chars_read, last_token, parse_error::create(113, chars_read, exception_message(input_format_t::msgpack, "expected binary type specification (0xC4-0xC9, 0xD4-0xD8); last byte: 0x" + last_token, "binary")));
++            }
+         }
+     }
+ 
+@@ -2203,7 +2211,7 @@ class binary_reader
+             {
+                 success = false;
+             }
+-            return static_cast<std::uint8_t>(current);
++            return static_cast<uint8_t>(current);
+         });
+         return success;
+     }
+diff --git a/include/nlohmann/detail/input/json_sax.hpp b/include/nlohmann/detail/input/json_sax.hpp
+index c54b80df7..47c859df0 100644
+--- a/include/nlohmann/detail/input/json_sax.hpp
++++ b/include/nlohmann/detail/input/json_sax.hpp
+@@ -214,7 +214,7 @@ class json_sax_dom_parser
+ 
+     bool binary(binary_t& val)
+     {
+-        handle_value(BasicJsonType::binary_array(std::move(val)));
++        handle_binary(val);
+         return true;
+     }
+ 
+@@ -327,6 +327,36 @@ class json_sax_dom_parser
+         return object_element;
+     }
+ 
++    /*!
++    @invariant If the ref stack is empty, then the passed value will be the new
++               root.
++    @invariant If the ref stack contains a value, then it is an array or an
++               object to which we can add elements
++    */
++    template<typename BinaryValue>
++    JSON_HEDLEY_RETURNS_NON_NULL
++    BasicJsonType* handle_binary(BinaryValue&& v)
++    {
++        if (ref_stack.empty())
++        {
++            root = BasicJsonType::binary_array(std::forward<BinaryValue>(v));
++            return &root;
++        }
++
++        assert(ref_stack.back()->is_array() or ref_stack.back()->is_object());
++
++        if (ref_stack.back()->is_array())
++        {
++            ref_stack.back()->m_value.array->emplace_back(BasicJsonType::binary_array(std::forward<BinaryValue>(v)));
++            return &(ref_stack.back()->m_value.array->back());
++        }
++
++        assert(ref_stack.back()->is_object());
++        assert(object_element);
++        *object_element = BasicJsonType::binary_array(std::forward<BinaryValue>(v));
++        return object_element;
++    }
++
+     /// the parsed JSON value
+     BasicJsonType& root;
+     /// stack to model hierarchy of values
+@@ -404,7 +434,7 @@ class json_sax_dom_callback_parser
+ 
+     bool binary(binary_t& val)
+     {
+-        handle_value(BasicJsonType::binary_array(val));
++        handle_value(val);
+         return true;
+     }
+ 
+diff --git a/include/nlohmann/detail/output/serializer.hpp b/include/nlohmann/detail/output/serializer.hpp
+index da544fada..f83f4a377 100644
+--- a/include/nlohmann/detail/output/serializer.hpp
++++ b/include/nlohmann/detail/output/serializer.hpp
+@@ -251,6 +251,27 @@ class serializer
+                 {
+                     o->write_characters("b[]", 3);
+                 }
++                else if (pretty_print)
++                {
++                    o->write_characters("b[", 2);
++                    for (auto i = val.m_value.binary->cbegin();
++                            i != val.m_value.binary->cend() - 1; ++i)
++                    {
++                        dump_integer(*i);
++                        o->write_character(',');
++                        if (std::distance(val.m_value.binary->cbegin(), i) % 16 == 0)
++                        {
++                            o->write_character('\n');
++                        }
++                        else
++                        {
++                            o->write_character(' ');
++                        }
++                    }
++
++                    dump_integer(val.m_value.binary->back());
++                    o->write_character(']');
++                }
+                 else
+                 {
+                     o->write_characters("b[", 2);
+diff --git a/include/nlohmann/json.hpp b/include/nlohmann/json.hpp
+index 9b26dd704..237a48b17 100644
+--- a/include/nlohmann/json.hpp
++++ b/include/nlohmann/json.hpp
+@@ -876,6 +876,7 @@ class basic_json
+ 
+     @since version 3.8.0
+     */
++
+     using binary_t = BinaryType;
+ 
+     /*!
+@@ -889,25 +890,9 @@ class basic_json
+     struct internal_binary_t : public BinaryType
+     {
+         using BinaryType::BinaryType;
+-        internal_binary_t() noexcept(noexcept(BinaryType()))
+-            : BinaryType()
+-        {}
+-        internal_binary_t(const BinaryType& bint) noexcept(noexcept(BinaryType(bint)))
+-            : BinaryType(bint)
+-        {}
+-        internal_binary_t(BinaryType&& bint) noexcept(noexcept(BinaryType(std::move(bint))))
+-            : BinaryType(std::move(bint))
+-        {}
+-        internal_binary_t(const BinaryType& bint, std::uint8_t st) noexcept(noexcept(BinaryType(bint)))
+-            : BinaryType(bint)
+-            , subtype(st)
+-            , has_subtype(true)
+-        {}
+-        internal_binary_t(BinaryType&& bint, std::uint8_t st) noexcept(noexcept(BinaryType(std::move(bint))))
+-            : BinaryType(std::move(bint))
+-            , subtype(st)
+-            , has_subtype(true)
+-        {}
++        internal_binary_t() noexcept(noexcept(BinaryType())) : BinaryType() {}
++        internal_binary_t(BinaryType const& bint) noexcept(noexcept(BinaryType(bint))) : BinaryType(bint) {}
++        internal_binary_t(BinaryType&& bint)  noexcept(noexcept(BinaryType(std::move(bint)))) : BinaryType(std::move(bint)) {}
+ 
+         // TOOD: If minimum C++ version is ever bumped to C++17, this field
+         // deserves to be a std::optional
+@@ -1114,18 +1099,6 @@ class basic_json
+             binary = create<internal_binary_t>(std::move(value));
+         }
+ 
+-        /// constructor for binary arrays (internal type)
+-        json_value(const internal_binary_t& value)
+-        {
+-            binary = create<internal_binary_t>(value);
+-        }
+-
+-        /// constructor for rvalue binary arrays (internal type)
+-        json_value(internal_binary_t&& value)
+-        {
+-            binary = create<internal_binary_t>(std::move(value));
+-        }
+-
+         void destroy(value_t t) noexcept
+         {
+             // flatten the current json_value to a heap-allocated stack
+@@ -1231,7 +1204,6 @@ class basic_json
+         assert(m_type != value_t::object or m_value.object != nullptr);
+         assert(m_type != value_t::array or m_value.array != nullptr);
+         assert(m_type != value_t::string or m_value.string != nullptr);
+-        assert(m_type != value_t::binary or m_value.binary != nullptr);
+     }
+ 
+   public:
+@@ -1683,7 +1655,7 @@ class basic_json
+     @since version 3.8.0
+     */
+     JSON_HEDLEY_WARN_UNUSED_RESULT
+-    static basic_json binary_array(const binary_t& init)
++    static basic_json binary_array(binary_t const& init)
+     {
+         auto res = basic_json();
+         res.m_type = value_t::binary;
+@@ -1691,15 +1663,6 @@ class basic_json
+         return res;
+     }
+ 
+-    JSON_HEDLEY_WARN_UNUSED_RESULT
+-    static basic_json binary_array(const binary_t& init, std::uint8_t subtype)
+-    {
+-        auto res = basic_json();
+-        res.m_type = value_t::binary;
+-        res.m_value = internal_binary_t(init, subtype);
+-        return res;
+-    }
+-
+     /*!
+     @brief explicitly create a binary array from an already constructed rvalue
+     copy of its base type
+@@ -1736,15 +1699,6 @@ class basic_json
+         return res;
+     }
+ 
+-    JSON_HEDLEY_WARN_UNUSED_RESULT
+-    static basic_json binary_array(binary_t&& init, std::uint8_t subtype)
+-    {
+-        auto res = basic_json();
+-        res.m_type = value_t::binary;
+-        res.m_value = internal_binary_t(std::move(init), subtype);
+-        return res;
+-    }
+-
+     /*!
+     @brief explicitly create an array from an initializer list
+ 
+@@ -2002,7 +1956,8 @@ class basic_json
+ 
+             case value_t::binary:
+             {
+-                m_value = *first.m_object->m_value.binary;
++                m_value.binary = create<internal_binary_t>(first.m_it.binary_iterator,
++                                 last.m_it.binary_iterator);
+                 break;
+             }
+ 
+@@ -2793,7 +2748,7 @@ class basic_json
+     /// get a pointer to the value (binary)
+     binary_t* get_impl_ptr(binary_t* /*unused*/) noexcept
+     {
+-        return is_binary() ? reinterpret_cast<binary_t*>(m_value.binary) : nullptr;
++        return is_binary() ? m_value.binary : nullptr;
+     }
+ 
+     /// get a pointer to the value (binary)
+@@ -6060,39 +6015,6 @@ class basic_json
+         }
+     }
+ 
+-    /*!
+-    @brief exchanges the values
+-
+-    Exchanges the contents of a JSON string with those of @a other. Does not
+-    invoke any move, copy, or swap operations on individual elements. All
+-    iterators and references remain valid. The past-the-end iterator is
+-    invalidated.
+-
+-    @param[in,out] other binary to exchange the contents with
+-
+-    @throw type_error.310 when JSON value is not a string; example: `"cannot
+-    use swap() with boolean"`
+-
+-    @complexity Constant.
+-
+-    @liveexample{The example below shows how strings can be swapped with
+-    `swap()`.,swap__binary_t}
+-
+-    @since version 3.8.0
+-    */
+-    void swap(binary_t& other)
+-    {
+-        // swap only works for strings
+-        if (JSON_HEDLEY_LIKELY(is_binary()))
+-        {
+-            std::swap(*(m_value.binary), other);
+-        }
+-        else
+-        {
+-            JSON_THROW(type_error::create(310, "cannot use swap() with " + std::string(type_name())));
+-        }
+-    }
+-
+     /// @}
+ 
+   public:
+@@ -6355,7 +6277,7 @@ class basic_json
+                     return (lhs.m_value.number_float) < (rhs.m_value.number_float);
+ 
+                 case value_t::binary:
+-                    return (*lhs.m_value.binary) < (*rhs.m_value.binary);
++                    return (lhs.m_value.binary) < (rhs.m_value.binary);
+ 
+                 default:
+                     return false;
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index abec8d3f1..f04091d02 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -4881,7 +4881,7 @@ class json_sax_dom_parser
+ 
+     bool binary(binary_t& val)
+     {
+-        handle_value(BasicJsonType::binary_array(std::move(val)));
++        handle_binary(val);
+         return true;
+     }
+ 
+@@ -4994,6 +4994,36 @@ class json_sax_dom_parser
+         return object_element;
+     }
+ 
++    /*!
++    @invariant If the ref stack is empty, then the passed value will be the new
++               root.
++    @invariant If the ref stack contains a value, then it is an array or an
++               object to which we can add elements
++    */
++    template<typename BinaryValue>
++    JSON_HEDLEY_RETURNS_NON_NULL
++    BasicJsonType* handle_binary(BinaryValue&& v)
++    {
++        if (ref_stack.empty())
++        {
++            root = BasicJsonType::binary_array(std::forward<BinaryValue>(v));
++            return &root;
++        }
++
++        assert(ref_stack.back()->is_array() or ref_stack.back()->is_object());
++
++        if (ref_stack.back()->is_array())
++        {
++            ref_stack.back()->m_value.array->emplace_back(BasicJsonType::binary_array(std::forward<BinaryValue>(v)));
++            return &(ref_stack.back()->m_value.array->back());
++        }
++
++        assert(ref_stack.back()->is_object());
++        assert(object_element);
++        *object_element = BasicJsonType::binary_array(std::forward<BinaryValue>(v));
++        return object_element;
++    }
++
+     /// the parsed JSON value
+     BasicJsonType& root;
+     /// stack to model hierarchy of values
+@@ -5071,7 +5101,7 @@ class json_sax_dom_callback_parser
+ 
+     bool binary(binary_t& val)
+     {
+-        handle_value(BasicJsonType::binary_array(val));
++        handle_value(val);
+         return true;
+     }
+ 
+@@ -7027,6 +7057,11 @@ class binary_reader
+     */
+     bool get_msgpack_binary(internal_binary_t& result)
+     {
++        if (JSON_HEDLEY_UNLIKELY(not unexpect_eof(input_format_t::msgpack, "binary")))
++        {
++            return false;
++        }
++
+         switch (current)
+         {
+             case 0xC4: // bin 8
+@@ -7104,8 +7139,11 @@ class binary_reader
+                 return get_number(input_format_t::msgpack, result.subtype) and get_binary(input_format_t::msgpack, 16, result);
+             }
+ 
+-            default:            // LCOV_EXCL_LINE
+-                assert(false);  // LCOV_EXCL_LINE
++            default:
++            {
++                auto last_token = get_token_string();
++                return sax->parse_error(chars_read, last_token, parse_error::create(113, chars_read, exception_message(input_format_t::msgpack, "expected binary type specification (0xC4-0xC9, 0xD4-0xD8); last byte: 0x" + last_token, "binary")));
++            }
+         }
+     }
+ 
+@@ -7730,7 +7768,7 @@ class binary_reader
+             {
+                 success = false;
+             }
+-            return static_cast<std::uint8_t>(current);
++            return static_cast<uint8_t>(current);
+         });
+         return success;
+     }
+@@ -14867,6 +14905,27 @@ class serializer
+                 {
+                     o->write_characters("b[]", 3);
+                 }
++                else if (pretty_print)
++                {
++                    o->write_characters("b[", 2);
++                    for (auto i = val.m_value.binary->cbegin();
++                            i != val.m_value.binary->cend() - 1; ++i)
++                    {
++                        dump_integer(*i);
++                        o->write_character(',');
++                        if (std::distance(val.m_value.binary->cbegin(), i) % 16 == 0)
++                        {
++                            o->write_character('\n');
++                        }
++                        else
++                        {
++                            o->write_character(' ');
++                        }
++                    }
++
++                    dump_integer(val.m_value.binary->back());
++                    o->write_character(']');
++                }
+                 else
+                 {
+                     o->write_characters("b[", 2);
+@@ -16324,6 +16383,7 @@ class basic_json
+ 
+     @since version 3.8.0
+     */
++
+     using binary_t = BinaryType;
+ 
+     /*!
+@@ -16337,25 +16397,9 @@ class basic_json
+     struct internal_binary_t : public BinaryType
+     {
+         using BinaryType::BinaryType;
+-        internal_binary_t() noexcept(noexcept(BinaryType()))
+-            : BinaryType()
+-        {}
+-        internal_binary_t(const BinaryType& bint) noexcept(noexcept(BinaryType(bint)))
+-            : BinaryType(bint)
+-        {}
+-        internal_binary_t(BinaryType&& bint) noexcept(noexcept(BinaryType(std::move(bint))))
+-            : BinaryType(std::move(bint))
+-        {}
+-        internal_binary_t(const BinaryType& bint, std::uint8_t st) noexcept(noexcept(BinaryType(bint)))
+-            : BinaryType(bint)
+-            , subtype(st)
+-            , has_subtype(true)
+-        {}
+-        internal_binary_t(BinaryType&& bint, std::uint8_t st) noexcept(noexcept(BinaryType(std::move(bint))))
+-            : BinaryType(std::move(bint))
+-            , subtype(st)
+-            , has_subtype(true)
+-        {}
++        internal_binary_t() noexcept(noexcept(BinaryType())) : BinaryType() {}
++        internal_binary_t(BinaryType const& bint) noexcept(noexcept(BinaryType(bint))) : BinaryType(bint) {}
++        internal_binary_t(BinaryType&& bint)  noexcept(noexcept(BinaryType(std::move(bint)))) : BinaryType(std::move(bint)) {}
+ 
+         // TOOD: If minimum C++ version is ever bumped to C++17, this field
+         // deserves to be a std::optional
+@@ -16562,18 +16606,6 @@ class basic_json
+             binary = create<internal_binary_t>(std::move(value));
+         }
+ 
+-        /// constructor for binary arrays (internal type)
+-        json_value(const internal_binary_t& value)
+-        {
+-            binary = create<internal_binary_t>(value);
+-        }
+-
+-        /// constructor for rvalue binary arrays (internal type)
+-        json_value(internal_binary_t&& value)
+-        {
+-            binary = create<internal_binary_t>(std::move(value));
+-        }
+-
+         void destroy(value_t t) noexcept
+         {
+             // flatten the current json_value to a heap-allocated stack
+@@ -16679,7 +16711,6 @@ class basic_json
+         assert(m_type != value_t::object or m_value.object != nullptr);
+         assert(m_type != value_t::array or m_value.array != nullptr);
+         assert(m_type != value_t::string or m_value.string != nullptr);
+-        assert(m_type != value_t::binary or m_value.binary != nullptr);
+     }
+ 
+   public:
+@@ -17131,7 +17162,7 @@ class basic_json
+     @since version 3.8.0
+     */
+     JSON_HEDLEY_WARN_UNUSED_RESULT
+-    static basic_json binary_array(const binary_t& init)
++    static basic_json binary_array(binary_t const& init)
+     {
+         auto res = basic_json();
+         res.m_type = value_t::binary;
+@@ -17139,15 +17170,6 @@ class basic_json
+         return res;
+     }
+ 
+-    JSON_HEDLEY_WARN_UNUSED_RESULT
+-    static basic_json binary_array(const binary_t& init, std::uint8_t subtype)
+-    {
+-        auto res = basic_json();
+-        res.m_type = value_t::binary;
+-        res.m_value = internal_binary_t(init, subtype);
+-        return res;
+-    }
+-
+     /*!
+     @brief explicitly create a binary array from an already constructed rvalue
+     copy of its base type
+@@ -17184,15 +17206,6 @@ class basic_json
+         return res;
+     }
+ 
+-    JSON_HEDLEY_WARN_UNUSED_RESULT
+-    static basic_json binary_array(binary_t&& init, std::uint8_t subtype)
+-    {
+-        auto res = basic_json();
+-        res.m_type = value_t::binary;
+-        res.m_value = internal_binary_t(std::move(init), subtype);
+-        return res;
+-    }
+-
+     /*!
+     @brief explicitly create an array from an initializer list
+ 
+@@ -17450,7 +17463,8 @@ class basic_json
+ 
+             case value_t::binary:
+             {
+-                m_value = *first.m_object->m_value.binary;
++                m_value.binary = create<internal_binary_t>(first.m_it.binary_iterator,
++                                 last.m_it.binary_iterator);
+                 break;
+             }
+ 
+@@ -18241,7 +18255,7 @@ class basic_json
+     /// get a pointer to the value (binary)
+     binary_t* get_impl_ptr(binary_t* /*unused*/) noexcept
+     {
+-        return is_binary() ? reinterpret_cast<binary_t*>(m_value.binary) : nullptr;
++        return is_binary() ? m_value.binary : nullptr;
+     }
+ 
+     /// get a pointer to the value (binary)
+@@ -21508,39 +21522,6 @@ class basic_json
+         }
+     }
+ 
+-    /*!
+-    @brief exchanges the values
+-
+-    Exchanges the contents of a JSON string with those of @a other. Does not
+-    invoke any move, copy, or swap operations on individual elements. All
+-    iterators and references remain valid. The past-the-end iterator is
+-    invalidated.
+-
+-    @param[in,out] other binary to exchange the contents with
+-
+-    @throw type_error.310 when JSON value is not a string; example: `"cannot
+-    use swap() with boolean"`
+-
+-    @complexity Constant.
+-
+-    @liveexample{The example below shows how strings can be swapped with
+-    `swap()`.,swap__binary_t}
+-
+-    @since version 3.8.0
+-    */
+-    void swap(binary_t& other)
+-    {
+-        // swap only works for strings
+-        if (JSON_HEDLEY_LIKELY(is_binary()))
+-        {
+-            std::swap(*(m_value.binary), other);
+-        }
+-        else
+-        {
+-            JSON_THROW(type_error::create(310, "cannot use swap() with " + std::string(type_name())));
+-        }
+-    }
+-
+     /// @}
+ 
+   public:
+@@ -21803,7 +21784,7 @@ class basic_json
+                     return (lhs.m_value.number_float) < (rhs.m_value.number_float);
+ 
+                 case value_t::binary:
+-                    return (*lhs.m_value.binary) < (*rhs.m_value.binary);
++                    return (lhs.m_value.binary) < (rhs.m_value.binary);
+ 
+                 default:
+                     return false;
+diff --git a/test/src/unit-bson.cpp b/test/src/unit-bson.cpp
+index 318286d12..9e8e996fc 100644
+--- a/test/src/unit-bson.cpp
++++ b/test/src/unit-bson.cpp
+@@ -106,7 +106,7 @@ TEST_CASE("BSON")
+     SECTION("string length must be at least 1")
+     {
+         // from https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=11175
+-        std::vector<std::uint8_t> v =
++        std::vector<uint8_t> v =
+         {
+             0x20, 0x20, 0x20, 0x20,
+             0x02,
+@@ -123,7 +123,7 @@ TEST_CASE("BSON")
+         SECTION("empty object")
+         {
+             json j = json::object();
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x05, 0x00, 0x00, 0x00, // size (little endian)
+                 // no entries
+@@ -145,7 +145,7 @@ TEST_CASE("BSON")
+                 { "entry", true }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x0D, 0x00, 0x00, 0x00, // size (little endian)
+                 0x08,               // entry: boolean
+@@ -169,7 +169,7 @@ TEST_CASE("BSON")
+                 { "entry", false }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x0D, 0x00, 0x00, 0x00, // size (little endian)
+                 0x08,               // entry: boolean
+@@ -193,7 +193,7 @@ TEST_CASE("BSON")
+                 { "entry", 4.2 }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x14, 0x00, 0x00, 0x00, // size (little endian)
+                 0x01, /// entry: double
+@@ -217,7 +217,7 @@ TEST_CASE("BSON")
+                 { "entry", "bsonstr" }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x18, 0x00, 0x00, 0x00, // size (little endian)
+                 0x02, /// entry: string (UTF-8)
+@@ -241,7 +241,7 @@ TEST_CASE("BSON")
+                 { "entry", nullptr }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x0C, 0x00, 0x00, 0x00, // size (little endian)
+                 0x0A, /// entry: null
+@@ -264,7 +264,7 @@ TEST_CASE("BSON")
+                 { "entry", std::int32_t{0x12345678} }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x10, 0x00, 0x00, 0x00, // size (little endian)
+                 0x10, /// entry: int32
+@@ -288,7 +288,7 @@ TEST_CASE("BSON")
+                 { "entry", std::int64_t{0x1234567804030201} }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x14, 0x00, 0x00, 0x00, // size (little endian)
+                 0x12, /// entry: int64
+@@ -312,7 +312,7 @@ TEST_CASE("BSON")
+                 { "entry", std::int32_t{-1} }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x10, 0x00, 0x00, 0x00, // size (little endian)
+                 0x10, /// entry: int32
+@@ -336,7 +336,7 @@ TEST_CASE("BSON")
+                 { "entry", std::int64_t{-1} }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x10, 0x00, 0x00, 0x00, // size (little endian)
+                 0x10, /// entry: int32
+@@ -361,7 +361,7 @@ TEST_CASE("BSON")
+                 { "entry", std::uint64_t{0x1234567804030201} }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x14, 0x00, 0x00, 0x00, // size (little endian)
+                 0x12, /// entry: int64
+@@ -385,7 +385,7 @@ TEST_CASE("BSON")
+                 { "entry", std::uint64_t{0x42} }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x10, 0x00, 0x00, 0x00, // size (little endian)
+                 0x10, /// entry: int32
+@@ -409,7 +409,7 @@ TEST_CASE("BSON")
+                 { "entry", json::object() }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x11, 0x00, 0x00, 0x00, // size (little endian)
+                 0x03, /// entry: embedded document
+@@ -437,7 +437,7 @@ TEST_CASE("BSON")
+                 { "entry", json::array() }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x11, 0x00, 0x00, 0x00, // size (little endian)
+                 0x04, /// entry: embedded document
+@@ -465,7 +465,7 @@ TEST_CASE("BSON")
+                 { "entry", json::array({1, 2, 3, 4, 5, 6, 7, 8}) }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x49, 0x00, 0x00, 0x00, // size (little endian)
+                 0x04, /// entry: embedded document
+@@ -496,13 +496,13 @@ TEST_CASE("BSON")
+         SECTION("non-empty object with binary member")
+         {
+             const size_t N = 10;
+-            const auto s = std::vector<std::uint8_t>(N, 'x');
++            const auto s = std::vector<uint8_t>(N, 'x');
+             json j =
+             {
+                 { "entry", json::binary_array(s) }
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 0x1B, 0x00, 0x00, 0x00, // size (little endian)
+                 0x05, // entry: binary
+@@ -523,36 +523,6 @@ TEST_CASE("BSON")
+             CHECK(json::from_bson(result, true, false) == j);
+         }
+ 
+-        SECTION("non-empty object with binary member with subtype")
+-        {
+-            // an MD5 hash
+-            const std::vector<std::uint8_t> md5hash = {0xd7, 0x7e, 0x27, 0x54, 0xbe, 0x12, 0x37, 0xfe, 0xd6, 0x0c, 0x33, 0x98, 0x30, 0x3b, 0x8d, 0xc4};
+-            json j =
+-            {
+-                { "entry", json::binary_array(md5hash, 5) }
+-            };
+-
+-            std::vector<std::uint8_t> expected =
+-            {
+-                0x21, 0x00, 0x00, 0x00, // size (little endian)
+-                0x05, // entry: binary
+-                'e', 'n', 't', 'r', 'y', '\x00',
+-
+-                0x10, 0x00, 0x00, 0x00, // size of binary (little endian)
+-                0x05, // MD5 binary subtype
+-                0xd7, 0x7e, 0x27, 0x54, 0xbe, 0x12, 0x37, 0xfe, 0xd6, 0x0c, 0x33, 0x98, 0x30, 0x3b, 0x8d, 0xc4,
+-
+-                0x00 // end marker
+-            };
+-
+-            const auto result = json::to_bson(j);
+-            CHECK(result == expected);
+-
+-            // roundtrip
+-            CHECK(json::from_bson(result) == j);
+-            CHECK(json::from_bson(result, true, false) == j);
+-        }
+-
+         SECTION("Some more complex document")
+         {
+             // directly encoding uint64 is not supported in bson (only for timestamp values)
+@@ -564,7 +534,7 @@ TEST_CASE("BSON")
+                 {"object", {{ "string", "value" }}}
+             };
+ 
+-            std::vector<std::uint8_t> expected =
++            std::vector<uint8_t> expected =
+             {
+                 /*size */ 0x4f, 0x00, 0x00, 0x00,
+                 /*entry*/ 0x01, 'd',  'o',  'u',  'b',  'l',  'e',  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x45, 0x40,
+@@ -622,7 +592,7 @@ TEST_CASE("BSON input/output_adapters")
+         {"object", {{ "string", "value" }}}
+     };
+ 
+-    std::vector<std::uint8_t> bson_representation =
++    std::vector<uint8_t> bson_representation =
+     {
+         /*size */ 0x4f, 0x00, 0x00, 0x00,
+         /*entry*/ 0x01, 'd',  'o',  'u',  'b',  'l',  'e',  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x45, 0x40,
+@@ -707,7 +677,7 @@ class SaxCountdown
+         return events_left-- > 0;
+     }
+ 
+-    bool binary(std::vector<std::uint8_t>&)
++    bool binary(std::vector<uint8_t>&)
+     {
+         return events_left-- > 0;
+     }
+@@ -751,7 +721,7 @@ TEST_CASE("Incomplete BSON Input")
+ {
+     SECTION("Incomplete BSON Input 1")
+     {
+-        std::vector<std::uint8_t> incomplete_bson =
++        std::vector<uint8_t> incomplete_bson =
+         {
+             0x0D, 0x00, 0x00, 0x00, // size (little endian)
+             0x08,                   // entry: boolean
+@@ -771,7 +741,7 @@ TEST_CASE("Incomplete BSON Input")
+ 
+     SECTION("Incomplete BSON Input 2")
+     {
+-        std::vector<std::uint8_t> incomplete_bson =
++        std::vector<uint8_t> incomplete_bson =
+         {
+             0x0D, 0x00, 0x00, 0x00, // size (little endian)
+             0x08,                   // entry: boolean, unexpected EOF
+@@ -789,7 +759,7 @@ TEST_CASE("Incomplete BSON Input")
+ 
+     SECTION("Incomplete BSON Input 3")
+     {
+-        std::vector<std::uint8_t> incomplete_bson =
++        std::vector<uint8_t> incomplete_bson =
+         {
+             0x41, 0x00, 0x00, 0x00, // size (little endian)
+             0x04, /// entry: embedded document
+@@ -813,7 +783,7 @@ TEST_CASE("Incomplete BSON Input")
+ 
+     SECTION("Incomplete BSON Input 4")
+     {
+-        std::vector<std::uint8_t> incomplete_bson =
++        std::vector<uint8_t> incomplete_bson =
+         {
+             0x0D, 0x00, // size (incomplete), unexpected EOF
+         };
+@@ -851,28 +821,9 @@ TEST_CASE("Incomplete BSON Input")
+     }
+ }
+ 
+-TEST_CASE("Negative size of binary value")
+-{
+-    // invalid BSON: the size of the binary value is -1
+-    std::vector<std::uint8_t> input =
+-    {
+-        0x21, 0x00, 0x00, 0x00, // size (little endian)
+-        0x05, // entry: binary
+-        'e', 'n', 't', 'r', 'y', '\x00',
+-
+-        0xFF, 0xFF, 0xFF, 0xFF, // size of binary (little endian)
+-        0x05, // MD5 binary subtype
+-        0xd7, 0x7e, 0x27, 0x54, 0xbe, 0x12, 0x37, 0xfe, 0xd6, 0x0c, 0x33, 0x98, 0x30, 0x3b, 0x8d, 0xc4,
+-
+-        0x00 // end marker
+-    };
+-    CHECK_THROWS_AS(json::from_bson(input), json::parse_error);
+-    CHECK_THROWS_WITH(json::from_bson(input), "[json.exception.parse_error.112] parse error at byte 15: syntax error while parsing BSON binary: byte array length cannot be negative, is -1");
+-}
+-
+ TEST_CASE("Unsupported BSON input")
+ {
+-    std::vector<std::uint8_t> bson =
++    std::vector<uint8_t> bson =
+     {
+         0x0C, 0x00, 0x00, 0x00, // size (little endian)
+         0xFF,                   // entry type: Min key (not supported yet)
+@@ -925,19 +876,19 @@ TEST_CASE("BSON numerical data")
+                     CHECK(j.at("entry").is_number_integer());
+ 
+                     std::uint64_t iu = *reinterpret_cast<std::uint64_t*>(&i);
+-                    std::vector<std::uint8_t> expected_bson =
++                    std::vector<uint8_t> expected_bson =
+                     {
+                         0x14u, 0x00u, 0x00u, 0x00u, // size (little endian)
+                         0x12u, /// entry: int64
+                         'e', 'n', 't', 'r', 'y', '\x00',
+-                        static_cast<std::uint8_t>((iu >> (8u * 0u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 1u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 2u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 3u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 4u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 5u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 6u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 7u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 0u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 1u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 2u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 3u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 4u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 5u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 6u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 7u)) & 0xffu),
+                         0x00u // end marker
+                     };
+ 
+@@ -997,15 +948,15 @@ TEST_CASE("BSON numerical data")
+                     CHECK(j.at("entry").is_number_integer());
+ 
+                     std::uint32_t iu = *reinterpret_cast<std::uint32_t*>(&i);
+-                    std::vector<std::uint8_t> expected_bson =
++                    std::vector<uint8_t> expected_bson =
+                     {
+                         0x10u, 0x00u, 0x00u, 0x00u, // size (little endian)
+                         0x10u, /// entry: int32
+                         'e', 'n', 't', 'r', 'y', '\x00',
+-                        static_cast<std::uint8_t>((iu >> (8u * 0u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 1u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 2u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 3u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 0u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 1u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 2u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 3u)) & 0xffu),
+                         0x00u // end marker
+                     };
+ 
+@@ -1050,19 +1001,19 @@ TEST_CASE("BSON numerical data")
+                     CHECK(j.at("entry").is_number_integer());
+ 
+                     std::uint64_t iu = *reinterpret_cast<std::uint64_t*>(&i);
+-                    std::vector<std::uint8_t> expected_bson =
++                    std::vector<uint8_t> expected_bson =
+                     {
+                         0x14u, 0x00u, 0x00u, 0x00u, // size (little endian)
+                         0x12u, /// entry: int64
+                         'e', 'n', 't', 'r', 'y', '\x00',
+-                        static_cast<std::uint8_t>((iu >> (8u * 0u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 1u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 2u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 3u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 4u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 5u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 6u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 7u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 0u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 1u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 2u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 3u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 4u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 5u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 6u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 7u)) & 0xffu),
+                         0x00u // end marker
+                     };
+ 
+@@ -1111,15 +1062,15 @@ TEST_CASE("BSON numerical data")
+                     };
+ 
+                     auto iu = i;
+-                    std::vector<std::uint8_t> expected_bson =
++                    std::vector<uint8_t> expected_bson =
+                     {
+                         0x10u, 0x00u, 0x00u, 0x00u, // size (little endian)
+                         0x10u, /// entry: int32
+                         'e', 'n', 't', 'r', 'y', '\x00',
+-                        static_cast<std::uint8_t>((iu >> (8u * 0u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 1u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 2u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 3u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 0u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 1u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 2u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 3u)) & 0xffu),
+                         0x00u // end marker
+                     };
+ 
+@@ -1166,19 +1117,19 @@ TEST_CASE("BSON numerical data")
+                     };
+ 
+                     auto iu = i;
+-                    std::vector<std::uint8_t> expected_bson =
++                    std::vector<uint8_t> expected_bson =
+                     {
+                         0x14u, 0x00u, 0x00u, 0x00u, // size (little endian)
+                         0x12u, /// entry: int64
+                         'e', 'n', 't', 'r', 'y', '\x00',
+-                        static_cast<std::uint8_t>((iu >> (8u * 0u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 1u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 2u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 3u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 4u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 5u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 6u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 7u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 0u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 1u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 2u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 3u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 4u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 5u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 6u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 7u)) & 0xffu),
+                         0x00u // end marker
+                     };
+ 
+@@ -1216,19 +1167,19 @@ TEST_CASE("BSON numerical data")
+                     };
+ 
+                     auto iu = i;
+-                    std::vector<std::uint8_t> expected_bson =
++                    std::vector<uint8_t> expected_bson =
+                     {
+                         0x14u, 0x00u, 0x00u, 0x00u, // size (little endian)
+                         0x12u, /// entry: int64
+                         'e', 'n', 't', 'r', 'y', '\x00',
+-                        static_cast<std::uint8_t>((iu >> (8u * 0u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 1u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 2u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 3u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 4u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 5u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 6u)) & 0xffu),
+-                        static_cast<std::uint8_t>((iu >> (8u * 7u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 0u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 1u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 2u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 3u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 4u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 5u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 6u)) & 0xffu),
++                        static_cast<uint8_t>((iu >> (8u * 7u)) & 0xffu),
+                         0x00u // end marker
+                     };
+ 
+@@ -1257,14 +1208,14 @@ TEST_CASE("BSON roundtrips" * doctest::skip())
+             CAPTURE(filename)
+ 
+             {
+-                INFO_WITH_TEMP(filename + ": std::vector<std::uint8_t>");
++                INFO_WITH_TEMP(filename + ": std::vector<uint8_t>");
+                 // parse JSON file
+                 std::ifstream f_json(filename);
+                 json j1 = json::parse(f_json);
+ 
+                 // parse BSON file
+                 std::ifstream f_bson(filename + ".bson", std::ios::binary);
+-                std::vector<std::uint8_t> packed(
++                std::vector<uint8_t> packed(
+                     (std::istreambuf_iterator<char>(f_bson)),
+                     std::istreambuf_iterator<char>());
+                 json j2;
+@@ -1297,7 +1248,7 @@ TEST_CASE("BSON roundtrips" * doctest::skip())
+ 
+                 // parse BSON file
+                 std::ifstream f_bson(filename + ".bson", std::ios::binary);
+-                std::vector<std::uint8_t> packed(
++                std::vector<uint8_t> packed(
+                     (std::istreambuf_iterator<char>(f_bson)),
+                     std::istreambuf_iterator<char>());
+                 json j2;
+@@ -1315,13 +1266,13 @@ TEST_CASE("BSON roundtrips" * doctest::skip())
+ 
+                 // parse BSON file
+                 std::ifstream f_bson(filename + ".bson", std::ios::binary);
+-                std::vector<std::uint8_t> packed(
++                std::vector<uint8_t> packed(
+                     (std::istreambuf_iterator<char>(f_bson)),
+                     std::istreambuf_iterator<char>());
+ 
+                 {
+-                    INFO_WITH_TEMP(filename + ": output adapters: std::vector<std::uint8_t>");
+-                    std::vector<std::uint8_t> vec;
++                    INFO_WITH_TEMP(filename + ": output adapters: std::vector<uint8_t>");
++                    std::vector<uint8_t> vec;
+                     json::to_bson(j1, vec);
+ 
+                     if (vec != packed)
+diff --git a/test/src/unit-cbor.cpp b/test/src/unit-cbor.cpp
+index 710e7af81..013790416 100644
+--- a/test/src/unit-cbor.cpp
++++ b/test/src/unit-cbor.cpp
+@@ -1428,53 +1428,6 @@ TEST_CASE("CBOR")
+                     CHECK(json::from_cbor(result, true, false) == j);
+                 }
+             }
+-
+-            SECTION("indefinite size")
+-            {
+-                std::vector<std::uint8_t> input = {0x5F, 0x44, 0xaa, 0xbb, 0xcc, 0xdd, 0x43, 0xee, 0xff, 0x99, 0xFF};
+-                auto j = json::from_cbor(input);
+-                CHECK(j.is_binary());
+-                auto k = json::binary_array({0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x99});
+-                CAPTURE(j.dump(0, ' ', false, json::error_handler_t::strict, true));
+-                CHECK(j == k);
+-            }
+-
+-            SECTION("binary in array")
+-            {
+-                // array with three empty byte strings
+-                std::vector<std::uint8_t> input = {0x83, 0x40, 0x40, 0x40};
+-                CHECK_NOTHROW(json::from_cbor(input));
+-            }
+-
+-            SECTION("binary in object")
+-            {
+-                // object mapping "foo" to empty byte string
+-                std::vector<std::uint8_t> input = {0xA1, 0x63, 0x66, 0x6F, 0x6F, 0x40};
+-                CHECK_NOTHROW(json::from_cbor(input));
+-            }
+-
+-            SECTION("SAX callback with binary")
+-            {
+-                // object mapping "foo" to byte string
+-                std::vector<std::uint8_t> input = {0xA1, 0x63, 0x66, 0x6F, 0x6F, 0x41, 0x00};
+-
+-                // callback to set binary_seen to true if a binary value was seen
+-                bool binary_seen = false;
+-                auto callback = [&binary_seen](int /*depth*/, json::parse_event_t /*event*/, json & parsed)
+-                {
+-                    if (parsed.is_binary())
+-                    {
+-                        binary_seen = true;
+-                    }
+-                    return true;
+-                };
+-
+-                json j;
+-                auto cbp = nlohmann::detail::json_sax_dom_callback_parser<json>(j, callback, true);
+-                CHECK(json::sax_parse(input, &cbp, json::input_format_t::cbor));
+-                CHECK(j.at("foo").is_binary());
+-                CHECK(binary_seen);
+-            }
+         }
+     }
+ 
+@@ -1555,9 +1508,6 @@ TEST_CASE("CBOR")
+             CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0x61, 0xF5})), json::parse_error&);
+             CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0xA1, 0x61, 0X61})), json::parse_error&);
+             CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0X61})), json::parse_error&);
+-            CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0x5F})), json::parse_error&);
+-            CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0x5F, 0x00})), json::parse_error&);
+-            CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0x41})), json::parse_error&);
+ 
+             CHECK_THROWS_WITH(_ = json::from_cbor(std::vector<uint8_t>({0x18})),
+                               "[json.exception.parse_error.110] parse error at byte 2: syntax error while parsing CBOR number: unexpected end of input");
+@@ -1607,12 +1557,6 @@ TEST_CASE("CBOR")
+                               "[json.exception.parse_error.110] parse error at byte 4: syntax error while parsing CBOR value: unexpected end of input");
+             CHECK_THROWS_WITH(_ = json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0x61})),
+                               "[json.exception.parse_error.110] parse error at byte 4: syntax error while parsing CBOR value: unexpected end of input");
+-            CHECK_THROWS_WITH(_ = json::from_cbor(std::vector<uint8_t>({0x5F})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: syntax error while parsing CBOR binary: unexpected end of input");
+-            CHECK_THROWS_WITH(_ = json::from_cbor(std::vector<uint8_t>({0x5F, 0x00})),
+-                              "[json.exception.parse_error.113] parse error at byte 2: syntax error while parsing CBOR binary: expected length specification (0x40-0x5B) or indefinite binary array type (0x5F); last byte: 0x00");
+-            CHECK_THROWS_WITH(_ = json::from_cbor(std::vector<uint8_t>({0x41})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: syntax error while parsing CBOR binary: unexpected end of input");
+ 
+             CHECK(json::from_cbor(std::vector<uint8_t>({0x18}), true, false).is_discarded());
+             CHECK(json::from_cbor(std::vector<uint8_t>({0x19}), true, false).is_discarded());
+@@ -1638,9 +1582,6 @@ TEST_CASE("CBOR")
+             CHECK(json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0x61, 0xF5}), true, false).is_discarded());
+             CHECK(json::from_cbor(std::vector<uint8_t>({0xA1, 0x61, 0x61}), true, false).is_discarded());
+             CHECK(json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0x61}), true, false).is_discarded());
+-            CHECK(json::from_cbor(std::vector<uint8_t>({0x5F}), true, false).is_discarded());
+-            CHECK(json::from_cbor(std::vector<uint8_t>({0x5F, 0x00}), true, false).is_discarded());
+-            CHECK(json::from_cbor(std::vector<uint8_t>({0x41}), true, false).is_discarded());
+         }
+ 
+         SECTION("unsupported bytes")
+diff --git a/test/src/unit-comparison.cpp b/test/src/unit-comparison.cpp
+index 91fbe1b46..6b27240b8 100644
+--- a/test/src/unit-comparison.cpp
++++ b/test/src/unit-comparison.cpp
+@@ -56,23 +56,21 @@ TEST_CASE("lexicographical comparison operators")
+             json::value_t::number_float,
+             json::value_t::object,
+             json::value_t::array,
+-            json::value_t::string,
+-            json::value_t::binary
++            json::value_t::string
+         };
+ 
+         SECTION("comparison: less")
+         {
+             std::vector<std::vector<bool>> expected =
+             {
+-                {false, true, true, true, true, true, true, true, true},
+-                {false, false, true, true, true, true, true, true, true},
+-                {false, false, false, false, false, true, true, true, true},
+-                {false, false, false, false, false, true, true, true, true},
+-                {false, false, false, false, false, true, true, true, true},
+-                {false, false, false, false, false, false, true, true, true},
+-                {false, false, false, false, false, false, false, true, true},
+-                {false, false, false, false, false, false, false, false, true},
+-                {false, false, false, false, false, false, false, false, false}
++                {false, true, true, true, true, true, true, true},
++                {false, false, true, true, true, true, true, true},
++                {false, false, false, false, false, true, true, true},
++                {false, false, false, false, false, true, true, true},
++                {false, false, false, false, false, true, true, true},
++                {false, false, false, false, false, false, true, true},
++                {false, false, false, false, false, false, false, true},
++                {false, false, false, false, false, false, false, false}
+             };
+ 
+             for (size_t i = 0; i < j_types.size(); ++i)
+@@ -100,32 +98,29 @@ TEST_CASE("lexicographical comparison operators")
+             "foo", "bar",
+             true, false,
+             {1, 2, 3}, {"one", "two", "three"},
+-            {{"first", 1}, {"second", 2}}, {{"a", "A"}, {"b", {"B"}}},
+-            json::binary_array({1, 2, 3}), json::binary_array({1, 2, 4})
++            {{"first", 1}, {"second", 2}}, {{"a", "A"}, {"b", {"B"}}}
+         };
+ 
+         SECTION("comparison: equal")
+         {
+             std::vector<std::vector<bool>> expected =
+             {
+-                {true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+-                {true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+-                {false, false, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+-                {false, false, false, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+-                {false, false, false, false, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
+-                {false, false, false, false, false, true, false, false, false, false, false, false, false, false, false, false, false, false},
+-                {false, false, false, false, false, false, true, false, false, false, false, false, false, false, false, false, false, false},
+-                {false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, false, false, false},
+-                {false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, false, false},
+-                {false, false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, false},
+-                {false, false, false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, false},
+-                {false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, false, false, false},
+-                {false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, false, false},
+-                {false, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, false},
+-                {false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false},
+-                {false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false},
+-                {false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, false},
+-                {false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true}
++                {true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
++                {true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
++                {false, false, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
++                {false, false, false, true, false, false, false, false, false, false, false, false, false, false, false, false},
++                {false, false, false, false, true, false, false, false, false, false, false, false, false, false, false, false},
++                {false, false, false, false, false, true, false, false, false, false, false, false, false, false, false, false},
++                {false, false, false, false, false, false, true, false, false, false, false, false, false, false, false, false},
++                {false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, false},
++                {false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, false},
++                {false, false, false, false, false, false, false, false, false, true, false, false, false, false, false, false},
++                {false, false, false, false, false, false, false, false, false, false, true, false, false, false, false, false},
++                {false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, false},
++                {false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false},
++                {false, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false},
++                {false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, false},
++                {false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true}
+             };
+ 
+             for (size_t i = 0; i < j_values.size(); ++i)
+@@ -181,24 +176,22 @@ TEST_CASE("lexicographical comparison operators")
+         {
+             std::vector<std::vector<bool>> expected =
+             {
+-                {false, false, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+-                {false, false, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+-                {false, false, false, true, true, true, true, true, true, true, false, false, true, true, true, true, true, true},
+-                {false, false, false, false, false, false, false, false, true, true, false, false, true, true, true, true, true, true},
+-                {false, false, false, true, false, true, false, true, true, true, false, false, true, true, true, true, true, true},
+-                {false, false, false, true, false, false, false, true, true, true, false, false, true, true, true, true, true, true},
+-                {false, false, false, true, true, true, false, true, true, true, false, false, true, true, true, true, true, true},
+-                {false, false, false, true, false, false, false, false, true, true, false, false, true, true, true, true, true, true},
+-                {false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+-                {false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, true, true},
+-                {false, false, true, true, true, true, true, true, true, true, false, false, true, true, true, true, true, true},
+-                {false, false, true, true, true, true, true, true, true, true, true, false, true, true, true, true, true, true},
+-                {false, false, false, false, false, false, false, false, true, true, false, false, false, true, false, false, true, true},
+-                {false, false, false, false, false, false, false, false, true, true, false, false, false, false, false, false, true, true},
+-                {false, false, false, false, false, false, false, false, true, true, false, false, true, true, false, false, true, true},
+-                {false, false, false, false, false, false, false, false, true, true, false, false, true, true, true, false, true, true},
+-                {false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true},
+-                {false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false}
++                {false, false, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
++                {false, false, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
++                {false, false, false, true, true, true, true, true, true, true, false, false, true, true, true, true},
++                {false, false, false, false, false, false, false, false, true, true, false, false, true, true, true, true},
++                {false, false, false, true, false, true, false, true, true, true, false, false, true, true, true, true},
++                {false, false, false, true, false, false, false, true, true, true, false, false, true, true, true, true},
++                {false, false, false, true, true, true, false, true, true, true, false, false, true, true, true, true},
++                {false, false, false, true, false, false, false, false, true, true, false, false, true, true, true, true},
++                {false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
++                {false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, false},
++                {false, false, true, true, true, true, true, true, true, true, false, false, true, true, true, true},
++                {false, false, true, true, true, true, true, true, true, true, true, false, true, true, true, true},
++                {false, false, false, false, false, false, false, false, true, true, false, false, false, true, false, false},
++                {false, false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
++                {false, false, false, false, false, false, false, false, true, true, false, false, true, true, false, false},
++                {false, false, false, false, false, false, false, false, true, true, false, false, true, true, true, false}
+             };
+ 
+             for (size_t i = 0; i < j_values.size(); ++i)
+diff --git a/test/src/unit-constructor1.cpp b/test/src/unit-constructor1.cpp
+index 96a0be0f1..2caf26535 100644
+--- a/test/src/unit-constructor1.cpp
++++ b/test/src/unit-constructor1.cpp
+@@ -115,14 +115,6 @@ TEST_CASE("constructors")
+             CHECK(j.type() == t);
+             CHECK(j == 0.0);
+         }
+-
+-        SECTION("binary")
+-        {
+-            auto t = json::value_t::binary;
+-            json j(t);
+-            CHECK(j.type() == t);
+-            CHECK(j == json::binary_array({}));
+-        }
+     }
+ 
+     SECTION("create a null object (implicitly)")
+@@ -1461,20 +1453,6 @@ TEST_CASE("constructors")
+                         CHECK(j == j_new);
+                     }
+                 }
+-
+-                SECTION("binary")
+-                {
+-                    {
+-                        json j = json::binary_array({1, 2, 3});
+-                        json j_new(j.begin(), j.end());
+-                        CHECK((j == j_new));
+-                    }
+-                    {
+-                        json j = json::binary_array({1, 2, 3});
+-                        json j_new(j.cbegin(), j.cend());
+-                        CHECK((j == j_new));
+-                    }
+-                }
+             }
+ 
+             SECTION("construct with two invalid iterators")
+diff --git a/test/src/unit-constructor2.cpp b/test/src/unit-constructor2.cpp
+index 8bbb5197c..69429b0b3 100644
+--- a/test/src/unit-constructor2.cpp
++++ b/test/src/unit-constructor2.cpp
+@@ -91,13 +91,6 @@ TEST_CASE("other constructors and destructor")
+             json k(j);
+             CHECK(j == k);
+         }
+-
+-        SECTION("binary")
+-        {
+-            json j = json::binary_array({1, 2, 3});
+-            json k(j);
+-            CHECK(j == k);
+-        }
+     }
+ 
+     SECTION("move constructor")
+@@ -174,14 +167,6 @@ TEST_CASE("other constructors and destructor")
+             k = j;
+             CHECK(j == k);
+         }
+-
+-        SECTION("binary")
+-        {
+-            json j = json::binary_array({1, 2, 3});
+-            json k;
+-            k = j;
+-            CHECK(j == k);
+-        }
+     }
+ 
+     SECTION("destructor")
+diff --git a/test/src/unit-convenience.cpp b/test/src/unit-convenience.cpp
+index b36d9dfea..1c61fae14 100644
+--- a/test/src/unit-convenience.cpp
++++ b/test/src/unit-convenience.cpp
+@@ -58,7 +58,6 @@ TEST_CASE("convenience functions")
+         CHECK(std::string(json(json::value_t::number_integer).type_name()) == "number");
+         CHECK(std::string(json(json::value_t::number_unsigned).type_name()) == "number");
+         CHECK(std::string(json(json::value_t::number_float).type_name()) == "number");
+-        CHECK(std::string(json(json::value_t::binary).type_name()) == "binary");
+         CHECK(std::string(json(json::value_t::boolean).type_name()) == "boolean");
+         CHECK(std::string(json(json::value_t::string).type_name()) == "string");
+         CHECK(std::string(json(json::value_t::discarded).type_name()) == "discarded");
+diff --git a/test/src/unit-element_access1.cpp b/test/src/unit-element_access1.cpp
+index 46638e272..ebec93284 100644
+--- a/test/src/unit-element_access1.cpp
++++ b/test/src/unit-element_access1.cpp
+@@ -694,22 +694,6 @@ TEST_CASE("element access 1")
+                     CHECK(it == j.end());
+                 }
+             }
+-
+-            SECTION("binary")
+-            {
+-                {
+-                    json j = json::binary_array({1, 2, 3});
+-                    json::iterator it = j.erase(j.begin());
+-                    CHECK(j.type() == json::value_t::null);
+-                    CHECK(it == j.end());
+-                }
+-                {
+-                    json j = json::binary_array({1, 2, 3});
+-                    json::const_iterator it = j.erase(j.cbegin());
+-                    CHECK(j.type() == json::value_t::null);
+-                    CHECK(it == j.end());
+-                }
+-            }
+         }
+ 
+         SECTION("erase with one invalid iterator")
+@@ -892,22 +876,6 @@ TEST_CASE("element access 1")
+                     CHECK(it == j.end());
+                 }
+             }
+-
+-            SECTION("binary")
+-            {
+-                {
+-                    json j = json::binary_array({1, 2, 3});
+-                    json::iterator it = j.erase(j.begin(), j.end());
+-                    CHECK(j.type() == json::value_t::null);
+-                    CHECK(it == j.end());
+-                }
+-                {
+-                    json j = json::binary_array({1, 2, 3});
+-                    json::const_iterator it = j.erase(j.cbegin(), j.cend());
+-                    CHECK(j.type() == json::value_t::null);
+-                    CHECK(it == j.end());
+-                }
+-            }
+         }
+ 
+         SECTION("erase with two invalid iterators")
+diff --git a/test/src/unit-inspection.cpp b/test/src/unit-inspection.cpp
+index c464b6989..04a59e53f 100644
+--- a/test/src/unit-inspection.cpp
++++ b/test/src/unit-inspection.cpp
+@@ -49,7 +49,6 @@ TEST_CASE("object inspection")
+             CHECK(not j.is_number_integer());
+             CHECK(not j.is_number_unsigned());
+             CHECK(not j.is_number_float());
+-            CHECK(not j.is_binary());
+             CHECK(j.is_object());
+             CHECK(not j.is_array());
+             CHECK(not j.is_string());
+@@ -67,7 +66,6 @@ TEST_CASE("object inspection")
+             CHECK(not j.is_number_integer());
+             CHECK(not j.is_number_unsigned());
+             CHECK(not j.is_number_float());
+-            CHECK(not j.is_binary());
+             CHECK(not j.is_object());
+             CHECK(j.is_array());
+             CHECK(not j.is_string());
+@@ -85,7 +83,6 @@ TEST_CASE("object inspection")
+             CHECK(not j.is_number_integer());
+             CHECK(not j.is_number_unsigned());
+             CHECK(not j.is_number_float());
+-            CHECK(not j.is_binary());
+             CHECK(not j.is_object());
+             CHECK(not j.is_array());
+             CHECK(not j.is_string());
+@@ -103,7 +100,6 @@ TEST_CASE("object inspection")
+             CHECK(not j.is_number_integer());
+             CHECK(not j.is_number_unsigned());
+             CHECK(not j.is_number_float());
+-            CHECK(not j.is_binary());
+             CHECK(not j.is_object());
+             CHECK(not j.is_array());
+             CHECK(not j.is_string());
+@@ -121,7 +117,6 @@ TEST_CASE("object inspection")
+             CHECK(not j.is_number_integer());
+             CHECK(not j.is_number_unsigned());
+             CHECK(not j.is_number_float());
+-            CHECK(not j.is_binary());
+             CHECK(not j.is_object());
+             CHECK(not j.is_array());
+             CHECK(j.is_string());
+@@ -139,7 +134,6 @@ TEST_CASE("object inspection")
+             CHECK(j.is_number_integer());
+             CHECK(not j.is_number_unsigned());
+             CHECK(not j.is_number_float());
+-            CHECK(not j.is_binary());
+             CHECK(not j.is_object());
+             CHECK(not j.is_array());
+             CHECK(not j.is_string());
+@@ -157,7 +151,6 @@ TEST_CASE("object inspection")
+             CHECK(j.is_number_integer());
+             CHECK(j.is_number_unsigned());
+             CHECK(not j.is_number_float());
+-            CHECK(not j.is_binary());
+             CHECK(not j.is_object());
+             CHECK(not j.is_array());
+             CHECK(not j.is_string());
+@@ -175,25 +168,6 @@ TEST_CASE("object inspection")
+             CHECK(not j.is_number_integer());
+             CHECK(not j.is_number_unsigned());
+             CHECK(j.is_number_float());
+-            CHECK(not j.is_binary());
+-            CHECK(not j.is_object());
+-            CHECK(not j.is_array());
+-            CHECK(not j.is_string());
+-            CHECK(not j.is_discarded());
+-            CHECK(j.is_primitive());
+-            CHECK(not j.is_structured());
+-        }
+-
+-        SECTION("binary")
+-        {
+-            json j(json::value_t::binary);
+-            CHECK(not j.is_null());
+-            CHECK(not j.is_boolean());
+-            CHECK(not j.is_number());
+-            CHECK(not j.is_number_integer());
+-            CHECK(not j.is_number_unsigned());
+-            CHECK(not j.is_number_float());
+-            CHECK(j.is_binary());
+             CHECK(not j.is_object());
+             CHECK(not j.is_array());
+             CHECK(not j.is_string());
+@@ -211,7 +185,6 @@ TEST_CASE("object inspection")
+             CHECK(not j.is_number_integer());
+             CHECK(not j.is_number_unsigned());
+             CHECK(not j.is_number_float());
+-            CHECK(not j.is_binary());
+             CHECK(not j.is_object());
+             CHECK(not j.is_array());
+             CHECK(not j.is_string());
+@@ -466,12 +439,5 @@ TEST_CASE("object inspection")
+             json::value_t t = j;
+             CHECK(t == j.type());
+         }
+-
+-        SECTION("binary")
+-        {
+-            json j = json::binary_array({});
+-            json::value_t t = j;
+-            CHECK(t == j.type());
+-        }
+     }
+ }
+diff --git a/test/src/unit-modifiers.cpp b/test/src/unit-modifiers.cpp
+index 2349dc143..c4073801c 100644
+--- a/test/src/unit-modifiers.cpp
++++ b/test/src/unit-modifiers.cpp
+@@ -106,31 +106,6 @@ TEST_CASE("modifiers")
+             }
+         }
+ 
+-        SECTION("binary")
+-        {
+-            SECTION("empty binary")
+-            {
+-                json j = json::binary_array({});
+-                json k = j;
+-
+-                j.clear();
+-                CHECK(not j.empty());
+-                CHECK(j == json(json::value_t::binary));
+-                CHECK(j == json(k.type()));
+-            }
+-
+-            SECTION("filled binary")
+-            {
+-                json j = json::binary_array({1, 2, 3, 4, 5});
+-                json k = j;
+-
+-                j.clear();
+-                CHECK(not j.empty());
+-                CHECK(j == json(json::value_t::binary));
+-                CHECK(j == json(k.type()));
+-            }
+-        }
+-
+         SECTION("number (integer)")
+         {
+             json j = 23;
+@@ -962,31 +937,5 @@ TEST_CASE("modifiers")
+                 CHECK_THROWS_WITH(j.swap(s), "[json.exception.type_error.310] cannot use swap() with number");
+             }
+         }
+-
+-        SECTION("binary_t")
+-        {
+-            SECTION("binary_t type")
+-            {
+-                json j = json::binary_array({1, 2, 3, 4});
+-                json::binary_t s = {1, 2, 3, 4};
+-
+-                j.swap(s);
+-
+-                CHECK(j == json::binary_array({1, 2, 3, 4}));
+-
+-                j.swap(s);
+-
+-                CHECK(j == json::binary_array({1, 2, 3, 4}));
+-            }
+-
+-            SECTION("non-string_t type")
+-            {
+-                json j = 17;
+-                json::binary_t s = {1, 2, 3, 4};
+-
+-                CHECK_THROWS_AS(j.swap(s), json::type_error&);
+-                CHECK_THROWS_WITH(j.swap(s), "[json.exception.type_error.310] cannot use swap() with number");
+-            }
+-        }
+     }
+ }
+diff --git a/test/src/unit-msgpack.cpp b/test/src/unit-msgpack.cpp
+index 40b63735e..cf5b19e79 100644
+--- a/test/src/unit-msgpack.cpp
++++ b/test/src/unit-msgpack.cpp
+@@ -1418,7 +1418,6 @@ TEST_CASE("MessagePack")
+             CHECK_THROWS_AS(_ = json::from_msgpack(std::vector<uint8_t>({0xa5, 0x68, 0x65})), json::parse_error&);
+             CHECK_THROWS_AS(_ = json::from_msgpack(std::vector<uint8_t>({0x92, 0x01})), json::parse_error&);
+             CHECK_THROWS_AS(_ = json::from_msgpack(std::vector<uint8_t>({0x81, 0xa1, 0x61})), json::parse_error&);
+-            CHECK_THROWS_AS(_ = json::from_msgpack(std::vector<uint8_t>({0xc4, 0x02})), json::parse_error&);
+ 
+             CHECK_THROWS_WITH(_ = json::from_msgpack(std::vector<uint8_t>({0x87})),
+                               "[json.exception.parse_error.110] parse error at byte 2: syntax error while parsing MessagePack string: unexpected end of input");
+@@ -1458,8 +1457,6 @@ TEST_CASE("MessagePack")
+                               "[json.exception.parse_error.110] parse error at byte 3: syntax error while parsing MessagePack value: unexpected end of input");
+             CHECK_THROWS_WITH(_ = json::from_msgpack(std::vector<uint8_t>({0x81, 0xa1, 0x61})),
+                               "[json.exception.parse_error.110] parse error at byte 4: syntax error while parsing MessagePack value: unexpected end of input");
+-            CHECK_THROWS_WITH(_ = json::from_msgpack(std::vector<uint8_t>({0xc4, 0x02})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: syntax error while parsing MessagePack binary: unexpected end of input");
+ 
+             CHECK(json::from_msgpack(std::vector<uint8_t>({0x87}), true, false).is_discarded());
+             CHECK(json::from_msgpack(std::vector<uint8_t>({0xcc}), true, false).is_discarded());
+@@ -1480,8 +1477,6 @@ TEST_CASE("MessagePack")
+             CHECK(json::from_msgpack(std::vector<uint8_t>({0xa5, 0x68, 0x65}), true, false).is_discarded());
+             CHECK(json::from_msgpack(std::vector<uint8_t>({0x92, 0x01}), true, false).is_discarded());
+             CHECK(json::from_msgpack(std::vector<uint8_t>({0x81, 0xA1, 0x61}), true, false).is_discarded());
+-            CHECK(json::from_msgpack(std::vector<uint8_t>({0xc4, 0x02}), true, false).is_discarded());
+-            CHECK(json::from_msgpack(std::vector<uint8_t>({0xc4}), true, false).is_discarded());
+         }
+ 
+         SECTION("unsupported bytes")
+diff --git a/test/src/unit-pointer_access.cpp b/test/src/unit-pointer_access.cpp
+index ed245dc69..778bef7ba 100644
+--- a/test/src/unit-pointer_access.cpp
++++ b/test/src/unit-pointer_access.cpp
+@@ -34,6 +34,22 @@ using nlohmann::json;
+ 
+ TEST_CASE("pointer access")
+ {
++    // create a JSON value with different types
++    json json_types =
++    {
++        {"boolean", true},
++        {
++            "number", {
++                {"integer", 42},
++                {"unsigned", 42u},
++                {"floating-point", 17.23}
++            }
++        },
++        {"string", "Hello, world!"},
++        {"array", {1, 2, 3, 4, 5}},
++        {"null", nullptr}
++    };
++
+     SECTION("pointer access to object_t")
+     {
+         using test_type = json::object_t;
+@@ -45,11 +61,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -60,8 +76,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<json::number_integer_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to const object_t")
+@@ -75,11 +89,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -90,8 +104,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<const json::number_integer_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to array_t")
+@@ -105,11 +117,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -120,8 +132,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<json::number_integer_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to const array_t")
+@@ -135,11 +145,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -150,8 +160,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<const json::number_integer_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to string_t")
+@@ -165,11 +173,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -180,8 +188,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<json::number_integer_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to const string_t")
+@@ -195,11 +201,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -210,8 +216,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<const json::number_integer_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to boolean_t")
+@@ -225,11 +229,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -240,8 +244,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<json::number_integer_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to const boolean_t")
+@@ -255,11 +257,11 @@ TEST_CASE("pointer access")
+         //CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -270,9 +272,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<const json::number_integer_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to number_integer_t")
+@@ -286,11 +285,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -301,8 +300,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<json::number_integer_t*>() != nullptr);
+         CHECK(value.get_ptr<json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to const number_integer_t")
+@@ -316,11 +313,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -331,8 +328,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<const json::number_integer_t*>() != nullptr);
+         CHECK(value.get_ptr<const json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to number_unsigned_t")
+@@ -346,11 +341,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -361,8 +356,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<json::number_integer_t*>() != nullptr);
+         CHECK(value.get_ptr<json::number_unsigned_t*>() != nullptr);
+         CHECK(value.get_ptr<json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to const number_unsigned_t")
+@@ -376,11 +369,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == value.get<test_type>());
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == value.get<test_type>());
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == value.get<test_type>());
+ 
+         // check if null pointers are returned correctly
+@@ -391,8 +384,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<const json::number_integer_t*>() != nullptr);
+         CHECK(value.get_ptr<const json::number_unsigned_t*>() != nullptr);
+         CHECK(value.get_ptr<const json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to number_float_t")
+@@ -406,11 +397,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == Approx(value.get<test_type>()));
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == Approx(value.get<test_type>()));
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == Approx(value.get<test_type>()));
+ 
+         // check if null pointers are returned correctly
+@@ -421,8 +412,6 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<json::number_integer_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<json::number_float_t*>() != nullptr);
+-        CHECK(value.get_ptr<json::binary_t*>() == nullptr);
+-        CHECK(value.get_ptr<json::internal_binary_t*>() == nullptr);
+     }
+ 
+     SECTION("pointer access to const number_float_t")
+@@ -436,11 +425,11 @@ TEST_CASE("pointer access")
+         CHECK(*p1 == Approx(value.get<test_type>()));
+ 
+         const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
++        CHECK(p1 == value.get_ptr<const test_type*>());
+         CHECK(*p2 == Approx(value.get<test_type>()));
+ 
+         const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
++        CHECK(p1 == value.get_ptr<const test_type* const>());
+         CHECK(*p3 == Approx(value.get<test_type>()));
+ 
+         // check if null pointers are returned correctly
+@@ -451,64 +440,5 @@ TEST_CASE("pointer access")
+         CHECK(value.get_ptr<const json::number_integer_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_unsigned_t*>() == nullptr);
+         CHECK(value.get_ptr<const json::number_float_t*>() != nullptr);
+-        CHECK(value.get_ptr<const json::binary_t*>() == nullptr);
+-    }
+-
+-    SECTION("pointer access to const binary_t")
+-    {
+-        using test_type = const json::binary_t;
+-        const json value = json::binary_array({});
+-
+-        // check if pointers are returned correctly
+-        test_type* p1 = value.get_ptr<test_type*>();
+-        CHECK(p1 == value.get_ptr<test_type*>());
+-        //CHECK(*p1 == value.get<test_type>());
+-
+-        const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
+-        //CHECK(*p2 == value.get<test_type>());
+-
+-        const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
+-        //CHECK(*p3 == value.get<test_type>());
+-
+-        // check if null pointers are returned correctly
+-        CHECK(value.get_ptr<const json::object_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::array_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::string_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::boolean_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::number_integer_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::number_unsigned_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::binary_t*>() != nullptr);
+-    }
+-
+-    SECTION("pointer access to const binary_t")
+-    {
+-        using test_type = const json::internal_binary_t;
+-        const json value = json::binary_array({});
+-
+-        // check if pointers are returned correctly
+-        test_type* p1 = value.get_ptr<test_type*>();
+-        CHECK(p1 == value.get_ptr<test_type*>());
+-        //CHECK(*p1 == value.get<test_type>());
+-
+-        const test_type* p2 = value.get_ptr<const test_type*>();
+-        CHECK(p2 == value.get_ptr<const test_type*>());
+-        //CHECK(*p2 == value.get<test_type>());
+-
+-        const test_type* const p3 = value.get_ptr<const test_type* const>();
+-        CHECK(p3 == value.get_ptr<const test_type* const>());
+-        //CHECK(*p3 == value.get<test_type>());
+-
+-        // check if null pointers are returned correctly
+-        CHECK(value.get_ptr<const json::object_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::array_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::string_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::boolean_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::number_integer_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::number_unsigned_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::number_float_t*>() == nullptr);
+-        CHECK(value.get_ptr<const json::internal_binary_t*>() != nullptr);
+     }
+ }
+diff --git a/test/src/unit-serialization.cpp b/test/src/unit-serialization.cpp
+index 083a6d5af..dc8175ef6 100644
+--- a/test/src/unit-serialization.cpp
++++ b/test/src/unit-serialization.cpp
+@@ -206,55 +206,3 @@ TEST_CASE_TEMPLATE("serialization for extreme integer values", T, int32_t, uint3
+         CHECK(j.dump() == std::to_string(maximum));
+     }
+ }
+-
+-TEST_CASE("dump with binary values")
+-{
+-    SECTION("serialize_binary = false")
+-    {
+-        auto binary = json::binary_array({1, 2, 3, 4});
+-        auto binary_empty = json::binary_array({});
+-        json object = {{"key", binary}};
+-        json array = {"value", 1, binary};
+-
+-        CHECK_THROWS_AS(binary.dump(), json::type_error);
+-        CHECK_THROWS_AS(binary_empty.dump(), json::type_error);
+-        CHECK_THROWS_AS(object.dump(), json::type_error);
+-        CHECK_THROWS_AS(array.dump(), json::type_error);
+-        CHECK_THROWS_WITH(binary.dump(), "[json.exception.type_error.317] cannot serialize binary data to text JSON");
+-        CHECK_THROWS_WITH(binary_empty.dump(), "[json.exception.type_error.317] cannot serialize binary data to text JSON");
+-        CHECK_THROWS_WITH(object.dump(), "[json.exception.type_error.317] cannot serialize binary data to text JSON");
+-        CHECK_THROWS_WITH(array.dump(), "[json.exception.type_error.317] cannot serialize binary data to text JSON");
+-    }
+-
+-    SECTION("serialize_binary = true")
+-    {
+-        auto binary = json::binary_array({1, 2, 3, 4});
+-        auto binary_empty = json::binary_array({});
+-        json object = {{"key", binary}};
+-        json array = {"value", 1, binary};
+-
+-        CHECK(binary.dump(-1, ' ', false, json::error_handler_t::strict, true) == "b[1,2,3,4]");
+-        CHECK(binary_empty.dump(-1, ' ', false, json::error_handler_t::strict, true) == "b[]");
+-        CHECK(object.dump(-1, ' ', false, json::error_handler_t::strict, true) == "{\"key\":b[1,2,3,4]}");
+-        CHECK(array.dump(-1, ' ', false, json::error_handler_t::strict, true) == "[\"value\",1,b[1,2,3,4]]");
+-    }
+-
+-    SECTION("serialize_binary = true, pretty-printed")
+-    {
+-        auto binary = json::binary_array({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20});
+-        auto binary_empty = json::binary_array({});
+-        json object = {{"key", binary}};
+-        json array = {"value", 1, binary};
+-
+-        CHECK(binary.dump(4, ' ', false, json::error_handler_t::strict, true) == "b[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]");
+-        CHECK(binary_empty.dump(4, ' ', false, json::error_handler_t::strict, true) == "b[]");
+-        CHECK(object.dump(4, ' ', false, json::error_handler_t::strict, true) == "{\n"
+-              "    \"key\": b[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]\n"
+-              "}");
+-        CHECK(array.dump(4, ' ', false, json::error_handler_t::strict, true) == "[\n"
+-              "    \"value\",\n"
+-              "    1,\n"
+-              "    b[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]\n"
+-              "]");
+-    }
+-}
+\ No newline at end of file

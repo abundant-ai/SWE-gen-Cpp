@@ -1,0 +1,667 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c8c027c7..8f828194 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.14)
+ project(
+     simdjson
+     # The version number is modified by tools/release.py
+-    VERSION 4.0.2
++    VERSION 4.0.3
+     DESCRIPTION "Parsing gigabytes of JSON per second"
+     HOMEPAGE_URL "https://simdjson.org/"
+     LANGUAGES CXX C
+diff --git a/Doxyfile b/Doxyfile
+index 02ffbef4..0cceef43 100644
+--- a/Doxyfile
++++ b/Doxyfile
+@@ -38,7 +38,7 @@ PROJECT_NAME           = simdjson
+ # could be handy for archiving the generated documentation or if some version
+ # control system is used.
+ 
+-PROJECT_NUMBER         = "4.0.2"
++PROJECT_NUMBER         = "4.0.3"
+ 
+ # Using the PROJECT_BRIEF tag one can provide an optional one line description
+ # for a project that appears at the top of each page and should give viewer a
+diff --git a/benchmark/static_reflect/CMakeLists.txt b/benchmark/static_reflect/CMakeLists.txt
+index 66196351..28c3be8e 100644
+--- a/benchmark/static_reflect/CMakeLists.txt
++++ b/benchmark/static_reflect/CMakeLists.txt
+@@ -6,38 +6,42 @@ CPMAddPackage(
+   EXCLUDE_FROM_ALL YES
+ )
+ 
++option(SIMDJSON_USE_RUST "Build the static_reflect benchmark" OFF)
+ 
++if(SIMDJSON_USER_RUST)
++  if(NOT WIN32)
++  # We want the check whether Rust is available before trying to build a crate.
++  CPMAddPackage(
++    NAME corrosion
++    GITHUB_REPOSITORY corrosion-rs/corrosion
++    VERSION 0.4.4
++    DOWNLOAD_ONLY ON
++    OPTIONS "Rust_FIND_QUIETLY OFF"
++  )
++  include("${corrosion_SOURCE_DIR}/cmake/FindRust.cmake")
++  endif()
+ 
+-if(NOT WIN32)
+-# We want the check whether Rust is available before trying to build a crate.
+-CPMAddPackage(
+-  NAME corrosion
+-  GITHUB_REPOSITORY corrosion-rs/corrosion
+-  VERSION 0.4.4
+-  DOWNLOAD_ONLY ON
+-  OPTIONS "Rust_FIND_QUIETLY OFF"
+-)
+-include("${corrosion_SOURCE_DIR}/cmake/FindRust.cmake")
+-endif()
+-
+-if(RUST_FOUND)
+-  message(STATUS "Rust found: " ${Rust_VERSION} )
+-  add_subdirectory("${corrosion_SOURCE_DIR}" "${PROJECT_BINARY_DIR}/_deps/corrosion" EXCLUDE_FROM_ALL)
+-  # Important: we want to build in release mode!
+-  corrosion_import_crate(MANIFEST_PATH "serde-benchmark/Cargo.toml" NO_LINKER_OVERRIDE PROFILE release)
+-else()
+-  message(STATUS "Rust/Cargo is unavailable." )
+-  message(STATUS "We will not benchmark serde-benchmark." )
+-  if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+-    message(STATUS "Under macOS, you may be able to install rust with")
+-    message(STATUS "curl https://sh.rustup.rs -sSf | sh")
+-  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+-    message(STATUS "Under Linux, you may be able to install rust with a command such as")
+-    message(STATUS "apt-get install cargo" )
+-    message(STATUS "or" )
+-    message(STATUS "curl https://sh.rustup.rs -sSf | sh")
++  if(RUST_FOUND)
++    message(STATUS "Rust found: " ${Rust_VERSION} )
++    add_subdirectory("${corrosion_SOURCE_DIR}" "${PROJECT_BINARY_DIR}/_deps/corrosion" EXCLUDE_FROM_ALL)
++    # Important: we want to build in release mode!
++    corrosion_import_crate(MANIFEST_PATH "serde-benchmark/Cargo.toml" NO_LINKER_OVERRIDE PROFILE release)
++  else()
++    message(STATUS "Rust/Cargo is unavailable." )
++    message(STATUS "We will not benchmark serde-benchmark." )
++    if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
++      message(STATUS "Under macOS, you may be able to install rust with")
++      message(STATUS "curl https://sh.rustup.rs -sSf | sh")
++    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++      message(STATUS "Under Linux, you may be able to install rust with a command such as")
++      message(STATUS "apt-get install cargo" )
++      message(STATUS "or" )
++      message(STATUS "curl https://sh.rustup.rs -sSf | sh")
++    endif()
+   endif()
+-endif()
++else(SIMDJSON_USER_RUST)
++  message(STATUS "We will not benchmark serde-benchmark." )
++endif(SIMDJSON_USER_RUST)
+ 
+ # Add the benchmark executable targets
+ add_subdirectory(twitter_benchmark)
+diff --git a/include/simdjson/convert-inl.h b/include/simdjson/convert-inl.h
+index 5bd05e52..0fd60e75 100644
+--- a/include/simdjson/convert-inl.h
++++ b/include/simdjson/convert-inl.h
+@@ -116,6 +116,16 @@ template <typename T>
+ inline auto to_adaptor<T>::operator()(ondemand::parser &parser, padded_string_view const str) const noexcept {
+   return auto_parser<ondemand::parser *>{parser, str};
+ }
++
++template <typename T>
++inline auto to_adaptor<T>::operator()(std::string str) const noexcept {
++  return auto_parser{pad_with_reserve(str)};
++}
++
++template <typename T>
++inline auto to_adaptor<T>::operator()(ondemand::parser &parser, std::string str) const noexcept {
++  return auto_parser<ondemand::parser *>{parser, pad_with_reserve(str)};
++}
+ } // namespace internal
+ } // namespace convert
+ } // namespace simdjson
+diff --git a/include/simdjson/convert.h b/include/simdjson/convert.h
+index fa6246be..e6d613fd 100644
+--- a/include/simdjson/convert.h
++++ b/include/simdjson/convert.h
+@@ -72,6 +72,11 @@ struct to_adaptor {
+ 	T operator()(simdjson_result<ondemand::value> &val) const noexcept;
+ 	auto operator()(padded_string_view const str) const noexcept;
+ 	auto operator()(ondemand::parser &parser, padded_string_view const str) const noexcept;
++	// The std::string is padded with reserve to ensure there is enough space for padding.
++	// Some sanitizers may not like this, so you can use simdjson::pad instead.
++	// simdjson::from(simdjson::pad(str))
++	auto operator()(std::string str) const noexcept;
++	auto operator()(ondemand::parser &parser, std::string str) const noexcept;
+ };
+ } // namespace internal
+ } // namespace convert
+diff --git a/include/simdjson/generic/ondemand/json_string_builder-inl.h b/include/simdjson/generic/ondemand/json_string_builder-inl.h
+index ed74bbdd..ebfe8a92 100644
+--- a/include/simdjson/generic/ondemand/json_string_builder-inl.h
++++ b/include/simdjson/generic/ondemand/json_string_builder-inl.h
+@@ -284,10 +284,12 @@ simdjson_inline void string_builder::clear() noexcept {
+ 
+ namespace internal {
+ 
+-// We could specialize further for 32-bit integers.
+-simdjson_really_inline int int_log2(uint32_t x) { return (63 - leading_zeroes(x | 1)); }
+ 
+-simdjson_really_inline int fast_digit_count(uint32_t x) {
++template <typename number_type, typename = typename std::enable_if<
++                                    std::is_unsigned<number_type>::value>::type>
++simdjson_really_inline int int_log2(number_type x) { return 63 - leading_zeroes(uint64_t(x) | 1); }
++
++simdjson_really_inline int fast_digit_count_32(uint32_t x) {
+   static uint64_t table[] = {
+       4294967296,  8589934582,  8589934582,  8589934582,  12884901788,
+       12884901788, 12884901788, 17179868184, 17179868184, 17179868184,
+@@ -299,9 +301,8 @@ simdjson_really_inline int fast_digit_count(uint32_t x) {
+   return uint32_t((x + table[int_log2(x)]) >> 32);
+ }
+ 
+-simdjson_really_inline int int_log2(uint64_t x) { return 63 - leading_zeroes(x | 1); }
+ 
+-simdjson_really_inline int fast_digit_count(uint64_t x) {
++simdjson_really_inline int fast_digit_count_64(uint64_t x) {
+   static uint64_t table[] = {9,
+                              99,
+                              999,
+@@ -332,7 +333,11 @@ simdjson_really_inline size_t digit_count(number_type v) noexcept {
+   static_assert(sizeof(number_type) == 8 || sizeof(number_type) == 4 ||
+                     sizeof(number_type) == 2 || sizeof(number_type) == 1,
+                 "We only support 8-bit, 16-bit, 32-bit and 64-bit numbers");
+-  return fast_digit_count(v);
++  SIMDJSON_IF_CONSTEXPR(sizeof(number_type) <= 4) {
++    return fast_digit_count_32(static_cast<uint32_t>(v));
++  } else {
++    return fast_digit_count_64(static_cast<uint64_t>(v));
++  }
+ }
+ static const char decimal_table[200] = {
+   0x30, 0x30, 0x30, 0x31, 0x30, 0x32, 0x30, 0x33, 0x30, 0x34, 0x30, 0x35,
+diff --git a/include/simdjson/simdjson_version.h b/include/simdjson/simdjson_version.h
+index 4b6004b5..0972eecf 100644
+--- a/include/simdjson/simdjson_version.h
++++ b/include/simdjson/simdjson_version.h
+@@ -4,7 +4,7 @@
+ #define SIMDJSON_SIMDJSON_VERSION_H
+ 
+ /** The version of simdjson being used (major.minor.revision) */
+-#define SIMDJSON_VERSION "4.0.2"
++#define SIMDJSON_VERSION "4.0.3"
+ 
+ namespace simdjson {
+ enum {
+@@ -19,7 +19,7 @@ enum {
+   /**
+    * The revision (major.minor.REVISION) of simdjson being used.
+    */
+-  SIMDJSON_VERSION_REVISION = 2
++  SIMDJSON_VERSION_REVISION = 3
+ };
+ } // namespace simdjson
+ 
+diff --git a/singleheader/simdjson.cpp b/singleheader/simdjson.cpp
+index d1fc6b9b..f4a488e2 100644
+--- a/singleheader/simdjson.cpp
++++ b/singleheader/simdjson.cpp
+@@ -1,4 +1,4 @@
+-/* auto-generated on 2025-09-14 09:01:41 -0600. version 4.0.2 Do not edit! */
++/* auto-generated on 2025-09-15 19:47:29 -0600. version 4.0.3 Do not edit! */
+ /* including simdjson.cpp:  */
+ /* begin file simdjson.cpp */
+ #define SIMDJSON_SRC_SIMDJSON_CPP
+diff --git a/singleheader/simdjson.h b/singleheader/simdjson.h
+index bf27830d..69f6826f 100644
+--- a/singleheader/simdjson.h
++++ b/singleheader/simdjson.h
+@@ -1,4 +1,4 @@
+-/* auto-generated on 2025-09-14 09:01:41 -0600. version 4.0.2 Do not edit! */
++/* auto-generated on 2025-09-15 19:47:29 -0600. version 4.0.3 Do not edit! */
+ /* including simdjson.h:  */
+ /* begin file simdjson.h */
+ #ifndef SIMDJSON_H
+@@ -2508,7 +2508,7 @@ namespace std {
+ #define SIMDJSON_SIMDJSON_VERSION_H
+ 
+ /** The version of simdjson being used (major.minor.revision) */
+-#define SIMDJSON_VERSION "4.0.2"
++#define SIMDJSON_VERSION "4.0.3"
+ 
+ namespace simdjson {
+ enum {
+@@ -2523,7 +2523,7 @@ enum {
+   /**
+    * The revision (major.minor.REVISION) of simdjson being used.
+    */
+-  SIMDJSON_VERSION_REVISION = 2
++  SIMDJSON_VERSION_REVISION = 3
+ };
+ } // namespace simdjson
+ 
+@@ -38968,7 +38968,7 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   }
+   error_code e = simdjson::SUCCESS;
+   template for (constexpr auto mem : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
+-        if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
++    if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+       // Note: removed static assert as optional types are now handled generically
+       // as long we are succesful or the field is not found, we continue
+@@ -45345,10 +45345,12 @@ simdjson_inline void string_builder::clear() noexcept {
+ 
+ namespace internal {
+ 
+-// We could specialize further for 32-bit integers.
+-simdjson_really_inline int int_log2(uint32_t x) { return (63 - leading_zeroes(x | 1)); }
+ 
+-simdjson_really_inline int fast_digit_count(uint32_t x) {
++template <typename number_type, typename = typename std::enable_if<
++                                    std::is_unsigned<number_type>::value>::type>
++simdjson_really_inline int int_log2(number_type x) { return 63 - leading_zeroes(uint64_t(x) | 1); }
++
++simdjson_really_inline int fast_digit_count_32(uint32_t x) {
+   static uint64_t table[] = {
+       4294967296,  8589934582,  8589934582,  8589934582,  12884901788,
+       12884901788, 12884901788, 17179868184, 17179868184, 17179868184,
+@@ -45360,9 +45362,8 @@ simdjson_really_inline int fast_digit_count(uint32_t x) {
+   return uint32_t((x + table[int_log2(x)]) >> 32);
+ }
+ 
+-simdjson_really_inline int int_log2(uint64_t x) { return 63 - leading_zeroes(x | 1); }
+ 
+-simdjson_really_inline int fast_digit_count(uint64_t x) {
++simdjson_really_inline int fast_digit_count_64(uint64_t x) {
+   static uint64_t table[] = {9,
+                              99,
+                              999,
+@@ -45393,7 +45394,11 @@ simdjson_really_inline size_t digit_count(number_type v) noexcept {
+   static_assert(sizeof(number_type) == 8 || sizeof(number_type) == 4 ||
+                     sizeof(number_type) == 2 || sizeof(number_type) == 1,
+                 "We only support 8-bit, 16-bit, 32-bit and 64-bit numbers");
+-  return fast_digit_count(v);
++  SIMDJSON_IF_CONSTEXPR(sizeof(number_type) <= 4) {
++    return fast_digit_count_32(static_cast<uint32_t>(v));
++  } else {
++    return fast_digit_count_64(static_cast<uint64_t>(v));
++  }
+ }
+ static const char decimal_table[200] = {
+   0x30, 0x30, 0x30, 0x31, 0x30, 0x32, 0x30, 0x33, 0x30, 0x34, 0x30, 0x35,
+@@ -51927,7 +51932,7 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   }
+   error_code e = simdjson::SUCCESS;
+   template for (constexpr auto mem : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
+-        if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
++    if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+       // Note: removed static assert as optional types are now handled generically
+       // as long we are succesful or the field is not found, we continue
+@@ -58304,10 +58309,12 @@ simdjson_inline void string_builder::clear() noexcept {
+ 
+ namespace internal {
+ 
+-// We could specialize further for 32-bit integers.
+-simdjson_really_inline int int_log2(uint32_t x) { return (63 - leading_zeroes(x | 1)); }
+ 
+-simdjson_really_inline int fast_digit_count(uint32_t x) {
++template <typename number_type, typename = typename std::enable_if<
++                                    std::is_unsigned<number_type>::value>::type>
++simdjson_really_inline int int_log2(number_type x) { return 63 - leading_zeroes(uint64_t(x) | 1); }
++
++simdjson_really_inline int fast_digit_count_32(uint32_t x) {
+   static uint64_t table[] = {
+       4294967296,  8589934582,  8589934582,  8589934582,  12884901788,
+       12884901788, 12884901788, 17179868184, 17179868184, 17179868184,
+@@ -58319,9 +58326,8 @@ simdjson_really_inline int fast_digit_count(uint32_t x) {
+   return uint32_t((x + table[int_log2(x)]) >> 32);
+ }
+ 
+-simdjson_really_inline int int_log2(uint64_t x) { return 63 - leading_zeroes(x | 1); }
+ 
+-simdjson_really_inline int fast_digit_count(uint64_t x) {
++simdjson_really_inline int fast_digit_count_64(uint64_t x) {
+   static uint64_t table[] = {9,
+                              99,
+                              999,
+@@ -58352,7 +58358,11 @@ simdjson_really_inline size_t digit_count(number_type v) noexcept {
+   static_assert(sizeof(number_type) == 8 || sizeof(number_type) == 4 ||
+                     sizeof(number_type) == 2 || sizeof(number_type) == 1,
+                 "We only support 8-bit, 16-bit, 32-bit and 64-bit numbers");
+-  return fast_digit_count(v);
++  SIMDJSON_IF_CONSTEXPR(sizeof(number_type) <= 4) {
++    return fast_digit_count_32(static_cast<uint32_t>(v));
++  } else {
++    return fast_digit_count_64(static_cast<uint64_t>(v));
++  }
+ }
+ static const char decimal_table[200] = {
+   0x30, 0x30, 0x30, 0x31, 0x30, 0x32, 0x30, 0x33, 0x30, 0x34, 0x30, 0x35,
+@@ -65385,7 +65395,7 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   }
+   error_code e = simdjson::SUCCESS;
+   template for (constexpr auto mem : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
+-        if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
++    if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+       // Note: removed static assert as optional types are now handled generically
+       // as long we are succesful or the field is not found, we continue
+@@ -71762,10 +71772,12 @@ simdjson_inline void string_builder::clear() noexcept {
+ 
+ namespace internal {
+ 
+-// We could specialize further for 32-bit integers.
+-simdjson_really_inline int int_log2(uint32_t x) { return (63 - leading_zeroes(x | 1)); }
+ 
+-simdjson_really_inline int fast_digit_count(uint32_t x) {
++template <typename number_type, typename = typename std::enable_if<
++                                    std::is_unsigned<number_type>::value>::type>
++simdjson_really_inline int int_log2(number_type x) { return 63 - leading_zeroes(uint64_t(x) | 1); }
++
++simdjson_really_inline int fast_digit_count_32(uint32_t x) {
+   static uint64_t table[] = {
+       4294967296,  8589934582,  8589934582,  8589934582,  12884901788,
+       12884901788, 12884901788, 17179868184, 17179868184, 17179868184,
+@@ -71777,9 +71789,8 @@ simdjson_really_inline int fast_digit_count(uint32_t x) {
+   return uint32_t((x + table[int_log2(x)]) >> 32);
+ }
+ 
+-simdjson_really_inline int int_log2(uint64_t x) { return 63 - leading_zeroes(x | 1); }
+ 
+-simdjson_really_inline int fast_digit_count(uint64_t x) {
++simdjson_really_inline int fast_digit_count_64(uint64_t x) {
+   static uint64_t table[] = {9,
+                              99,
+                              999,
+@@ -71810,7 +71821,11 @@ simdjson_really_inline size_t digit_count(number_type v) noexcept {
+   static_assert(sizeof(number_type) == 8 || sizeof(number_type) == 4 ||
+                     sizeof(number_type) == 2 || sizeof(number_type) == 1,
+                 "We only support 8-bit, 16-bit, 32-bit and 64-bit numbers");
+-  return fast_digit_count(v);
++  SIMDJSON_IF_CONSTEXPR(sizeof(number_type) <= 4) {
++    return fast_digit_count_32(static_cast<uint32_t>(v));
++  } else {
++    return fast_digit_count_64(static_cast<uint64_t>(v));
++  }
+ }
+ static const char decimal_table[200] = {
+   0x30, 0x30, 0x30, 0x31, 0x30, 0x32, 0x30, 0x33, 0x30, 0x34, 0x30, 0x35,
+@@ -78843,7 +78858,7 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   }
+   error_code e = simdjson::SUCCESS;
+   template for (constexpr auto mem : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
+-        if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
++    if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+       // Note: removed static assert as optional types are now handled generically
+       // as long we are succesful or the field is not found, we continue
+@@ -85220,10 +85235,12 @@ simdjson_inline void string_builder::clear() noexcept {
+ 
+ namespace internal {
+ 
+-// We could specialize further for 32-bit integers.
+-simdjson_really_inline int int_log2(uint32_t x) { return (63 - leading_zeroes(x | 1)); }
+ 
+-simdjson_really_inline int fast_digit_count(uint32_t x) {
++template <typename number_type, typename = typename std::enable_if<
++                                    std::is_unsigned<number_type>::value>::type>
++simdjson_really_inline int int_log2(number_type x) { return 63 - leading_zeroes(uint64_t(x) | 1); }
++
++simdjson_really_inline int fast_digit_count_32(uint32_t x) {
+   static uint64_t table[] = {
+       4294967296,  8589934582,  8589934582,  8589934582,  12884901788,
+       12884901788, 12884901788, 17179868184, 17179868184, 17179868184,
+@@ -85235,9 +85252,8 @@ simdjson_really_inline int fast_digit_count(uint32_t x) {
+   return uint32_t((x + table[int_log2(x)]) >> 32);
+ }
+ 
+-simdjson_really_inline int int_log2(uint64_t x) { return 63 - leading_zeroes(x | 1); }
+ 
+-simdjson_really_inline int fast_digit_count(uint64_t x) {
++simdjson_really_inline int fast_digit_count_64(uint64_t x) {
+   static uint64_t table[] = {9,
+                              99,
+                              999,
+@@ -85268,7 +85284,11 @@ simdjson_really_inline size_t digit_count(number_type v) noexcept {
+   static_assert(sizeof(number_type) == 8 || sizeof(number_type) == 4 ||
+                     sizeof(number_type) == 2 || sizeof(number_type) == 1,
+                 "We only support 8-bit, 16-bit, 32-bit and 64-bit numbers");
+-  return fast_digit_count(v);
++  SIMDJSON_IF_CONSTEXPR(sizeof(number_type) <= 4) {
++    return fast_digit_count_32(static_cast<uint32_t>(v));
++  } else {
++    return fast_digit_count_64(static_cast<uint64_t>(v));
++  }
+ }
+ static const char decimal_table[200] = {
+   0x30, 0x30, 0x30, 0x31, 0x30, 0x32, 0x30, 0x33, 0x30, 0x34, 0x30, 0x35,
+@@ -92416,7 +92436,7 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   }
+   error_code e = simdjson::SUCCESS;
+   template for (constexpr auto mem : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
+-        if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
++    if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+       // Note: removed static assert as optional types are now handled generically
+       // as long we are succesful or the field is not found, we continue
+@@ -98793,10 +98813,12 @@ simdjson_inline void string_builder::clear() noexcept {
+ 
+ namespace internal {
+ 
+-// We could specialize further for 32-bit integers.
+-simdjson_really_inline int int_log2(uint32_t x) { return (63 - leading_zeroes(x | 1)); }
+ 
+-simdjson_really_inline int fast_digit_count(uint32_t x) {
++template <typename number_type, typename = typename std::enable_if<
++                                    std::is_unsigned<number_type>::value>::type>
++simdjson_really_inline int int_log2(number_type x) { return 63 - leading_zeroes(uint64_t(x) | 1); }
++
++simdjson_really_inline int fast_digit_count_32(uint32_t x) {
+   static uint64_t table[] = {
+       4294967296,  8589934582,  8589934582,  8589934582,  12884901788,
+       12884901788, 12884901788, 17179868184, 17179868184, 17179868184,
+@@ -98808,9 +98830,8 @@ simdjson_really_inline int fast_digit_count(uint32_t x) {
+   return uint32_t((x + table[int_log2(x)]) >> 32);
+ }
+ 
+-simdjson_really_inline int int_log2(uint64_t x) { return 63 - leading_zeroes(x | 1); }
+ 
+-simdjson_really_inline int fast_digit_count(uint64_t x) {
++simdjson_really_inline int fast_digit_count_64(uint64_t x) {
+   static uint64_t table[] = {9,
+                              99,
+                              999,
+@@ -98841,7 +98862,11 @@ simdjson_really_inline size_t digit_count(number_type v) noexcept {
+   static_assert(sizeof(number_type) == 8 || sizeof(number_type) == 4 ||
+                     sizeof(number_type) == 2 || sizeof(number_type) == 1,
+                 "We only support 8-bit, 16-bit, 32-bit and 64-bit numbers");
+-  return fast_digit_count(v);
++  SIMDJSON_IF_CONSTEXPR(sizeof(number_type) <= 4) {
++    return fast_digit_count_32(static_cast<uint32_t>(v));
++  } else {
++    return fast_digit_count_64(static_cast<uint64_t>(v));
++  }
+ }
+ static const char decimal_table[200] = {
+   0x30, 0x30, 0x30, 0x31, 0x30, 0x32, 0x30, 0x33, 0x30, 0x34, 0x30, 0x35,
+@@ -106305,7 +106330,7 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   }
+   error_code e = simdjson::SUCCESS;
+   template for (constexpr auto mem : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
+-        if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
++    if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+       // Note: removed static assert as optional types are now handled generically
+       // as long we are succesful or the field is not found, we continue
+@@ -112682,10 +112707,12 @@ simdjson_inline void string_builder::clear() noexcept {
+ 
+ namespace internal {
+ 
+-// We could specialize further for 32-bit integers.
+-simdjson_really_inline int int_log2(uint32_t x) { return (63 - leading_zeroes(x | 1)); }
+ 
+-simdjson_really_inline int fast_digit_count(uint32_t x) {
++template <typename number_type, typename = typename std::enable_if<
++                                    std::is_unsigned<number_type>::value>::type>
++simdjson_really_inline int int_log2(number_type x) { return 63 - leading_zeroes(uint64_t(x) | 1); }
++
++simdjson_really_inline int fast_digit_count_32(uint32_t x) {
+   static uint64_t table[] = {
+       4294967296,  8589934582,  8589934582,  8589934582,  12884901788,
+       12884901788, 12884901788, 17179868184, 17179868184, 17179868184,
+@@ -112697,9 +112724,8 @@ simdjson_really_inline int fast_digit_count(uint32_t x) {
+   return uint32_t((x + table[int_log2(x)]) >> 32);
+ }
+ 
+-simdjson_really_inline int int_log2(uint64_t x) { return 63 - leading_zeroes(x | 1); }
+ 
+-simdjson_really_inline int fast_digit_count(uint64_t x) {
++simdjson_really_inline int fast_digit_count_64(uint64_t x) {
+   static uint64_t table[] = {9,
+                              99,
+                              999,
+@@ -112730,7 +112756,11 @@ simdjson_really_inline size_t digit_count(number_type v) noexcept {
+   static_assert(sizeof(number_type) == 8 || sizeof(number_type) == 4 ||
+                     sizeof(number_type) == 2 || sizeof(number_type) == 1,
+                 "We only support 8-bit, 16-bit, 32-bit and 64-bit numbers");
+-  return fast_digit_count(v);
++  SIMDJSON_IF_CONSTEXPR(sizeof(number_type) <= 4) {
++    return fast_digit_count_32(static_cast<uint32_t>(v));
++  } else {
++    return fast_digit_count_64(static_cast<uint64_t>(v));
++  }
+ }
+ static const char decimal_table[200] = {
+   0x30, 0x30, 0x30, 0x31, 0x30, 0x32, 0x30, 0x33, 0x30, 0x34, 0x30, 0x35,
+@@ -119671,7 +119701,7 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   }
+   error_code e = simdjson::SUCCESS;
+   template for (constexpr auto mem : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
+-        if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
++    if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+       // Note: removed static assert as optional types are now handled generically
+       // as long we are succesful or the field is not found, we continue
+@@ -126048,10 +126078,12 @@ simdjson_inline void string_builder::clear() noexcept {
+ 
+ namespace internal {
+ 
+-// We could specialize further for 32-bit integers.
+-simdjson_really_inline int int_log2(uint32_t x) { return (63 - leading_zeroes(x | 1)); }
+ 
+-simdjson_really_inline int fast_digit_count(uint32_t x) {
++template <typename number_type, typename = typename std::enable_if<
++                                    std::is_unsigned<number_type>::value>::type>
++simdjson_really_inline int int_log2(number_type x) { return 63 - leading_zeroes(uint64_t(x) | 1); }
++
++simdjson_really_inline int fast_digit_count_32(uint32_t x) {
+   static uint64_t table[] = {
+       4294967296,  8589934582,  8589934582,  8589934582,  12884901788,
+       12884901788, 12884901788, 17179868184, 17179868184, 17179868184,
+@@ -126063,9 +126095,8 @@ simdjson_really_inline int fast_digit_count(uint32_t x) {
+   return uint32_t((x + table[int_log2(x)]) >> 32);
+ }
+ 
+-simdjson_really_inline int int_log2(uint64_t x) { return 63 - leading_zeroes(x | 1); }
+ 
+-simdjson_really_inline int fast_digit_count(uint64_t x) {
++simdjson_really_inline int fast_digit_count_64(uint64_t x) {
+   static uint64_t table[] = {9,
+                              99,
+                              999,
+@@ -126096,7 +126127,11 @@ simdjson_really_inline size_t digit_count(number_type v) noexcept {
+   static_assert(sizeof(number_type) == 8 || sizeof(number_type) == 4 ||
+                     sizeof(number_type) == 2 || sizeof(number_type) == 1,
+                 "We only support 8-bit, 16-bit, 32-bit and 64-bit numbers");
+-  return fast_digit_count(v);
++  SIMDJSON_IF_CONSTEXPR(sizeof(number_type) <= 4) {
++    return fast_digit_count_32(static_cast<uint32_t>(v));
++  } else {
++    return fast_digit_count_64(static_cast<uint64_t>(v));
++  }
+ }
+ static const char decimal_table[200] = {
+   0x30, 0x30, 0x30, 0x31, 0x30, 0x32, 0x30, 0x33, 0x30, 0x34, 0x30, 0x35,
+@@ -133050,7 +133085,7 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   }
+   error_code e = simdjson::SUCCESS;
+   template for (constexpr auto mem : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
+-        if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
++    if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+       // Note: removed static assert as optional types are now handled generically
+       // as long we are succesful or the field is not found, we continue
+@@ -139427,10 +139462,12 @@ simdjson_inline void string_builder::clear() noexcept {
+ 
+ namespace internal {
+ 
+-// We could specialize further for 32-bit integers.
+-simdjson_really_inline int int_log2(uint32_t x) { return (63 - leading_zeroes(x | 1)); }
+ 
+-simdjson_really_inline int fast_digit_count(uint32_t x) {
++template <typename number_type, typename = typename std::enable_if<
++                                    std::is_unsigned<number_type>::value>::type>
++simdjson_really_inline int int_log2(number_type x) { return 63 - leading_zeroes(uint64_t(x) | 1); }
++
++simdjson_really_inline int fast_digit_count_32(uint32_t x) {
+   static uint64_t table[] = {
+       4294967296,  8589934582,  8589934582,  8589934582,  12884901788,
+       12884901788, 12884901788, 17179868184, 17179868184, 17179868184,
+@@ -139442,9 +139479,8 @@ simdjson_really_inline int fast_digit_count(uint32_t x) {
+   return uint32_t((x + table[int_log2(x)]) >> 32);
+ }
+ 
+-simdjson_really_inline int int_log2(uint64_t x) { return 63 - leading_zeroes(x | 1); }
+ 
+-simdjson_really_inline int fast_digit_count(uint64_t x) {
++simdjson_really_inline int fast_digit_count_64(uint64_t x) {
+   static uint64_t table[] = {9,
+                              99,
+                              999,
+@@ -139475,7 +139511,11 @@ simdjson_really_inline size_t digit_count(number_type v) noexcept {
+   static_assert(sizeof(number_type) == 8 || sizeof(number_type) == 4 ||
+                     sizeof(number_type) == 2 || sizeof(number_type) == 1,
+                 "We only support 8-bit, 16-bit, 32-bit and 64-bit numbers");
+-  return fast_digit_count(v);
++  SIMDJSON_IF_CONSTEXPR(sizeof(number_type) <= 4) {
++    return fast_digit_count_32(static_cast<uint32_t>(v));
++  } else {
++    return fast_digit_count_64(static_cast<uint64_t>(v));
++  }
+ }
+ static const char decimal_table[200] = {
+   0x30, 0x30, 0x30, 0x31, 0x30, 0x32, 0x30, 0x33, 0x30, 0x34, 0x30, 0x35,
+@@ -140244,6 +140284,11 @@ struct to_adaptor {
+ 	T operator()(simdjson_result<ondemand::value> &val) const noexcept;
+ 	auto operator()(padded_string_view const str) const noexcept;
+ 	auto operator()(ondemand::parser &parser, padded_string_view const str) const noexcept;
++	// The std::string is padded with reserve to ensure there is enough space for padding.
++	// Some sanitizers may not like this, so you can use simdjson::pad instead.
++	// simdjson::from(simdjson::pad(str))
++	auto operator()(std::string str) const noexcept;
++	auto operator()(ondemand::parser &parser, std::string str) const noexcept;
+ };
+ } // namespace internal
+ } // namespace convert
+@@ -140402,6 +140447,16 @@ template <typename T>
+ inline auto to_adaptor<T>::operator()(ondemand::parser &parser, padded_string_view const str) const noexcept {
+   return auto_parser<ondemand::parser *>{parser, str};
+ }
++
++template <typename T>
++inline auto to_adaptor<T>::operator()(std::string str) const noexcept {
++  return auto_parser{pad_with_reserve(str)};
++}
++
++template <typename T>
++inline auto to_adaptor<T>::operator()(ondemand::parser &parser, std::string str) const noexcept {
++  return auto_parser<ondemand::parser *>{parser, pad_with_reserve(str)};
++}
+ } // namespace internal
+ } // namespace convert
+ } // namespace simdjson
+diff --git a/singleheader/singleheader.zip b/singleheader/singleheader.zip
+index e2bbc04e..f1d9f0f4 100644
+Binary files a/singleheader/singleheader.zip and b/singleheader/singleheader.zip differ

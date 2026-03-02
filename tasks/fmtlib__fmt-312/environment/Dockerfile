@@ -9,10 +9,10 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CMake and GCC for building C++ project
+# Install C++ build dependencies
 RUN apt-get update && apt-get install -y \
     cmake \
-    g++ \
+    clang \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -26,28 +26,33 @@ RUN git clone https://github.com/fmtlib/fmt.git src && \
 
 WORKDIR /app/src
 
-# Configure the project with CMake
-RUN cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=g++ \
-    -DCMAKE_C_COMPILER=gcc \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DFMT_TEST=ON
+# Remove test/format file to avoid header collision with std::format
+RUN rm -f test/format
 
-# Reset any changes from build to ensure bug.patch applies cleanly
+# Configure with Clang and C++14 standard
+RUN mkdir -p build && cd build && cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_STANDARD=14 \
+    -DFMT_TEST=ON \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DFMT_PEDANTIC=ON
+
+# Reset any modified files before applying bug.patch
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Reconfigure after applying bug.patch
-RUN cmake -S . -B build \
+# Reconfigure CMake after applying patch
+RUN cd build && cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=g++ \
-    -DCMAKE_C_COMPILER=gcc \
     -DCMAKE_CXX_STANDARD=14 \
-    -DFMT_TEST=ON
+    -DFMT_TEST=ON \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DFMT_PEDANTIC=ON
 
 RUN rm -rf /app/src/.git
 

@@ -1,0 +1,9 @@
+When spdlog is built/configured to use C++20 std::format instead of fmtlib, spdlog’s formatting API does not provide equivalent compile-time format string checking. In practice, code that benefits from compile-time checking with fmtlib (e.g., passing a compile-time format string type to logging and formatting helpers) either fails to compile or falls back to runtime-only checking when the std::format backend is selected.
+
+The library should provide an equivalent, backend-agnostic way to pass compile-time-checked format strings through spdlog APIs so that using std::format offers the same safety and ergonomics as using fmtlib. This includes making spdlog’s formatting entry points accept a compile-time format string wrapper/type and ensuring it propagates correctly through formatting calls used by loggers and format helpers.
+
+Expected behavior: With std::format enabled, typical spdlog formatting calls should support compile-time validation of the format string against the provided argument types (similarly to fmtlib). Invalid format strings or mismatched argument types should be rejected at compile time when the format string is a compile-time string type.
+
+Actual behavior: With std::format enabled, compile-time format string checking is not supported or not wired through spdlog’s API consistently, causing either compilation errors when trying to use compile-time format string types or loss of compile-time validation compared to fmtlib.
+
+Implement support so that std::format and fmtlib behave equivalently when used via spdlog, including ensuring internal formatting utilities continue to work correctly with the selected backend. Public-facing formatting should still work for runtime strings, but compile-time format strings should also be accepted and checked when available.

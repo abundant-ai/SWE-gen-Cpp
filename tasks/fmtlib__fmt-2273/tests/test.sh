@@ -10,26 +10,76 @@ cp "/tests/os-test.cc" "test/os-test.cc"
 mkdir -p "test"
 cp "/tests/posix-mock-test.cc" "test/posix-mock-test.cc"
 
-# Build the specific test targets using CMake
-cmake --build build --target gtest-extra-test
-cmake --build build --target os-test
-cmake --build build --target posix-mock-test
+test_status=0
 
-# Run the test executables
-./build/bin/gtest-extra-test
-gtest_status=$?
+# Reconfigure CMake after copying new test files
+echo "Reconfiguring CMake..."
+cd build
+if ! cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_STANDARD=20 \
+    -DFMT_TEST=ON \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ 2>&1; then
+    echo "FAIL: CMake reconfiguration failed"
+    test_status=1
+fi
 
-./build/bin/os-test
-os_status=$?
+# Build and run gtest-extra-test
+if [ $test_status -eq 0 ]; then
+    echo "Building gtest-extra-test..."
+    if ! cmake --build . --target gtest-extra-test 2>&1; then
+        echo "FAIL: gtest-extra-test build failed"
+        test_status=1
+    fi
+fi
 
-./build/bin/posix-mock-test
-posix_status=$?
+if [ $test_status -eq 0 ]; then
+    echo "Running gtest-extra-test..."
+    if ! ./bin/gtest-extra-test 2>&1; then
+        echo "FAIL: gtest-extra-test execution failed"
+        test_status=1
+    else
+        echo "PASS: gtest-extra-test passed"
+    fi
+fi
 
-# Check if all tests passed
-if [ $gtest_status -eq 0 ] && [ $os_status -eq 0 ] && [ $posix_status -eq 0 ]; then
-  test_status=0
-else
-  test_status=1
+# Build and run os-test
+if [ $test_status -eq 0 ]; then
+    echo "Building os-test..."
+    if ! cmake --build . --target os-test 2>&1; then
+        echo "FAIL: os-test build failed"
+        test_status=1
+    fi
+fi
+
+if [ $test_status -eq 0 ]; then
+    echo "Running os-test..."
+    if ! ./bin/os-test 2>&1; then
+        echo "FAIL: os-test execution failed"
+        test_status=1
+    else
+        echo "PASS: os-test passed"
+    fi
+fi
+
+# Build and run posix-mock-test
+if [ $test_status -eq 0 ]; then
+    echo "Building posix-mock-test..."
+    if ! cmake --build . --target posix-mock-test 2>&1; then
+        echo "FAIL: posix-mock-test build failed"
+        test_status=1
+    fi
+fi
+
+if [ $test_status -eq 0 ]; then
+    echo "Running posix-mock-test..."
+    if ! ./bin/posix-mock-test 2>&1; then
+        echo "FAIL: posix-mock-test execution failed"
+        test_status=1
+    else
+        echo "PASS: posix-mock-test passed"
+    fi
 fi
 
 if [ $test_status -eq 0 ]; then

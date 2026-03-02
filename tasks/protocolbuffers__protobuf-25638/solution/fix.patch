@@ -1,0 +1,443 @@
+diff --git a/src/google/protobuf/compiler/command_line_interface_unittest.cc b/src/google/protobuf/compiler/command_line_interface_unittest.cc
+index 019003ea3..acf1f46e5 100644
+--- a/src/google/protobuf/compiler/command_line_interface_unittest.cc
++++ b/src/google/protobuf/compiler/command_line_interface_unittest.cc
+@@ -1652,6 +1652,36 @@ TEST_F(CommandLineInterfaceTest, ValidateFeatureSupportValid) {
+   ExpectNoErrors();
+ }
+ 
++TEST_F(CommandLineInterfaceTest, ValidateFeatureSupportLifetimesOptionRemoved) {
++  CreateTempFile("google/protobuf/descriptor.proto",
++                 google::protobuf::DescriptorProto::descriptor()->file()->DebugString());
++  CreateTempFile("foo.proto",
++                 R"schema(
++    edition = "2024";
++    import "google/protobuf/descriptor.proto";
++
++    option features.field_presence = IMPLICIT;
++
++    extend google.protobuf.MessageOptions {
++      bool removed_option = 7733026 [feature_support = {
++        edition_removed: EDITION_2023
++        removal_error: "removed_option removal error"}];
++    }
++    message Foo {
++      option (removed_option) = true;
++      int32 bar = 1 [
++        feature_support = {
++          edition_removed: EDITION_2023
++          removal_error: "Custom removal error"
++        }
++      ];
++    })schema");
++  Run("protocol_compiler --proto_path=$tmpdir --test_out=$tmpdir foo.proto");
++  ExpectErrorSubstring(
++      "removed_option has been removed in edition 2023: removed_option removal "
++      "error");
++}
++
+ TEST_F(CommandLineInterfaceTest, FeatureValidationError) {
+   CreateTempFile("foo.proto",
+                  R"schema(
+diff --git a/src/google/protobuf/descriptor.cc b/src/google/protobuf/descriptor.cc
+index 2db65a2ed..0970a200c 100644
+--- a/src/google/protobuf/descriptor.cc
++++ b/src/google/protobuf/descriptor.cc
+@@ -1608,7 +1608,6 @@ class DescriptorPool::DeferredValidation {
+   struct LifetimesInfo {
+     const Message* option_to_validate;  // features or options to validate
+     const Message* proto;
+-    bool is_feature;
+     absl::string_view full_name;
+     absl::string_view filename;
+   };
+@@ -1637,20 +1636,16 @@ class DescriptorPool::DeferredValidation {
+       return true;
+     }
+ 
+-    static absl::string_view feature_set_name = "google.protobuf.FeatureSet";
+     bool has_errors = false;
+     for (const auto& it : lifetimes_info_map_) {
+       const FileDescriptor* file = it.first;
+ 
+       for (const auto& info : it.second) {
+-        const Descriptor* feature_set_descriptor = nullptr;
+-        // TODO: Support custom options
+-        if (info.is_feature) {
+-          feature_set_descriptor =
+-              pool_->FindMessageTypeByName(feature_set_name);
+-        }
++        const Descriptor* option_descriptor = nullptr;
++        option_descriptor = pool_->FindMessageTypeByName(
++            info.option_to_validate->GetTypeName());
+         auto results = FeatureResolver::ValidateFeatureLifetimes(
+-            file->edition(), *info.option_to_validate, feature_set_descriptor);
++            file->edition(), *info.option_to_validate, option_descriptor);
+         for (const auto& error : results.errors) {
+           has_errors = true;
+           if (error_collector_ == nullptr) {
+@@ -6690,15 +6685,13 @@ FileDescriptor* DescriptorBuilder::BuildFileImpl(
+         *result, proto, [&](const auto& descriptor, const auto& desc_proto) {
+           if (!IsDefaultInstance(*descriptor.proto_features_)) {
+             deferred_validation_.ValidateFeatureLifetimes(
+-                GetFile(descriptor),
+-                {descriptor.proto_features_, &desc_proto, /*is_feature=*/true,
+-                 GetFullName(descriptor), proto.name()});
++                GetFile(descriptor), {descriptor.proto_features_, &desc_proto,
++                                      GetFullName(descriptor), proto.name()});
+           }
+           if (!IsDefaultInstance(*descriptor.options_)) {
+             deferred_validation_.ValidateFeatureLifetimes(
+-                GetFile(descriptor),
+-                {descriptor.options_, &desc_proto,
+-                 /*is_feature=*/false, GetFullName(descriptor), proto.name()});
++                GetFile(descriptor), {descriptor.options_, &desc_proto,
++                                      GetFullName(descriptor), proto.name()});
+           }
+         });
+   }
+diff --git a/src/google/protobuf/descriptor_test_utils.cc b/src/google/protobuf/descriptor_test_utils.cc
+index 5cecf0f73..55d998896 100644
+--- a/src/google/protobuf/descriptor_test_utils.cc
++++ b/src/google/protobuf/descriptor_test_utils.cc
+@@ -135,6 +135,15 @@ void ValidationErrorTest::ParseAndBuildFileWithErrorSubstr(
+   EXPECT_THAT(error_collector.text_, HasSubstr(expected_errors));
+ }
+ 
++void ValidationErrorTest::ParseAndBuildFileWithWarningSubstr(
++    absl::string_view file_name, absl::string_view file_text,
++    absl::string_view expected_warning) {
++  MockErrorCollector error_collector;
++  EXPECT_TRUE(pool_.BuildFileCollectingErrors(ParseFile(file_name, file_text),
++                                              &error_collector));
++  EXPECT_THAT(error_collector.warning_text_, HasSubstr(expected_warning));
++}
++
+ // Parse file_text as a FileDescriptorProto in text format and add it
+ // to the DescriptorPool.  Expect errors to be produced which match the
+ // given warning text.
+diff --git a/src/google/protobuf/descriptor_test_utils.h b/src/google/protobuf/descriptor_test_utils.h
+index 63ff626af..41a2080ca 100644
+--- a/src/google/protobuf/descriptor_test_utils.h
++++ b/src/google/protobuf/descriptor_test_utils.h
+@@ -97,6 +97,10 @@ class ValidationErrorTest : public testing::Test {
+                                         absl::string_view file_text,
+                                         absl::string_view expected_errors);
+ 
++  void ParseAndBuildFileWithWarningSubstr(absl::string_view file_name,
++                                          absl::string_view file_text,
++                                          absl::string_view expected_warning);
++
+   // Parse file_text as a FileDescriptorProto in text format and add it
+   // to the DescriptorPool.  Expect errors to be produced which match the
+   // given warning text.
+diff --git a/src/google/protobuf/descriptor_unittest.cc b/src/google/protobuf/descriptor_unittest.cc
+index c4ee9dc0d..d55c99765 100644
+--- a/src/google/protobuf/descriptor_unittest.cc
++++ b/src/google/protobuf/descriptor_unittest.cc
+@@ -4052,7 +4052,7 @@ TEST_P(AllowUnknownDependenciesTest, MissingTypeAggregateOption) {
+   EXPECT_EQ(file->options().uninterpreted_option_size(), 1);
+ }
+ 
+-TEST_P(AllowUnknownDependenciesTest, MissinNestedTypeAggregateOption) {
++TEST_P(AllowUnknownDependenciesTest, MissingNestedTypeAggregateOption) {
+   // Test that we can use an aggregate custom option with a missing type.
+ 
+   FileDescriptorProto file_proto;
+@@ -4112,7 +4112,7 @@ TEST_P(AllowUnknownDependenciesTest, MissinNestedTypeAggregateOption) {
+   const Descriptor* message = file->FindMessageTypeByName("MessageMissing");
+   ASSERT_NE(message, nullptr);
+   std::vector<const FieldDescriptor*> fields;
+-  file->options().GetReflection()->ListFields(message->options(), &fields);
++  message->options().GetReflection()->ListFields(message->options(), &fields);
+   EXPECT_EQ(fields.size(), 1);
+   EXPECT_EQ(message->options().unknown_fields().field_count(), 0);
+   EXPECT_EQ(message->options().uninterpreted_option_size(), 1);
+@@ -4120,7 +4120,7 @@ TEST_P(AllowUnknownDependenciesTest, MissinNestedTypeAggregateOption) {
+   // Aggregate options without missing types should be resolved.
+   message = file->FindMessageTypeByName("MessageValid");
+   ASSERT_NE(message, nullptr);
+-  file->options().GetReflection()->ListFields(message->options(), &fields);
++  message->options().GetReflection()->ListFields(message->options(), &fields);
+   EXPECT_EQ(fields.size(), 0);
+   EXPECT_EQ(message->options().unknown_fields().field_count(), 1);
+   EXPECT_EQ(message->options().uninterpreted_option_size(), 0);
+@@ -12907,6 +12907,61 @@ TEST_F(FeaturesTest, ExistingUnstableFeatureDefault) {
+       pb::UNSTABLE3);
+ }
+ 
++TEST_F(FeaturesTest, FeatureLifetimesOptionRemoved) {
++  BuildDescriptorMessagesInTestPool();
++  ParseAndBuildFileWithErrorSubstr(
++      "featurelifetimes.proto", R"schema(
++    edition = "2024";
++    package featurelifetimes;
++    import "google/protobuf/descriptor.proto";
++
++    extend google.protobuf.MessageOptions {
++      bool removed_option = 7733026 [feature_support = {
++        edition_removed: EDITION_2023
++        removal_error: "removed_option removal error"
++      }];
++    }
++    message SomeMessage {
++      option (removed_option) = true;
++    }
++  )schema",
++      "featurelifetimes.removed_option has been removed in edition 2023: "
++      "removed_option removal error");
++}
++
++TEST_F(FeaturesTest, FeatureLifetimesOptionDeprecated) {
++  BuildDescriptorMessagesInTestPool();
++
++  ParseAndBuildFile("featurelifetimes.proto", R"schema(
++    edition = "2024";
++    package featurelifetimes;
++    import "google/protobuf/descriptor.proto";
++
++    extend google.protobuf.MessageOptions {
++       bool deprecated_option = 7733026 [feature_support = {
++        edition_deprecated: EDITION_2023
++        deprecation_warning: "deprecated_option deprecation warning"
++      }];
++    }
++  )schema");
++
++  pool_.AddDirectInputFile("some_message.proto");
++  ParseAndBuildFileWithWarningSubstr(
++      "some_message.proto",
++      R"schema(
++      edition = "2024";
++      package some_message;
++      import "google/protobuf/descriptor.proto";
++      import "featurelifetimes.proto";
++
++      message SomeMessage {
++        option (featurelifetimes.deprecated_option) = true;
++      }
++    )schema",
++      "featurelifetimes.deprecated_option has been deprecated in edition 2023: "
++      "deprecated_option deprecation warning");
++}
++
+ // Test that the result of FileDescriptor::DebugString() can be used to create
+ // the original descriptors.
+ class FeaturesDebugStringTest
+diff --git a/src/google/protobuf/feature_resolver.cc b/src/google/protobuf/feature_resolver.cc
+index 6d9fa94c8..2026910ce 100644
+--- a/src/google/protobuf/feature_resolver.cc
++++ b/src/google/protobuf/feature_resolver.cc
+@@ -340,39 +340,55 @@ void ValidateSingleFeatureLifetimes(
+     results.errors.emplace_back(std::move(error_message));
+   } else if (feature_support.has_edition_deprecated() &&
+              edition >= feature_support.edition_deprecated()) {
+-    std::string error_message = absl::Substitute(
++    std::string warning_message = absl::Substitute(
+         "$0 has been deprecated in edition "
+         "$1: $2",
+         full_name, feature_support.edition_deprecated(),
+         feature_support.deprecation_warning());
+-    results.warnings.emplace_back(std::move(error_message));
++    results.warnings.emplace_back(std::move(warning_message));
+   }
+ }
+ 
+ void ValidateFeatureLifetimesImpl(Edition edition, const Message& message,
+-                                  FeatureResolver::ValidationResults& results,
+-                                  bool is_feature) {
++                                  FeatureResolver::ValidationResults& results) {
+   std::vector<const FieldDescriptor*> fields;
+   message.GetReflection()->ListFields(message, &fields);
+   for (const FieldDescriptor* field : fields) {
+-    // TODO: Support repeated option enum values and custom options
+-    // feature support
+-    if (is_feature) {
+-      // Recurse into message extension.
+-      if (field->is_extension() &&
+-          field->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
++    const Reflection* reflector = message.GetReflection();
++    // Recurse into all Messages to be validated
++    if (field->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
++      // Recursing into repeated Messages
++      if (field->is_repeated()) {
++        for (int index = 0; index < reflector->FieldSize(message, field);
++             index++) {
++          ValidateFeatureLifetimesImpl(
++              edition, reflector->GetRepeatedMessage(message, field, index),
++              results);
++        }
++      } else {
+         ValidateFeatureLifetimesImpl(
+-            edition, message.GetReflection()->GetMessage(message, field),
+-            results, is_feature);
+-        continue;
++            edition, reflector->GetMessage(message, field), results);
+       }
+-
+-      if (field->enum_type() != nullptr) {
+-        int number = message.GetReflection()->GetEnumValue(message, field);
++    }
++    // Validating ENUM value
++    if (field->enum_type() != nullptr) {
++      // Handling repeated enum values. Ex: OptionTargetType option
++      if (field->is_repeated()) {
++        for (int index = 0; index < reflector->FieldSize(message, field);
++             index++) {
++          int number = reflector->GetRepeatedEnumValue(message, field, index);
++          auto value = field->enum_type()->FindValueByNumber(number);
++          if (value == nullptr) {
++            continue;
++          }
++          ValidateSingleFeatureLifetimes(edition, value->full_name(),
++                                         value->options().feature_support(),
++                                         results);
++        }
++      } else {
++        int number = reflector->GetEnumValue(message, field);
+         auto value = field->enum_type()->FindValueByNumber(number);
+         if (value == nullptr) {
+-          results.errors.emplace_back(absl::StrCat(
+-              "Feature ", field->full_name(), " has no known value ", number));
+           continue;
+         }
+         ValidateSingleFeatureLifetimes(edition, value->full_name(),
+@@ -380,10 +396,6 @@ void ValidateFeatureLifetimesImpl(Edition edition, const Message& message,
+                                        results);
+       }
+     }
+-    // TODO: Support custom options
+-    if (field->is_extension()) {
+-      continue;
+-    }
+     ValidateSingleFeatureLifetimes(edition, field->full_name(),
+                                    field->options().feature_support(), results);
+   }
+@@ -521,10 +533,7 @@ FeatureResolver::ValidationResults FeatureResolver::ValidateFeatureLifetimes(
+   const Message* pool_option = nullptr;
+   DynamicMessageFactory factory;
+   std::unique_ptr<Message> message_storage;
+-  bool is_feature =
+-      option.GetDescriptor()->name() == FeatureSet::descriptor()->name();
+-  // TODO: Support custom options
+-  if (pool_descriptor != nullptr && is_feature) {
++  if (pool_descriptor != nullptr) {
+     // Move the messages back to the current pool so that we can reflect on
+     // any extensions.
+     message_storage =
+@@ -543,7 +552,7 @@ FeatureResolver::ValidationResults FeatureResolver::ValidateFeatureLifetimes(
+ 
+   ValidationResults results;
+   // Validate feature support
+-  ValidateFeatureLifetimesImpl(edition, *pool_option, results, is_feature);
++  ValidateFeatureLifetimesImpl(edition, *pool_option, results);
+ 
+   return results;
+ }
+diff --git a/src/google/protobuf/unittest_custom_options.proto b/src/google/protobuf/unittest_custom_options.proto
+index fa39a1c94..581251d08 100644
+--- a/src/google/protobuf/unittest_custom_options.proto
++++ b/src/google/protobuf/unittest_custom_options.proto
+@@ -75,29 +75,63 @@ extend google.protobuf.MethodOptions {
+ extend google.protobuf.MessageOptions {
+   optional bool removed_option = 7733026 [feature_support = {
+     edition_removed: EDITION_2023
+-    removal_error: "Custom feature removal warning"
++    removal_error: "removed_option removal error"
+   }];
+   optional bool deprecated_option = 7737036 [feature_support = {
+     edition_deprecated: EDITION_2023
+-    deprecation_warning: "Custom feature deprecation warning"
++    deprecation_warning: "deprecated_option deprecation warning"
+   }];
+-  optional CustomOption custom_option = 7737026;
++  optional CustomOptionLifetimesMessage custom_option_lifetimes_message =
++      7737026;
++  optional CustomOptionLifetimesEnum custom_option_lifetimes_enum = 7737022;
++  repeated CustomOptionLifetimesMessage
++      repeated_custom_option_lifetimes_message = 7737021;
+ }
+ 
+-message CustomOption {
+-  optional string removed_message_option = 7734026 [feature_support = {
++message CustomOptionLifetimesMessage {
++  optional string removed_option = 1 [feature_support = {
+     edition_removed: EDITION_2023
+-    removal_error: "Custom feature removal warning"
++    removal_error: "removed_option removal error"
+   }];
+-  optional string deprecated_message_option = 7734016 [feature_support = {
++  optional string deprecated_option = 2 [feature_support = {
+     edition_deprecated: EDITION_2023
+-    deprecation_warning: "Custom feature deprecation warning"
++    deprecation_warning: "deprecated_option deprecation warning"
++  }];
++
++  repeated CustomOptionLifetimesEnum repeated_custom_option_lifetimes_enum = 4;
++
++  optional NestedCustomOptionLifetimesMessage
++      nested_custom_option_lifetimes_message = 5;
++
++  extensions 100 to 200;
++}
++
++enum CustomOptionLifetimesEnum {
++  CUSTOM_OPTION_ENUM_DEFAULT = 0;
++  CUSTOM_OPTION_ENUM_REMOVED_EDITION2023 = 1 [feature_support = {
++    edition_removed: EDITION_2023
++    removal_error: "CUSTOM_OPTION_ENUM_REMOVED_EDITION2023 removal error"
++  }];
++  CUSTOM_OPTION_ENUM_REMOVED_PROTO3 = 2 [feature_support = {
++    edition_removed: EDITION_PROTO3
++    removal_error: "CUSTOM_OPTION_ENUM_REMOVED_PROTO3 removal error"
++  }];
++  CUSTOM_OPTION_ENUM_VALUE3 = 3;
++  CUSTOM_OPTION_ENUM_VALUE4 = 4;
++}
++
++message NestedCustomOptionLifetimesMessage {
++  optional string deprecated_option = 1 [feature_support = {
++    edition_deprecated: EDITION_2023
++    deprecation_warning: "deprecated_option deprecation warning"
++  }];
++}
++
++extend proto2_unittest.CustomOptionLifetimesMessage {
++  optional string custom_nested_option = 101 [feature_support = {
++    edition_removed: EDITION_2023
++    removal_error: "custom_nested_option removal error"
+   }];
+-  message Nested {
+-    extend google.protobuf.MessageOptions {
+-      optional CustomOption nested_custom_option = 7732016;
+-    }
+-  }
+ }
+ 
+ // A test message with custom options at all possible locations (and also some
+diff --git a/src/google/protobuf/unittest_features.proto b/src/google/protobuf/unittest_features.proto
+index b1488fba4..7171dfc2e 100644
+--- a/src/google/protobuf/unittest_features.proto
++++ b/src/google/protobuf/unittest_features.proto
+@@ -13,6 +13,21 @@ import "google/protobuf/descriptor.proto";
+ 
+ option java_outer_classname = "UnittestFeatures";
+ 
++// Custom option added for option open enum coverage
++extend google.protobuf.MessageOptions {
++  CustomOptionLifetimesMessage custom_option_lifetimes_message = 7737012;
++}
++
++message CustomOptionLifetimesMessage {
++  CustomOptionLifetimesEnum custom_enum = 1;
++  repeated CustomOptionLifetimesEnum repeated_custom_enum = 2;
++}
++
++enum CustomOptionLifetimesEnum {
++  TEST_CUSTOM_OPTION = 0;
++  CUSTOM_OPTION1 = 1;
++}
++
+ extend google.protobuf.FeatureSet {
+   TestFeatures test = 9999;
+ }

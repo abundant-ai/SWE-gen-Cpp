@@ -1,0 +1,359 @@
+diff --git a/docs/guides/websockets.md b/docs/guides/websockets.md
+index de70d62a0..e46934112 100644
+--- a/docs/guides/websockets.md
++++ b/docs/guides/websockets.md
+@@ -1,19 +1,19 @@
+ Websockets are a way of connecting a client and a server without the request response nature of HTTP.<br><br>
+ 
++## Routes
+ To create a websocket in Crow, you need a websocket route.<br>
+-A websocket route differs from a normal route quite a bit. While it uses the same `CROW_ROUTE(app, "/url")` macro, that's about where the similarities end.<br>
+-A websocket route follows the macro with `.websocket()` which is then followed by a series of methods (with handlers inside) for each event. These are (sorted by order of execution):
+-
+-!!! Warning
+-
+-    By default, Crow allows Clients to send unmasked websocket messages, which is useful for debugging but goes against the protocol specification. Production Crow applications should enforce the protocol by adding `#!cpp #define CROW_ENFORCE_WS_SPEC` to their source code.
++A websocket route differs from a normal route quite a bit. It uses A slightly altered `CROW_WEBSOCKET_ROUTE(app, "/url")` macro, which is then followed by a series of methods (with handlers inside) for each event. These are (sorted by order of execution):
+ 
+ 
+ - `#!cpp onaccept([&](const crow::request&){handler code goes here})` (This handler has to return `bool`)
+ - `#!cpp onopen([&](crow::websocket::connection& conn){handler code goes here})`
+ - `#!cpp onmessage([&](crow::websocket::connection& conn, const std::string message, bool is_binary){handler code goes here})`
+ - `#!cpp onerror([&](crow::websocket::connection& conn){handler code goes here})`
+-- `#!cpp onclose([&](crow::websocket::connection& conn, const std::string reason){handler code goes here})`<br><br>
++- `#!cpp onclose([&](crow::websocket::connection& conn, const std::string reason){handler code goes here})`
++
++!!! Warning
++
++    By default, Crow allows Clients to send unmasked websocket messages, which is useful for debugging but goes against the protocol specification. Production Crow applications should enforce the protocol by adding `#!cpp #define CROW_ENFORCE_WS_SPEC` to their source code.
+ 
+ These event methods and their handlers can be chained. The full Route should look similar to this:
+ ```cpp
+@@ -32,5 +32,17 @@ CROW_ROUTE(app, "/ws")
+                     do_something_else(data);
+             });
+ ```
+-<br><br>
+-For more info go [here](../../reference/classcrow_1_1_web_socket_rule.html).
++
++## Maximum payload size
++<span class="tag">[:octicons-feed-tag-16: master](https://github.com/CrowCpp/Crow)</span>
++
++The maximum payload size that a connection accepts can be adjusted either globally by using `#!cpp app.websocket_max_payload(<value in bytes>)` or per route by using `#!cpp CROW_WEBSOCKET_ROUTE(app, "/url").max_payload(<value in bytes>)`. In case a message was sent that exceeded the limit. The connection would be shut down and `onerror` would be triggered.
++
++!!! note
++
++    By default, This limit is disabled. To disable the global setting in specific routes, you only need to call `#!cpp CROW_WEBSOCKET_ROUTE(app, "/url").max_payload(UINT64_MAX)`.
++
++
++For more info about websocket routes go [here](../../reference/classcrow_1_1_web_socket_rule.html).
++
++For more info about websocket connections go [here](../../reference/classcrow_1_1websocket_1_1_connection.html).
+diff --git a/include/crow/app.h b/include/crow/app.h
+index c652fbf38..a6ab3951c 100644
+--- a/include/crow/app.h
++++ b/include/crow/app.h
+@@ -19,6 +19,7 @@
+ #include "crow/http_request.h"
+ #include "crow/http_server.h"
+ #include "crow/task_timer.h"
++#include "crow/websocket.h"
+ #ifdef CROW_ENABLE_COMPRESSION
+ #include "crow/compression.h"
+ #endif
+@@ -59,9 +60,6 @@ namespace crow
+         Crow()
+         {}
+ 
+-
+-        std::atomic<int> websocket_count{0};
+-
+         /// Process an Upgrade request
+ 
+         ///
+@@ -106,6 +104,19 @@ namespace crow
+             return router_.catchall_rule();
+         }
+ 
++        /// Set the default max payload size for websockets
++        self_t& websocket_max_payload(uint64_t max_payload)
++        {
++            max_payload_ = max_payload;
++            return *this;
++        }
++
++        /// Get the default max payload size for websockets
++        uint64_t websocket_max_payload()
++        {
++            return max_payload_;
++        }
++
+         self_t& signal_clear()
+         {
+             signals_.clear();
+@@ -336,10 +347,26 @@ namespace crow
+             else
+ #endif
+             {
++                std::vector<crow::websocket::connection*> websockets_to_close = websockets_;
++                for (auto websocket : websockets_to_close)
++                {
++                    CROW_LOG_INFO << "Quitting Websocket: " << websocket;
++                    websocket->close("Server Application Terminated");
++                }
+                 if (server_) { server_->stop(); }
+             }
+         }
+ 
++        void add_websocket(crow::websocket::connection* conn)
++        {
++            websockets_.push_back(conn);
++        }
++
++        void remove_websocket(crow::websocket::connection* conn)
++        {
++            std::remove(websockets_.begin(), websockets_.end(), conn);
++        }
++
+         /// Print the routing paths defined for each HTTP method
+         void debug_print()
+         {
+@@ -469,6 +496,7 @@ namespace crow
+         std::uint8_t timeout_{5};
+         uint16_t port_ = 80;
+         uint16_t concurrency_ = 2;
++        uint64_t max_payload_{UINT64_MAX};
+         bool validated_ = false;
+         std::string server_name_ = std::string("Crow/") + VERSION;
+         std::string bindaddr_ = "0.0.0.0";
+@@ -498,6 +526,7 @@ namespace crow
+         bool server_started_{false};
+         std::condition_variable cv_started_;
+         std::mutex start_mutex_;
++        std::vector<crow::websocket::connection*> websockets_;
+     };
+     template<typename... Middlewares>
+     using App = Crow<Middlewares...>;
+diff --git a/include/crow/http_server.h b/include/crow/http_server.h
+index 56b24834b..e674bf83c 100644
+--- a/include/crow/http_server.h
++++ b/include/crow/http_server.h
+@@ -161,21 +161,18 @@ namespace crow
+ 
+         void stop()
+         {
+-            shutting_down_ = true;                                                 //Prevent the acceptor from taking new connections
+-            while (handler_->websocket_count.load(std::memory_order_release) != 0) //Wait for the websockets to close properly
+-            {
+-            }
++            shutting_down_ = true; // Prevent the acceptor from taking new connections
+             for (auto& io_service : io_service_pool_)
+             {
+                 if (io_service != nullptr)
+                 {
+                     CROW_LOG_INFO << "Closing IO service " << &io_service;
+-                    io_service->stop(); //Close all io_services (and HTTP connections)
++                    io_service->stop(); // Close all io_services (and HTTP connections)
+                 }
+             }
+ 
+             CROW_LOG_INFO << "Closing main IO service (" << &io_service_ << ')';
+-            io_service_.stop(); //Close main io_service
++            io_service_.stop(); // Close main io_service
+         }
+ 
+         void signal_clear()
+diff --git a/include/crow/routing.h b/include/crow/routing.h
+index 0122b4b9e..b44c3228b 100644
+--- a/include/crow/routing.h
++++ b/include/crow/routing.h
+@@ -376,7 +376,8 @@ namespace crow
+     public:
+         WebSocketRule(std::string rule, App* app):
+           BaseRule(std::move(rule)),
+-          app_(app)
++          app_(app),
++          max_payload_(UINT64_MAX)
+         {}
+ 
+         void validate() override
+@@ -390,15 +391,24 @@ namespace crow
+ 
+         void handle_upgrade(const request& req, response&, SocketAdaptor&& adaptor) override
+         {
+-            new crow::websocket::Connection<SocketAdaptor, App>(req, std::move(adaptor), app_, open_handler_, message_handler_, close_handler_, error_handler_, accept_handler_);
++            max_payload_ = max_payload_override_ ? max_payload_ : app_->websocket_max_payload();
++            new crow::websocket::Connection<SocketAdaptor, App>(req, std::move(adaptor), app_, max_payload_, open_handler_, message_handler_, close_handler_, error_handler_, accept_handler_);
+         }
+ #ifdef CROW_ENABLE_SSL
+         void handle_upgrade(const request& req, response&, SSLAdaptor&& adaptor) override
+         {
+-            new crow::websocket::Connection<SSLAdaptor, App>(req, std::move(adaptor), app_, open_handler_, message_handler_, close_handler_, error_handler_, accept_handler_);
++            new crow::websocket::Connection<SSLAdaptor, App>(req, std::move(adaptor), app_, max_payload_, open_handler_, message_handler_, close_handler_, error_handler_, accept_handler_);
+         }
+ #endif
+ 
++        /// Override the global payload limit for this single WebSocket rule
++        self_t& max_payload(uint64_t max_payload)
++        {
++            max_payload_ = max_payload;
++            max_payload_override_ = true;
++            return *this;
++        }
++
+         template<typename Func>
+         self_t& onopen(Func f)
+         {
+@@ -441,6 +451,8 @@ namespace crow
+         std::function<void(crow::websocket::connection&, const std::string&)> close_handler_;
+         std::function<void(crow::websocket::connection&)> error_handler_;
+         std::function<bool(const crow::request&)> accept_handler_;
++        uint64_t max_payload_;
++        bool max_payload_override_ = false;
+     };
+ 
+     /// Allows the user to assign parameters using functions.
+diff --git a/include/crow/websocket.h b/include/crow/websocket.h
+index 22b083ba3..fa187c4ab 100644
+--- a/include/crow/websocket.h
++++ b/include/crow/websocket.h
+@@ -71,7 +71,7 @@ namespace crow
+             ///
+             /// Requires a request with an "Upgrade: websocket" header.<br>
+             /// Automatically handles the handshake.
+-            Connection(const crow::request& req, Adaptor&& adaptor, Handler* handler,
++            Connection(const crow::request& req, Adaptor&& adaptor, Handler* handler, uint64_t max_payload,
+                        std::function<void(crow::websocket::connection&)> open_handler,
+                        std::function<void(crow::websocket::connection&, const std::string&, bool)> message_handler,
+                        std::function<void(crow::websocket::connection&, const std::string&)> close_handler,
+@@ -79,17 +79,17 @@ namespace crow
+                        std::function<bool(const crow::request&)> accept_handler):
+               adaptor_(std::move(adaptor)),
+               handler_(handler),
+-              websocket_count_(handler_->websocket_count),
++              max_payload_bytes_(max_payload),
+               open_handler_(std::move(open_handler)),
+               message_handler_(std::move(message_handler)),
+               close_handler_(std::move(close_handler)),
+               error_handler_(std::move(error_handler)),
+-              accept_handler_(std::move(accept_handler)),
+-              signals_(adaptor_.get_io_service())
++              accept_handler_(std::move(accept_handler))
+             {
+                 if (!boost::iequals(req.get_header_value("upgrade"), "websocket"))
+                 {
+                     adaptor.close();
++                    handler_->remove_websocket(this);
+                     delete this;
+                     return;
+                 }
+@@ -99,16 +99,12 @@ namespace crow
+                     if (!accept_handler_(req))
+                     {
+                         adaptor.close();
++                        handler_->remove_websocket(this);
+                         delete this;
+                         return;
+                     }
+                 }
+ 
+-
+-                signals_.clear();
+-                for (auto snum : handler_->signals())
+-                    signals_.add(snum);
+-
+                 // Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+                 // Sec-WebSocket-Version: 13
+                 std::string magic = req.get_header_value("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+@@ -117,14 +113,6 @@ namespace crow
+                 uint8_t digest[20];
+                 s.getDigestBytes(digest);
+ 
+-                signals_.async_wait(
+-                  [&](const boost::system::error_code& e, int /*signal_number*/) {
+-                      if (!e)
+-                      {
+-                          CROW_LOG_INFO << "Quitting Websocket: " << this;
+-                          close("Server Application Terminated");
+-                      }
+-                  });
+                 start(crow::utility::base64encode((unsigned char*)digest, 20));
+             }
+ 
+@@ -218,6 +206,11 @@ namespace crow
+                 return adaptor_.remote_endpoint().address().to_string();
+             }
+ 
++            void set_max_payload_size(uint64_t payload)
++            {
++                max_payload_bytes_ = payload;
++            }
++
+         protected:
+             /// Generate the websocket headers using an opcode and the message size (in bytes).
+             std::string build_header(int opcode, size_t size)
+@@ -417,7 +410,15 @@ namespace crow
+                     }
+                     break;
+                     case WebSocketReadState::Mask:
+-                        if (has_mask_)
++                        if (remaining_length_ > max_payload_bytes_)
++                        {
++                            close_connection_ = true;
++                            adaptor_.close();
++                            if (error_handler_)
++                                error_handler_(*this);
++                            check_destroy();
++                        }
++                        else if (has_mask_)
+                         {
+                             boost::asio::async_read(
+                               adaptor_.socket(), boost::asio::buffer((char*)&mask_, 4),
+@@ -446,6 +447,7 @@ namespace crow
+                                           error_handler_(*this);
+                                       adaptor_.shutdown_readwrite();
+                                       adaptor_.close();
++                                      check_destroy();
+                                   }
+                               });
+                         }
+@@ -485,6 +487,7 @@ namespace crow
+                                       error_handler_(*this);
+                                   adaptor_.shutdown_readwrite();
+                                   adaptor_.close();
++                                  check_destroy();
+                               }
+                           });
+                     }
+@@ -633,7 +636,7 @@ namespace crow
+                 if (!is_close_handler_called_)
+                     if (close_handler_)
+                         close_handler_(*this, "uncleanly");
+-                websocket_count_--;
++                handler_->remove_websocket(this);
+                 if (sending_buffers_.empty() && !is_reading)
+                     delete this;
+             }
+@@ -652,6 +655,7 @@ namespace crow
+             WebSocketReadState state_{WebSocketReadState::MiniHeader};
+             uint16_t remaining_length16_{0};
+             uint64_t remaining_length_{0};
++            uint64_t max_payload_bytes_{UINT64_MAX};
+             bool close_connection_{false};
+             bool is_reading{false};
+             bool has_mask_{false};
+@@ -662,14 +666,12 @@ namespace crow
+             bool error_occured_{false};
+             bool pong_received_{false};
+             bool is_close_handler_called_{false};
+-            std::atomic<int>& websocket_count_;
+ 
+             std::function<void(crow::websocket::connection&)> open_handler_;
+             std::function<void(crow::websocket::connection&, const std::string&, bool)> message_handler_;
+             std::function<void(crow::websocket::connection&, const std::string&)> close_handler_;
+             std::function<void(crow::websocket::connection&)> error_handler_;
+             std::function<bool(const crow::request&)> accept_handler_;
+-            boost::asio::signal_set signals_;
+         };
+     } // namespace websocket
+ } // namespace crow

@@ -1,0 +1,296 @@
+diff --git a/include/crow/app.h b/include/crow/app.h
+index 293ced5f9..d38697ed8 100644
+--- a/include/crow/app.h
++++ b/include/crow/app.h
+@@ -279,62 +279,57 @@ namespace crow
+             return compression_used_;
+         }
+ #endif
+-        /// A wrapper for `validate()` in the router
+ 
+-        ///
+-        /// Go through the rules, upgrade them if possible, and add them to the list of rules
+-        void validate()
++        /// Apply blueprints
++        void add_blueprint()
+         {
+-            if (!validated_)
+-            {
++#if defined(__APPLE__) || defined(__MACH__)
++            if (router_.blueprints().empty()) return;
++#endif
+ 
+-#ifndef CROW_DISABLE_STATIC_DIR
++            for (Blueprint* bp : router_.blueprints())
++            {
++                if (bp->static_dir().empty()) continue;
+ 
+-                // stat on windows doesn't care whether '/' or '\' is being used. on Linux however, using '\' doesn't work. therefore every instance of '\' gets replaced with '/' then a check is done to make sure the directory ends with '/'.
+-                std::string static_dir_(CROW_STATIC_DIRECTORY);
+-                std::replace(static_dir_.begin(), static_dir_.end(), '\\', '/');
+-                if (static_dir_[static_dir_.length() - 1] != '/')
+-                    static_dir_ += '/';
++                auto static_dir_ = crow::utility::normalize_path(bp->static_dir());
+ 
+-                route<crow::black_magic::get_parameter_tag(CROW_STATIC_ENDPOINT)>(CROW_STATIC_ENDPOINT)([static_dir_](crow::response& res, std::string file_path_partial) {
++                bp->new_rule_tagged<crow::black_magic::get_parameter_tag(CROW_STATIC_ENDPOINT)>(CROW_STATIC_ENDPOINT)([static_dir_](crow::response& res, std::string file_path_partial) {
+                     utility::sanitize_filename(file_path_partial);
+                     res.set_static_file_info_unsafe(static_dir_ + file_path_partial);
+                     res.end();
+                 });
++            }
+ 
+-#if defined(__APPLE__) || defined(__MACH__)
+-                if (!router_.blueprints().empty())
+-#endif
+-                {
+-                    for (Blueprint* bp : router_.blueprints())
+-                    {
+-                        if (!bp->static_dir().empty())
+-                        {
+-                            // stat on windows doesn't care whether '/' or '\' is being used. on Linux however, using '\' doesn't work. therefore every instance of '\' gets replaced with '/' then a check is done to make sure the directory ends with '/'.
+-                            std::string static_dir_(bp->static_dir());
+-                            std::replace(static_dir_.begin(), static_dir_.end(), '\\', '/');
+-                            if (static_dir_[static_dir_.length() - 1] != '/')
+-                                static_dir_ += '/';
+-
+-                            bp->new_rule_tagged<crow::black_magic::get_parameter_tag(CROW_STATIC_ENDPOINT)>(CROW_STATIC_ENDPOINT)([static_dir_](crow::response& res, std::string file_path_partial) {
+-                                utility::sanitize_filename(file_path_partial);
+-                                res.set_static_file_info_unsafe(static_dir_ + file_path_partial);
+-                                res.end();
+-                            });
+-                        }
+-                    }
+-                }
+-#endif
++            router_.validate_bp();
++        }
+ 
+-                router_.validate();
+-                validated_ = true;
+-            }
++        /// Go through the rules, upgrade them if possible, and add them to the list of rules
++        void add_static_dir()
++        {
++            if (are_static_routes_added()) return;
++            auto static_dir_ = crow::utility::normalize_path(CROW_STATIC_DIRECTORY);
++
++            route<crow::black_magic::get_parameter_tag(CROW_STATIC_ENDPOINT)>(CROW_STATIC_ENDPOINT)([static_dir_](crow::response& res, std::string file_path_partial) {
++                utility::sanitize_filename(file_path_partial);
++                res.set_static_file_info_unsafe(static_dir_ + file_path_partial);
++                res.end();
++            });
++            set_static_routes_added();
++        }
++
++        /// A wrapper for `validate()` in the router
++        void validate()
++        {
++            router_.validate();
+         }
+ 
+         /// Run the server
+         void run()
+         {
+-
++#ifndef CROW_DISABLE_STATIC_DIR
++            add_blueprint();
++            add_static_dir();
++#endif
+             validate();
+ 
+ #ifdef CROW_ENABLE_SSL
+@@ -557,17 +552,24 @@ namespace crow
+             cv_started_.notify_all();
+         }
+ 
++        void set_static_routes_added() {
++            static_routes_added_ = true;
++        }
++
++        bool are_static_routes_added() {
++            return static_routes_added_;
++        }
+ 
+     private:
+         std::uint8_t timeout_{5};
+         uint16_t port_ = 80;
+         uint16_t concurrency_ = 2;
+         uint64_t max_payload_{UINT64_MAX};
+-        bool validated_ = false;
+         std::string server_name_ = std::string("Crow/") + VERSION;
+         std::string bindaddr_ = "0.0.0.0";
+         size_t res_stream_threshold_ = 1048576;
+         Router router_;
++        bool static_routes_added_{false};
+ 
+ #ifdef CROW_ENABLE_COMPRESSION
+         compression::algorithm comp_algorithm_;
+diff --git a/include/crow/routing.h b/include/crow/routing.h
+index 9fef41410..e9ca5e560 100644
+--- a/include/crow/routing.h
++++ b/include/crow/routing.h
+@@ -96,6 +96,15 @@ namespace crow
+         {}
+ 
+         virtual void validate() = 0;
++        
++        void set_added() {
++            added_ = true;
++        }
++
++        bool is_added() {
++            return added_;
++        }
++
+         std::unique_ptr<BaseRule> upgrade()
+         {
+             if (rule_to_upgrade_)
+@@ -141,6 +150,7 @@ namespace crow
+ 
+         std::string rule_;
+         std::string name_;
++        bool added_{false};
+ 
+         std::unique_ptr<BaseRule> rule_to_upgrade_;
+ 
+@@ -1154,6 +1164,14 @@ namespace crow
+             return static_dir_;
+         }
+ 
++        void set_added() {
++            added_ = true;
++        }
++
++        bool is_added() {
++            return added_;
++        }
++
+         DynamicRule& new_rule_dynamic(const std::string& rule)
+         {
+             std::string new_rule = '/' + prefix_ + rule;
+@@ -1226,6 +1244,7 @@ namespace crow
+         CatchallRule catchall_rule_;
+         std::vector<Blueprint*> blueprints_;
+         detail::middleware_indices mw_indices_;
++        bool added_{false};
+ 
+         friend class Router;
+     };
+@@ -1261,6 +1280,11 @@ namespace crow
+             return catchall_rule_;
+         }
+ 
++        void internal_add_rule_object(const std::string& rule, BaseRule* ruleObject)
++        {
++            internal_add_rule_object(rule, ruleObject, INVALID_BP_ID, blueprints_);
++        }
++
+         void internal_add_rule_object(const std::string& rule, BaseRule* ruleObject, const uint16_t& BP_index, std::vector<Blueprint*>& blueprints)
+         {
+             bool has_trailing_slash = false;
+@@ -1285,6 +1309,8 @@ namespace crow
+                     per_methods_[method].trie.add(rule_without_trailing_slash, RULE_SPECIAL_REDIRECT_SLASH, BP_index != INVALID_BP_ID ? blueprints[BP_index]->prefix().length() : 0, BP_index);
+                 }
+             });
++
++            ruleObject->set_added();
+         }
+ 
+         void register_blueprint(Blueprint& blueprint)
+@@ -1319,11 +1345,20 @@ namespace crow
+             }
+         }
+ 
++        void validate_bp() {
++            //Take all the routes from the registered blueprints and add them to `all_rules_` to be processed.
++            detail::middleware_indices blueprint_mw;
++            validate_bp(blueprints_, blueprint_mw);
++        }
++
+         void validate_bp(std::vector<Blueprint*> blueprints, detail::middleware_indices& current_mw)
+         {
+             for (unsigned i = 0; i < blueprints.size(); i++)
+             {
+                 Blueprint* blueprint = blueprints[i];
++
++                if (blueprint->is_added()) continue;
++
+                 if (blueprint->static_dir_ == "" && blueprint->all_rules_.empty())
+                 {
+                     std::vector<HTTPMethod> methods;
+@@ -1338,7 +1373,7 @@ namespace crow
+                 current_mw.merge_back(blueprint->mw_indices_);
+                 for (auto& rule : blueprint->all_rules_)
+                 {
+-                    if (rule)
++                    if (rule && !rule->is_added())
+                     {
+                         auto upgraded = rule->upgrade();
+                         if (upgraded)
+@@ -1350,24 +1385,21 @@ namespace crow
+                 }
+                 validate_bp(blueprint->blueprints_, current_mw);
+                 current_mw.pop_back(blueprint->mw_indices_);
++                blueprint->set_added();
+             }
+         }
+ 
+         void validate()
+         {
+-            //Take all the routes from the registered blueprints and add them to `all_rules_` to be processed.
+-            detail::middleware_indices blueprint_mw;
+-            validate_bp(blueprints_, blueprint_mw);
+-
+             for (auto& rule : all_rules_)
+             {
+-                if (rule)
++                if (rule && !rule->is_added())
+                 {
+                     auto upgraded = rule->upgrade();
+                     if (upgraded)
+                         rule = std::move(upgraded);
+                     rule->validate();
+-                    internal_add_rule_object(rule->rule(), rule.get(), INVALID_BP_ID, blueprints_);
++                    internal_add_rule_object(rule->rule(), rule.get());
+                 }
+             }
+             for (auto& per_method : per_methods_)
+diff --git a/include/crow/utility.h b/include/crow/utility.h
+index be5b08cdb..8d72738ea 100644
+--- a/include/crow/utility.h
++++ b/include/crow/utility.h
+@@ -11,6 +11,7 @@
+ #include <sstream>
+ #include <unordered_map>
+ #include <random>
++#include <algorithm>
+ 
+ #include "crow/settings.h"
+ 
+@@ -702,6 +703,14 @@ namespace crow
+             return base64decode(data.data(), data.length());
+         }
+ 
++        inline static std::string normalize_path(const std::string& directoryPath)
++        {
++            std::string normalizedPath = directoryPath;
++            std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
++            if (!normalizedPath.empty() && normalizedPath.back() != '/')
++                normalizedPath += '/';
++            return normalizedPath;
++        }
+ 
+         inline static void sanitize_filename(std::string& data, char replacement = '_')
+         {
+@@ -715,8 +724,8 @@ namespace crow
+             // a special device. Thus we search for the string (case-insensitive), and then check if the string ends or if
+             // is has a dangerous follow up character (.:\/)
+             auto sanitizeSpecialFile = [](std::string& source, unsigned ofs, const char* pattern, bool includeNumber, char replacement) {
+-	      unsigned i = ofs;
+-	      size_t len = source.length();
++                unsigned i = ofs;
++                size_t len = source.length();
+                 const char* p = pattern;
+                 while (*p)
+                 {

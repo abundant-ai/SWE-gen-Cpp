@@ -10,40 +10,35 @@ cp "/tests/mock-allocator.h" "test/mock-allocator.h"
 mkdir -p "test"
 cp "/tests/util-test.cc" "test/util-test.cc"
 
-# Clean build directory to avoid CMake cache issues
-rm -rf build
+# Remove test/format file to avoid header collision with std::format
+rm -f test/format
 
-# Reconfigure with the updated test files
-cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=g++ \
-    -DCMAKE_C_COMPILER=gcc \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DFMT_TEST=ON 2>&1
+# Rebuild and run the specific tests for this PR
+cd build
+rm -rf *
 
-# Build the specific test targets
-cmake --build build --target format-test --parallel $(nproc) 2>&1
-format_test_build=$?
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_STANDARD=14 \
+  -DFMT_TEST=ON \
+  -DCMAKE_C_COMPILER=clang \
+  -DCMAKE_CXX_COMPILER=clang++
 
-cmake --build build --target util-test --parallel $(nproc) 2>&1
-util_test_build=$?
-
-# If build failed, exit with error
-if [ $format_test_build -ne 0 ] || [ $util_test_build -ne 0 ]; then
-  echo "Build failed"
-  test_status=1
+# Build and run format-test
+make format-test
+if [ $? -eq 0 ]; then
+  ./bin/format-test
+  test_status=$?
 else
-  # Run the format-test
-  ./build/bin/format-test
-  format_test_status=$?
+  test_status=1
+fi
 
-  # Run the util-test
-  ./build/bin/util-test
-  util_test_status=$?
-
-  # Both must pass
-  if [ $format_test_status -eq 0 ] && [ $util_test_status -eq 0 ]; then
-    test_status=0
+# Build and run util-test if format-test passed
+if [ $test_status -eq 0 ]; then
+  make util-test
+  if [ $? -eq 0 ]; then
+    ./bin/util-test
+    test_status=$?
   else
     test_status=1
   fi

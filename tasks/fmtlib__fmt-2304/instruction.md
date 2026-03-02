@@ -1,5 +1,26 @@
-Using `FMT_COMPILE` with `fmt::print` fails to compile for format strings that rely on non-core formatters such as `fmt/chrono.h`. For example, formatting a `tm` with `fmt::print(FMT_COMPILE("{:%Y-%m-%dT%H:%M:%S}"), t);` should compile and print the same output as the runtime-format-string version `fmt::print("{:%Y-%m-%dT%H:%M:%S}", t);`, but currently it produces a compilation error with current major compilers.
+Using compiled format strings with `FMT_COMPILE` currently fails to compile when calling `fmt::print` with chrono formatting, even though the same format works with a normal runtime format string.
 
-The issue is specific to the `fmt::print` overload set: `FMT_COMPILE("...")` produces a compiled-format object that works with `fmt::format`/`fmt::format_to`, but `fmt::print` does not have a compatible overload/path for compiled formats, so using `FMT_COMPILE` with `fmt::print` breaks when the compiled formatting machinery is selected.
+For example, the following should compile and print a formatted `tm` timestamp:
 
-Implement support for compiled formats in `fmt::print()` so that `fmt::print(FMT_COMPILE("..."), args...)` is accepted and works for types formatted via additional headers like `fmt/chrono.h`. This should behave consistently with existing `fmt::print` behavior (writing to `stdout`/a `std::FILE*` as appropriate), and it must preserve the ability to use runtime format strings as before. The fix should ensure the chrono example with `tm` compiles and runs when the format string is wrapped in `FMT_COMPILE`.
+```c++
+#include <fmt/chrono.h>
+#include <fmt/compile.h>
+
+int main() {
+  std::tm t = {};
+  t.tm_year = 2010 - 1900;
+  t.tm_mon = 6;
+  t.tm_mday = 4;
+  t.tm_hour = 12;
+  t.tm_min = 15;
+  t.tm_sec = 58;
+
+  fmt::print(FMT_COMPILE("{:%Y-%m-%dT%H:%M:%S}"), t);
+}
+```
+
+Expected behavior: `fmt::print(FMT_COMPILE("{:%Y-%m-%dT%H:%M:%S}"), t)` compiles successfully and produces the same output as `fmt::print("{:%Y-%m-%dT%H:%M:%S}", t)`.
+
+Actual behavior: with current master, major compilers reject the `fmt::print` call when the format string is wrapped in `FMT_COMPILE(...)` and the argument uses chrono formatting (e.g., `std::tm` with `fmt/chrono.h`). The compiled-format path lacks an appropriate `fmt::print` overload or printing implementation for compiled format strings.
+
+Implement support for calling `fmt::print` with compiled format strings so that it works for chrono types (including `std::tm`) and, more generally, behaves consistently with the runtime-format `fmt::print` API. The solution should ensure the compiled-format printing path ultimately writes the formatted result to the provided `std::FILE*` / stdout in the same way as the existing runtime `vprint`-based printing does, without requiring users to switch to `fmt::format` as a workaround.

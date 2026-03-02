@@ -1,21 +1,32 @@
-fmt::dynamic_format_arg_store<Context> cannot currently be copied, which prevents creating a new argument scope based on an existing store (e.g., copying a base set of arguments and then appending additional ones) without mutating the original. Attempting to do something like:
+Currently, fmt::dynamic_format_arg_store<Context> cannot be copied because it lacks a copy constructor (and in some configurations is also missing a usable default constructor). This prevents common workflows where a “base” argument store is prepared and then extended in a derived scope without mutating the original store.
 
-```c++
+Implement proper construction support for fmt::dynamic_format_arg_store<Context> so that the following usage works as expected:
+
+```cpp
 fmt::dynamic_format_arg_store<fmt::format_context> args;
-args.push_back(42);
-args.push_back(fmt::arg("name", "Alice"));
+args.push_back(fmt::arg("global_username", std::ref("utkarsh1")));
+args.push_back(fmt::arg("global_hostname", std::ref("miron")));
+std::vector<int> v1 = {5, 1235, 1235123};
+args.push_back(fmt::arg("global_vector", v1));
 
-fmt::dynamic_format_arg_store<fmt::format_context> args2(args); // should compile
-args2.push_back(fmt::arg("extra", "value"));
+fmt::dynamic_format_arg_store<fmt::format_context> args2(args);
+args2.push_back(fmt::arg("extra", std::ref("extra-value")));
+
+auto s1 = fmt::vformat("{global_username} {global_hostname}", args);
+auto s2 = fmt::vformat("{global_username} {global_hostname} {extra}", args2);
 ```
 
-fails because the type is not copy-constructible.
+Expected behavior:
+- args2 constructed from args contains the same positional and named arguments as args at the time of copying.
+- After copying, pushing additional arguments into args2 must not affect args.
+- Formatting with fmt::vformat using args and args2 should resolve the correct values for both positional and named placeholders.
+- The copy must preserve correct behavior for a variety of stored argument kinds, including:
+  - integers/floats
+  - C strings and string views
+  - values stored by value vs by reference (e.g., std::cref)
+  - custom formattable types
 
-Add proper default construction and a copy constructor for fmt::dynamic_format_arg_store<Context> so that:
+Actual behavior (before the fix):
+- Copy construction is not available, so code like `fmt::dynamic_format_arg_store<fmt::format_context> args2(args);` fails to compile.
 
-- Copying a store produces a logically equivalent store that can be used with fmt::vformat in the same way as the original.
-- After copying, the original store must remain unchanged when the copy is appended to (e.g., args2.push_back(...) must not affect args).
-- The copy must preserve positional and named arguments such that formatting with either automatic fields ("{}") or named fields ("{name}") works the same as with the source store.
-- The copy must preserve the existing value-vs-reference behavior of stored arguments (e.g., storing a C string by value vs storing a reference wrapper should continue to behave consistently after copying when the original underlying object is later mutated).
-
-The result should allow using a copied store as a base and then adding more arguments, with fmt::vformat producing expected output for both positional and named formatting using the copied store.
+Add the necessary constructors/semantics so dynamic_format_arg_store is default-constructible and copy-constructible, and ensure copied stores continue to work with fmt::vformat for both positional and named arguments.

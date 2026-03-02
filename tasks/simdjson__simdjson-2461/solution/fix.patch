@@ -1,0 +1,63 @@
+diff --git a/doc/basics.md b/doc/basics.md
+index bcb52e77..118c38b2 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -1400,6 +1400,9 @@ maps it to parsing code. We call the default constructor,
+ and then assign values to the public members.
+ 
+ 
++If a key is missing in the JSON document, an error is generated (`NO_SUCH_FIELD`),
++except if the attribute is of a type like `std::optional` (`simdjson::concepts::optional_type`).
++
+ #### Special cases
+ 
+ However, there are instances where the construction cannot
+diff --git a/include/simdjson/concepts.h b/include/simdjson/concepts.h
+index 818e9b25..c4e207d3 100644
+--- a/include/simdjson/concepts.h
++++ b/include/simdjson/concepts.h
+@@ -122,6 +122,7 @@ concept optional_type = requires(std::remove_cvref_t<T> obj) {
+     } -> std::convertible_to<typename std::remove_cvref_t<T>::value_type>;
+   };
+   { static_cast<bool>(obj) } -> std::same_as<bool>; // convertible to bool
++  { obj.reset() } noexcept -> std::same_as<void>;
+ };
+ 
+ 
+diff --git a/include/simdjson/generic/ondemand/std_deserialize.h b/include/simdjson/generic/ondemand/std_deserialize.h
+index 07dc5904..2c9f7106 100644
+--- a/include/simdjson/generic/ondemand/std_deserialize.h
++++ b/include/simdjson/generic/ondemand/std_deserialize.h
+@@ -286,18 +286,26 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   } else {
+     SIMDJSON_TRY(val.get_object().get(obj));
+   }
+-  error_code e = simdjson::SUCCESS;
+   template for (constexpr auto mem : std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
+     if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+-      // Note: removed static assert as optional types are now handled generically
+-      // as long we are successful or the field is not found, we continue
+-      if(e == simdjson::SUCCESS || e == simdjson::NO_SUCH_FIELD) {
+-        e = obj[key].get(out.[:mem:]);
++      if constexpr (concepts::optional_type<decltype(out.[:mem:])>) {
++        // for optional members, it's ok if the key is missing
++        auto error = obj[key].get(out.[:mem:]);
++        if (error && error != NO_SUCH_FIELD) {
++          if(error == NO_SUCH_FIELD) {
++            out.[:mem:].reset();
++            continue;
++          }
++          return error;
++        }
++      } else {
++        // for non-optional members, the key must be present
++        SIMDJSON_TRY(obj[key].get(out.[:mem:]));
+       }
+     }
+   };
+-  return e;
++  return simdjson::SUCCESS;
+ }
+ 
+ // Support for enum deserialization - deserialize from string representation using expand approach from P2996R12

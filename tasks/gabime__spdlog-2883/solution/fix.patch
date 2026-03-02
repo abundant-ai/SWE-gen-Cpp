@@ -1,0 +1,101 @@
+diff --git a/include/spdlog/details/registry-inl.h b/include/spdlog/details/registry-inl.h
+index da4a7de9..a23655f0 100644
+--- a/include/spdlog/details/registry-inl.h
++++ b/include/spdlog/details/registry-inl.h
+@@ -259,6 +259,22 @@ SPDLOG_INLINE void registry::register_logger_(std::shared_ptr<logger> new_logger
+     auto logger_name = new_logger->name();
+     throw_if_exists_(logger_name);
+     loggers_[logger_name] = std::move(new_logger);
++
++    const auto& logger = loggers_[logger_name];
++    for (const auto& on_registration_callback : on_registration_callbacks_) {
++        on_registration_callback(logger);
++    }
++}
++
++SPDLOG_INLINE void registry::add_on_registration_callback(
++    const std::function<void(std::shared_ptr<logger>)>& callback) {
++    std::lock_guard<std::mutex> lock(logger_map_mutex_);
++    on_registration_callbacks_.push_back(callback);
++}
++
++SPDLOG_INLINE void registry::drop_all_on_registration_callbacks() {
++    std::lock_guard<std::mutex> lock(logger_map_mutex_);
++    on_registration_callbacks_.clear();
+ }
+ 
+ }  // namespace details
+diff --git a/include/spdlog/details/registry.h b/include/spdlog/details/registry.h
+index 56a6886e..cb3cc2ba 100644
+--- a/include/spdlog/details/registry.h
++++ b/include/spdlog/details/registry.h
+@@ -17,6 +17,7 @@
+ #include <mutex>
+ #include <string>
+ #include <unordered_map>
++#include <vector>
+ 
+ namespace spdlog {
+ class logger;
+@@ -92,6 +93,10 @@ public:
+ 
+     void apply_logger_env_levels(std::shared_ptr<logger> new_logger);
+ 
++    void add_on_registration_callback(const std::function<void(std::shared_ptr<logger>)>& callback);
++
++    void drop_all_on_registration_callbacks();
++
+ private:
+     registry();
+     ~registry();
+@@ -112,6 +117,7 @@ private:
+     std::shared_ptr<logger> default_logger_;
+     bool automatic_registration_ = true;
+     size_t backtrace_n_messages_ = 0;
++    std::vector<std::function<void(std::shared_ptr<logger>)>> on_registration_callbacks_;
+ };
+ 
+ }  // namespace details
+diff --git a/include/spdlog/spdlog-inl.h b/include/spdlog/spdlog-inl.h
+index 97c36222..9959dbac 100644
+--- a/include/spdlog/spdlog-inl.h
++++ b/include/spdlog/spdlog-inl.h
+@@ -89,4 +89,12 @@ SPDLOG_INLINE void apply_logger_env_levels(std::shared_ptr<logger> logger) {
+     details::registry::instance().apply_logger_env_levels(std::move(logger));
+ }
+ 
++SPDLOG_INLINE void add_on_registration_callback(const std::function<void(const std::shared_ptr<logger>&)>& callback) {
++    details::registry::instance().add_on_registration_callback(callback);
++}
++
++SPDLOG_INLINE void drop_all_on_registration_callbacks() {
++    details::registry::instance().drop_all_on_registration_callbacks();
++}
++
+ }  // namespace spdlog
+diff --git a/include/spdlog/spdlog.h b/include/spdlog/spdlog.h
+index a8afbcec..dc077d69 100644
+--- a/include/spdlog/spdlog.h
++++ b/include/spdlog/spdlog.h
+@@ -140,6 +140,21 @@ SPDLOG_API void set_default_logger(std::shared_ptr<spdlog::logger> default_logge
+ //   spdlog::apply_logger_env_levels(mylogger);
+ SPDLOG_API void apply_logger_env_levels(std::shared_ptr<logger> logger);
+ 
++// Add a callback that is called whenever a logger is registered
++//
++// Useful for intercepting loggers that are dynamically created during the application's lifetime
++// (e.g. from dynamically loaded libraries, etc.)
++// Example:
++// void my_on_registration_callback(const std::shared_ptr<spdlog::logger>& logger) {
++//     logger->do_stuff();
++// }
++// ...
++// spdlog::add_on_registration_callback(my_on_registration_callback);
++SPDLOG_API void add_on_registration_callback(const std::function<void(const std::shared_ptr<logger>&)>& callback);
++
++// Clear all callbacks that were added to intercept registrations (see "add_on_registration_callback")
++SPDLOG_API void drop_all_on_registration_callbacks();
++
+ template <typename... Args>
+ inline void log(source_loc source,
+                 level::level_enum lvl,

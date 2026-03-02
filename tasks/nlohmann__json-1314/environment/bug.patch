@@ -1,0 +1,1013 @@
+diff --git a/include/nlohmann/detail/output/serializer.hpp b/include/nlohmann/detail/output/serializer.hpp
+index 1d107ce04..bb74a86e6 100644
+--- a/include/nlohmann/detail/output/serializer.hpp
++++ b/include/nlohmann/detail/output/serializer.hpp
+@@ -28,14 +28,6 @@ namespace detail
+ // serialization //
+ ///////////////////
+ 
+-/// how to treat decoding errors
+-enum class error_handler_t
+-{
+-    strict,  ///< throw a type_error exception in case of invalid UTF-8
+-    replace, ///< replace invalid UTF-8 sequences with U+FFFD
+-    ignore   ///< ignore invalid UTF-8 sequences
+-};
+-
+ template<typename BasicJsonType>
+ class serializer
+ {
+@@ -50,17 +42,12 @@ class serializer
+     /*!
+     @param[in] s  output stream to serialize to
+     @param[in] ichar  indentation character to use
+-    @param[in] error_handler_  how to react on decoding errors
+     */
+-    serializer(output_adapter_t<char> s, const char ichar,
+-               error_handler_t error_handler_ = error_handler_t::strict)
+-        : o(std::move(s))
+-        , loc(std::localeconv())
+-        , thousands_sep(loc->thousands_sep == nullptr ? '\0' : * (loc->thousands_sep))
+-        , decimal_point(loc->decimal_point == nullptr ? '\0' : * (loc->decimal_point))
+-        , indent_char(ichar)
+-        , indent_string(512, indent_char)
+-        , error_handler(error_handler_)
++    serializer(output_adapter_t<char> s, const char ichar)
++        : o(std::move(s)), loc(std::localeconv()),
++          thousands_sep(loc->thousands_sep == nullptr ? '\0' : * (loc->thousands_sep)),
++          decimal_point(loc->decimal_point == nullptr ? '\0' : * (loc->decimal_point)),
++          indent_char(ichar), indent_string(512, indent_char)
+     {}
+ 
+     // delete because of pointer members
+@@ -300,10 +287,6 @@ class serializer
+         uint8_t state = UTF8_ACCEPT;
+         std::size_t bytes = 0;  // number of bytes written to string_buffer
+ 
+-        // number of bytes written at the point of the last valid byte
+-        std::size_t bytes_after_last_accept = 0;
+-        std::size_t undumped_chars = 0;
+-
+         for (std::size_t i = 0; i < s.size(); ++i)
+         {
+             const auto byte = static_cast<uint8_t>(s[i]);
+@@ -401,68 +384,14 @@ class serializer
+                         o->write_characters(string_buffer.data(), bytes);
+                         bytes = 0;
+                     }
+-
+-                    // remember the byte position of this accept
+-                    bytes_after_last_accept = bytes;
+-                    undumped_chars = 0;
+                     break;
+                 }
+ 
+                 case UTF8_REJECT:  // decode found invalid UTF-8 byte
+                 {
+-                    switch (error_handler)
+-                    {
+-                        case error_handler_t::strict:
+-                        {
+-                            std::string sn(3, '\0');
+-                            snprintf(&sn[0], sn.size(), "%.2X", byte);
+-                            JSON_THROW(type_error::create(316, "invalid UTF-8 byte at index " + std::to_string(i) + ": 0x" + sn));
+-                        }
+-
+-                        case error_handler_t::ignore:
+-                        case error_handler_t::replace:
+-                        {
+-                            // in case we saw this character the first time, we
+-                            // would like to read it again, because the byte
+-                            // may be OK for itself, but just not OK for the
+-                            // previous sequence
+-                            if (undumped_chars > 0)
+-                            {
+-                                --i;
+-                            }
+-
+-                            // reset length buffer to the last accepted index;
+-                            // thus removing/ignoring the invalid characters
+-                            bytes = bytes_after_last_accept;
+-
+-                            if (error_handler == error_handler_t::replace)
+-                            {
+-                                // add a replacement character
+-                                if (ensure_ascii)
+-                                {
+-                                    string_buffer[bytes++] = '\\';
+-                                    string_buffer[bytes++] = 'u';
+-                                    string_buffer[bytes++] = 'f';
+-                                    string_buffer[bytes++] = 'f';
+-                                    string_buffer[bytes++] = 'f';
+-                                    string_buffer[bytes++] = 'd';
+-                                }
+-                                else
+-                                {
+-                                    string_buffer[bytes++] = '\xEF';
+-                                    string_buffer[bytes++] = '\xBF';
+-                                    string_buffer[bytes++] = '\xBD';
+-                                }
+-                                bytes_after_last_accept = bytes;
+-                            }
+-
+-                            undumped_chars = 0;
+-
+-                            // continue processing the string
+-                            state = UTF8_ACCEPT;
+-                            continue;
+-                        }
+-                    }
++                    std::string sn(3, '\0');
++                    snprintf(&sn[0], sn.size(), "%.2X", byte);
++                    JSON_THROW(type_error::create(316, "invalid UTF-8 byte at index " + std::to_string(i) + ": 0x" + sn));
+                 }
+ 
+                 default:  // decode found yet incomplete multi-byte code point
+@@ -472,13 +401,11 @@ class serializer
+                         // code point will not be escaped - copy byte to buffer
+                         string_buffer[bytes++] = s[i];
+                     }
+-                    ++undumped_chars;
+                     break;
+                 }
+             }
+         }
+ 
+-        // we finished processing the string
+         if (JSON_LIKELY(state == UTF8_ACCEPT))
+         {
+             // write buffer
+@@ -490,38 +417,9 @@ class serializer
+         else
+         {
+             // we finish reading, but do not accept: string was incomplete
+-            switch (error_handler)
+-            {
+-                case error_handler_t::strict:
+-                {
+-                    std::string sn(3, '\0');
+-                    snprintf(&sn[0], sn.size(), "%.2X", static_cast<uint8_t>(s.back()));
+-                    JSON_THROW(type_error::create(316, "incomplete UTF-8 string; last byte: 0x" + sn));
+-                }
+-
+-                case error_handler_t::ignore:
+-                {
+-                    // write all accepted bytes
+-                    o->write_characters(string_buffer.data(), bytes_after_last_accept);
+-                    break;
+-                }
+-
+-                case error_handler_t::replace:
+-                {
+-                    // write all accepted bytes
+-                    o->write_characters(string_buffer.data(), bytes_after_last_accept);
+-                    // add a replacement character
+-                    if (ensure_ascii)
+-                    {
+-                        o->write_characters("\\ufffd", 6);
+-                    }
+-                    else
+-                    {
+-                        o->write_characters("\xEF\xBF\xBD", 3);
+-                    }
+-                    break;
+-                }
+-            }
++            std::string sn(3, '\0');
++            snprintf(&sn[0], sn.size(), "%.2X", static_cast<uint8_t>(s.back()));
++            JSON_THROW(type_error::create(316, "incomplete UTF-8 string; last byte: 0x" + sn));
+         }
+     }
+ 
+@@ -731,9 +629,6 @@ class serializer
+     const char indent_char;
+     /// the indentation string
+     string_t indent_string;
+-
+-    /// error_handler how to react on decoding errors
+-    const error_handler_t error_handler;
+ };
+ }  // namespace detail
+ }  // namespace nlohmann
+diff --git a/include/nlohmann/json.hpp b/include/nlohmann/json.hpp
+index a5f7d47d0..619fd9e63 100644
+--- a/include/nlohmann/json.hpp
++++ b/include/nlohmann/json.hpp
+@@ -208,8 +208,6 @@ class basic_json
+     using json_pointer = ::nlohmann::json_pointer<basic_json>;
+     template<typename T, typename SFINAE>
+     using json_serializer = JSONSerializer<T, SFINAE>;
+-    /// how to treat decoding errors
+-    using error_handler_t = detail::error_handler_t;
+     /// helper type for initializer lists of basic_json values
+     using initializer_list_t = std::initializer_list<detail::json_ref<basic_json>>;
+ 
+@@ -1934,10 +1932,6 @@ class basic_json
+     @param[in] ensure_ascii If @a ensure_ascii is true, all non-ASCII characters
+     in the output are escaped with `\uXXXX` sequences, and the result consists
+     of ASCII characters only.
+-    @param[in] error_handler  how to react on decoding errors; there are three
+-    possible values: `strict` (throws and exception in case a decoding error
+-    occurs; default), `replace` (replace invalid UTF-8 sequences with U+FFFD),
+-    and `ignore` (ignore invalid UTF-8 sequences during serialization).
+ 
+     @return string containing the serialization of the JSON value
+ 
+@@ -1956,16 +1950,13 @@ class basic_json
+     @see https://docs.python.org/2/library/json.html#json.dump
+ 
+     @since version 1.0.0; indentation character @a indent_char, option
+-           @a ensure_ascii and exceptions added in version 3.0.0; error
+-           handlers added in version 3.4.0.
++           @a ensure_ascii and exceptions added in version 3.0.0
+     */
+-    string_t dump(const int indent = -1,
+-                  const char indent_char = ' ',
+-                  const bool ensure_ascii = false,
+-                  const error_handler_t error_handler = error_handler_t::strict) const
++    string_t dump(const int indent = -1, const char indent_char = ' ',
++                  const bool ensure_ascii = false) const
+     {
+         string_t result;
+-        serializer s(detail::output_adapter<char, string_t>(result), indent_char, error_handler);
++        serializer s(detail::output_adapter<char, string_t>(result), indent_char);
+ 
+         if (indent >= 0)
+         {
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index be3f84174..dc206d301 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -9980,14 +9980,6 @@ namespace detail
+ // serialization //
+ ///////////////////
+ 
+-/// how to treat decoding errors
+-enum class error_handler_t
+-{
+-    strict,  ///< throw a type_error exception in case of invalid UTF-8
+-    replace, ///< replace invalid UTF-8 sequences with U+FFFD
+-    ignore   ///< ignore invalid UTF-8 sequences
+-};
+-
+ template<typename BasicJsonType>
+ class serializer
+ {
+@@ -10002,17 +9994,12 @@ class serializer
+     /*!
+     @param[in] s  output stream to serialize to
+     @param[in] ichar  indentation character to use
+-    @param[in] error_handler_  how to react on decoding errors
+-    */
+-    serializer(output_adapter_t<char> s, const char ichar,
+-               error_handler_t error_handler_ = error_handler_t::strict)
+-        : o(std::move(s))
+-        , loc(std::localeconv())
+-        , thousands_sep(loc->thousands_sep == nullptr ? '\0' : * (loc->thousands_sep))
+-        , decimal_point(loc->decimal_point == nullptr ? '\0' : * (loc->decimal_point))
+-        , indent_char(ichar)
+-        , indent_string(512, indent_char)
+-        , error_handler(error_handler_)
++    */
++    serializer(output_adapter_t<char> s, const char ichar)
++        : o(std::move(s)), loc(std::localeconv()),
++          thousands_sep(loc->thousands_sep == nullptr ? '\0' : * (loc->thousands_sep)),
++          decimal_point(loc->decimal_point == nullptr ? '\0' : * (loc->decimal_point)),
++          indent_char(ichar), indent_string(512, indent_char)
+     {}
+ 
+     // delete because of pointer members
+@@ -10252,10 +10239,6 @@ class serializer
+         uint8_t state = UTF8_ACCEPT;
+         std::size_t bytes = 0;  // number of bytes written to string_buffer
+ 
+-        // number of bytes written at the point of the last valid byte
+-        std::size_t bytes_after_last_accept = 0;
+-        std::size_t undumped_chars = 0;
+-
+         for (std::size_t i = 0; i < s.size(); ++i)
+         {
+             const auto byte = static_cast<uint8_t>(s[i]);
+@@ -10353,68 +10336,14 @@ class serializer
+                         o->write_characters(string_buffer.data(), bytes);
+                         bytes = 0;
+                     }
+-
+-                    // remember the byte position of this accept
+-                    bytes_after_last_accept = bytes;
+-                    undumped_chars = 0;
+                     break;
+                 }
+ 
+                 case UTF8_REJECT:  // decode found invalid UTF-8 byte
+                 {
+-                    switch (error_handler)
+-                    {
+-                        case error_handler_t::strict:
+-                        {
+-                            std::string sn(3, '\0');
+-                            snprintf(&sn[0], sn.size(), "%.2X", byte);
+-                            JSON_THROW(type_error::create(316, "invalid UTF-8 byte at index " + std::to_string(i) + ": 0x" + sn));
+-                        }
+-
+-                        case error_handler_t::ignore:
+-                        case error_handler_t::replace:
+-                        {
+-                            // in case we saw this character the first time, we
+-                            // would like to read it again, because the byte
+-                            // may be OK for itself, but just not OK for the
+-                            // previous sequence
+-                            if (undumped_chars > 0)
+-                            {
+-                                --i;
+-                            }
+-
+-                            // reset length buffer to the last accepted index;
+-                            // thus removing/ignoring the invalid characters
+-                            bytes = bytes_after_last_accept;
+-
+-                            if (error_handler == error_handler_t::replace)
+-                            {
+-                                // add a replacement character
+-                                if (ensure_ascii)
+-                                {
+-                                    string_buffer[bytes++] = '\\';
+-                                    string_buffer[bytes++] = 'u';
+-                                    string_buffer[bytes++] = 'f';
+-                                    string_buffer[bytes++] = 'f';
+-                                    string_buffer[bytes++] = 'f';
+-                                    string_buffer[bytes++] = 'd';
+-                                }
+-                                else
+-                                {
+-                                    string_buffer[bytes++] = '\xEF';
+-                                    string_buffer[bytes++] = '\xBF';
+-                                    string_buffer[bytes++] = '\xBD';
+-                                }
+-                                bytes_after_last_accept = bytes;
+-                            }
+-
+-                            undumped_chars = 0;
+-
+-                            // continue processing the string
+-                            state = UTF8_ACCEPT;
+-                            continue;
+-                        }
+-                    }
++                    std::string sn(3, '\0');
++                    snprintf(&sn[0], sn.size(), "%.2X", byte);
++                    JSON_THROW(type_error::create(316, "invalid UTF-8 byte at index " + std::to_string(i) + ": 0x" + sn));
+                 }
+ 
+                 default:  // decode found yet incomplete multi-byte code point
+@@ -10424,13 +10353,11 @@ class serializer
+                         // code point will not be escaped - copy byte to buffer
+                         string_buffer[bytes++] = s[i];
+                     }
+-                    ++undumped_chars;
+                     break;
+                 }
+             }
+         }
+ 
+-        // we finished processing the string
+         if (JSON_LIKELY(state == UTF8_ACCEPT))
+         {
+             // write buffer
+@@ -10442,38 +10369,9 @@ class serializer
+         else
+         {
+             // we finish reading, but do not accept: string was incomplete
+-            switch (error_handler)
+-            {
+-                case error_handler_t::strict:
+-                {
+-                    std::string sn(3, '\0');
+-                    snprintf(&sn[0], sn.size(), "%.2X", static_cast<uint8_t>(s.back()));
+-                    JSON_THROW(type_error::create(316, "incomplete UTF-8 string; last byte: 0x" + sn));
+-                }
+-
+-                case error_handler_t::ignore:
+-                {
+-                    // write all accepted bytes
+-                    o->write_characters(string_buffer.data(), bytes_after_last_accept);
+-                    break;
+-                }
+-
+-                case error_handler_t::replace:
+-                {
+-                    // write all accepted bytes
+-                    o->write_characters(string_buffer.data(), bytes_after_last_accept);
+-                    // add a replacement character
+-                    if (ensure_ascii)
+-                    {
+-                        o->write_characters("\\ufffd", 6);
+-                    }
+-                    else
+-                    {
+-                        o->write_characters("\xEF\xBF\xBD", 3);
+-                    }
+-                    break;
+-                }
+-            }
++            std::string sn(3, '\0');
++            snprintf(&sn[0], sn.size(), "%.2X", static_cast<uint8_t>(s.back()));
++            JSON_THROW(type_error::create(316, "incomplete UTF-8 string; last byte: 0x" + sn));
+         }
+     }
+ 
+@@ -10683,9 +10581,6 @@ class serializer
+     const char indent_char;
+     /// the indentation string
+     string_t indent_string;
+-
+-    /// error_handler how to react on decoding errors
+-    const error_handler_t error_handler;
+ };
+ }  // namespace detail
+ }  // namespace nlohmann
+@@ -11655,8 +11550,6 @@ class basic_json
+     using json_pointer = ::nlohmann::json_pointer<basic_json>;
+     template<typename T, typename SFINAE>
+     using json_serializer = JSONSerializer<T, SFINAE>;
+-    /// how to treat decoding errors
+-    using error_handler_t = detail::error_handler_t;
+     /// helper type for initializer lists of basic_json values
+     using initializer_list_t = std::initializer_list<detail::json_ref<basic_json>>;
+ 
+@@ -13381,10 +13274,6 @@ class basic_json
+     @param[in] ensure_ascii If @a ensure_ascii is true, all non-ASCII characters
+     in the output are escaped with `\uXXXX` sequences, and the result consists
+     of ASCII characters only.
+-    @param[in] error_handler  how to react on decoding errors; there are three
+-    possible values: `strict` (throws and exception in case a decoding error
+-    occurs; default), `replace` (replace invalid UTF-8 sequences with U+FFFD),
+-    and `ignore` (ignore invalid UTF-8 sequences during serialization).
+ 
+     @return string containing the serialization of the JSON value
+ 
+@@ -13403,16 +13292,13 @@ class basic_json
+     @see https://docs.python.org/2/library/json.html#json.dump
+ 
+     @since version 1.0.0; indentation character @a indent_char, option
+-           @a ensure_ascii and exceptions added in version 3.0.0; error
+-           handlers added in version 3.4.0.
++           @a ensure_ascii and exceptions added in version 3.0.0
+     */
+-    string_t dump(const int indent = -1,
+-                  const char indent_char = ' ',
+-                  const bool ensure_ascii = false,
+-                  const error_handler_t error_handler = error_handler_t::strict) const
++    string_t dump(const int indent = -1, const char indent_char = ' ',
++                  const bool ensure_ascii = false) const
+     {
+         string_t result;
+-        serializer s(detail::output_adapter<char, string_t>(result), indent_char, error_handler);
++        serializer s(detail::output_adapter<char, string_t>(result), indent_char);
+ 
+         if (indent >= 0)
+         {
+diff --git a/test/src/unit-serialization.cpp b/test/src/unit-serialization.cpp
+index 1fe796e57..0eed7246e 100644
+--- a/test/src/unit-serialization.cpp
++++ b/test/src/unit-serialization.cpp
+@@ -94,80 +94,4 @@ TEST_CASE("serialization")
+                   "[\n\t\"foo\",\n\t1,\n\t2,\n\t3,\n\tfalse,\n\t{\n\t\t\"one\": 1\n\t}\n]");
+         }
+     }
+-
+-    SECTION("dump")
+-    {
+-        SECTION("invalid character")
+-        {
+-            json j = "ä\xA9ü";
+-
+-            CHECK_THROWS_AS(j.dump(), json::type_error&);
+-            CHECK_THROWS_WITH(j.dump(), "[json.exception.type_error.316] invalid UTF-8 byte at index 2: 0xA9");
+-            CHECK_THROWS_AS(j.dump(1, ' ', false, json::error_handler_t::strict), json::type_error&);
+-            CHECK_THROWS_WITH(j.dump(1, ' ', false, json::error_handler_t::strict), "[json.exception.type_error.316] invalid UTF-8 byte at index 2: 0xA9");
+-            CHECK(j.dump(-1, ' ', false, json::error_handler_t::ignore) == "\"äü\"");
+-            CHECK(j.dump(-1, ' ', false, json::error_handler_t::replace) == "\"ä\xEF\xBF\xBDü\"");
+-            CHECK(j.dump(-1, ' ', true, json::error_handler_t::replace) == "\"\\u00e4\\ufffd\\u00fc\"");
+-        }
+-
+-        SECTION("ending with incomplete character")
+-        {
+-            json j = "123\xC2";
+-
+-            CHECK_THROWS_AS(j.dump(), json::type_error&);
+-            CHECK_THROWS_WITH(j.dump(), "[json.exception.type_error.316] incomplete UTF-8 string; last byte: 0xC2");
+-            CHECK_THROWS_AS(j.dump(1, ' ', false, json::error_handler_t::strict), json::type_error&);
+-            CHECK(j.dump(-1, ' ', false, json::error_handler_t::ignore) == "\"123\"");
+-            CHECK(j.dump(-1, ' ', false, json::error_handler_t::replace) == "\"123\xEF\xBF\xBD\"");
+-            CHECK(j.dump(-1, ' ', true, json::error_handler_t::replace) == "\"123\\ufffd\"");
+-        }
+-
+-        SECTION("unexpected character")
+-        {
+-            json j = "123\xF1\xB0\x34\x35\x36";
+-
+-            CHECK_THROWS_AS(j.dump(), json::type_error&);
+-            CHECK_THROWS_WITH(j.dump(), "[json.exception.type_error.316] invalid UTF-8 byte at index 5: 0x34");
+-            CHECK_THROWS_AS(j.dump(1, ' ', false, json::error_handler_t::strict), json::type_error&);
+-            CHECK(j.dump(-1, ' ', false, json::error_handler_t::ignore) == "\"123456\"");
+-            CHECK(j.dump(-1, ' ', false, json::error_handler_t::replace) == "\"123\xEF\xBF\xBD\x34\x35\x36\"");
+-            CHECK(j.dump(-1, ' ', true, json::error_handler_t::replace) == "\"123\\ufffd456\"");
+-        }
+-
+-        SECTION("U+FFFD Substitution of Maximal Subparts")
+-        {
+-            // Some tests (mostly) from
+-            // https://www.unicode.org/versions/Unicode11.0.0/ch03.pdf
+-            // Section 3.9 -- U+FFFD Substitution of Maximal Subparts
+-
+-            auto test = [&](std::string const & input, std::string const & expected)
+-            {
+-                json j = input;
+-                CHECK(j.dump(-1, ' ', true, json::error_handler_t::replace) == "\"" + expected + "\"");
+-            };
+-
+-            test("\xC2", "\\ufffd");
+-            test("\xC2\x41\x42", "\\ufffd" "\x41" "\x42");
+-            test("\xC2\xF4", "\\ufffd" "\\ufffd");
+-
+-            test("\xF0\x80\x80\x41", "\\ufffd" "\\ufffd" "\\ufffd" "\x41");
+-            test("\xF1\x80\x80\x41", "\\ufffd" "\x41");
+-            test("\xF2\x80\x80\x41", "\\ufffd" "\x41");
+-            test("\xF3\x80\x80\x41", "\\ufffd" "\x41");
+-            test("\xF4\x80\x80\x41", "\\ufffd" "\x41");
+-            test("\xF5\x80\x80\x41", "\\ufffd" "\\ufffd" "\\ufffd" "\x41");
+-
+-            test("\xF0\x90\x80\x41", "\\ufffd" "\x41");
+-            test("\xF1\x90\x80\x41", "\\ufffd" "\x41");
+-            test("\xF2\x90\x80\x41", "\\ufffd" "\x41");
+-            test("\xF3\x90\x80\x41", "\\ufffd" "\x41");
+-            test("\xF4\x90\x80\x41", "\\ufffd" "\\ufffd" "\\ufffd" "\x41");
+-            test("\xF5\x90\x80\x41", "\\ufffd" "\\ufffd" "\\ufffd" "\x41");
+-
+-            test("\xC0\xAF\xE0\x80\xBF\xF0\x81\x82\x41", "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\x41");
+-            test("\xED\xA0\x80\xED\xBF\xBF\xED\xAF\x41", "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\x41");
+-            test("\xF4\x91\x92\x93\xFF\x41\x80\xBF\x42", "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\x41" "\\ufffd""\\ufffd" "\x42");
+-            test("\xE1\x80\xE2\xF0\x91\x92\xF1\xBF\x41", "\\ufffd" "\\ufffd" "\\ufffd" "\\ufffd" "\x41");
+-        }
+-    }
+ }
+diff --git a/test/src/unit-unicode.cpp b/test/src/unit-unicode.cpp
+index a8a0a9388..4def1a3e8 100644
+--- a/test/src/unit-unicode.cpp
++++ b/test/src/unit-unicode.cpp
+@@ -39,80 +39,6 @@ using nlohmann::json;
+ extern size_t calls;
+ size_t calls = 0;
+ 
+-void check_utf8dump(bool success_expected, int byte1, int byte2, int byte3, int byte4);
+-
+-void check_utf8dump(bool success_expected, int byte1, int byte2 = -1, int byte3 = -1, int byte4 = -1)
+-{
+-    std::string json_string;
+-
+-    CAPTURE(byte1);
+-    CAPTURE(byte2);
+-    CAPTURE(byte3);
+-    CAPTURE(byte4);
+-
+-    json_string += std::string(1, static_cast<char>(byte1));
+-
+-    if (byte2 != -1)
+-    {
+-        json_string += std::string(1, static_cast<char>(byte2));
+-    }
+-
+-    if (byte3 != -1)
+-    {
+-        json_string += std::string(1, static_cast<char>(byte3));
+-    }
+-
+-    if (byte4 != -1)
+-    {
+-        json_string += std::string(1, static_cast<char>(byte4));
+-    }
+-
+-    CAPTURE(json_string);
+-
+-    // store the string in a JSON value
+-    json j = json_string;
+-    json j2 = "abc" + json_string + "xyz";
+-
+-    // dumping with ignore/replace must not throw in any case
+-    auto s_ignored = j.dump(-1, ' ', false, json::error_handler_t::ignore);
+-    auto s_ignored2 = j2.dump(-1, ' ', false, json::error_handler_t::ignore);
+-    auto s_ignored_ascii = j.dump(-1, ' ', true, json::error_handler_t::ignore);
+-    auto s_ignored2_ascii = j2.dump(-1, ' ', true, json::error_handler_t::ignore);
+-    auto s_replaced = j.dump(-1, ' ', false, json::error_handler_t::replace);
+-    auto s_replaced2 = j2.dump(-1, ' ', false, json::error_handler_t::replace);
+-    auto s_replaced_ascii = j.dump(-1, ' ', true, json::error_handler_t::replace);
+-    auto s_replaced2_ascii = j2.dump(-1, ' ', true, json::error_handler_t::replace);
+-
+-    if (success_expected)
+-    {
+-        // strict mode must not throw if success is expected
+-        auto s_strict = j.dump();
+-        // all dumps should agree on the string
+-        CHECK(s_strict == s_ignored);
+-        CHECK(s_strict == s_replaced);
+-    }
+-    else
+-    {
+-        // strict mode must throw if success is not expected
+-        CHECK_THROWS_AS(j.dump(), json::type_error&);
+-        // ignore and replace must create different dumps
+-        CHECK(s_ignored != s_replaced);
+-
+-        // check that replace string contains a replacement character
+-        CHECK(s_replaced.find("\xEF\xBF\xBD") != std::string::npos);
+-    }
+-
+-    // check that prefix and suffix are preserved
+-    CHECK(s_ignored2.substr(1, 3) == "abc");
+-    CHECK(s_ignored2.substr(s_ignored2.size() - 4, 3) == "xyz");
+-    CHECK(s_ignored2_ascii.substr(1, 3) == "abc");
+-    CHECK(s_ignored2_ascii.substr(s_ignored2_ascii.size() - 4, 3) == "xyz");
+-    CHECK(s_replaced2.substr(1, 3) == "abc");
+-    CHECK(s_replaced2.substr(s_replaced2.size() - 4, 3) == "xyz");
+-    CHECK(s_replaced2_ascii.substr(1, 3) == "abc");
+-    CHECK(s_replaced2_ascii.substr(s_replaced2_ascii.size() - 4, 3) == "xyz");
+-}
+-
+ void check_utf8string(bool success_expected, int byte1, int byte2, int byte3, int byte4);
+ 
+ // create and check a JSON string with up to four UTF-8 bytes
+@@ -189,13 +115,11 @@ TEST_CASE("Unicode", "[hide]")
+             for (int byte1 = 0x80; byte1 <= 0xC1; ++byte1)
+             {
+                 check_utf8string(false, byte1);
+-                check_utf8dump(false, byte1);
+             }
+ 
+             for (int byte1 = 0xF5; byte1 <= 0xFF; ++byte1)
+             {
+                 check_utf8string(false, byte1);
+-                check_utf8dump(false, byte1);
+             }
+         }
+ 
+@@ -228,7 +152,6 @@ TEST_CASE("Unicode", "[hide]")
+ 
+                     // all other characters are OK
+                     check_utf8string(true, byte1);
+-                    check_utf8dump(true, byte1);
+                 }
+             }
+         }
+@@ -242,7 +165,6 @@ TEST_CASE("Unicode", "[hide]")
+                     for (int byte2 = 0x80; byte2 <= 0xBF; ++byte2)
+                     {
+                         check_utf8string(true, byte1, byte2);
+-                        check_utf8dump(true, byte1, byte2);
+                     }
+                 }
+             }
+@@ -252,7 +174,6 @@ TEST_CASE("Unicode", "[hide]")
+                 for (int byte1 = 0xC2; byte1 <= 0xDF; ++byte1)
+                 {
+                     check_utf8string(false, byte1);
+-                    check_utf8dump(false, byte1);
+                 }
+             }
+ 
+@@ -269,7 +190,6 @@ TEST_CASE("Unicode", "[hide]")
+                         }
+ 
+                         check_utf8string(false, byte1, byte2);
+-                        check_utf8dump(false, byte1, byte2);
+                     }
+                 }
+             }
+@@ -286,7 +206,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(true, byte1, byte2, byte3);
+-                            check_utf8dump(true, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -297,7 +216,6 @@ TEST_CASE("Unicode", "[hide]")
+                 for (int byte1 = 0xE0; byte1 <= 0xE0; ++byte1)
+                 {
+                     check_utf8string(false, byte1);
+-                    check_utf8dump(false, byte1);
+                 }
+             }
+ 
+@@ -308,7 +226,6 @@ TEST_CASE("Unicode", "[hide]")
+                     for (int byte2 = 0xA0; byte2 <= 0xBF; ++byte2)
+                     {
+                         check_utf8string(false, byte1, byte2);
+-                        check_utf8dump(false, byte1, byte2);
+                     }
+                 }
+             }
+@@ -328,7 +245,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -349,7 +265,6 @@ TEST_CASE("Unicode", "[hide]")
+                             }
+ 
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -367,7 +282,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(true, byte1, byte2, byte3);
+-                            check_utf8dump(true, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -378,7 +292,6 @@ TEST_CASE("Unicode", "[hide]")
+                 for (int byte1 = 0xE1; byte1 <= 0xEC; ++byte1)
+                 {
+                     check_utf8string(false, byte1);
+-                    check_utf8dump(false, byte1);
+                 }
+             }
+ 
+@@ -389,7 +302,6 @@ TEST_CASE("Unicode", "[hide]")
+                     for (int byte2 = 0x80; byte2 <= 0xBF; ++byte2)
+                     {
+                         check_utf8string(false, byte1, byte2);
+-                        check_utf8dump(false, byte1, byte2);
+                     }
+                 }
+             }
+@@ -409,7 +321,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -430,7 +341,6 @@ TEST_CASE("Unicode", "[hide]")
+                             }
+ 
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -448,7 +358,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(true, byte1, byte2, byte3);
+-                            check_utf8dump(true, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -459,7 +368,6 @@ TEST_CASE("Unicode", "[hide]")
+                 for (int byte1 = 0xED; byte1 <= 0xED; ++byte1)
+                 {
+                     check_utf8string(false, byte1);
+-                    check_utf8dump(false, byte1);
+                 }
+             }
+ 
+@@ -470,7 +378,6 @@ TEST_CASE("Unicode", "[hide]")
+                     for (int byte2 = 0x80; byte2 <= 0x9F; ++byte2)
+                     {
+                         check_utf8string(false, byte1, byte2);
+-                        check_utf8dump(false, byte1, byte2);
+                     }
+                 }
+             }
+@@ -490,7 +397,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -511,7 +417,6 @@ TEST_CASE("Unicode", "[hide]")
+                             }
+ 
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -529,7 +434,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(true, byte1, byte2, byte3);
+-                            check_utf8dump(true, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -540,7 +444,6 @@ TEST_CASE("Unicode", "[hide]")
+                 for (int byte1 = 0xEE; byte1 <= 0xEF; ++byte1)
+                 {
+                     check_utf8string(false, byte1);
+-                    check_utf8dump(false, byte1);
+                 }
+             }
+ 
+@@ -551,7 +454,6 @@ TEST_CASE("Unicode", "[hide]")
+                     for (int byte2 = 0x80; byte2 <= 0xBF; ++byte2)
+                     {
+                         check_utf8string(false, byte1, byte2);
+-                        check_utf8dump(false, byte1, byte2);
+                     }
+                 }
+             }
+@@ -571,7 +473,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -592,7 +493,6 @@ TEST_CASE("Unicode", "[hide]")
+                             }
+ 
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -612,7 +512,6 @@ TEST_CASE("Unicode", "[hide]")
+                             for (int byte4 = 0x80; byte4 <= 0xBF; ++byte4)
+                             {
+                                 check_utf8string(true, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(true, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -624,7 +523,6 @@ TEST_CASE("Unicode", "[hide]")
+                 for (int byte1 = 0xF0; byte1 <= 0xF0; ++byte1)
+                 {
+                     check_utf8string(false, byte1);
+-                    check_utf8dump(false, byte1);
+                 }
+             }
+ 
+@@ -635,7 +533,6 @@ TEST_CASE("Unicode", "[hide]")
+                     for (int byte2 = 0x90; byte2 <= 0xBF; ++byte2)
+                     {
+                         check_utf8string(false, byte1, byte2);
+-                        check_utf8dump(false, byte1, byte2);
+                     }
+                 }
+             }
+@@ -649,7 +546,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -672,7 +568,6 @@ TEST_CASE("Unicode", "[hide]")
+                             for (int byte4 = 0x80; byte4 <= 0xBF; ++byte4)
+                             {
+                                 check_utf8string(false, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(false, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -696,7 +591,6 @@ TEST_CASE("Unicode", "[hide]")
+                             for (int byte4 = 0x80; byte4 <= 0xBF; ++byte4)
+                             {
+                                 check_utf8string(false, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(false, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -720,7 +614,6 @@ TEST_CASE("Unicode", "[hide]")
+                                 }
+ 
+                                 check_utf8string(false, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(false, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -741,7 +634,6 @@ TEST_CASE("Unicode", "[hide]")
+                             for (int byte4 = 0x80; byte4 <= 0xBF; ++byte4)
+                             {
+                                 check_utf8string(true, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(true, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -753,7 +645,6 @@ TEST_CASE("Unicode", "[hide]")
+                 for (int byte1 = 0xF1; byte1 <= 0xF3; ++byte1)
+                 {
+                     check_utf8string(false, byte1);
+-                    check_utf8dump(false, byte1);
+                 }
+             }
+ 
+@@ -764,7 +655,6 @@ TEST_CASE("Unicode", "[hide]")
+                     for (int byte2 = 0x80; byte2 <= 0xBF; ++byte2)
+                     {
+                         check_utf8string(false, byte1, byte2);
+-                        check_utf8dump(false, byte1, byte2);
+                     }
+                 }
+             }
+@@ -778,7 +668,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -801,7 +690,6 @@ TEST_CASE("Unicode", "[hide]")
+                             for (int byte4 = 0x80; byte4 <= 0xBF; ++byte4)
+                             {
+                                 check_utf8string(false, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(false, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -825,7 +713,6 @@ TEST_CASE("Unicode", "[hide]")
+                             for (int byte4 = 0x80; byte4 <= 0xBF; ++byte4)
+                             {
+                                 check_utf8string(false, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(false, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -849,7 +736,6 @@ TEST_CASE("Unicode", "[hide]")
+                                 }
+ 
+                                 check_utf8string(false, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(false, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -870,7 +756,6 @@ TEST_CASE("Unicode", "[hide]")
+                             for (int byte4 = 0x80; byte4 <= 0xBF; ++byte4)
+                             {
+                                 check_utf8string(true, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(true, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -882,7 +767,6 @@ TEST_CASE("Unicode", "[hide]")
+                 for (int byte1 = 0xF4; byte1 <= 0xF4; ++byte1)
+                 {
+                     check_utf8string(false, byte1);
+-                    check_utf8dump(false, byte1);
+                 }
+             }
+ 
+@@ -893,7 +777,6 @@ TEST_CASE("Unicode", "[hide]")
+                     for (int byte2 = 0x80; byte2 <= 0x8F; ++byte2)
+                     {
+                         check_utf8string(false, byte1, byte2);
+-                        check_utf8dump(false, byte1, byte2);
+                     }
+                 }
+             }
+@@ -907,7 +790,6 @@ TEST_CASE("Unicode", "[hide]")
+                         for (int byte3 = 0x80; byte3 <= 0xBF; ++byte3)
+                         {
+                             check_utf8string(false, byte1, byte2, byte3);
+-                            check_utf8dump(false, byte1, byte2, byte3);
+                         }
+                     }
+                 }
+@@ -930,7 +812,6 @@ TEST_CASE("Unicode", "[hide]")
+                             for (int byte4 = 0x80; byte4 <= 0xBF; ++byte4)
+                             {
+                                 check_utf8string(false, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(false, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -954,7 +835,6 @@ TEST_CASE("Unicode", "[hide]")
+                             for (int byte4 = 0x80; byte4 <= 0xBF; ++byte4)
+                             {
+                                 check_utf8string(false, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(false, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }
+@@ -978,7 +858,6 @@ TEST_CASE("Unicode", "[hide]")
+                                 }
+ 
+                                 check_utf8string(false, byte1, byte2, byte3, byte4);
+-                                check_utf8dump(false, byte1, byte2, byte3, byte4);
+                             }
+                         }
+                     }

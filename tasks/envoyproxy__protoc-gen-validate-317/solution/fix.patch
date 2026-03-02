@@ -1,0 +1,157 @@
+diff --git a/java/pgv-java-grpc/pom.xml b/java/pgv-java-grpc/pom.xml
+index b72eba0..b4d0a49 100644
+--- a/java/pgv-java-grpc/pom.xml
++++ b/java/pgv-java-grpc/pom.xml
+@@ -11,6 +11,11 @@
+     <name>PGV-Java gRPC Interceptors</name>
+ 
+     <dependencies>
++        <dependency>
++            <groupId>com.google.api.grpc</groupId>
++            <artifactId>proto-google-common-protos</artifactId>
++            <version>${proto-google-common-protos.version}</version>
++        </dependency>
+         <dependency>
+             <groupId>io.grpc</groupId>
+             <artifactId>grpc-core</artifactId>
+@@ -26,7 +31,6 @@
+             <groupId>io.grpc</groupId>
+             <artifactId>grpc-protobuf</artifactId>
+             <version>${grpc.version}</version>
+-            <scope>test</scope>
+         </dependency>
+         <dependency>
+             <groupId>io.grpc</groupId>
+@@ -55,6 +59,7 @@
+         </dependency>
+     </dependencies>
+ 
++
+     <build>
+         <extensions>
+             <extension>
+diff --git a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptor.java b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptor.java
+index 6d2e44d..3598bf9 100644
+--- a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptor.java
++++ b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptor.java
+@@ -24,7 +24,7 @@ public class ValidatingClientInterceptor implements ClientInterceptor {
+                     index.validatorFor(message.getClass()).assertValid(message);
+                     super.sendMessage(message);
+                 } catch (ValidationException ex) {
+-                    throw ValidationExceptions.asStatus(ex).asRuntimeException();
++                    throw ValidationExceptions.asStatusRuntimeException(ex);
+                 }
+             }
+         };
+diff --git a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptor.java b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptor.java
+index 2fbe7da..60b5147 100644
+--- a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptor.java
++++ b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptor.java
+@@ -29,9 +29,9 @@ public class ValidatingServerInterceptor implements ServerInterceptor {
+                     index.validatorFor(message.getClass()).assertValid(message);
+                     super.onMessage(message);
+                 } catch (ValidationException ex) {
+-                    Status status = ValidationExceptions.asStatus(ex);
++                    StatusRuntimeException status = ValidationExceptions.asStatusRuntimeException(ex);
+                     aborted = true;
+-                    call.close(status, new Metadata());
++                    call.close(status.getStatus(), status.getTrailers());
+                 }
+             }
+ 
+diff --git a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidationExceptions.java b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidationExceptions.java
+index 82d8278..3780f21 100644
+--- a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidationExceptions.java
++++ b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidationExceptions.java
+@@ -1,22 +1,38 @@
+ package io.envoyproxy.pgv.grpc;
+ 
++import com.google.protobuf.Any;
++import com.google.rpc.BadRequest;
++import com.google.rpc.Code;
++import com.google.rpc.Status;
+ import io.envoyproxy.pgv.ValidationException;
+-import io.grpc.Status;
++import io.grpc.StatusRuntimeException;
++import io.grpc.protobuf.StatusProto;
+ 
+ /**
+  * {@code ValidationExceptions} provides utilities for converting {@link ValidationException} objects into gRPC
+- * {@code Status} objects.
++ * {@code StatusRuntimeException} objects.
+  */
+ public final class ValidationExceptions {
+-    private ValidationExceptions() { }
++    private ValidationExceptions() {
++    }
+ 
+     /**
+-     * Convert a {@link ValidationException} into a gRPC {@code Status.INVALID_ARGUMENT} with appropriate message
+-     * and cause.
++     * Convert a {@link ValidationException} into a gRPC {@code StatusRuntimeException}
++     * with status code {@code Code.INVALID_ARGUMENT},
++     * the {@link ValidationException} exception message,
++     * and {@link Any} error details containing {@link BadRequest} with field violation details.
++     *
+      * @param ex the {@code ValidationException} to convert.
+-     * @return a gRPC {@code Status.INVALID_ARGUMENT}
++     * @return a gRPC {@code StatusRuntimeException}
+      */
+-    public static Status asStatus(ValidationException ex) {
+-        return Status.INVALID_ARGUMENT.withDescription(ex.getMessage()).withCause(ex);
++    public static StatusRuntimeException asStatusRuntimeException(ValidationException ex) {
++        BadRequest badRequestElement = BadRequest.newBuilder()
++                .addFieldViolations(BadRequest.FieldViolation.newBuilder().setField(ex.getField()).setDescription(ex.getReason()).build())
++                .build();
++
++        return StatusProto.toStatusRuntimeException(Status.newBuilder()
++                .setCode(Code.INVALID_ARGUMENT.getNumber())
++                .setMessage(ex.getMessage())
++                .addDetails(Any.pack(badRequestElement)).build());
+     }
+ }
+diff --git a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidationException.java b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidationException.java
+index 44d26b7..7728b9c 100644
+--- a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidationException.java
++++ b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidationException.java
+@@ -4,7 +4,26 @@ package io.envoyproxy.pgv;
+  * Base class for failed field validations.
+  */
+ public class ValidationException extends Exception {
++    private String field;
++    private Object value;
++    private String reason;
++
+     public ValidationException(String field, Object value, String reason) {
+         super(field + ": " + reason + " - Got " + value.toString());
++        this.field = field;
++        this.value = value;
++        this.reason = reason;
++    }
++
++    public String getField() {
++        return field;
++    }
++
++    public Object getValue() {
++        return value;
++    }
++
++    public String getReason() {
++        return reason;
+     }
+ }
+diff --git a/java/pom.xml b/java/pom.xml
+index 7c10eb8..e7da6e4 100644
+--- a/java/pom.xml
++++ b/java/pom.xml
+@@ -49,8 +49,8 @@
+         <grpc.version>1.12.0</grpc.version>
+         <junit.version>4.12</junit.version>
+         <assertj.version>3.11.1</assertj.version>
+-
+         <java.version>1.8</java.version>
++        <proto-google-common-protos.version>1.17.0</proto-google-common-protos.version>
+     </properties>
+ 
+     <dependencies>

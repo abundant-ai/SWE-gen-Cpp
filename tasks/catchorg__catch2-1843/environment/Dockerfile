@@ -9,11 +9,11 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install C++ compiler, CMake, and Python (needed for tests)
+# Install C++ compiler (Clang), CMake, and Python (needed for tests)
 RUN apt-get update && apt-get install -y \
     cmake \
     ninja-build \
-    g++ \
+    clang \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,16 +28,22 @@ RUN git clone https://github.com/catchorg/Catch2.git src && \
 
 WORKDIR /app/src
 
-# Fix MINSIGSTKSZ issue - MINSIGSTKSZ is no longer a compile-time constant in newer glibc
-RUN sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static const std::size_t sigStackSize = 32768;/' src/catch2/catch_fatal_condition.cpp
+# Use Clang as the C++ compiler
+ENV CC=clang
+ENV CXX=clang++
+ENV CXXFLAGS="-Wno-error=deprecated-literal-operator"
 
 # Configure and build Catch2 with CMake
 RUN cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
-    -DCATCH_DEVELOPMENT_BUILD=ON \
-    -DCATCH_BUILD_TESTING=ON \
+    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
     -G Ninja
 
+# Fix MINSIGSTKSZ constexpr issue with newer glibc - hardcode a safe value
+RUN find . \( -name "*.cpp" -o -name "*.hpp" \) -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
+    xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' || true
+
+# Build Catch2
 RUN cmake --build build
 
 # Reset tracked files so bug.patch applies cleanly
@@ -47,8 +53,9 @@ RUN git reset --hard
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Re-apply MINSIGSTKSZ fix after git reset removed it
-RUN sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static const std::size_t sigStackSize = 32768;/' src/catch2/catch_fatal_condition.cpp
+# Fix MINSIGSTKSZ constexpr issue again (undone by git reset)
+RUN find . \( -name "*.cpp" -o -name "*.hpp" \) -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
+    xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' || true
 
 # Rebuild after applying bug.patch (C++ is a compiled language)
 RUN cmake --build build

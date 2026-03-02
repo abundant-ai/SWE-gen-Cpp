@@ -1,0 +1,178 @@
+diff --git a/include/nlohmann/detail/input/binary_reader.hpp b/include/nlohmann/detail/input/binary_reader.hpp
+index c72a3264e..92b85572a 100644
+--- a/include/nlohmann/detail/input/binary_reader.hpp
++++ b/include/nlohmann/detail/input/binary_reader.hpp
+@@ -2192,16 +2192,8 @@ class binary_reader
+                     result = 1;
+                     for (auto i : dim)
+                     {
+-                        // Pre-multiplication overflow check: if i > 0 and result > SIZE_MAX/i, then result*i would overflow.
+-                        // This check must happen before multiplication since overflow detection after the fact is unreliable
+-                        // as modular arithmetic can produce any value, not just 0 or SIZE_MAX.
+-                        if (JSON_HEDLEY_UNLIKELY(i > 0 && result > (std::numeric_limits<std::size_t>::max)() / i))
+-                        {
+-                            return sax->parse_error(chars_read, get_token_string(), out_of_range::create(408, exception_message(input_format, "excessive ndarray size caused overflow", "size"), nullptr));
+-                        }
+                         result *= i;
+-                        // Additional post-multiplication check to catch any edge cases the pre-check might miss
+-                        if (result == 0 || result == npos)
++                        if (result == 0 || result == npos) // because dim elements shall not have zeros, result = 0 means overflow happened; it also can't be npos as it is used to initialize size in get_ubjson_size_type()
+                         {
+                             return sax->parse_error(chars_read, get_token_string(), out_of_range::create(408, exception_message(input_format, "excessive ndarray size caused overflow", "size"), nullptr));
+                         }
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index 9e2efb8d9..374b54ecb 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -11981,16 +11981,8 @@ class binary_reader
+                     result = 1;
+                     for (auto i : dim)
+                     {
+-                        // Pre-multiplication overflow check: if i > 0 and result > SIZE_MAX/i, then result*i would overflow.
+-                        // This check must happen before multiplication since overflow detection after the fact is unreliable
+-                        // as modular arithmetic can produce any value, not just 0 or SIZE_MAX.
+-                        if (JSON_HEDLEY_UNLIKELY(i > 0 && result > (std::numeric_limits<std::size_t>::max)() / i))
+-                        {
+-                            return sax->parse_error(chars_read, get_token_string(), out_of_range::create(408, exception_message(input_format, "excessive ndarray size caused overflow", "size"), nullptr));
+-                        }
+                         result *= i;
+-                        // Additional post-multiplication check to catch any edge cases the pre-check might miss
+-                        if (result == 0 || result == npos)
++                        if (result == 0 || result == npos) // because dim elements shall not have zeros, result = 0 means overflow happened; it also can't be npos as it is used to initialize size in get_ubjson_size_type()
+                         {
+                             return sax->parse_error(chars_read, get_token_string(), out_of_range::create(408, exception_message(input_format, "excessive ndarray size caused overflow", "size"), nullptr));
+                         }
+diff --git a/tests/src/unit-bjdata.cpp b/tests/src/unit-bjdata.cpp
+index 764675547..a7c305d91 100644
+--- a/tests/src/unit-bjdata.cpp
++++ b/tests/src/unit-bjdata.cpp
+@@ -2815,129 +2815,6 @@ TEST_CASE("BJData")
+ #endif
+             }
+ 
+-            SECTION("overflow detection in dimension multiplication")
+-            {
+-                // Simple SAX handler just to monitor if overflow is detected
+-                struct SimpleOverflowSaxHandler : public nlohmann::json_sax<json>
+-                {
+-                    bool overflow_detected = false;
+-
+-                    // Implement all required virtual methods with minimal implementation
+-                    bool null() override
+-                    {
+-                        return true;
+-                    }
+-                    bool boolean(bool /*val*/) override
+-                    {
+-                        return true;
+-                    }
+-                    bool number_integer(json::number_integer_t /*val*/) override
+-                    {
+-                        return true;
+-                    }
+-                    bool number_unsigned(json::number_unsigned_t /*val*/) override
+-                    {
+-                        return true;
+-                    }
+-                    bool number_float(json::number_float_t /*val*/, const std::string& /*s*/) override
+-                    {
+-                        return true;
+-                    }
+-                    bool string(std::string& /*val*/) override
+-                    {
+-                        return true;
+-                    }
+-                    bool binary(json::binary_t& /*val*/) override
+-                    {
+-                        return true;
+-                    }
+-                    bool start_object(std::size_t /*elements*/) override
+-                    {
+-                        return true;
+-                    }
+-                    bool key(std::string& /*val*/) override
+-                    {
+-                        return true;
+-                    }
+-                    bool end_object() override
+-                    {
+-                        return true;
+-                    }
+-                    bool start_array(std::size_t /*elements*/) override
+-                    {
+-                        return true;
+-                    }
+-                    bool end_array() override
+-                    {
+-                        return true;
+-                    }
+-
+-                    // This is the only method we care about - detecting error 408
+-                    bool parse_error(std::size_t /*position*/, const std::string& /*last_token*/, const json::exception& ex) override
+-                    {
+-                        if (ex.id == 408)
+-                        {
+-                            overflow_detected = true;
+-                        }
+-                        return false;
+-                    }
+-                };
+-
+-                // Create BJData payload with overflow-causing dimensions (2^32+1) × (2^32)
+-                const std::vector<uint8_t> bjdata_payload =
+-                {
+-                    0x5B,                                           // '[' start array
+-                    0x24, 0x55,                                     // '$', 'U' (type uint8)
+-                    0x23, 0x5B,                                     // '#', '[' (dimensions array)
+-                    0x4D,                                           // 'M' (uint64)
+-                    0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // 2^32 + 1 (4294967297) as little-endian
+-                    0x4D,                                           // 'M' (uint64)
+-                    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // 2^32 (4294967296) as little-endian
+-                    0x5D                                            // ']' end dimensions
+-                    // No data - we don't need it for this test, we just want to hit the overflow check
+-                };
+-
+-                // Test with overflow dimensions using SAX parser
+-                {
+-                    SimpleOverflowSaxHandler handler;
+-                    const auto result = json::sax_parse(bjdata_payload, &handler,
+-                                                        nlohmann::detail::input_format_t::bjdata, false);
+-
+-                    // Should detect overflow
+-                    CHECK(handler.overflow_detected == true);
+-                    CHECK(result == false);
+-                }
+-
+-                // Test with DOM parser (should throw)
+-                {
+-                    json _;
+-                    CHECK_THROWS_AS(_ = json::from_bjdata(bjdata_payload), json::out_of_range);
+-                }
+-
+-                // Test with normal dimensions
+-                const std::vector<uint8_t> normal_payload =
+-                {
+-                    0x5B,                                           // '[' start array
+-                    0x24, 0x55,                                     // '$', 'U' (type uint8)
+-                    0x23, 0x5B,                                     // '#', '[' (dimensions array)
+-                    0x55, 0x02,                                     // 'U', 2 (uint8)
+-                    0x55, 0x03,                                     // 'U', 3 (uint8)
+-                    0x5D,                                           // ']' end dimensions
+-                    // 6 data bytes for a 2×3 array (enough to avoid EOF but not entire array)
+-                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06
+-                };
+-
+-                // For normal dimensions, overflow should not be detected
+-                {
+-                    SimpleOverflowSaxHandler handler;
+-                    const auto result = json::sax_parse(normal_payload, &handler,
+-                                                        nlohmann::detail::input_format_t::bjdata, false);
+-
+-                    CHECK(handler.overflow_detected == false);
+-                    CHECK(result == true);
+-                }
+-            }
+-
+             SECTION("do not accept NTFZ markers in ndarray optimized type (with count)")
+             {
+                 json _;

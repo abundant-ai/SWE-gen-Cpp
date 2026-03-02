@@ -1,41 +1,33 @@
-Composable matchers in Catch2 are currently tied to a single concrete argument type via inheritance from `Catch::MatcherBase<T>`. This prevents writing matchers that can accept multiple different, but comparable, argument types (e.g., comparing a `std::vector<int>` to a `std::array<int, N>` or `std::list<int>`), and also makes it impossible to use matchers with inputs that cannot be bound as `const T&` (e.g., certain range/view types that mutate internal state while iterating and therefore cannot be `const`).
+Catch2 matchers currently require their input argument type to be fixed and taken as a const reference via MatcherBase<T> (e.g., bool match(T const&) const). This causes two practical problems:
 
-The matcher API needs to support “generic” matchers that are not parameterized by a single `T`, while still allowing them to be composed with existing typed matchers using `&&`, `||`, and `!`, and without breaking existing `MatcherBase<T>`-derived matchers.
+1) Some values cannot be matched because they are not const-iterable or otherwise require non-const access during matching (e.g., certain range/view types that mutate internal state while iterating). When users write REQUIRE_THAT(value, matcher), the framework forces the match operation to treat the value as const, making these types unusable with matchers.
 
-Implement support for a new generic matcher base (exposed as `Catch::MatcherGenericBase`) that enables defining matchers with a templated `match` member, e.g.
+2) Composable matchers are not reusable across different but compatible argument types. For example, an equality-style range matcher can compare std::vector<int> to std::vector<int>, but users cannot easily write a single composable matcher that can be applied to std::array<int, N>, std::vector<int>, std::list<int>, etc., and then freely combine it with other matchers using operator||, operator&&, and operator!.
 
-```cpp
-template <typename Range>
-struct EqualsRangeMatcher : Catch::MatcherGenericBase {
-    EqualsRangeMatcher(Range const& range);
+Implement support for “generic” matchers that:
 
-    template <typename OtherRange>
-    bool match(OtherRange const& other) const;
+- Allow writing matchers that are generic over the matched argument type, e.g. a matcher type derived from Catch::MatcherGenericBase, whose match function is a function template such as:
 
-    std::string describe() const override;
-};
-```
+  template <typename OtherRange>
+  bool match(OtherRange const& other) const;
 
-With this capability, the following kind of usage must compile and work as expected:
+  and whose describe() function still returns a std::string.
 
-```cpp
-std::array<int, 3> container{1,2,3};
-std::array<int, 3> a{1,2,3};
-std::vector<int> b{0,1,2};
-std::list<int> c{4,5,6};
+- Preserve compatibility with existing non-generic matchers derived from Catch::MatcherBase<T> and ensure they keep working unchanged with REQUIRE_THAT / CHECK_THAT.
 
-CHECK_THAT(container, EqualsRange(a) || EqualsRange(b) || EqualsRange(c));
-```
+- Support composing generic matchers with other generic matchers and with non-generic matchers using logical combinators (operator||, operator&&, operator!). The composed matcher must still be usable in REQUIRE_THAT / CHECK_THAT and must produce a sensible description via describe().
 
-Expected behavior:
-- A generic matcher (derived from `Catch::MatcherGenericBase`) can be used with `CHECK_THAT`/`REQUIRE_THAT` against different argument types, as long as its templated `match` can be instantiated for that argument.
-- Generic matchers can be combined with `&&`, `||`, and `!`, including mixing generic matchers and classic `Catch::MatcherBase<T>` matchers in the same expression.
-- Existing matchers derived from `Catch::MatcherBase<T>` continue to work unchanged and remain composable.
-- The generic matcher mechanism must address the const-reference limitation from the reported issue: matchers should no longer force the matched value to be accepted only as `const T&` in a way that blocks matching non-const-iterable views/ranges; users should be able to write matchers that accept inputs in a way compatible with non-const iteration (e.g., by value or non-const reference) when needed.
+- Address the “non-constable value” use case: it must be possible for the matcher framework to accept matching inputs in a way that does not require binding the matched value as const in all cases. In particular, users should be able to match values that cannot be iterated when const (e.g. stateful views) by providing an overload/path that does not force a const reference.
 
-Actual current behavior to fix:
-- Matchers are type-locked to `T` through `MatcherBase<T>` and thus cannot naturally compare different container/range types.
-- Composable matchers require a shared `MatcherBase<T>`, making it difficult to author reusable range/container matchers that work across multiple types.
-- Matching fails (at compile time) for inputs that cannot be bound as `const&` due to internal mutation during iteration, because the matcher interface requires `match(T const&)` for a fixed `T`.
+A motivating usage that should compile and work is:
 
-After the change, users should be able to implement and compose generic matchers via `Catch::MatcherGenericBase` and use them seamlessly with `CHECK_THAT`/`REQUIRE_THAT`, including for heterogeneous container/range comparisons and for non-const-iterable view types.
+  std::array<int, 3> container{1,2,3};
+  std::array<int, 3> a{1,2,3};
+  std::vector<int> b{0,1,2};
+  std::list<int> c{4,5,6};
+
+  CHECK_THAT(container, EqualsRange(a) || EqualsRange(b) || EqualsRange(c));
+
+where EqualsRange returns a matcher that can match against multiple container/range types, and the logical composition (||) between these matchers is supported.
+
+After the change, users should be able to define their own generic matchers by inheriting from Catch::MatcherGenericBase, implementing a templated match method, and using them in REQUIRE_THAT/CHECK_THAT and in compositions with ||/&&/! without needing to derive from MatcherBase<T> for every possible T. Existing matchers such as the exception matcher pattern (a class deriving from Catch::MatcherBase<SpecialException> overriding bool match(SpecialException const&) const) must continue to behave the same way.

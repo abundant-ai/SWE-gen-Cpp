@@ -1,0 +1,256 @@
+diff --git a/README.md b/README.md
+index c41cb8ea6..3dd04aed5 100644
+--- a/README.md
++++ b/README.md
+@@ -227,15 +227,12 @@ json j_string = "this is a string";
+ std::string cpp_string = j_string;
+ // retrieve the string value (explicit JSON to std::string conversion)
+ auto cpp_string2 = j_string.get<std::string>();
+-// retrieve the string value (alternative explicit JSON to std::string conversion)
+-std::string cpp_string3;
+-j_string.get_to(cpp_string3);
+ 
+ // retrieve the serialized value (explicit JSON serialization)
+ std::string serialized_string = j_string.dump();
+ 
+ // output of original string
+-std::cout << cpp_string << " == " << cpp_string2 << " == " << cpp_string3 << " == " << j_string.get<std::string>() << '\n';
++std::cout << cpp_string << " == " << cpp_string2 << " == " << j_string.get<std::string>() << '\n';
+ // output of serialized value
+ std::cout << j_string << " == " << serialized_string << std::endl;
+ ```
+@@ -646,15 +643,15 @@ namespace ns {
+     }
+ 
+     void from_json(const json& j, person& p) {
+-        j.at("name").get_to(p.name);
+-        j.at("address").get_to(p.address);
+-        j.at("age").get_to(p.age);
++        p.name = j.at("name").get<std::string>();
++        p.address = j.at("address").get<std::string>();
++        p.age = j.at("age").get<int>();
+     }
+ } // namespace ns
+ ```
+ 
+ That's all! When calling the `json` constructor with your type, your custom `to_json` method will be automatically called.
+-Likewise, when calling `get<your_type>()` or `get_to(your_type&)`, the `from_json` method will be called.
++Likewise, when calling `get<your_type>()`, the `from_json` method will be called.
+ 
+ Some important things:
+ 
+@@ -662,8 +659,9 @@ Some important things:
+ * Those methods **MUST** be available (e.g., properly headers must be included) everywhere you use the implicit conversions. Look at [issue 1108](https://github.com/nlohmann/json/issues/1108) for errors that may occur otherwise.
+ * When using `get<your_type>()`, `your_type` **MUST** be [DefaultConstructible](https://en.cppreference.com/w/cpp/named_req/DefaultConstructible). (There is a way to bypass this requirement described later.)
+ * In function `from_json`, use function [`at()`](https://nlohmann.github.io/json/classnlohmann_1_1basic__json_a93403e803947b86f4da2d1fb3345cf2c.html#a93403e803947b86f4da2d1fb3345cf2c) to access the object values rather than `operator[]`. In case a key does not exist, `at` throws an exception that you can handle, whereas `operator[]` exhibits undefined behavior.
+-* In case your type contains several `operator=` definitions, code like `your_variable = your_json;` [may not compile](https://github.com/nlohmann/json/issues/667). You need to write `your_variable = your_json.get<decltype(your_variable)>();` or `your_json.get_to(your_variable);` instead.
++* In case your type contains several `operator=` definitions, code like `your_variable = your_json;` [may not compile](https://github.com/nlohmann/json/issues/667). You need to write `your_variable = your_json.get<decltype your_variable>();` instead.
+ * You do not need to add serializers or deserializers for STL types like `std::vector`: the library already implements these.
++* Be careful with the definition order of the `from_json`/`to_json` functions: If a type `B` has a member of type `A`, you **MUST** define `to_json(A)` before `to_json(B)`. Look at [issue 561](https://github.com/nlohmann/json/issues/561) for more details.
+ 
+ 
+ #### How do I convert third-party types?
+diff --git a/doc/examples/get_to.cpp b/doc/examples/get_to.cpp
+deleted file mode 100644
+index 4705b172f..000000000
+--- a/doc/examples/get_to.cpp
++++ /dev/null
+@@ -1,60 +0,0 @@
+-#include <iostream>
+-#include <unordered_map>
+-#include <nlohmann/json.hpp>
+-
+-using json = nlohmann::json;
+-
+-int main()
+-{
+-    // create a JSON value with different types
+-    json json_types =
+-    {
+-        {"boolean", true},
+-        {
+-            "number", {
+-                {"integer", 42},
+-                {"floating-point", 17.23}
+-            }
+-        },
+-        {"string", "Hello, world!"},
+-        {"array", {1, 2, 3, 4, 5}},
+-        {"null", nullptr}
+-    };
+-
+-    bool v1;
+-    int v2;
+-    short v3;
+-    float v4;
+-    int v5;
+-    std::string v6;
+-    std::vector<short> v7;
+-    std::unordered_map<std::string, json> v8;
+-
+-
+-    // use explicit conversions
+-    json_types["boolean"].get_to(v1);
+-    json_types["number"]["integer"].get_to(v2);
+-    json_types["number"]["integer"].get_to(v3);
+-    json_types["number"]["floating-point"].get_to(v4);
+-    json_types["number"]["floating-point"].get_to(v5);
+-    json_types["string"].get_to(v6);
+-    json_types["array"].get_to(v7);
+-    json_types.get_to(v8);
+-
+-    // print the conversion results
+-    std::cout << v1 << '\n';
+-    std::cout << v2 << ' ' << v3 << '\n';
+-    std::cout << v4 << ' ' << v5 << '\n';
+-    std::cout << v6 << '\n';
+-
+-    for (auto i : v7)
+-    {
+-        std::cout << i << ' ';
+-    }
+-    std::cout << "\n\n";
+-
+-    for (auto i : v8)
+-    {
+-        std::cout << i.first << ": " << i.second << '\n';
+-    }
+-}
+diff --git a/include/nlohmann/json.hpp b/include/nlohmann/json.hpp
+index 14eba5c33..3fc3e865d 100644
+--- a/include/nlohmann/json.hpp
++++ b/include/nlohmann/json.hpp
+@@ -2623,52 +2623,6 @@ class basic_json
+         return JSONSerializer<ValueTypeCV>::from_json(*this);
+     }
+ 
+-    /*!
+-    @brief get a value (explicit)
+-
+-    Explicit type conversion between the JSON value and a compatible value.
+-    The value is filled into the input parameter by calling the @ref json_serializer<ValueType>
+-    `from_json()` method.
+-
+-    The function is equivalent to executing
+-    @code {.cpp}
+-    ValueType v;
+-    JSONSerializer<ValueType>::from_json(*this, v);
+-    @endcode
+-
+-    This overloads is chosen if:
+-    - @a ValueType is not @ref basic_json,
+-    - @ref json_serializer<ValueType> has a `from_json()` method of the form
+-      `void from_json(const basic_json&, ValueType&)`, and
+-
+-    @tparam ValueType the input parameter type.
+-
+-    @return the input parameter, allowing chaining calls.
+-
+-    @throw what @ref json_serializer<ValueType> `from_json()` method throws
+-
+-    @liveexample{The example below shows several conversions from JSON values
+-    to other types. There a few things to note: (1) Floating-point numbers can
+-    be converted to integers\, (2) A JSON array can be converted to a standard
+-    `std::vector<short>`\, (3) A JSON object can be converted to C++
+-    associative containers such as `std::unordered_map<std::string\,
+-    json>`.,get_to}
+-
+-    @since version 3.3.0
+-    */
+-    template<typename ValueType,
+-             detail::enable_if_t <
+-                 not detail::is_basic_json<ValueType>::value and
+-                 detail::has_from_json<basic_json_t, ValueType>::value,
+-                 int> = 0>
+-    ValueType & get_to(ValueType& v) const noexcept(noexcept(
+-                JSONSerializer<ValueType>::from_json(std::declval<const basic_json_t&>(), v)))
+-    {
+-        JSONSerializer<ValueType>::from_json(*this, v);
+-        return v;
+-    }
+-
+-
+     /*!
+     @brief get a pointer value (explicit)
+ 
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index 7a4b206e6..93bb4f231 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -13696,52 +13696,6 @@ class basic_json
+         return JSONSerializer<ValueTypeCV>::from_json(*this);
+     }
+ 
+-    /*!
+-    @brief get a value (explicit)
+-
+-    Explicit type conversion between the JSON value and a compatible value.
+-    The value is filled into the input parameter by calling the @ref json_serializer<ValueType>
+-    `from_json()` method.
+-
+-    The function is equivalent to executing
+-    @code {.cpp}
+-    ValueType v;
+-    JSONSerializer<ValueType>::from_json(*this, v);
+-    @endcode
+-
+-    This overloads is chosen if:
+-    - @a ValueType is not @ref basic_json,
+-    - @ref json_serializer<ValueType> has a `from_json()` method of the form
+-      `void from_json(const basic_json&, ValueType&)`, and
+-
+-    @tparam ValueType the input parameter type.
+-
+-    @return the input parameter, allowing chaining calls.
+-
+-    @throw what @ref json_serializer<ValueType> `from_json()` method throws
+-
+-    @liveexample{The example below shows several conversions from JSON values
+-    to other types. There a few things to note: (1) Floating-point numbers can
+-    be converted to integers\, (2) A JSON array can be converted to a standard
+-    `std::vector<short>`\, (3) A JSON object can be converted to C++
+-    associative containers such as `std::unordered_map<std::string\,
+-    json>`.,get_to}
+-
+-    @since version 3.3.0
+-    */
+-    template<typename ValueType,
+-             detail::enable_if_t <
+-                 not detail::is_basic_json<ValueType>::value and
+-                 detail::has_from_json<basic_json_t, ValueType>::value,
+-                 int> = 0>
+-    ValueType & get_to(ValueType& v) const noexcept(noexcept(
+-                JSONSerializer<ValueType>::from_json(std::declval<const basic_json_t&>(), v)))
+-    {
+-        JSONSerializer<ValueType>::from_json(*this, v);
+-        return v;
+-    }
+-
+-
+     /*!
+     @brief get a pointer value (explicit)
+ 
+diff --git a/test/src/unit-udt.cpp b/test/src/unit-udt.cpp
+index 81d871f3f..f59999ee1 100644
+--- a/test/src/unit-udt.cpp
++++ b/test/src/unit-udt.cpp
+@@ -298,19 +298,6 @@ TEST_CASE("basic usage", "[udt]")
+             CHECK(book == parsed_book);
+         }
+ 
+-        SECTION("via explicit calls to get_to")
+-        {
+-            udt::person person;
+-            udt::name name;
+-
+-            json person_json = big_json["contacts"][0]["person"];
+-            CHECK(person_json.get_to(person) == sfinae_addict);
+-
+-            // correct reference gets returned
+-            person_json["name"].get_to(name).m_val = "new name";
+-            CHECK(name.m_val == "new name");
+-        }
+-
+         SECTION("implicit conversions")
+         {
+             const udt::contact_book parsed_book = big_json;

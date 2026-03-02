@@ -1,14 +1,18 @@
-Using compile-time format strings via FMT_STRING (and the "..."_format literal) currently rejects named arguments unless they are passed as runtime-named arguments created with fmt::arg("name", value). This produces a compile-time failure with a static assertion like:
+Using compile-time format strings via FMT_STRING currently rejects named arguments provided through the user-defined literal form (e.g., "foo"_a = value) in some supported configurations, even though these names are known at compile time and should be usable for compile-time checking.
 
-static assertion failed: use statically named arguments with compile-time format strings: fmt::arg("name", value) -> "name"_a = value
+The library should support statically named arguments with compile-time format strings, so that calls like:
 
-The library should support statically named arguments with compile-time format strings when the compiler supports non-type template arguments for the name. For example, the following should compile and format correctly (order of arguments should not matter):
-
+```cpp
 fmt::format(FMT_STRING("{foo}{bar}"), "bar"_a = "bar", "foo"_a = "foo");
 "{foo}{bar}"_format("bar"_a = "bar", "foo"_a = "foo");
+```
 
-Expected behavior: compile-time format strings accept statically named arguments created with the "name"_a syntax, and formatting resolves the names correctly regardless of the order they are provided.
+compile and format correctly (producing "foobar" with the values above), regardless of the order in which the named arguments are passed.
 
-Actual behavior: compile-time format strings do not accept these statically named arguments and/or fail name resolution at compile time, forcing users toward runtime-named arguments or triggering the static assertion.
+At the same time, dynamic named arguments created with `fmt::arg("name", value)` must remain disallowed with compile-time format strings. Attempting to use them with `FMT_STRING` should continue to fail at compile time with a clear diagnostic equivalent to:
 
-Implement support so that compile-time checking for named arguments recognizes statically named arguments ("name"_a = value) as valid for compile-time format strings and matches them against placeholders like {foo} and {bar} during compile-time parsing/validation.
+```
+static assertion failed: use statically named arguments with compile-time format strings: fmt::arg("name", value) -> "name"_a = value
+```
+
+In other words: compile-time format strings should accept only statically named arguments (such as those produced by the `_a` literal) and perform compile-time validation of the referenced names, while still rejecting dynamically named arguments produced by `fmt::arg`.

@@ -1,0 +1,247 @@
+diff --git a/src/google/protobuf/compiler/command_line_interface_tester.h b/src/google/protobuf/compiler/command_line_interface_tester.h
+index 86ff7df81..cccccf4ef 100644
+--- a/src/google/protobuf/compiler/command_line_interface_tester.h
++++ b/src/google/protobuf/compiler/command_line_interface_tester.h
+@@ -131,8 +131,6 @@ class CommandLineInterfaceTester : public testing::Test {
+   void ExpectFileContentNotContainsSubstring(
+       absl::string_view filename, absl::string_view content_substring);
+ 
+-  std::string FileContents(absl::string_view filename) const;
+-
+  private:
+   // The object we are testing.
+   CommandLineInterface cli_;
+@@ -151,6 +149,8 @@ class CommandLineInterfaceTester : public testing::Test {
+   std::string captured_stdout_;
+ 
+   std::vector<std::unique_ptr<CodeGenerator>> generators_;
++
++  std::string FileContents(absl::string_view filename) const;
+ };
+ 
+ }  // namespace compiler
+diff --git a/src/google/protobuf/compiler/rust/context.cc b/src/google/protobuf/compiler/rust/context.cc
+index 966ce6a82..b3075cb8c 100644
+--- a/src/google/protobuf/compiler/rust/context.cc
++++ b/src/google/protobuf/compiler/rust/context.cc
+@@ -93,12 +93,6 @@ absl::StatusOr<Options> Options::Parse(absl::string_view param) {
+     opts.force_lite_runtime = lite->second == "true";
+   }
+ 
+-  auto annotate_code = absl::c_find_if(
+-      args, [](auto& arg) { return arg.first == "annotate_code"; });
+-  if (annotate_code != args.end()) {
+-    opts.annotate_code = annotate_code->second == "true";
+-  }
+-
+   return opts;
+ }
+ 
+diff --git a/src/google/protobuf/compiler/rust/context.h b/src/google/protobuf/compiler/rust/context.h
+index 5a31062e8..6bdf0c461 100644
+--- a/src/google/protobuf/compiler/rust/context.h
++++ b/src/google/protobuf/compiler/rust/context.h
+@@ -50,7 +50,6 @@ struct Options {
+   std::string mapping_file_path;
+   bool strip_nonfunctional_codegen = false;
+   bool force_lite_runtime = false;
+-  bool annotate_code = false;
+ 
+   // The name to use for the generated entry point rs file.
+   std::string generated_entry_point_rs_file_name = "generated.rs";
+diff --git a/src/google/protobuf/compiler/rust/generator.cc b/src/google/protobuf/compiler/rust/generator.cc
+index b9ce6e6b7..bb616ee3c 100644
+--- a/src/google/protobuf/compiler/rust/generator.cc
++++ b/src/google/protobuf/compiler/rust/generator.cc
+@@ -217,14 +217,7 @@ bool RustGenerator::Generate(const FileDescriptor* file,
+ 
+   auto outfile = absl::WrapUnique(
+       generator_context->Open(GetRsFile(ctx_without_printer, *file)));
+-  GeneratedCodeInfo annotations;
+-  io::AnnotationProtoCollector<GeneratedCodeInfo> annotation_collector(
+-      &annotations);
+-  io::Printer::Options printer_options{};
+-  if (opts->annotate_code) {
+-    printer_options.annotation_collector = &annotation_collector;
+-  }
+-  io::Printer printer(outfile.get(), printer_options);
++  io::Printer printer(outfile.get());
+   Context ctx = ctx_without_printer.WithPrinter(&printer);
+ 
+   // Convenience shorthands for common symbols.
+@@ -334,12 +327,6 @@ bool RustGenerator::Generate(const FileDescriptor* file,
+     }
+   }
+ 
+-  if (opts->annotate_code) {
+-    ctx.printer().PrintRaw(absl::StrCat(
+-        "// google.protobuf.GeneratedCodeInfo ",
+-        absl::Base64Escape(annotations.SerializeAsString()), "\n"));
+-  }
+-
+   return true;
+ }
+ 
+diff --git a/src/google/protobuf/compiler/rust/generator_test.cc b/src/google/protobuf/compiler/rust/generator_test.cc
+deleted file mode 100644
+index caadcb36f..000000000
+--- a/src/google/protobuf/compiler/rust/generator_test.cc
++++ /dev/null
+@@ -1,125 +0,0 @@
+-// Protocol Buffers - Google's data interchange format
+-// Copyright 2026 Google Inc.  All rights reserved.
+-//
+-// Use of this source code is governed by a BSD-style
+-// license that can be found in the LICENSE file or at
+-// https://developers.google.com/open-source/licenses/bsd
+-
+-#include "google/protobuf/compiler/rust/generator.h"
+-
+-#include <memory>
+-
+-#include "google/protobuf/descriptor.pb.h"
+-#include <gmock/gmock.h>
+-#include <gtest/gtest.h>
+-#include "absl/strings/escaping.h"
+-#include "google/protobuf/compiler/command_line_interface_tester.h"
+-
+-
+-namespace google {
+-namespace protobuf {
+-namespace compiler {
+-namespace rust {
+-namespace {
+-
+-using ::testing::HasSubstr;
+-
+-class RustGeneratorTest : public CommandLineInterfaceTester {
+- protected:
+-  RustGeneratorTest() {
+-    RegisterGenerator("--rust_out", "--rust_opt",
+-                      std::make_unique<RustGenerator>(), "Rust test generator");
+-
+-    // Generate built-in protos.
+-    CreateTempFile(
+-        google::protobuf::DescriptorProto::descriptor()->file()->name(),
+-        google::protobuf::DescriptorProto::descriptor()->file()->DebugString());
+-  }
+-};
+-
+-// The Rust generator will append this comment somewhere near the end of the
+-// generated source file, followed by a base64-encoded wire format message
+-// and an endline.
+-constexpr absl::string_view kMetadataComment = "// google.protobuf.GeneratedCodeInfo ";
+-
+-TEST_F(RustGeneratorTest, EmitsNoMessageMetadataByDefault) {
+-  constexpr absl::string_view kFooProto = R"schema(
+-    syntax = "proto2";
+-    package foo;
+-    message Message {
+-    })schema";
+-  CreateTempFile("foo.proto", kFooProto);
+-  RunProtoc(
+-      "protocol_compiler --proto_path=$tmpdir "
+-      "--rust_out=$tmpdir "
+-      "--rust_opt=experimental-codegen=enabled,kernel=cpp "
+-      "foo.proto");
+-  ExpectNoErrors();
+-  EXPECT_THAT(FileContents("foo.c.pb.rs"), Not(HasSubstr(kMetadataComment)));
+-}
+-
+-TEST_F(RustGeneratorTest, EmitsNoMessageMetadataOnFalseArgument) {
+-  constexpr absl::string_view kFooProto = R"schema(
+-    syntax = "proto2";
+-    package foo;
+-    message Message {
+-    })schema";
+-  CreateTempFile("foo.proto", kFooProto);
+-  RunProtoc(
+-      "protocol_compiler --proto_path=$tmpdir "
+-      "--rust_out=$tmpdir "
+-      "--rust_opt=experimental-codegen=enabled,kernel=cpp,annotate_code=false "
+-      "foo.proto");
+-  ExpectNoErrors();
+-  EXPECT_THAT(FileContents("foo.c.pb.rs"), Not(HasSubstr(kMetadataComment)));
+-}
+-
+-TEST_F(RustGeneratorTest, EmitsMessageMetadata) {
+-  constexpr absl::string_view kFooProto = R"schema(
+-    syntax = "proto2";
+-    package foo;
+-    message Message {
+-    })schema";
+-  CreateTempFile("foo.proto", kFooProto);
+-  RunProtoc(
+-      "protocol_compiler --proto_path=$tmpdir "
+-      "--rust_out=$tmpdir "
+-      "--rust_opt=experimental-codegen=enabled,kernel=cpp,annotate_code=true "
+-      "foo.proto");
+-
+-  ExpectNoErrors();
+-  auto file_contents = FileContents("foo.c.pb.rs");
+-  auto metadata_comment_pos = file_contents.find(kMetadataComment);
+-  ASSERT_NE(metadata_comment_pos, std::string::npos);
+-  metadata_comment_pos += kMetadataComment.size();
+-  auto metadata_comment_end_pos =
+-      file_contents.find('\n', metadata_comment_pos);
+-  ASSERT_NE(metadata_comment_end_pos, std::string::npos);
+-  auto metadata_comment = file_contents.substr(
+-      metadata_comment_pos, metadata_comment_end_pos - metadata_comment_pos);
+-  std::string decoded_metadata;
+-  ASSERT_TRUE(absl::Base64Unescape(metadata_comment, &decoded_metadata));
+-  google::protobuf::GeneratedCodeInfo generated_code_info;
+-  ASSERT_TRUE(generated_code_info.ParseFromString(decoded_metadata));
+-
+-  ASSERT_EQ(generated_code_info.annotation_size(), 1);
+-  const auto& annotation = generated_code_info.annotation(0);
+-  ASSERT_EQ(annotation.path_size(), 2);
+-  EXPECT_EQ(annotation.path(0),
+-            google::protobuf::FileDescriptorProto::kMessageTypeFieldNumber);
+-  EXPECT_EQ(annotation.path(1), 0);
+-  EXPECT_EQ(annotation.source_file(), "foo.proto");
+-  ASSERT_LE(annotation.begin(), file_contents.size());
+-  ASSERT_LE(annotation.end(), file_contents.size());
+-  // We expect the Rust name for the message type to be `Message`. Check to see
+-  // the annotation covers that string.
+-  ASSERT_EQ(file_contents.substr(annotation.begin(),
+-                                 annotation.end() - annotation.begin()),
+-            "Message");
+-}
+-
+-}  // namespace
+-}  // namespace rust
+-}  // namespace compiler
+-}  // namespace protobuf
+-}  // namespace google
+diff --git a/src/google/protobuf/compiler/rust/message.cc b/src/google/protobuf/compiler/rust/message.cc
+index 2a0c05a5e..d95c3d78e 100644
+--- a/src/google/protobuf/compiler/rust/message.cc
++++ b/src/google/protobuf/compiler/rust/message.cc
+@@ -38,8 +38,6 @@ namespace compiler {
+ namespace rust {
+ namespace {
+ 
+-using Sub = ::google::protobuf::io::Printer::Sub;
+-
+ void MessageNew(Context& ctx, const Descriptor& msg) {
+   switch (ctx.opts().kernel) {
+     case Kernel::kCpp:
+@@ -411,9 +409,6 @@ void GenerateRs(Context& ctx, const Descriptor& msg, const upb::DefPool& pool) {
+   upb::MessageDefPtr upb_msg = pool.FindMessageByName(msg.full_name().data());
+   ctx.Emit(
+       {
+-          // There's also ${$/$}$-style begin and end tokens, but those might
+-          // be harder to retrofit here because of the giant-template style.
+-          Sub("MsgDefinition", RsSafeName(msg.name())).AnnotatedAs(&msg),
+           {"Msg", RsSafeName(msg.name())},
+           {"Msg::new", [&] { MessageNew(ctx, msg); }},
+           {"Msg::drop", [&] { MessageDrop(ctx, msg); }},
+@@ -525,7 +520,7 @@ void GenerateRs(Context& ctx, const Descriptor& msg, const upb::DefPool& pool) {
+       },
+       R"rs(
+         #[allow(non_camel_case_types)]
+-        pub struct $MsgDefinition$ {
++        pub struct $Msg$ {
+           inner: $pbr$::OwnedMessageInner<$Msg$>
+         }
+ 

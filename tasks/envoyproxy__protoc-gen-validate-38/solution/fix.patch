@@ -1,0 +1,79 @@
+diff --git a/Makefile b/Makefile
+index 50544f4..70006f1 100644
+--- a/Makefile
++++ b/Makefile
+@@ -34,7 +34,8 @@ tests:
+ 	# runs all tests against the package with race detection and coverage percentage
+ 	go test -race -cover
+ 	# tests validate proto generation
+-	bazel build //validate:go_default_library && diff $$(bazel info bazel-genfiles)/validate/validate.pb.go validate/validate.pb.go
++	bazel build //validate:go_default_library \
++		&& diff $$(bazel info bazel-genfiles)/validate/validate.pb.go validate/validate.pb.go
+ 
+ .PHONY: cover
+ cover:
+@@ -51,7 +52,7 @@ harness: tests/harness/harness.pb.go tests/harness/go/go-harness tests/harness/c
+ .PHONY: bazel-harness
+ bazel-harness:
+ 	# runs the test harness via bazel
+-	bazel run //tests/harness/executor
++	bazel run //tests/harness/executor:executor
+ 
+ .PHONY: kitchensink
+ kitchensink:
+@@ -94,6 +95,7 @@ tests/harness/cc/cc-harness: tests/harness/cc/harness.cc
+ 	# use bazel which knows how to pull in the C++ common proto libraries
+ 	bazel build //tests/harness/cc:cc-harness
+ 	cp bazel-bin/tests/harness/cc/cc-harness $@
++	chmod 0755 $@
+ 
+ .PHONY: ci
+ ci: lint build tests kitchensink testcases harness bazel-harness
+diff --git a/templates/cc/repeated.go b/templates/cc/repeated.go
+index 570755d..6fca277 100644
+--- a/templates/cc/repeated.go
++++ b/templates/cc/repeated.go
+@@ -46,6 +46,7 @@ const repTpl = `
+ 	{{ if or $r.GetUnique (ne (.Elem "" "").Typ "none") }}
+ 		for (int i = 0; i < {{ accessor . }}.size(); i++) {
+ 			const {{ $typ }}& item = {{ accessor . }}.Get(i);
++			(void)item;
+ 
+ 			{{ if $r.GetUnique }}
+ 				auto p = {{ lookup $f "Unique" }}.emplace(const_cast<{{ $typ }}&>(item));
+diff --git a/templates/go/repeated.go b/templates/go/repeated.go
+index ba8d14f..d5fe5e9 100644
+--- a/templates/go/repeated.go
++++ b/templates/go/repeated.go
+@@ -31,8 +31,9 @@ const repTpl = `
+ 		{{ end -}}
+ 	{{ end }}
+ 
+-	{{ if or $r.GetUnique (ne 	(.Elem "" "").Typ "none") }}
++	{{ if or $r.GetUnique (ne (.Elem "" "").Typ "none") }}
+ 		for idx, item := range {{ accessor . }} {
++			_, _ = idx, item
+ 			{{ if $r.GetUnique }}
+ 				if _, exists := {{ lookup $f "Unique" }}[{{ if isBytes $f.Type.Element }}string(item){{ else }}item{{ end }}]; exists {
+ 					return {{ errIdx . "idx" "repeated value must contain unique items" }}
+diff --git a/templates/shared/context.go b/templates/shared/context.go
+index 992b9f9..8f7e70e 100644
+--- a/templates/shared/context.go
++++ b/templates/shared/context.go
+@@ -166,12 +166,12 @@ func resolveRules(typ ruleTarget, rules *validate.FieldRules) (string, proto.Mes
+ 	case *validate.FieldRules_Timestamp:
+ 		return "timestamp", r.Timestamp, false
+ 	case nil:
+-		switch {
+-		case typ.IsEmbed():
++		if ft, ok := typ.(pgs.FieldType); ok && ft.IsRepeated() {
++			return "repeated", &validate.RepeatedRules{}, false
++		} else if typ.IsEmbed() {
+ 			return "message", &validate.MessageRules{}, false
+-		default:
+-			return "none", nil, false
+ 		}
++		return "none", nil, false
+ 	default:
+ 		return "error", nil, false
+ 	}

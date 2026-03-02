@@ -1,0 +1,31 @@
+#!/bin/bash
+
+cd /app/src
+
+# Copy HEAD test files from /tests (overwrites BASE state)
+mkdir -p "tests/src"
+cp "/tests/src/unit-locale-cpp.cpp" "tests/src/unit-locale-cpp.cpp" || true
+
+# Re-run CMake configure to pick up the new test file (if it was added by the copy)
+cmake -S . -B build -DJSON_BuildTests=ON > /dev/null 2>&1
+
+# Rebuild the test executable with the updated test file (using C++11)
+cmake --build build --target test-locale-cpp_cpp11 || { echo 0 > /logs/verifier/reward.txt; exit 1; }
+
+# Run the specific test executable
+build/tests/test-locale-cpp_cpp11 2>&1 | tee /tmp/test_output.txt
+test_status=${PIPESTATUS[0]}
+
+# Check if tests actually ran (not just an empty test file)
+if grep -q "test cases: 0" /tmp/test_output.txt; then
+    # Empty test file or tests not enabled - treat as failure
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+if [ $test_status -eq 0 ]; then
+  echo 1 > /logs/verifier/reward.txt
+else
+  echo 0 > /logs/verifier/reward.txt
+fi
+exit "$test_status"

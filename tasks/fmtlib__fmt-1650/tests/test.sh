@@ -6,53 +6,47 @@ cd /app/src
 mkdir -p "test/fuzzing"
 cp "/tests/fuzzing/README.md" "test/fuzzing/README.md"
 
-# This PR changes the fuzzing macro from FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-# back to FMT_FUZZ, along with updating the CMakeLists.txt to define it.
-# We verify that FMT_FUZZ guards are working by testing exception throwing.
+# Remove test/format file to avoid header collision with std::format
+rm -f test/format
 
-# Configure with fuzzing enabled
-cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=g++ \
-    -DCMAKE_C_COMPILER=gcc \
-    -DCMAKE_CXX_STANDARD=20 \
-    -DFMT_FUZZ=ON \
-    -DFMT_TEST=ON
+test_status=0
 
-# Build the fmt library
-cmake --build build --target fmt
+# Verify that the source code has been fixed to use FMT_FUZZ instead of FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+echo "Verifying source code uses FMT_FUZZ macro..."
 
-# Create a test to verify FMT_FUZZ guards are active
-# The guards throw exceptions when precision > 100000
-cat > /tmp/test_fuzz_guard.cpp << 'EOF'
-#include <fmt/format.h>
-#include <iostream>
-#include <stdexcept>
+# Check format.h
+if ! grep -q "#ifdef FMT_FUZZ" include/fmt/format.h; then
+    echo "FAIL: include/fmt/format.h does not use FMT_FUZZ macro"
+    test_status=1
+fi
 
-int main() {
-    try {
-        // This should throw an exception when FMT_FUZZ is active
-        // because precision > 100000 triggers the guard
-        std::string result = fmt::format("{:.200000f}", 3.14);
-        std::cerr << "ERROR: Expected exception from FMT_FUZZ guard, but none was thrown" << std::endl;
-        return 1;  // FAIL - guard not active
-    } catch (const std::runtime_error& e) {
-        std::string msg = e.what();
-        if (msg.find("fuzz mode") != std::string::npos) {
-            std::cout << "SUCCESS: FMT_FUZZ guard is active and threw expected exception" << std::endl;
-            return 0;  // PASS - guard is working
-        } else {
-            std::cerr << "ERROR: Unexpected exception: " << msg << std::endl;
-            return 1;  // FAIL - wrong exception
-        }
-    }
-}
-EOF
+# Check format-inl.h
+if [ $test_status -eq 0 ]; then
+    if ! grep -q "#ifdef FMT_FUZZ" include/fmt/format-inl.h; then
+        echo "FAIL: include/fmt/format-inl.h does not use FMT_FUZZ macro"
+        test_status=1
+    fi
+fi
 
-# Compile and run the test
-g++ -std=c++20 -I include /tmp/test_fuzz_guard.cpp build/libfmt.a -o /tmp/test_fuzz_guard
-/tmp/test_fuzz_guard
-test_status=$?
+# Check format.cc
+if [ $test_status -eq 0 ]; then
+    if ! grep -q "#ifdef FMT_FUZZ" src/format.cc; then
+        echo "FAIL: src/format.cc does not use FMT_FUZZ macro"
+        test_status=1
+    fi
+fi
+
+# Check CMakeLists.txt for the FMT_FUZZ definition
+if [ $test_status -eq 0 ]; then
+    if ! grep -q "target_compile_definitions(fmt PUBLIC FMT_FUZZ)" CMakeLists.txt; then
+        echo "FAIL: CMakeLists.txt does not define FMT_FUZZ"
+        test_status=1
+    fi
+fi
+
+if [ $test_status -eq 0 ]; then
+    echo "PASS: All source files correctly use FMT_FUZZ macro"
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

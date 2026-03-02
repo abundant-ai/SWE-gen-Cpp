@@ -1,18 +1,40 @@
-Two related issues exist in fmt’s standard-library support.
+Two issues need to be fixed in fmt’s standard-library support and formattability detection.
 
-1) `fmt::is_formattable<void>` is currently broken and can hard-error at compile time. Users expect `fmt::is_formattable<void>::value == false`, but attempting to instantiate it causes a compilation failure due to forming a reference to `void` inside the `is_formattable` implementation. This must be fixed so that checking formattability for `void` is well-formed and yields `false` without producing a substitution/instantiation error.
+1) `fmt::is_formattable<void>` is broken and causes a hard compilation error.
 
-2) Formatting `std::expected<void, E>` should be supported (when the error type `E` itself is formattable). Add a `formatter<std::expected<void, E>, Char>` specialization (or equivalent behavior) such that:
+Expected behavior: querying the trait should be well-formed and evaluate to `false`:
 
-- If the expected contains a value (i.e., `has_value()` is true), formatting with `{}` produces exactly `expected()`.
-- If the expected contains an error, formatting with `{}` produces `unexpected(<formatted error>)` where the error is formatted using the library’s existing escaping/alternative formatting used for other `std::expected`/`std::unexpected`-style outputs.
+```cpp
+static_assert(fmt::is_formattable<void>::value == false);
+```
 
-The new formatter must not require `void` to be formattable, and it must only participate when `E` is formattable for the given character type (e.g., guarded by `fmt::is_formattable<E, Char>` or an equivalent constraint).
+Actual behavior: attempting to instantiate the trait for `void` fails to compile with an error like:
 
-After these changes:
+```
+error: forming reference to void
+... required from ... fmt::is_formattable<void> ...
+```
 
-- Code that evaluates `fmt::is_formattable<void>::value` should compile cleanly and evaluate to `false`.
-- Code like `fmt::format("{}", std::expected<void, E>{})` should compile and return `"expected()"`.
-- Code like `fmt::format("{}", std::unexpected<E>(err))` (as stored in `std::expected<void, E>`) should produce `"unexpected(...)"` with the error formatted appropriately.
+This indicates `fmt::is_formattable<T, Char>` (and/or the internal mapping used to compute it) must treat `void` as not formattable without attempting to form `T&` or otherwise create invalid references.
 
-If `E` is not formattable, attempting to format `std::expected<void, E>` should fail in the same way other non-formattable types fail (i.e., no accidental hard error from the `void` handling; it should be excluded by constraints).
+2) Add support for formatting `std::expected<void, E>`.
+
+Currently, formatting an `std::expected<void, E>` either fails to compile (no matching formatter / not formattable) or does not produce the desired output.
+
+Expected behavior when calling `fmt::format("{}", value)` on `std::expected<void, E>`:
+
+- If `value.has_value()` is true, formatting should produce exactly:
+
+```
+expected()
+```
+
+- If `value.has_value()` is false, formatting should produce:
+
+```
+unexpected(<formatted error>)
+```
+
+where `<formatted error>` is the formatted representation of `value.error()` using fmt’s normal formatting rules for `E`, and should work when `E` is formattable for the selected character type.
+
+The implementation should be compatible with `fmt/std.h` usage so that including it enables formatting of `std::expected<void, E>` for appropriate `E`. The formattability of `std::expected<void, E>` should depend on `E` being formattable, and formatting must not require `void` itself to be formattable.

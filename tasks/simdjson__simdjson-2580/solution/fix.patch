@@ -1,0 +1,1845 @@
+diff --git a/doc/builder.md b/doc/builder.md
+index 8bbfb141..ec170c66 100644
+--- a/doc/builder.md
++++ b/doc/builder.md
+@@ -14,6 +14,7 @@ speed and high convenience.
+   * [C++26 static reflection](#c--26-static-reflection)
+     + [Without `string_buffer` instance](#without--string-buffer--instance)
+     + [Without `string_buffer` instance but with explicit error handling](#without--string-buffer--instance-but-with-explicit-error-handling)
++    + [Pretty formatted (fractured JSON)](#pretty-formatted-fractured-json)
+ 
+ Overview: string_builder
+ ---------------------------
+@@ -364,3 +365,49 @@ void tag_invoke(serialize_tag, builder_type &builder, const Car& car) {
+ 
+ } // namespace simdjson
+ ```
++
++### Pretty formatted (fractured JSON)
++
++In some instances, you may want your JSON to be more readable. For this pupose, we also
++support the Fractured JSON standard.
++
++```Cpp
++  TableTestData data{
++    {{1, "Alice", true}, {2, "Bob", false}, {3, "Carol", true}, {4, "Dave", false}}
++  };
++
++  fractured_json_options opts;
++  opts.enable_table_format = true;
++  opts.min_table_rows = 3;
++
++  std::string formatted = simdjson::to_fractured_json_string(data, opts);
++```
++
++The result might be as follows.
++
++```json
++{
++    "records": [
++        { "active": true , "id": 1, "name": "Alice" },
++        { "active": false, "id": 2, "name": "Bob" },
++        { "active": true , "id": 3, "name": "Carol" },
++        { "active": false, "id": 4, "name": "Dave" }
++    ]
++}
++```
++
++The `fractured_json_options` struct allows you to customize the formatting behavior. It includes the following options:
++
++- `max_total_line_length` (default: 120): Maximum total characters per line. Content exceeding this will be expanded to multiple lines.
++- `max_inline_length` (default: 80): Maximum length for inlined elements. Simple arrays/objects shorter than this may be rendered inline.
++- `max_inline_complexity` (default: 2): Maximum nesting depth for inline rendering. Elements with complexity exceeding this will be expanded. Complexity 0 = scalar, 1 = flat array/object, 2 = one level of nesting.
++- `max_compact_array_complexity` (default: 1): Maximum complexity for compact array formatting. Arrays with elements of this complexity or less may have multiple items per line.
++- `indent_spaces` (default: 4): Number of spaces per indentation level.
++- `enable_table_format` (default: true): Enable tabular formatting for arrays of similar objects. When enabled, arrays of objects with identical keys are formatted as aligned tables.
++- `min_table_rows` (default: 3): Minimum number of rows to trigger table mode.
++- `table_similarity_threshold` (default: 0.8): Similarity threshold for table detection. Objects must share at least this fraction of keys to be formatted as a table.
++- `enable_compact_multiline` (default: true): Enable compact multiline arrays. When enabled, arrays of simple elements may have multiple items per line.
++- `max_items_per_line` (default: 10): Maximum array items per line in compact mode.
++- `simple_bracket_padding` (default: true): Add space inside brackets for simple containers. When true: `{ "key": "value" }`, when false: `{"key": "value"}`.
++- `colon_padding` (default: true): Add space after colons. When true: `"key": "value"`, when false: `"key":"value"`.
++- `comma_padding` (default: true): Add space after commas in inline content. When true: `[1, 2, 3]`, when false: `[1,2,3]`.
+\ No newline at end of file
+diff --git a/include/simdjson/dom.h b/include/simdjson/dom.h
+index bcf22ac2..cfdd1009 100644
+--- a/include/simdjson/dom.h
++++ b/include/simdjson/dom.h
+@@ -9,6 +9,7 @@
+ #include "simdjson/dom/object.h"
+ #include "simdjson/dom/parser.h"
+ #include "simdjson/dom/serialization.h"
++#include "simdjson/dom/fractured_json.h"
+ 
+ // Inline functions
+ #include "simdjson/dom/array-inl.h"
+@@ -19,5 +20,6 @@
+ #include "simdjson/dom/parser-inl.h"
+ #include "simdjson/internal/tape_ref-inl.h"
+ #include "simdjson/dom/serialization-inl.h"
++#include "simdjson/dom/fractured_json-inl.h"
+ 
+ #endif // SIMDJSON_DOM_H
+diff --git a/include/simdjson/dom/fractured_json-inl.h b/include/simdjson/dom/fractured_json-inl.h
+new file mode 100644
+index 00000000..2ab9d36d
+--- /dev/null
++++ b/include/simdjson/dom/fractured_json-inl.h
+@@ -0,0 +1,1077 @@
++#ifndef SIMDJSON_DOM_FRACTURED_JSON_INL_H
++#define SIMDJSON_DOM_FRACTURED_JSON_INL_H
++
++#include "simdjson/dom/fractured_json.h"
++#include "simdjson/dom/serialization.h"
++#include "simdjson/dom/element-inl.h"
++#include "simdjson/dom/array-inl.h"
++#include "simdjson/dom/object-inl.h"
++#include "simdjson/dom/parser-inl.h"
++#include "simdjson/padded_string.h"
++#include "simdjson/internal/json_structure_analyzer.h"
++#include "simdjson/internal/fractured_formatter.h"
++
++#include <cmath>
++#include <algorithm>
++#include <cstring>
++
++namespace simdjson {
++namespace internal {
++
++//
++// Structure Analyzer Implementation
++//
++
++inline element_metrics structure_analyzer::analyze(const dom::element& elem,
++                                                    const fractured_json_options& opts) {
++  current_opts_ = &opts;
++  return analyze_element(elem, 0);
++}
++
++inline void structure_analyzer::clear() {
++  current_opts_ = nullptr;
++}
++
++inline element_metrics structure_analyzer::analyze_array(const dom::array& arr,
++                                                          const fractured_json_options& opts) {
++  current_opts_ = &opts;
++  return analyze_array(arr, 0);
++}
++
++inline element_metrics structure_analyzer::analyze_object(const dom::object& obj,
++                                                           const fractured_json_options& opts) {
++  current_opts_ = &opts;
++  return analyze_object(obj, 0);
++}
++
++inline element_metrics structure_analyzer::analyze_element(const dom::element& elem, size_t depth) {
++  switch (elem.type()) {
++    case dom::element_type::ARRAY: {
++      dom::array arr;
++      if (elem.get_array().get(arr) == SUCCESS) {
++        return analyze_array(arr, depth);
++      }
++      break;
++    }
++    case dom::element_type::OBJECT: {
++      dom::object obj;
++      if (elem.get_object().get(obj) == SUCCESS) {
++        return analyze_object(obj, depth);
++      }
++      break;
++    }
++    default:
++      // Handle all scalar types with a helper
++      return analyze_scalar(elem);
++  }
++  return element_metrics{};
++}
++
++inline element_metrics structure_analyzer::analyze_scalar(const dom::element& elem) {
++  element_metrics metrics;
++  metrics.complexity = 0;
++  metrics.child_count = 0;
++  metrics.can_inline = true;
++  metrics.recommended_layout = layout_mode::INLINE;
++
++  switch (elem.type()) {
++    case dom::element_type::STRING: {
++      std::string_view str;
++      if (elem.get_string().get(str) == SUCCESS) {
++        metrics.estimated_inline_len = estimate_string_length(str);
++      }
++      break;
++    }
++    case dom::element_type::INT64: {
++      int64_t val;
++      if (elem.get_int64().get(val) == SUCCESS) {
++        metrics.estimated_inline_len = estimate_number_length(val);
++      }
++      break;
++    }
++    case dom::element_type::UINT64: {
++      uint64_t val;
++      if (elem.get_uint64().get(val) == SUCCESS) {
++        metrics.estimated_inline_len = estimate_number_length(val);
++      }
++      break;
++    }
++    case dom::element_type::DOUBLE: {
++      double val;
++      if (elem.get_double().get(val) == SUCCESS) {
++        metrics.estimated_inline_len = estimate_number_length(val);
++      }
++      break;
++    }
++    case dom::element_type::BOOL: {
++      bool val;
++      if (elem.get_bool().get(val) == SUCCESS) {
++        metrics.estimated_inline_len = val ? 4 : 5; // "true" or "false"
++      }
++      break;
++    }
++    case dom::element_type::NULL_VALUE:
++      metrics.estimated_inline_len = 4; // "null"
++      break;
++    default:
++      break;
++  }
++
++  return metrics;
++}
++
++inline element_metrics structure_analyzer::analyze_array(const dom::array& arr,
++                                                          size_t depth) {
++  element_metrics metrics;
++  metrics.complexity = 1; // At least 1 for being an array
++  metrics.estimated_inline_len = 2; // "[]"
++  metrics.child_count = 0;
++
++  size_t max_child_complexity = 0;
++  bool first = true;
++
++  for (dom::element child : arr) {
++    if (!first) {
++      metrics.estimated_inline_len += 2; // ", "
++    }
++    first = false;
++
++    element_metrics child_metrics = analyze_element(child, depth + 1);
++    metrics.estimated_inline_len += child_metrics.estimated_inline_len;
++    max_child_complexity = (std::max)(max_child_complexity, child_metrics.complexity);
++    metrics.child_count++;
++    metrics.children.push_back(std::move(child_metrics));
++  }
++
++  // Complexity is 1 + max child complexity
++  metrics.complexity = 1 + max_child_complexity;
++
++  // Check if can inline
++  metrics.can_inline = (metrics.complexity <= current_opts_->max_inline_complexity) &&
++                       (metrics.estimated_inline_len <= current_opts_->max_inline_length);
++
++  // Check for uniform array (table formatting)
++  if (current_opts_->enable_table_format &&
++      metrics.child_count >= current_opts_->min_table_rows) {
++    metrics.is_uniform_array = check_array_uniformity(arr, metrics.common_keys);
++  }
++
++  // Decide layout
++  if (metrics.child_count == 0) {
++    metrics.recommended_layout = layout_mode::INLINE;
++  } else if (metrics.can_inline) {
++    metrics.recommended_layout = layout_mode::INLINE;
++  } else if (metrics.is_uniform_array && !metrics.common_keys.empty()) {
++    metrics.recommended_layout = layout_mode::TABLE;
++  } else if (current_opts_->enable_compact_multiline &&
++             max_child_complexity <= current_opts_->max_compact_array_complexity) {
++    metrics.recommended_layout = layout_mode::COMPACT_MULTILINE;
++  } else {
++    metrics.recommended_layout = layout_mode::EXPANDED;
++  }
++
++  return metrics;
++}
++
++inline element_metrics structure_analyzer::analyze_object(const dom::object& obj,
++                                                           size_t depth) {
++  element_metrics metrics;
++  metrics.complexity = 1;
++  metrics.estimated_inline_len = 2; // "{}"
++  metrics.child_count = 0;
++
++  size_t max_child_complexity = 0;
++  bool first = true;
++
++  for (dom::key_value_pair field : obj) {
++    if (!first) {
++      metrics.estimated_inline_len += 2; // ", "
++    }
++    first = false;
++
++    // Key length: quotes + key + colon + space
++    metrics.estimated_inline_len += estimate_string_length(field.key) + 2;
++
++    element_metrics child_metrics = analyze_element(field.value, depth + 1);
++    metrics.estimated_inline_len += child_metrics.estimated_inline_len;
++    max_child_complexity = (std::max)(max_child_complexity, child_metrics.complexity);
++    metrics.child_count++;
++    metrics.children.push_back(std::move(child_metrics));
++  }
++
++  metrics.complexity = 1 + max_child_complexity;
++
++  metrics.can_inline = (metrics.complexity <= current_opts_->max_inline_complexity) &&
++                       (metrics.estimated_inline_len <= current_opts_->max_inline_length);
++
++  // Objects use inline or expanded (no table/compact for objects)
++  if (metrics.child_count == 0 || metrics.can_inline) {
++    metrics.recommended_layout = layout_mode::INLINE;
++  } else {
++    metrics.recommended_layout = layout_mode::EXPANDED;
++  }
++
++  return metrics;
++}
++
++inline size_t structure_analyzer::estimate_string_length(std::string_view s) const {
++  size_t len = 2; // quotes
++  for (char c : s) {
++    if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 32) {
++      len += 2; // escape sequence (at least)
++    } else {
++      len += 1;
++    }
++  }
++  return len;
++}
++
++inline size_t structure_analyzer::estimate_number_length(double d) const {
++  if (std::isnan(d) || std::isinf(d)) {
++    return 4; // "null" for invalid numbers
++  }
++  // Rough estimate: up to 17 significant digits + sign + decimal point + exponent
++  char buf[32];
++  int len = snprintf(buf, sizeof(buf), "%.17g", d);
++  return len > 0 ? static_cast<size_t>(len) : 20;
++}
++
++inline size_t structure_analyzer::estimate_number_length(int64_t i) const {
++  if (i == 0) return 1;
++  // Handle INT64_MIN specially to avoid overflow when negating
++  if (i == INT64_MIN) return 20; // "-9223372036854775808" is 20 characters
++  size_t len = (i < 0) ? 1 : 0; // negative sign
++  int64_t abs_val = (i < 0) ? -i : i;
++  while (abs_val > 0) {
++    len++;
++    abs_val /= 10;
++  }
++  return len;
++}
++
++inline size_t structure_analyzer::estimate_number_length(uint64_t u) const {
++  if (u == 0) return 1;
++  size_t len = 0;
++  while (u > 0) {
++    len++;
++    u /= 10;
++  }
++  return len;
++}
++
++inline bool structure_analyzer::check_array_uniformity(const dom::array& arr,
++                                                        std::vector<std::string>& common_keys) const {
++  common_keys.clear();
++
++  std::set<std::string> shared_keys;
++  dom::object first_obj;
++  bool have_first = false;
++  size_t object_count = 0;
++
++  for (dom::element elem : arr) {
++    if (elem.type() != dom::element_type::OBJECT) {
++      return false; // Not all elements are objects
++    }
++
++    dom::object obj;
++    if (elem.get_object().get(obj) != SUCCESS) {
++      return false;
++    }
++
++    std::set<std::string> current_keys;
++    for (dom::key_value_pair field : obj) {
++      current_keys.insert(std::string(field.key));
++    }
++
++    if (!have_first) {
++      shared_keys = current_keys;
++      first_obj = obj;
++      have_first = true;
++    } else {
++      // Check similarity threshold against the first object
++      double similarity = compute_object_similarity(first_obj, obj);
++      if (similarity < current_opts_->table_similarity_threshold) {
++        return false; // Objects are too dissimilar for table format
++      }
++
++      // Intersect with current keys
++      std::set<std::string> intersection;
++      std::set_intersection(shared_keys.begin(), shared_keys.end(),
++                            current_keys.begin(), current_keys.end(),
++                            std::inserter(intersection, intersection.begin()));
++      shared_keys = intersection;
++    }
++
++    object_count++;
++  }
++
++  if (object_count < current_opts_->min_table_rows) {
++    return false;
++  }
++
++  // Require at least one common key for table formatting
++  if (shared_keys.empty()) {
++    return false;
++  }
++
++  common_keys.assign(shared_keys.begin(), shared_keys.end());
++  return true;
++}
++
++inline double structure_analyzer::compute_object_similarity(const dom::object& a,
++                                                             const dom::object& b) const {
++  std::set<std::string> keys_a, keys_b;
++  for (dom::key_value_pair field : a) {
++    keys_a.insert(std::string(field.key));
++  }
++  for (dom::key_value_pair field : b) {
++    keys_b.insert(std::string(field.key));
++  }
++
++  std::set<std::string> intersection;
++  std::set_intersection(keys_a.begin(), keys_a.end(),
++                        keys_b.begin(), keys_b.end(),
++                        std::inserter(intersection, intersection.begin()));
++
++  std::set<std::string> union_set;
++  std::set_union(keys_a.begin(), keys_a.end(),
++                 keys_b.begin(), keys_b.end(),
++                 std::inserter(union_set, union_set.begin()));
++
++  if (union_set.empty()) return 1.0;
++  return static_cast<double>(intersection.size()) / static_cast<double>(union_set.size());
++}
++
++inline layout_mode structure_analyzer::decide_layout(const element_metrics& metrics,
++                                                      size_t depth,
++                                                      size_t available_width) const {
++  if (metrics.child_count == 0) {
++    return layout_mode::INLINE;
++  }
++
++  // Check inline feasibility
++  size_t indent_width = depth * current_opts_->indent_spaces;
++  if (metrics.can_inline &&
++      metrics.estimated_inline_len + indent_width <= available_width) {
++    return layout_mode::INLINE;
++  }
++
++  // Check table mode
++  if (metrics.is_uniform_array && !metrics.common_keys.empty()) {
++    return layout_mode::TABLE;
++  }
++
++  // Check compact multiline
++  if (current_opts_->enable_compact_multiline &&
++      metrics.complexity <= current_opts_->max_compact_array_complexity + 1) {
++    return layout_mode::COMPACT_MULTILINE;
++  }
++
++  return layout_mode::EXPANDED;
++}
++
++//
++// Fractured Formatter Implementation
++//
++
++inline fractured_formatter::fractured_formatter(const fractured_json_options& opts)
++    : options_(opts), column_widths_{} {}
++
++simdjson_inline void fractured_formatter::print_newline() {
++  if (current_layout_ == layout_mode::INLINE) {
++    return; // No newlines in inline mode
++  }
++  one_char('\n');
++  current_line_length_ = 0;
++}
++
++simdjson_inline void fractured_formatter::print_indents(size_t depth) {
++  if (current_layout_ == layout_mode::INLINE) {
++    return; // No indentation in inline mode
++  }
++  for (size_t i = 0; i < depth * options_.indent_spaces; i++) {
++    one_char(' ');
++    current_line_length_++;
++  }
++}
++
++simdjson_inline void fractured_formatter::print_space() {
++  one_char(' ');
++  current_line_length_++;
++}
++
++inline void fractured_formatter::set_layout_mode(layout_mode mode) {
++  current_layout_ = mode;
++}
++
++inline layout_mode fractured_formatter::get_layout_mode() const {
++  return current_layout_;
++}
++
++inline void fractured_formatter::set_depth(size_t depth) {
++  current_depth_ = depth;
++}
++
++inline size_t fractured_formatter::get_depth() const {
++  return current_depth_;
++}
++
++inline void fractured_formatter::track_line_length(size_t chars) {
++  current_line_length_ += chars;
++}
++
++inline void fractured_formatter::reset_line_length() {
++  current_line_length_ = 0;
++}
++
++inline size_t fractured_formatter::get_line_length() const {
++  return current_line_length_;
++}
++
++inline bool fractured_formatter::should_break_line(size_t upcoming_length) const {
++  return (current_line_length_ + upcoming_length) > options_.max_total_line_length;
++}
++
++inline const fractured_json_options& fractured_formatter::options() const {
++  return options_;
++}
++
++inline void fractured_formatter::begin_table_row() {
++  in_table_mode_ = true;
++  current_column_ = 0;
++}
++
++inline void fractured_formatter::end_table_row() {
++  in_table_mode_ = false;
++  current_column_ = 0;
++}
++
++inline void fractured_formatter::set_column_widths(const std::vector<size_t>& widths) {
++  column_widths_ = widths;
++}
++
++inline size_t fractured_formatter::get_column_index() const {
++  return current_column_;
++}
++
++inline void fractured_formatter::next_column() {
++  current_column_++;
++}
++
++inline void fractured_formatter::align_to_column_width(size_t actual_width) {
++  if (current_column_ < column_widths_.size()) {
++    size_t target_width = column_widths_[current_column_];
++    while (actual_width < target_width) {
++      one_char(' ');
++      actual_width++;
++      current_line_length_++;
++    }
++  }
++}
++
++//
++// Fractured String Builder Implementation
++//
++
++inline fractured_string_builder::fractured_string_builder(const fractured_json_options& opts)
++    : format_(opts), analyzer_{}, options_(opts) {}
++
++inline void fractured_string_builder::append(const dom::element& value) {
++  // Phase 1: Analyze structure (metrics tree is built recursively)
++  element_metrics root_metrics = analyzer_.analyze(value, options_);
++
++  // Phase 2: Format using metrics tree (passed through recursion)
++  format_element(value, root_metrics, 0);
++}
++
++inline void fractured_string_builder::append(const dom::array& value) {
++  // Analyze the array to get proper metrics with children
++  element_metrics metrics = analyzer_.analyze_array(value, options_);
++  format_array(value, metrics, 0);
++}
++
++inline void fractured_string_builder::append(const dom::object& value) {
++  // Analyze the object to get proper metrics with children
++  element_metrics metrics = analyzer_.analyze_object(value, options_);
++  format_object(value, metrics, 0);
++}
++
++simdjson_inline void fractured_string_builder::clear() {
++  format_.clear();
++  analyzer_.clear();
++}
++
++simdjson_inline std::string_view fractured_string_builder::str() const {
++  return format_.str();
++}
++
++inline void fractured_string_builder::format_element(const dom::element& elem,
++                                                       const element_metrics& metrics,
++                                                       size_t depth) {
++  switch (elem.type()) {
++    case dom::element_type::ARRAY: {
++      dom::array arr;
++      if (elem.get_array().get(arr) == SUCCESS) {
++        format_array(arr, metrics, depth);
++      }
++      break;
++    }
++    case dom::element_type::OBJECT: {
++      dom::object obj;
++      if (elem.get_object().get(obj) == SUCCESS) {
++        format_object(obj, metrics, depth);
++      }
++      break;
++    }
++    default:
++      format_scalar(elem);
++      break;
++  }
++}
++
++inline void fractured_string_builder::format_array(const dom::array& arr,
++                                                    const element_metrics& metrics,
++                                                    size_t depth) {
++  switch (metrics.recommended_layout) {
++    case layout_mode::INLINE:
++      format_array_inline(arr, metrics);
++      break;
++    case layout_mode::COMPACT_MULTILINE:
++      format_array_compact_multiline(arr, metrics, depth);
++      break;
++    case layout_mode::TABLE:
++      format_array_as_table(arr, metrics, depth);
++      break;
++    case layout_mode::EXPANDED:
++    default:
++      format_array_expanded(arr, metrics, depth);
++      break;
++  }
++}
++
++inline void fractured_string_builder::format_array_inline(const dom::array& arr,
++                                                            const element_metrics& metrics) {
++  layout_mode prev_layout = format_.get_layout_mode();
++  format_.set_layout_mode(layout_mode::INLINE);
++
++  format_.start_array();
++
++  bool first = true;
++  bool empty = true;
++  size_t child_idx = 0;
++  for (dom::element elem : arr) {
++    empty = false;
++    if (!first) {
++      format_.comma();
++      if (options_.comma_padding) {
++        format_.print_space();
++      }
++    } else if (options_.simple_bracket_padding) {
++      format_.print_space();
++    }
++    first = false;
++    const element_metrics& child_metrics = (child_idx < metrics.children.size())
++        ? metrics.children[child_idx] : element_metrics{};
++    format_element(elem, child_metrics, 0);
++    child_idx++;
++  }
++
++  if (options_.simple_bracket_padding && !empty) {
++    format_.print_space();
++  }
++  format_.end_array();
++
++  format_.set_layout_mode(prev_layout);
++}
++
++inline void fractured_string_builder::format_array_compact_multiline(const dom::array& arr,
++                                                                       const element_metrics& metrics,
++                                                                       size_t depth) {
++  format_.start_array();
++  format_.print_newline();
++  format_.print_indents(depth + 1);
++
++  size_t items_on_line = 0;
++  bool first = true;
++  size_t child_idx = 0;
++
++  for (dom::element elem : arr) {
++    if (!first) {
++      format_.comma();
++
++      // Check if we should break to new line
++      if (items_on_line >= options_.max_items_per_line ||
++          format_.should_break_line(20)) { // 20 is rough estimate for next item
++        format_.print_newline();
++        format_.print_indents(depth + 1);
++        items_on_line = 0;
++      } else if (options_.comma_padding) {
++        format_.print_space();
++      }
++    }
++    first = false;
++
++    // Format element inline
++    layout_mode prev_layout = format_.get_layout_mode();
++    format_.set_layout_mode(layout_mode::INLINE);
++    const element_metrics& child_metrics = (child_idx < metrics.children.size())
++        ? metrics.children[child_idx] : element_metrics{};
++    format_element(elem, child_metrics, depth + 1);
++    format_.set_layout_mode(prev_layout);
++
++    items_on_line++;
++    child_idx++;
++  }
++
++  format_.print_newline();
++  format_.print_indents(depth);
++  format_.end_array();
++}
++
++inline void fractured_string_builder::format_array_as_table(const dom::array& arr,
++                                                             const element_metrics& metrics,
++                                                             size_t depth) {
++  const std::vector<std::string>& columns = metrics.common_keys;
++  if (columns.empty()) {
++    format_array_expanded(arr, metrics, depth);
++    return;
++  }
++
++  // Calculate column widths for alignment
++  std::vector<size_t> col_widths = calculate_column_widths(arr, columns);
++  format_.set_column_widths(col_widths);
++
++  format_.start_array();
++  format_.print_newline();
++
++  bool first_row = true;
++  size_t child_idx = 0;
++  for (dom::element elem : arr) {
++    if (!first_row) {
++      format_.comma();
++      format_.print_newline();
++    }
++    first_row = false;
++
++    format_.print_indents(depth + 1);
++    format_.begin_table_row();
++
++    // Format object as inline with aligned columns
++    dom::object obj;
++    if (elem.get_object().get(obj) != SUCCESS) {
++      child_idx++;
++      continue;
++    }
++
++    // Get child metrics for this row (object)
++    const element_metrics& row_metrics = (child_idx < metrics.children.size())
++        ? metrics.children[child_idx] : element_metrics{};
++
++    format_.start_object();
++    if (options_.simple_bracket_padding) {
++      format_.print_space();
++    }
++
++    bool first_col = true;
++    const size_t num_columns = columns.size();
++
++    for (size_t col_idx = 0; col_idx < num_columns; col_idx++) {
++      const std::string& key = columns[col_idx];
++      const bool is_last_col = (col_idx == num_columns - 1);
++
++      if (!first_col) {
++        format_.comma();
++        if (options_.comma_padding) {
++          format_.print_space();
++        }
++      }
++      first_col = false;
++
++      // Write key
++      format_.key(key);
++      if (options_.colon_padding) {
++        format_.print_space();
++      }
++
++      // Find the value for this key and its metrics
++      dom::element value;
++      bool found = false;
++      size_t field_idx = 0;
++      for (dom::key_value_pair field : obj) {
++        if (field.key == key) {
++          value = field.value;
++          found = true;
++          break;
++        }
++        field_idx++;
++      }
++
++      // Write value
++      if (found) {
++        layout_mode prev_layout = format_.get_layout_mode();
++        format_.set_layout_mode(layout_mode::INLINE);
++        const element_metrics& value_metrics = (field_idx < row_metrics.children.size())
++            ? row_metrics.children[field_idx] : element_metrics{};
++        format_element(value, value_metrics, depth + 1);
++        format_.set_layout_mode(prev_layout);
++      } else {
++        format_.null_atom();
++      }
++
++      // Only pad non-last columns to align values across rows
++      if (!is_last_col) {
++        size_t actual_len = found ? measure_value_length(value) : 4; // 4 for "null"
++        size_t target_width = col_widths[col_idx];
++        while (actual_len < target_width) {
++          format_.one_char(' ');
++          actual_len++;
++        }
++      }
++
++      format_.next_column();
++    }
++
++    if (options_.simple_bracket_padding) {
++      format_.print_space();
++    }
++    format_.end_object();
++    format_.end_table_row();
++    child_idx++;
++  }
++
++  format_.print_newline();
++  format_.print_indents(depth);
++  format_.end_array();
++}
++
++inline void fractured_string_builder::format_array_expanded(const dom::array& arr,
++                                                              const element_metrics& metrics,
++                                                              size_t depth) {
++  format_.start_array();
++
++  bool empty = true;
++  bool first = true;
++  size_t child_idx = 0;
++
++  for (dom::element elem : arr) {
++    empty = false;
++    if (!first) {
++      format_.comma();
++    }
++    first = false;
++
++    format_.print_newline();
++    format_.print_indents(depth + 1);
++    const element_metrics& child_metrics = (child_idx < metrics.children.size())
++        ? metrics.children[child_idx] : element_metrics{};
++    format_element(elem, child_metrics, depth + 1);
++    child_idx++;
++  }
++
++  if (!empty) {
++    format_.print_newline();
++    format_.print_indents(depth);
++  }
++  format_.end_array();
++}
++
++inline void fractured_string_builder::format_object(const dom::object& obj,
++                                                     const element_metrics& metrics,
++                                                     size_t depth) {
++  if (metrics.recommended_layout == layout_mode::INLINE || metrics.can_inline) {
++    format_object_inline(obj, metrics);
++  } else {
++    format_object_expanded(obj, metrics, depth);
++  }
++}
++
++inline void fractured_string_builder::format_object_inline(const dom::object& obj,
++                                                             const element_metrics& metrics) {
++  layout_mode prev_layout = format_.get_layout_mode();
++  format_.set_layout_mode(layout_mode::INLINE);
++
++  format_.start_object();
++
++  bool empty = true;
++  bool first = true;
++  size_t child_idx = 0;
++
++  for (dom::key_value_pair field : obj) {
++    empty = false;
++    if (!first) {
++      format_.comma();
++      if (options_.comma_padding) {
++        format_.print_space();
++      }
++    } else if (options_.simple_bracket_padding) {
++      format_.print_space();
++    }
++    first = false;
++
++    format_.key(field.key);
++    if (options_.colon_padding) {
++      format_.print_space();
++    }
++    const element_metrics& child_metrics = (child_idx < metrics.children.size())
++        ? metrics.children[child_idx] : element_metrics{};
++    format_element(field.value, child_metrics, 0);
++    child_idx++;
++  }
++
++  if (options_.simple_bracket_padding && !empty) {
++    format_.print_space();
++  }
++  format_.end_object();
++
++  format_.set_layout_mode(prev_layout);
++}
++
++inline void fractured_string_builder::format_object_expanded(const dom::object& obj,
++                                                               const element_metrics& metrics,
++                                                               size_t depth) {
++  format_.start_object();
++
++  bool empty = true;
++  bool first = true;
++  size_t child_idx = 0;
++
++  for (dom::key_value_pair field : obj) {
++    empty = false;
++    if (!first) {
++      format_.comma();
++    }
++    first = false;
++
++    format_.print_newline();
++    format_.print_indents(depth + 1);
++    format_.key(field.key);
++    if (options_.colon_padding) {
++      format_.print_space();
++    }
++    const element_metrics& child_metrics = (child_idx < metrics.children.size())
++        ? metrics.children[child_idx] : element_metrics{};
++    format_element(field.value, child_metrics, depth + 1);
++    child_idx++;
++  }
++
++  if (!empty) {
++    format_.print_newline();
++    format_.print_indents(depth);
++  }
++  format_.end_object();
++}
++
++inline void fractured_string_builder::format_scalar(const dom::element& elem) {
++  switch (elem.type()) {
++    case dom::element_type::STRING: {
++      std::string_view str;
++      if (elem.get_string().get(str) == SUCCESS) {
++        format_.string(str);
++      }
++      break;
++    }
++    case dom::element_type::INT64: {
++      int64_t val;
++      if (elem.get_int64().get(val) == SUCCESS) {
++        format_.number(val);
++      }
++      break;
++    }
++    case dom::element_type::UINT64: {
++      uint64_t val;
++      if (elem.get_uint64().get(val) == SUCCESS) {
++        format_.number(val);
++      }
++      break;
++    }
++    case dom::element_type::DOUBLE: {
++      double val;
++      if (elem.get_double().get(val) == SUCCESS) {
++        format_.number(val);
++      }
++      break;
++    }
++    case dom::element_type::BOOL: {
++      bool val;
++      if (elem.get_bool().get(val) == SUCCESS) {
++        val ? format_.true_atom() : format_.false_atom();
++      }
++      break;
++    }
++    case dom::element_type::NULL_VALUE:
++      format_.null_atom();
++      break;
++    default:
++      break;
++  }
++}
++
++inline size_t fractured_string_builder::measure_value_length(const dom::element& elem) const {
++  switch (elem.type()) {
++    case dom::element_type::STRING: {
++      std::string_view str;
++      if (elem.get_string().get(str) == SUCCESS) {
++        // Count actual escaped length
++        size_t len = 2; // quotes
++        for (char c : str) {
++          if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 32) {
++            len += 2; // escape sequence
++          } else {
++            len += 1;
++          }
++        }
++        return len;
++      }
++      return 2;
++    }
++    case dom::element_type::INT64: {
++      int64_t val;
++      if (elem.get_int64().get(val) == SUCCESS) {
++        if (val == 0) return 1;
++        // Handle INT64_MIN specially to avoid overflow when negating
++        if (val == INT64_MIN) return 20; // "-9223372036854775808" is 20 characters
++        size_t len = (val < 0) ? 1 : 0;
++        int64_t abs_val = (val < 0) ? -val : val;
++        while (abs_val > 0) { len++; abs_val /= 10; }
++        return len;
++      }
++      return 1;
++    }
++    case dom::element_type::UINT64: {
++      uint64_t val;
++      if (elem.get_uint64().get(val) == SUCCESS) {
++        if (val == 0) return 1;
++        size_t len = 0;
++        while (val > 0) { len++; val /= 10; }
++        return len;
++      }
++      return 1;
++    }
++    case dom::element_type::DOUBLE: {
++      double val;
++      if (elem.get_double().get(val) == SUCCESS) {
++        char buf[32];
++        int len = snprintf(buf, sizeof(buf), "%.17g", val);
++        return len > 0 ? static_cast<size_t>(len) : 1;
++      }
++      return 1;
++    }
++    case dom::element_type::BOOL: {
++      bool val;
++      if (elem.get_bool().get(val) == SUCCESS) {
++        return val ? 4 : 5; // "true" or "false"
++      }
++      return 5;
++    }
++    case dom::element_type::NULL_VALUE:
++      return 4; // "null"
++    default:
++      return 4;
++  }
++}
++
++inline std::vector<size_t> fractured_string_builder::calculate_column_widths(
++    const dom::array& arr,
++    const std::vector<std::string>& columns) const {
++
++  std::vector<size_t> widths(columns.size(), 0);
++
++  for (dom::element elem : arr) {
++    dom::object obj;
++    if (elem.get_object().get(obj) != SUCCESS) {
++      continue;
++    }
++
++    for (size_t col_idx = 0; col_idx < columns.size(); col_idx++) {
++      const std::string& key = columns[col_idx];
++
++      for (dom::key_value_pair field : obj) {
++        if (field.key == key) {
++          // Measure actual value length
++          size_t len = measure_value_length(field.value);
++          widths[col_idx] = (std::max)(widths[col_idx], len);
++          break;
++        }
++      }
++    }
++  }
++
++  return widths;
++}
++
++} // namespace internal
++
++//
++// Public API Implementation
++//
++
++template <class T>
++std::string fractured_json(T x) {
++  return fractured_json(x, fractured_json_options{});
++}
++
++template <class T>
++std::string fractured_json(T x, const fractured_json_options& options) {
++  internal::fractured_string_builder sb(options);
++  sb.append(x);
++  std::string_view result = sb.str();
++  return std::string(result.data(), result.size());
++}
++
++#if SIMDJSON_EXCEPTIONS
++template <class T>
++std::string fractured_json(simdjson_result<T> x) {
++  if (x.error()) {
++    throw simdjson_error(x.error());
++  }
++  return fractured_json(x.value());
++}
++
++template <class T>
++std::string fractured_json(simdjson_result<T> x, const fractured_json_options& options) {
++  if (x.error()) {
++    throw simdjson_error(x.error());
++  }
++  return fractured_json(x.value(), options);
++}
++#endif
++
++// Explicit template instantiations for common types
++template std::string fractured_json(dom::element x);
++template std::string fractured_json(dom::element x, const fractured_json_options& options);
++template std::string fractured_json(dom::array x);
++template std::string fractured_json(dom::array x, const fractured_json_options& options);
++template std::string fractured_json(dom::object x);
++template std::string fractured_json(dom::object x, const fractured_json_options& options);
++
++#if SIMDJSON_EXCEPTIONS
++template std::string fractured_json(simdjson_result<dom::element> x);
++template std::string fractured_json(simdjson_result<dom::element> x, const fractured_json_options& options);
++#endif
++
++//
++// String-based API for formatting any JSON string
++//
++
++inline std::string fractured_json_string(std::string_view json_str) {
++  return fractured_json_string(json_str, fractured_json_options{});
++}
++
++inline std::string fractured_json_string(std::string_view json_str,
++                                          const fractured_json_options& options) {
++  // Parse the JSON string
++  dom::parser parser;
++  dom::element doc;
++  // Need to pad the string for simdjson
++  auto padded = padded_string(json_str);
++  auto error = parser.parse(padded).get(doc);
++  if (error) {
++    // If parsing fails, return the original string
++    return std::string(json_str);
++  }
++  return fractured_json(doc, options);
++}
++
++} // namespace simdjson
++
++#endif // SIMDJSON_DOM_FRACTURED_JSON_INL_H
+diff --git a/include/simdjson/dom/fractured_json.h b/include/simdjson/dom/fractured_json.h
+new file mode 100644
+index 00000000..7651c81f
+--- /dev/null
++++ b/include/simdjson/dom/fractured_json.h
+@@ -0,0 +1,159 @@
++#ifndef SIMDJSON_DOM_FRACTURED_JSON_H
++#define SIMDJSON_DOM_FRACTURED_JSON_H
++
++#include "simdjson/dom/base.h"
++#include "simdjson/dom/element.h"
++
++namespace simdjson {
++
++/**
++ * Configuration options for FracturedJson formatting.
++ *
++ * FracturedJson intelligently chooses between different layout strategies
++ * (inline, compact multiline, table, expanded) based on content complexity,
++ * length, and structure similarity.
++ */
++struct fractured_json_options {
++  /**
++   * Maximum total characters per line (default: 120).
++   * Content exceeding this will be expanded to multiple lines.
++   */
++  size_t max_total_line_length = 120;
++
++  /**
++   * Maximum length for inlined elements (default: 80).
++   * Simple arrays/objects shorter than this may be rendered inline.
++   */
++  size_t max_inline_length = 80;
++
++  /**
++   * Maximum nesting depth for inline rendering (default: 2).
++   * Elements with complexity exceeding this will be expanded.
++   * Complexity 0 = scalar, 1 = flat array/object, 2 = one level of nesting.
++   */
++  size_t max_inline_complexity = 2;
++
++  /**
++   * Maximum complexity for compact array formatting (default: 1).
++   * Arrays with elements of this complexity or less may have multiple
++   * items per line.
++   */
++  size_t max_compact_array_complexity = 1;
++
++  /**
++   * Number of spaces per indentation level (default: 4).
++   */
++  size_t indent_spaces = 4;
++
++  /**
++   * Enable tabular formatting for arrays of similar objects (default: true).
++   * When enabled, arrays of objects with identical keys are formatted
++   * as aligned tables.
++   */
++  bool enable_table_format = true;
++
++  /**
++   * Minimum number of rows to trigger table mode (default: 3).
++   */
++  size_t min_table_rows = 3;
++
++  /**
++   * Similarity threshold for table detection (default: 0.8).
++   * Objects must share at least this fraction of keys to be formatted
++   * as a table.
++   */
++  double table_similarity_threshold = 0.8;
++
++  /**
++   * Enable compact multiline arrays (default: true).
++   * When enabled, arrays of simple elements may have multiple items
++   * per line.
++   */
++  bool enable_compact_multiline = true;
++
++  /**
++   * Maximum array items per line in compact mode (default: 10).
++   */
++  size_t max_items_per_line = 10;
++
++  /**
++   * Add space inside brackets for simple containers (default: true).
++   * When true: { "key": "value" }
++   * When false: {"key": "value"}
++   */
++  bool simple_bracket_padding = true;
++
++  /**
++   * Add space after colons (default: true).
++   * When true: "key": "value"
++   * When false: "key":"value"
++   */
++  bool colon_padding = true;
++
++  /**
++   * Add space after commas in inline content (default: true).
++   * When true: [1, 2, 3]
++   * When false: [1,2,3]
++   */
++  bool comma_padding = true;
++};
++
++/**
++ * Format JSON using FracturedJson formatting with default options.
++ *
++ * FracturedJson produces human-readable yet compact output by intelligently
++ * choosing between inline, compact multiline, table, and expanded layouts.
++ *
++ *   dom::parser parser;
++ *   element doc = parser.parse(json_string);
++ *   cout << fractured_json(doc) << endl;
++ */
++template <class T>
++std::string fractured_json(T x);
++
++/**
++ * Format JSON using FracturedJson formatting with custom options.
++ *
++ *   dom::parser parser;
++ *   element doc = parser.parse(json_string);
++ *   fractured_json_options opts;
++ *   opts.max_total_line_length = 80;
++ *   cout << fractured_json(doc, opts) << endl;
++ */
++template <class T>
++std::string fractured_json(T x, const fractured_json_options& options);
++
++#if SIMDJSON_EXCEPTIONS
++template <class T>
++std::string fractured_json(simdjson_result<T> x);
++
++template <class T>
++std::string fractured_json(simdjson_result<T> x, const fractured_json_options& options);
++#endif
++
++/**
++ * Format a JSON string using FracturedJson formatting.
++ *
++ * This is useful for formatting output from the builder/static reflection API
++ * or any valid JSON string.
++ *
++ *   // With static reflection
++ *   MyStruct data = {...};
++ *   auto minified = simdjson::to_json_string(data);
++ *   auto formatted = simdjson::fractured_json_string(minified.value());
++ *
++ *   // Or with any JSON string
++ *   std::string json = R"({"key":"value"})";
++ *   auto formatted = simdjson::fractured_json_string(json);
++ */
++inline std::string fractured_json_string(std::string_view json_str);
++
++/**
++ * Format a JSON string using FracturedJson formatting with custom options.
++ */
++inline std::string fractured_json_string(std::string_view json_str,
++                                          const fractured_json_options& options);
++
++} // namespace simdjson
++
++#endif // SIMDJSON_DOM_FRACTURED_JSON_H
+diff --git a/include/simdjson/generic/builder/amalgamated.h b/include/simdjson/generic/builder/amalgamated.h
+index d09f83c4..f61b1d42 100644
+--- a/include/simdjson/generic/builder/amalgamated.h
++++ b/include/simdjson/generic/builder/amalgamated.h
+@@ -4,6 +4,7 @@
+ 
+ #include "simdjson/generic/builder/json_string_builder.h"
+ #include "simdjson/generic/builder/json_builder.h"
++#include "simdjson/generic/builder/fractured_json_builder.h"
+ 
+ 
+ 
+diff --git a/include/simdjson/generic/builder/dependencies.h b/include/simdjson/generic/builder/dependencies.h
+index fcab068f..a5a26abf 100644
+--- a/include/simdjson/generic/builder/dependencies.h
++++ b/include/simdjson/generic/builder/dependencies.h
+@@ -9,5 +9,6 @@
+ // All includes not under simdjson/generic/builder must be here!
+ // Otherwise, amalgamation will fail.
+ #include "simdjson/concepts.h"
++#include "simdjson/dom/fractured_json.h"
+ 
+ #endif // SIMDJSON_GENERIC_BUILDER_DEPENDENCIES_H
+\ No newline at end of file
+diff --git a/include/simdjson/generic/builder/fractured_json_builder.h b/include/simdjson/generic/builder/fractured_json_builder.h
+new file mode 100644
+index 00000000..d5dda49f
+--- /dev/null
++++ b/include/simdjson/generic/builder/fractured_json_builder.h
+@@ -0,0 +1,117 @@
++#ifndef SIMDJSON_GENERIC_FRACTURED_JSON_BUILDER_H
++#define SIMDJSON_GENERIC_FRACTURED_JSON_BUILDER_H
++
++#ifndef SIMDJSON_CONDITIONAL_INCLUDE
++#include "simdjson/generic/builder/json_builder.h"
++#include "simdjson/dom/fractured_json.h"
++#endif // SIMDJSON_CONDITIONAL_INCLUDE
++
++#if SIMDJSON_STATIC_REFLECTION
++
++namespace simdjson {
++namespace SIMDJSON_IMPLEMENTATION {
++namespace builder {
++
++/**
++ * Serialize an object to a FracturedJson-formatted string.
++ *
++ * FracturedJson produces human-readable yet compact JSON output by intelligently
++ * choosing between different layout strategies (inline, compact multiline, table,
++ * expanded) based on content complexity, length, and structure similarity.
++ *
++ * This function combines the builder's serialization with FracturedJson formatting:
++ * 1. Serializes the object to minified JSON using reflection
++ * 2. Parses and reformats using FracturedJson
++ *
++ * Example:
++ *   struct User { int id; std::string name; bool active; };
++ *   User user{1, "Alice", true};
++ *   auto result = to_fractured_json_string(user);
++ *   // result.value() == "{ \"id\": 1, \"name\": \"Alice\", \"active\": true }"
++ *
++ * @param obj The object to serialize (must be a reflectable type)
++ * @param opts FracturedJson formatting options
++ * @param initial_capacity Initial buffer capacity for serialization
++ * @return The formatted JSON string, or an error
++ */
++template <class T>
++simdjson_warn_unused simdjson_result<std::string> to_fractured_json_string(
++    const T& obj,
++    const fractured_json_options& opts = {},
++    size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  // Step 1: Serialize to minified JSON
++  std::string formatted;
++  auto error = to_json_string(obj, initial_capacity).get(formatted);
++  if (error) {
++    return error;
++  }
++
++  // Step 2: Reformat with FracturedJson
++  return fractured_json_string(formatted, opts);
++}
++
++/**
++ * Extract specific fields from an object and format with FracturedJson.
++ *
++ * Example:
++ *   struct User { int id; std::string name; std::string email; bool active; };
++ *   User user{1, "Alice", "alice@example.com", true};
++ *   auto result = extract_fractured_json<"id", "name">(user);
++ *   // result.value() == "{ \"id\": 1, \"name\": \"Alice\" }"
++ *
++ * @param obj The object to serialize
++ * @param opts FracturedJson formatting options
++ * @param initial_capacity Initial buffer capacity for serialization
++ * @return The formatted JSON string containing only the specified fields
++ */
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_fractured_json(
++    const T& obj,
++    const fractured_json_options& opts = {},
++    size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  // Step 1: Extract fields to minified JSON
++  std::string formatted;
++  auto error = extract_from<FieldNames...>(obj, initial_capacity).get(formatted);
++  if (error) {
++    return error;
++  }
++
++  // Step 2: Reformat with FracturedJson
++  return fractured_json_string(formatted, opts);
++}
++
++} // namespace builder
++} // namespace SIMDJSON_IMPLEMENTATION
++
++// Global namespace convenience functions
++
++/**
++ * Serialize an object to a FracturedJson-formatted string.
++ * Global namespace version for convenience.
++ */
++template <class T>
++simdjson_warn_unused simdjson_result<std::string> to_fractured_json_string(
++    const T& obj,
++    const fractured_json_options& opts = {},
++    size_t initial_capacity = SIMDJSON_IMPLEMENTATION::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  return SIMDJSON_IMPLEMENTATION::builder::to_fractured_json_string(obj, opts, initial_capacity);
++}
++/**
++ * Extract specific fields from an object and format with FracturedJson.
++ * Global namespace version for convenience.
++ */
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_fractured_json(
++    const T& obj,
++    const fractured_json_options& opts = {},
++    size_t initial_capacity = SIMDJSON_IMPLEMENTATION::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  return SIMDJSON_IMPLEMENTATION::builder::extract_fractured_json<FieldNames...>(obj, opts, initial_capacity);
++}
++
++} // namespace simdjson
++
++#endif // SIMDJSON_STATIC_REFLECTION
++
++#endif // SIMDJSON_GENERIC_FRACTURED_JSON_BUILDER_H
+diff --git a/include/simdjson/internal/fractured_formatter.h b/include/simdjson/internal/fractured_formatter.h
+new file mode 100644
+index 00000000..d2d2c092
+--- /dev/null
++++ b/include/simdjson/internal/fractured_formatter.h
+@@ -0,0 +1,161 @@
++#ifndef SIMDJSON_INTERNAL_FRACTURED_FORMATTER_H
++#define SIMDJSON_INTERNAL_FRACTURED_FORMATTER_H
++
++#include "simdjson/dom/serialization.h"
++#include "simdjson/dom/fractured_json.h"
++#include "simdjson/internal/json_structure_analyzer.h"
++
++namespace simdjson {
++namespace internal {
++
++/**
++ * Fractured JSON formatter using CRTP pattern.
++ *
++ * This formatter intelligently chooses between different layout modes
++ * (inline, compact multiline, table, expanded) based on pre-computed
++ * structure metrics.
++ */
++class fractured_formatter : public base_formatter<fractured_formatter> {
++public:
++  explicit fractured_formatter(const fractured_json_options& opts = {});
++
++  /** CRTP hook: print newline (context-aware) */
++  simdjson_inline void print_newline();
++
++  /** CRTP hook: print indentation */
++  simdjson_inline void print_indents(size_t depth);
++
++  /** CRTP hook: print space (context-aware) */
++  simdjson_inline void print_space();
++
++  /** Set the current layout mode */
++  void set_layout_mode(layout_mode mode);
++
++  /** Get the current layout mode */
++  layout_mode get_layout_mode() const;
++
++  /** Set current depth for formatting decisions */
++  void set_depth(size_t depth);
++
++  /** Get current depth */
++  size_t get_depth() const;
++
++  /** Track current line length for compact multiline decisions */
++  void track_line_length(size_t chars);
++
++  /** Reset line length (after newline) */
++  void reset_line_length();
++
++  /** Get current line length */
++  size_t get_line_length() const;
++
++  /** Check if we should break to a new line in compact mode */
++  bool should_break_line(size_t upcoming_length) const;
++
++  /** Get the options */
++  const fractured_json_options& options() const;
++
++  // Table formatting support
++  /** Begin a table row */
++  void begin_table_row();
++
++  /** End a table row */
++  void end_table_row();
++
++  /** Set column widths for table alignment */
++  void set_column_widths(const std::vector<size_t>& widths);
++
++  /** Get current column index in table mode */
++  size_t get_column_index() const;
++
++  /** Advance to next column */
++  void next_column();
++
++  /** Add padding to align with column width */
++  void align_to_column_width(size_t actual_width);
++
++private:
++  fractured_json_options options_;
++  layout_mode current_layout_ = layout_mode::EXPANDED;
++  size_t current_depth_ = 0;
++  size_t current_line_length_ = 0;
++
++  // Table state
++  bool in_table_mode_ = false;
++  std::vector<size_t> column_widths_;
++  size_t current_column_ = 0;
++};
++
++/**
++ * Specialized string builder for fractured JSON formatting.
++ *
++ * This builder performs two passes:
++ * 1. Analyze the structure to compute metrics
++ * 2. Format using the metrics to make layout decisions
++ */
++class fractured_string_builder {
++public:
++  fractured_string_builder(const fractured_json_options& opts = {});
++
++  /** Append a DOM element with fractured formatting */
++  void append(const dom::element& value);
++
++  /** Append a DOM array with fractured formatting */
++  void append(const dom::array& value);
++
++  /** Append a DOM object with fractured formatting */
++  void append(const dom::object& value);
++
++  /** Clear the builder */
++  simdjson_inline void clear();
++
++  /** Get the formatted string */
++  simdjson_inline std::string_view str() const;
++
++private:
++  fractured_formatter format_;
++  structure_analyzer analyzer_;
++  fractured_json_options options_;
++
++  /** Format an element using pre-computed metrics */
++  void format_element(const dom::element& elem, const element_metrics& metrics, size_t depth);
++
++  /** Format an array with the appropriate layout */
++  void format_array(const dom::array& arr, const element_metrics& metrics, size_t depth);
++
++  /** Format an array inline: [1, 2, 3] */
++  void format_array_inline(const dom::array& arr, const element_metrics& metrics);
++
++  /** Format an array with compact multiline: multiple items per line */
++  void format_array_compact_multiline(const dom::array& arr, const element_metrics& metrics, size_t depth);
++
++  /** Format an array as a table */
++  void format_array_as_table(const dom::array& arr, const element_metrics& metrics, size_t depth);
++
++  /** Format an array expanded: one item per line */
++  void format_array_expanded(const dom::array& arr, const element_metrics& metrics, size_t depth);
++
++  /** Format an object with the appropriate layout */
++  void format_object(const dom::object& obj, const element_metrics& metrics, size_t depth);
++
++  /** Format an object inline: {"a": 1, "b": 2} */
++  void format_object_inline(const dom::object& obj, const element_metrics& metrics);
++
++  /** Format an object expanded: one key per line */
++  void format_object_expanded(const dom::object& obj, const element_metrics& metrics, size_t depth);
++
++  /** Format a scalar value */
++  void format_scalar(const dom::element& elem);
++
++  /** Calculate column widths for table formatting */
++  std::vector<size_t> calculate_column_widths(const dom::array& arr,
++                                               const std::vector<std::string>& columns) const;
++
++  /** Measure the actual formatted length of a value (for alignment) */
++  size_t measure_value_length(const dom::element& elem) const;
++};
++
++} // namespace internal
++} // namespace simdjson
++
++#endif // SIMDJSON_INTERNAL_FRACTURED_FORMATTER_H
+diff --git a/include/simdjson/internal/json_structure_analyzer.h b/include/simdjson/internal/json_structure_analyzer.h
+new file mode 100644
+index 00000000..cda34b1e
+--- /dev/null
++++ b/include/simdjson/internal/json_structure_analyzer.h
+@@ -0,0 +1,169 @@
++#ifndef SIMDJSON_INTERNAL_JSON_STRUCTURE_ANALYZER_H
++#define SIMDJSON_INTERNAL_JSON_STRUCTURE_ANALYZER_H
++
++#include "simdjson/dom/base.h"
++#include "simdjson/dom/element.h"
++#include "simdjson/dom/array.h"
++#include "simdjson/dom/object.h"
++#include "simdjson/dom/fractured_json.h"
++#include "simdjson/internal/tape_type.h"
++
++#include <vector>
++#include <string>
++#include <string_view>
++#include <set>
++
++namespace simdjson {
++namespace internal {
++
++/**
++ * Layout mode for fractured JSON formatting.
++ */
++enum class layout_mode {
++  INLINE,              // Single line: [1, 2, 3] or {"a": 1}
++  COMPACT_MULTILINE,   // Multiple items per line with breaks
++  TABLE,               // Tabular format for arrays of similar objects
++  EXPANDED             // Traditional multi-line with indentation
++};
++
++/**
++ * Metrics computed for a JSON element during structure analysis.
++ * These metrics drive layout decisions and contain child metrics for recursive formatting.
++ */
++struct element_metrics {
++  /** Nesting depth score (0 = scalar, 1 = flat container, etc.) */
++  size_t complexity = 0;
++
++  /** Estimated character length if rendered inline (minified + spaces) */
++  size_t estimated_inline_len = 0;
++
++  /** Number of direct children (0 for scalars) */
++  size_t child_count = 0;
++
++  /** Pre-computed: can this element be rendered inline? */
++  bool can_inline = false;
++
++  /** Is this an array where all elements have similar structure? */
++  bool is_uniform_array = false;
++
++  /** For uniform arrays of objects: the common keys */
++  std::vector<std::string> common_keys{};
++
++  /** Recommended layout mode based on analysis */
++  layout_mode recommended_layout = layout_mode::EXPANDED;
++
++  /** Child metrics for arrays and objects (in order of iteration) */
++  std::vector<element_metrics> children{};
++};
++
++/**
++ * Analyzes JSON structure to compute metrics for formatting decisions.
++ *
++ * The analyzer performs a single pass over the DOM to compute:
++ * - Complexity (nesting depth)
++ * - Estimated inline length
++ * - Array uniformity for table detection
++ *
++ * Metrics are stored hierarchically with child metrics embedded in parent metrics,
++ * enabling efficient lookup during formatting without address-based caching.
++ */
++class structure_analyzer {
++public:
++  /** Default constructor */
++  structure_analyzer() : current_opts_(nullptr) {}
++
++  /** Copy constructor - deleted since class has pointer member */
++  structure_analyzer(const structure_analyzer&) = delete;
++
++  /** Copy assignment - deleted since class has pointer member */
++  structure_analyzer& operator=(const structure_analyzer&) = delete;
++
++  /** Move constructor */
++  structure_analyzer(structure_analyzer&&) = default;
++
++  /** Move assignment */
++  structure_analyzer& operator=(structure_analyzer&&) = default;
++
++  /**
++   * Analyze a DOM element and compute metrics.
++   * @param elem The element to analyze
++   * @param opts Formatting options that affect metric computation
++   * @return Metrics for the root element (with child metrics embedded)
++   */
++  element_metrics analyze(const dom::element& elem,
++                          const fractured_json_options& opts);
++
++  /**
++   * Clear state.
++   */
++  void clear();
++
++  /**
++   * Analyze an array element directly (for standalone array formatting).
++   * @param arr The array to analyze
++   * @param opts Formatting options
++   * @return Metrics for the array
++   */
++  element_metrics analyze_array(const dom::array& arr,
++                                const fractured_json_options& opts);
++
++  /**
++   * Analyze an object element directly (for standalone object formatting).
++   * @param obj The object to analyze
++   * @param opts Formatting options
++   * @return Metrics for the object
++   */
++  element_metrics analyze_object(const dom::object& obj,
++                                 const fractured_json_options& opts);
++
++private:
++  const fractured_json_options* current_opts_ = nullptr;
++
++  /** Recursive analysis implementation */
++  element_metrics analyze_element(const dom::element& elem, size_t depth);
++
++  /** Analyze scalar values (strings, numbers, booleans, null) */
++  element_metrics analyze_scalar(const dom::element& elem);
++
++  /** Analyze an array element */
++  element_metrics analyze_array(const dom::array& arr, size_t depth);
++
++  /** Analyze an object element */
++  element_metrics analyze_object(const dom::object& obj, size_t depth);
++
++  /** Estimate inline length for a string (including quotes and escaping) */
++  size_t estimate_string_length(std::string_view s) const;
++
++  /** Estimate inline length for a number */
++  size_t estimate_number_length(double d) const;
++  size_t estimate_number_length(int64_t i) const;
++  size_t estimate_number_length(uint64_t u) const;
++
++  /**
++   * Check if an array contains uniform objects suitable for table formatting.
++   * @param arr The array to check
++   * @param common_keys Output: keys common to all objects
++   * @return true if the array is suitable for table formatting
++   */
++  bool check_array_uniformity(const dom::array& arr,
++                               std::vector<std::string>& common_keys) const;
++
++  /**
++   * Compute similarity between two objects.
++   * @return Fraction of keys that are common (0.0 to 1.0)
++   */
++  double compute_object_similarity(const dom::object& a,
++                                   const dom::object& b) const;
++
++  /**
++   * Decide the recommended layout mode based on metrics and options.
++   */
++  layout_mode decide_layout(const element_metrics& metrics,
++                            size_t depth,
++                            size_t available_width) const;
++};
++
++} // namespace internal
++} // namespace simdjson
++
++#endif // SIMDJSON_INTERNAL_JSON_STRUCTURE_ANALYZER_H
+diff --git a/singleheader/amalgamate.py b/singleheader/amalgamate.py
+index 71cd85a2..978f01be 100755
+--- a/singleheader/amalgamate.py
++++ b/singleheader/amalgamate.py
+@@ -231,7 +231,11 @@ class SimdjsonFile:
+     @property
+     def is_amalgamator(self):
+         if self.implementation:
+-            return self.root == 'src' or self.include_dir == 'simdjson' or self.filename == 'ondemand.h'or self.filename == 'builder.h'  or self.filename == 'implementation.h'
++            return (self.root == 'src' or
++                    self.include_dir == 'simdjson' or
++                    self.filename == 'ondemand.h' or
++                    self.filename == 'builder.h' or
++                    self.filename == 'implementation.h')
+         else:
+             return self.filename == 'amalgamated.h'
+ 
+@@ -319,7 +323,7 @@ class SimdjsonRepository:
+         result = None
+         for relative_root in self.relative_roots:
+             if os.path.exists(os.path.join(self.project_path, relative_root, filename)):
+-                assert result is None, f"Error: File '{filename}' exists in both '{result}' and '{root}' directories. Files must be unique across roots to avoid ambiguity. Rename or move the duplicate file.{result}' and '{root}' directories. Files must be unique across roots to avoid ambiguity. Rename or move the duplicate file."
++                assert result is None, f"Error: File '{filename}' exists in both '{result}' and '{relative_root}' directories. Files must be unique across roots to avoid ambiguity. Rename or move the duplicate file."
+                 result = relative_root
+         return result
+ 

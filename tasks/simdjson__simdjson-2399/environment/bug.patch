@@ -1,0 +1,277 @@
+diff --git a/include/simdjson/generic/ondemand/deserialize.h b/include/simdjson/generic/ondemand/deserialize.h
+index 1e310fba..8bad5699 100644
+--- a/include/simdjson/generic/ondemand/deserialize.h
++++ b/include/simdjson/generic/ondemand/deserialize.h
+@@ -77,7 +77,7 @@ template <typename T, typename ValT = SIMDJSON_IMPLEMENTATION::ondemand::value>
+ concept custom_deserializable = tag_invocable<deserialize_tag, ValT&, T&>;
+ 
+ template <typename T, typename ValT = SIMDJSON_IMPLEMENTATION::ondemand::value>
+-concept deserializable = custom_deserializable<T, ValT> || is_builtin_deserializable_v<T> || concepts::optional_type<T>;
++concept deserializable = custom_deserializable<T, ValT> || is_builtin_deserializable_v<T>;
+ 
+ template <typename T, typename ValT = SIMDJSON_IMPLEMENTATION::ondemand::value>
+ concept nothrow_custom_deserializable = nothrow_tag_invocable<deserialize_tag, ValT&, T&>;
+diff --git a/include/simdjson/generic/ondemand/std_deserialize.h b/include/simdjson/generic/ondemand/std_deserialize.h
+index 7c8f518a..25ef2f5d 100644
+--- a/include/simdjson/generic/ondemand/std_deserialize.h
++++ b/include/simdjson/generic/ondemand/std_deserialize.h
+@@ -248,11 +248,18 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept(nothrow_deser
+ /**
+  * This CPO (Customization Point Object) will help deserialize into optional types.
+  */
+-template <concepts::optional_type T>
++template <concepts::optional_type T, typename ValT>
+   requires(!require_custom_serialization<T>)
+-error_code tag_invoke(deserialize_tag, auto &val, T &out) noexcept(nothrow_deserializable<typename std::remove_cvref_t<T>::value_type, decltype(val)>) {
++error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept(nothrow_deserializable<typename std::remove_cvref_t<T>::value_type, ValT>) {
+   using value_type = typename std::remove_cvref_t<T>::value_type;
+ 
++  static_assert(
++      deserializable<value_type, ValT>,
++      "The specified type inside the optional must itself be deserializable");
++  static_assert(
++      std::is_default_constructible_v<value_type>,
++      "The specified type inside the optional must default constructible.");
++
+   // Check if the value is null
+   if (val.is_null()) {
+     out.reset(); // Set to nullopt
+@@ -316,10 +323,12 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept {
+   [:expand(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked())):] >> [&]<auto mem>() {
+     if constexpr (!std::meta::is_const(mem) && std::meta::is_public(mem)) {
+       constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
+-      // Note: removed static assert as optional types are now handled generically
++      static_assert(
++        deserializable<decltype(out.[:mem:]), SIMDJSON_IMPLEMENTATION::ondemand::object>,
++        "The specified type inside the class must itself be deserializable");
+       // as long we are succesful or the field is not found, we continue
+       if(e == simdjson::SUCCESS || e == simdjson::NO_SUCH_FIELD) {
+-        e = obj[key].get(out.[:mem:]);
++        obj[key].get(out.[:mem:]);
+       }
+     }
+   };
+@@ -527,6 +536,37 @@ error_code tag_invoke(deserialize_tag, auto &val, std::shared_ptr<std::string_vi
+ ////////////////////////////////////////
+ // Explicit optional specializations
+ ////////////////////////////////////////
++error_code tag_invoke(deserialize_tag, auto &val, std::optional<std::string> &out) noexcept {
++  // Check if the value is null
++  if (val.is_null()) {
++    out.reset(); // Set to nullopt
++    return SUCCESS;
++  }
++
++  if (!out) {
++    out.emplace();
++  }
++  std::string_view str;
++  SIMDJSON_TRY(val.get_string().get(str));
++  out.value() = std::string{str};
++  return SUCCESS;
++}
++
++error_code tag_invoke(deserialize_tag, auto &val, std::optional<int> &out) noexcept {
++  // Check if the value is null
++  if (val.is_null()) {
++    out.reset(); // Set to nullopt
++    return SUCCESS;
++  }
++
++  if (!out) {
++    out.emplace();
++  }
++  int64_t temp;
++  SIMDJSON_TRY(val.get_int64().get(temp));
++  out.value() = static_cast<int>(temp);
++  return SUCCESS;
++}
+ 
+ ////////////////////////////////////////
+ // Explicit smart pointer specializations for string and int types
+diff --git a/include/simdjson/generic/ondemand/value.h b/include/simdjson/generic/ondemand/value.h
+index 6d3c8d27..dc175bab 100644
+--- a/include/simdjson/generic/ondemand/value.h
++++ b/include/simdjson/generic/ondemand/value.h
+@@ -75,19 +75,6 @@ public:
+   #if SIMDJSON_SUPPORTS_DESERIALIZATION
+   if constexpr (custom_deserializable<T, value>) {
+       return deserialize(*this, out);
+-  } else if constexpr (concepts::optional_type<T>) {
+-      using value_type = typename std::remove_cvref_t<T>::value_type;
+-
+-      // Check if the value is null
+-      if (is_null()) {
+-        out.reset(); // Set to nullopt
+-        return SUCCESS;
+-      }
+-
+-      if (!out) {
+-        out.emplace();
+-      }
+-      return get<value_type>(out.value());
+   } else {
+     static_assert(!sizeof(T), "The get<T> method with type T is not implemented by the simdjson library. "
+       "And you do not seem to have added support for it. Indeed, we have that "
+diff --git a/tests/builder/static_reflection_builder_tests.cpp b/tests/builder/static_reflection_builder_tests.cpp
+index 3b0981db..d48086fd 100644
+--- a/tests/builder/static_reflection_builder_tests.cpp
++++ b/tests/builder/static_reflection_builder_tests.cpp
+@@ -48,11 +48,14 @@ namespace builder_tests {
+ 
+   bool car_test() {
+     TEST_START();
+-#if SIMDJSON_STATIC_REFLECTION
++    simdjson::builder::string_builder sb;
+     Car c = {"Toyota", "Corolla", 2017, {30.0,30.2,30.513,30.79}};
+-    auto result = builder::to_json_string(c);
++    append(sb, c);
++    std::string_view p;
++    auto result = sb.view().get(p);
+     ASSERT_SUCCESS(result);
+-    std::string pstr = result.value();
++    ASSERT_EQUAL(p, "{\"make\":\"Toyota\",\"model\":\"Corolla\",\"year\":2017,\"tire_pressure\":[30.0,30.2,30.513,30.79]}");
++    std::string pstr(p.begin(), p.end());
+     ASSERT_EQUAL(pstr, "{\"make\":\"Toyota\",\"model\":\"Corolla\",\"year\":2017,\"tire_pressure\":[30.0,30.2,30.513,30.79]}");
+     simdjson::ondemand::parser parser;
+     simdjson::ondemand::document doc;
+@@ -67,14 +70,12 @@ namespace builder_tests {
+     ASSERT_EQUAL(c2.tire_pressure[1], 30.2);
+     ASSERT_EQUAL(c2.tire_pressure[2], 30.513);
+     ASSERT_EQUAL(c2.tire_pressure[3], 30.79);
+-#endif
+     TEST_SUCCEED();
+   }
+ 
+ 
+ bool serialize_deserialize_kid() {
+   TEST_START();
+-#if SIMDJSON_STATIC_REFLECTION
+   simdjson::padded_string json_str =
+       R"({"age": 12, "name": "John", "toys": ["car", "ball"]})"_padded;
+   simdjson::ondemand::parser parser;
+@@ -89,7 +90,7 @@ bool serialize_deserialize_kid() {
+   ASSERT_EQUAL(k.toys[1], "ball");
+   // Now, go the other direction:
+   std::string json;
+-  ASSERT_SUCCESS(builder::to_json_string(k).get(json));
++  ASSERT_SUCCESS(simdjson::builder::to_json_string(k).get(json));
+   std::cout << json << std::endl;
+   // Now we parse it back:
+   simdjson::ondemand::parser parser2;
+@@ -102,13 +103,11 @@ bool serialize_deserialize_kid() {
+   ASSERT_EQUAL(k2.toys.size(), 2);
+   ASSERT_EQUAL(k2.toys[0], "car");
+   ASSERT_EQUAL(k2.toys[1], "ball");
+-#endif
+   TEST_SUCCEED();
+ }
+ 
+ bool serialize_deserialize_x_y_z() {
+   TEST_START();
+-#if SIMDJSON_STATIC_REFLECTION
+   X s1 = {.a = '1',
+           .b = 10,
+           .c = 0,
+@@ -120,7 +119,7 @@ bool serialize_deserialize_x_y_z() {
+                 .i = {1, 2, 3},
+                 .z = {.x = 1000}}};
+   std::string pstr;
+-  ASSERT_SUCCESS(builder::to_json_string(s1).get(pstr));
++  ASSERT_SUCCESS(simdjson::builder::to_json_string(s1).get(pstr));
+   ASSERT_EQUAL(
+       pstr,
+       R"({"a":"1","b":10,"c":0,"d":"test string\n\r\"","e":[1,2,3],"f":["ab","cd","fg"],"y":{"g":100,"h":"test string\n\r\"","i":[1,2,3],"z":{"x":1000}}})");
+@@ -130,7 +129,6 @@ bool serialize_deserialize_x_y_z() {
+   X s2;
+   ASSERT_SUCCESS(doc.get<X>().get(s2));
+   ASSERT_TRUE(s1 == s2);
+-#endif
+   TEST_SUCCEED();
+ }
+ 
+diff --git a/tests/builder/static_reflection_comprehensive_tests.cpp b/tests/builder/static_reflection_comprehensive_tests.cpp
+index 426dfc5e..ef8eb1e2 100644
+--- a/tests/builder/static_reflection_comprehensive_tests.cpp
++++ b/tests/builder/static_reflection_comprehensive_tests.cpp
+@@ -215,13 +215,42 @@ namespace builder_tests {
+     TEST_SUCCEED();
+   }
+ 
++  bool test_individual_serialization() {
++    TEST_START();
++
++    // Test individual type serialization (not part of structs)
++    auto bool_result = builder::to_json_string(true);
++    ASSERT_SUCCESS(bool_result);
++    ASSERT_EQUAL(bool_result.value(), "true");
++
++    auto int_result = builder::to_json_string(42);
++    ASSERT_SUCCESS(int_result);
++    ASSERT_EQUAL(int_result.value(), "42");
++
++    auto string_result = builder::to_json_string(std::string("hello"));
++    ASSERT_SUCCESS(string_result);
++    ASSERT_EQUAL(string_result.value(), "\"hello\"");
++
++    auto char_result = builder::to_json_string('X');
++    ASSERT_SUCCESS(char_result);
++    ASSERT_EQUAL(char_result.value(), "\"X\"");
++
++    // Test const char* serialization (serialization only, not round-trip)
++    const char* cstring = "cstring";
++    auto cstring_result = builder::to_json_string(cstring);
++    ASSERT_SUCCESS(cstring_result);
++    ASSERT_EQUAL(cstring_result.value(), "\"cstring\"");
++
++    TEST_SUCCEED();
++  }
+ 
+   bool run() {
+     return test_primitive_types() &&
+            test_string_types() &&
+            test_optional_types() &&
+            test_smart_pointer_types() &&
+-           test_container_types();
++           test_container_types() &&
++           test_individual_serialization();
+   }
+ 
+ } // namespace builder_tests
+diff --git a/tests/builder/static_reflection_edge_cases_tests.cpp b/tests/builder/static_reflection_edge_cases_tests.cpp
+index 3037414a..27047fbb 100644
+--- a/tests/builder/static_reflection_edge_cases_tests.cpp
++++ b/tests/builder/static_reflection_edge_cases_tests.cpp
+@@ -215,12 +215,31 @@ namespace builder_tests {
+     TEST_SUCCEED();
+   }
+ 
++  bool test_const_char_serialization_only() {
++    TEST_START();
++
++    // Test that const char* can be serialized (but not round-tripped)
++    const char* test_cstring = "const char test";
++    auto result = builder::to_json_string(test_cstring);
++    ASSERT_SUCCESS(result);
++    ASSERT_EQUAL(result.value(), "\"const char test\"");
++
++    // Test with special characters in const char*
++    const char* special_cstring = "quotes\"and\\backslashes";
++    auto special_result = builder::to_json_string(special_cstring);
++    ASSERT_SUCCESS(special_result);
++    ASSERT_TRUE(special_result.value().find("\\\"") != std::string::npos);
++    ASSERT_TRUE(special_result.value().find("\\\\") != std::string::npos);
++
++    TEST_SUCCEED();
++  }
+ 
+   bool run() {
+     return test_empty_values() &&
+            test_special_characters() &&
+            test_numeric_limits() &&
+-           test_nested_structures();
++           test_nested_structures() &&
++           test_const_char_serialization_only();
+   }
+ 
+ } // namespace builder_tests

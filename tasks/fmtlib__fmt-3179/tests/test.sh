@@ -8,12 +8,28 @@ cp "/tests/format-test.cc" "test/format-test.cc"
 mkdir -p "test"
 cp "/tests/printf-test.cc" "test/printf-test.cc"
 
-# Rebuild tests with the updated test files
-cmake --build build --target format-test printf-test
+# Reconfigure CMake with updated test files
+cmake -S . -B build \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_STANDARD=23 \
+    -DFMT_TEST=ON
 
-# Run the specific test executables
-./build/bin/format-test && ./build/bin/printf-test
-test_status=$?
+# Build the project and the specific test executables
+if ! cmake --build build --target format-test printf-test 2>&1; then
+    echo "FAIL: Build failed"
+    test_status=1
+else
+    # Run the specific test executables
+    if ./build/bin/format-test && ./build/bin/printf-test; then
+        echo "PASS: All tests passed"
+        test_status=0
+    else
+        echo "FAIL: Tests failed"
+        test_status=1
+    fi
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

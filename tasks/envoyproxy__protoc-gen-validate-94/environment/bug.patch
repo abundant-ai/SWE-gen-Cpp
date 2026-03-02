@@ -1,0 +1,598 @@
+diff --git a/.gitignore b/.gitignore
+index ee16f03..db007a9 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -3,7 +3,6 @@ bazel-*
+ !vendor/*
+ 
+ /gogofast
+-/gogofast.exe
+ 
+ /tests/harness/cases/go
+ /tests/harness/cases/gogo
+@@ -11,12 +10,9 @@ bazel-*
+ /tests/harness/cases/other_package/gogo
+ /tests/harness/go/harness.pb.go
+ /tests/harness/go/main/go-harness
+-/tests/harness/go/main/go-harness.exe
+ /tests/harness/gogo/harness.pb.go
+ /tests/harness/gogo/main/go-harness
+-/tests/harness/gogo/main/go-harness.exe
+ /tests/harness/cc/cc-harness
+-/tests/harness/cc/cc-harness.exe
+ 
+ /tests/kitchensink/go/
+ /tests/kitchensink/gogo/
+diff --git a/WORKSPACE b/WORKSPACE
+index 9b3b000..3f0c526 100644
+--- a/WORKSPACE
++++ b/WORKSPACE
+@@ -1,31 +1,27 @@
+ workspace(name = "com_lyft_protoc_gen_validate")
+ 
+-load('@bazel_tools//tools/build_defs/repo:http.bzl', 'http_archive')
++load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
+ 
+-http_archive(
++git_repository(
+     name = "io_bazel_rules_go",
+-    url = "https://github.com/bazelbuild/rules_go/releases/download/0.14.0/rules_go-0.14.0.tar.gz",
+-    sha256 = "5756a4ad75b3703eb68249d50e23f5d64eaf1593e886b9aa931aa6e938c4e301",
++    remote = "https://github.com/bazelbuild/rules_go.git",
++    commit = "238329474a90d8ac8c128cec3184c515ef467c04",
+ )
+ http_archive(
+     name = "bazel_gazelle",
+-    url = "https://github.com/bazelbuild/bazel-gazelle/releases/download/0.14.0/bazel-gazelle-0.14.0.tar.gz",
+-    sha256 = "c0a5739d12c6d05b6c1ad56f2200cb0b57c5a70e03ebd2f7b87ce88cabf09c7b",
++    urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/0.13.0/bazel-gazelle-0.13.0.tar.gz"],
++    sha256 = "bc653d3e058964a5a26dcad02b6c72d7d63e6bb88d94704990b908a1445b8758",
+ )
+-# TODO: use released version of protobuf that includes commit
+-# fa252ec2a54acb24ddc87d48fed1ecfd458445fd. This works around the issue
+-# described here: https://github.com/google/protobuf/pull/5024
++
++
++# TODO(htuch): This can switch back to a point release http_archive at the next
++# release (> 3.4.1), we need HEAD proto_library support and
++# https://github.com/google/protobuf/pull/3761.
+ http_archive(
+     name = "com_google_protobuf",
+-    url = "https://github.com/google/protobuf/archive/fa252ec2a54acb24ddc87d48fed1ecfd458445fd.tar.gz",
+-    sha256 = "3d610ac90f8fa16e12490088605c248b85fdaf23114ce4b3605cdf81f7823604",
+-    strip_prefix = "protobuf-fa252ec2a54acb24ddc87d48fed1ecfd458445fd",
+-)
+-http_archive(
+-    name = "bazel_skylib",
+-    url = "https://github.com/bazelbuild/bazel-skylib/archive/0.5.0.tar.gz",
+-    sha256 = "b5f6abe419da897b7901f90cbab08af958b97a8f3575b0d3dd062ac7ce78541f",
+-    strip_prefix = "bazel-skylib-0.5.0",
++    strip_prefix = "protobuf-c4f59dcc5c13debc572154c8f636b8a9361aacde",
++    sha256 = "5d4551193416861cb81c3bc0a428f22a6878148c57c31fb6f8f2aa4cf27ff635",
++    url = "https://github.com/google/protobuf/archive/c4f59dcc5c13debc572154c8f636b8a9361aacde.tar.gz",
+ )
+ 
+ load("@io_bazel_rules_go//go:def.bzl", "go_rules_dependencies", "go_register_toolchains")
+diff --git a/bazel/protobuf.bzl b/bazel/protobuf.bzl
+index cd9fdde..6177054 100644
+--- a/bazel/protobuf.bzl
++++ b/bazel/protobuf.bzl
+@@ -44,7 +44,7 @@ def _protoc_gen_validate_impl(ctx):
+   descriptor_args = [ds.path for ds in tds]
+ 
+   if len(descriptor_args) != 0:
+-    args += ["--descriptor_set_in=%s" % ctx.configuration.host_path_separator.join(descriptor_args)]
++    args += ["--descriptor_set_in=%s" % ":".join(descriptor_args)]
+ 
+   ctx.action(
+       inputs=protos + tds.to_list() + [ctx.executable._plugin],
+diff --git a/templates/cc/repeated.go b/templates/cc/repeated.go
+index d620266..6fca277 100644
+--- a/templates/cc/repeated.go
++++ b/templates/cc/repeated.go
+@@ -33,9 +33,9 @@ const repTpl = `
+ 
+ 	// Implement hashing for wrapped reference types
+ 	struct hash {
+-		std::hash<{{ $typ }}> hash_fn;
++		std::hash<{{ $typ }}> hash;
+ 		bool operator() (const std::reference_wrapper<{{ $typ }}> ref) const {
+-			return hash_fn(ref.get());
++			return hash(ref.get());
+ 		}
+ 	};
+ 
+diff --git a/tests/harness/cc/BUILD b/tests/harness/cc/BUILD
+index 6a3c007..4690014 100644
+--- a/tests/harness/cc/BUILD
++++ b/tests/harness/cc/BUILD
+@@ -1,10 +1,4 @@
+-MSVC_C_OPTS = [
+-    "-WX",
+-    "-DWIN32",
+-    "-DWIN32_LEAN_AND_MEAN",
+-]
+-
+-POSIX_C_OPTS = [
++C_OPTS = [
+     "-Wall",
+     "-Wextra",
+     "-Werror",
+@@ -14,19 +8,11 @@ POSIX_C_OPTS = [
+     "-std=c++14",
+ ]
+ 
+-config_setting(
+-    name = "windows_x86_64",
+-    values = {"cpu": "x64_windows"},
+-)
+-
+ cc_binary(
+     name = "cc-harness",
+     srcs = ["harness.cc"],
+     # These ensure that we are at least compatible with what Envoy is expecting.
+-    copts = select({
+-      ":windows_x86_64": MSVC_C_OPTS,
+-      "//conditions:default": POSIX_C_OPTS,
+-    }),
++    copts = C_OPTS,
+     visibility = ["//visibility:public"],
+     deps = [
+         "//tests/harness:harness_proto",
+@@ -39,10 +25,7 @@ cc_binary(
+ cc_test(
+     name = "cc_diamond_test",
+     srcs = ["diamond_test.cc"],
+-    copts = select({
+-      ":windows_x86_64": MSVC_C_OPTS,
+-      "//conditions:default": POSIX_C_OPTS,
+-    }),
++    copts = C_OPTS,
+     linkstatic = 1,  # Forces both libraries to be linked in. DO NOT REMOVE THIS
+     deps = [
+         "cc_diamond_0",
+@@ -53,10 +36,7 @@ cc_test(
+ cc_library(
+     name = "cc_diamond_0",
+     srcs = ["diamond_lib.cc"],
+-    copts = select({
+-      ":windows_x86_64": MSVC_C_OPTS,
+-      "//conditions:default": POSIX_C_OPTS,
+-    }),
++    copts = C_OPTS,
+     deps = ["//tests/harness/cases:cc"],
+     alwayslink = 1,
+ )
+@@ -64,10 +44,7 @@ cc_library(
+ cc_library(
+     name = "cc_diamond_1",
+     srcs = ["diamond_lib.cc"],
+-    copts = select({
+-      ":windows_x86_64": MSVC_C_OPTS,
+-      "//conditions:default": POSIX_C_OPTS,
+-    }),
++    copts = C_OPTS,
+     deps = ["//tests/harness/cases:cc"],
+     alwayslink = 1,
+ )
+diff --git a/tests/harness/cc/harness.cc b/tests/harness/cc/harness.cc
+index 84aa20c..437908c 100644
+--- a/tests/harness/cc/harness.cc
++++ b/tests/harness/cc/harness.cc
+@@ -1,12 +1,6 @@
+ #include <functional>
+ #include <iostream>
+ 
+-#if defined(WIN32)
+-#include <stdio.h>
+-#include <io.h>
+-#include <fcntl.h>
+-#endif
+-
+ #include "validate/validate.h"
+ 
+ #include "tests/harness/cases/bool.pb.h"
+@@ -128,12 +122,6 @@ std::function<TestResult()> GetValidationCheck(const Any& msg) {
+ 
+ int main() {
+   TestCase test_case;
+-
+-#if defined(WIN32)
+-  // need to explicitly set the stdin file mode to binary on Windows
+-  ExitIfFailed(_setmode(_fileno(stdin), _O_BINARY) != -1, "failed to set stdin to binary mode");
+-#endif
+-
+   ExitIfFailed(test_case.ParseFromIstream(&std::cin), "failed to parse TestCase");
+ 
+   auto validate_fn = GetValidationCheck(test_case.message());
+diff --git a/tests/harness/executor/BUILD b/tests/harness/executor/BUILD
+index 4ece3f4..ac12818 100644
+--- a/tests/harness/executor/BUILD
++++ b/tests/harness/executor/BUILD
+@@ -1,10 +1,5 @@
+ load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
+ 
+-config_setting(
+-    name = "windows_x86_64",
+-    values = {"cpu": "x64_windows"},
+-)
+-
+ go_library(
+     name = "go_default_library",
+     srcs = [
+@@ -31,16 +26,11 @@ go_library(
+ 
+ go_binary(
+     name = "executor",
+-    data = ["//tests/harness/cc:cc-harness"] + select({
+-      ":windows_x86_64": [
+-        "//tests/harness/go/main:go-harness-exe",
+-        "//tests/harness/gogo/main:go-harness-exe",
+-    ],
+-      "//conditions:default": [
++    data = [
++        "//tests/harness/cc:cc-harness",
+         "//tests/harness/go/main:go-harness",
+         "//tests/harness/gogo/main:go-harness",
+-    ]
+-    }),
++    ],
+     embed = [":go_default_library"],
+     importpath = "github.com/lyft/protoc-gen-validate/tests/harness/executor",
+     visibility = ["//visibility:private"],
+diff --git a/tests/harness/executor/harness.go b/tests/harness/executor/harness.go
+index 5dc06b4..9eb83eb 100644
+--- a/tests/harness/executor/harness.go
++++ b/tests/harness/executor/harness.go
+@@ -1,13 +1,10 @@
+ package main
+ 
+ import (
+-	"bufio"
+ 	"bytes"
+ 	"fmt"
+ 	"io"
+-	"os"
+ 	"os/exec"
+-	"runtime"
+ 	"sync"
+ 
+ 	"strings"
+@@ -29,27 +26,6 @@ type Harness struct {
+ }
+ 
+ func InitHarness(cmd string, args ...string) Harness {
+-	if runtime.GOOS == "windows" {
+-		// Bazel runfiles are not symlinked in on windows,
+-		// so we have to use the manifest instead. If the manifest
+-		// doesn't exist, assume we're running in a non-Bazel context
+-		f, err := os.Open("MANIFEST")
+-		if err == nil {
+-			defer f.Close()
+-
+-			s := bufio.NewScanner(f)
+-			manifest := map[string]string{}
+-			for s.Scan() {
+-				values := strings.Split(s.Text(), " ")
+-				manifest[values[0]] = values[1]
+-			}
+-			for k, v := range manifest {
+-				if strings.Contains(k, cmd) {
+-					cmd = v
+-				}
+-			}
+-		}
+-	}
+ 
+ 	return Harness{
+ 		Name: cmd,
+diff --git a/tests/harness/go/main/BUILD b/tests/harness/go/main/BUILD
+index ad17afd..05bae7e 100644
+--- a/tests/harness/go/main/BUILD
++++ b/tests/harness/go/main/BUILD
+@@ -22,14 +22,6 @@ genrule(
+     visibility = ["//visibility:public"],
+ )
+ 
+-genrule(
+-    name = "go-harness-exe",
+-    srcs = [":main"],
+-    outs = ["go-harness.exe"],
+-    cmd = "cp $(SRCS) $@",
+-    visibility = ["//visibility:public"],
+-)
+-
+ go_binary(
+     name = "main",
+     embed = [":go_default_library"],
+diff --git a/tests/harness/gogo/main/BUILD.bazel b/tests/harness/gogo/main/BUILD.bazel
+index a322f40..3e5e933 100644
+--- a/tests/harness/gogo/main/BUILD.bazel
++++ b/tests/harness/gogo/main/BUILD.bazel
+@@ -22,14 +22,6 @@ genrule(
+     visibility = ["//visibility:public"],
+ )
+ 
+-genrule(
+-    name = "go-harness-exe",
+-    srcs = [":main"],
+-    outs = ["go-harness.exe"],
+-    cmd = "cp $(SRCS) $@",
+-    visibility = ["//visibility:public"],
+-)
+-
+ go_binary(
+     name = "main",
+     embed = [":go_default_library"],
+diff --git a/validate/validate.h b/validate/validate.h
+index 80a48eb..361626f 100644
+--- a/validate/validate.h
++++ b/validate/validate.h
+@@ -9,13 +9,6 @@
+ #include <google/protobuf/message.h>
+ #include <google/protobuf/util/time_util.h>
+ 
+-// It looks like one of the above protobuf headers includes windows.h. This
+-// causes GetMessage to be defined to GetMessageA or GetMessageW, interfering
+-// with the protobuf code
+-#if defined(WIN32) && defined(GetMessage)
+-#undef GetMessage
+-#endif
+-
+ namespace pgv {
+ using std::string;
+ 
+@@ -35,11 +28,7 @@ protected:
+   static std::map<size_t, BaseValidator*> validators;
+ };
+ 
+-#if !defined(WIN32)
+ std::map<size_t, BaseValidator*> __attribute__((weak)) BaseValidator::validators;
+-#else
+-__declspec(selectany) std::map<size_t, BaseValidator*> BaseValidator::validators;
+-#endif
+ 
+ template <typename T>
+ class Validator : public BaseValidator {
+diff --git a/windows/bazel.rc b/windows/bazel.rc
+deleted file mode 100644
+index fe47137..0000000
+--- a/windows/bazel.rc
++++ /dev/null
+@@ -1,3 +0,0 @@
+-# TODO: remove experimental_shortened_obj_file_path for Bazel 0.16.0
+-build --experimental_shortened_obj_file_path
+-build --verbose_failures
+diff --git a/windows/ci.ps1 b/windows/ci.ps1
+deleted file mode 100644
+index 3e52eae..0000000
+--- a/windows/ci.ps1
++++ /dev/null
+@@ -1,227 +0,0 @@
+-$ErrorActionPreference = "Stop";
+-trap { $host.SetShouldExit(1) }
+-
+-$package = "github.com/lyft/protoc-gen-validate"
+-
+-# protoc-gen-go parameters for properly generating the import path for PGV
+-$validate_import = "Mvalidate/validate.proto=$package/validate"
+-$go_import = "$validate_import," +`
+-  "Mgoogle/protobuf/any.proto=github.com/golang/protobuf/ptypes/any," +`
+-  "Mgoogle/protobuf/duration.proto=github.com/golang/protobuf/ptypes/duration," +`
+-  "Mgoogle/protobuf/struct.proto=github.com/golang/protobuf/ptypes/struct," +`
+-  "Mgoogle/protobuf/timestamp.proto=github.com/golang/protobuf/ptypes/timestamp," +`
+-  "Mgoogle/protobuf/wrappers.proto=github.com/golang/protobuf/ptypes/wrappers," +`
+-  "Mgoogle/protobuf/descriptor.proto=github.com/golang/protobuf/protoc-gen-go/descriptor," +`
+-  "Mgogoproto/gogo.proto=$package/gogoproto"
+-
+-# protoc-gen-gogo parameters
+-$gogo_import = "$validate_import," +`
+-  "Mgoogle/protobuf/any.proto=github.com/gogo/protobuf/types," +`
+-  "Mgoogle/protobuf/duration.proto=github.com/gogo/protobuf/types," +`
+-  "Mgoogle/protobuf/struct.proto=github.com/gogo/protobuf/types," +`
+-  "Mgoogle/protobuf/timestamp.proto=github.com/gogo/protobuf/types," +`
+-  "Mgoogle/protobuf/wrappers.proto=github.com/gogo/protobuf/types," +`
+-  "Mgoogle/protobuf/descriptor.proto=github.com/gogo/protobuf/types," +`
+-  "Mgogoproto/gogo.proto=github.com/gogo/protobuf/gogoproto"
+-
+-#lint:
+-# don't need to run linter on Windows (it already runs on Linux)
+-
+-#build:
+-# generates the PGV binary and installs it into $$GOPATH/bin
+-go install .
+-if ($LASTEXITCODE -ne 0) {
+-  exit $LASTEXITCODE
+-}
+-
+-#tests:
+-# runs all tests against the package with race detection and coverage percentage
+-go test -race -cover
+-if ($LASTEXITCODE -ne 0) {
+-  exit $LASTEXITCODE
+-}
+-
+-# tests validate proto generation
+-bazel "--output_base=c:\_pgv" "--bazelrc=windows\bazel.rc" build //validate:go_default_library
+-$le = $LASTEXITCODE
+-if ($le -ne 0) {
+-  exit $le
+-}
+-
+-$diff = Compare-Object (Get-Content "bazel-out\x64_windows-fastbuild\bin\validate\windows_amd64_stripped\go_default_library%\github.com\lyft\protoc-gen-validate\validate\validate.pb.go") (Get-Content "validate\validate.pb.go")
+-if ($diff -ne $null) {
+-  $diff
+-  exit 1
+-}
+-
+-#gogofast:
+-go build -o gogofast.exe vendor/github.com/gogo/protobuf/protoc-gen-gogofast/main.go
+-if ($LASTEXITCODE -ne 0) {
+-  exit $LASTEXITCODE
+-}
+-$gogofast_exe = (Get-Item gogofast.exe).FullName
+-
+-#kitchensink
+-#generates the kitchensink test protos
+-
+-Remove-Item -Force -Recurse -ErrorAction SilentlyContinue tests/kitchensink/go
+-New-Item -Type Directory -Force tests/kitchensink/go > $nul
+-Remove-Item -Force -Recurse -ErrorAction SilentlyContinue tests/kitchensink/gogo
+-New-Item -Type Directory -Force tests/kitchensink/gogo > $nul
+-
+-pushd tests/kitchensink
+-  $protos = ""
+-  (get-childitem -recurse -Path . -Include *.proto) | foreach {$protos += "$_ "}
+-  protoc `
+-    -I "$PWD" `
+-    -I "$PWD\..\.." `
+-    "--go_out=$go_import`:./go" `
+-    "--validate_out=lang=go:./go" `
+-    "--plugin=protoc-gen-gogofast=$gogofast_exe" `
+-    "--gogofast_out=$gogo_import`:./gogo" `
+-    "--validate_out=lang=gogo:./gogo" `
+-    $protos.Split(" ")
+-
+-  $le = $LASTEXITCODE
+-  if ($le -ne 0) {
+-    popd
+-    exit $le
+-  }
+-popd
+-
+-pushd tests/kitchensink/go
+-  go build .
+-  $le = $LASTEXITCODE
+-  if ($le -ne 0) {
+-    popd
+-    exit $le
+-  }
+-popd
+-
+-pushd tests/kitchensink/gogo
+-  go build .
+-  $le = $LASTEXITCODE
+-  if ($le -ne 0) {
+-    popd
+-    exit $le
+-  }
+-popd
+-
+-#testcases: gogofast
+-# generate the test harness case protos
+-
+-Remove-Item -Force -Recurse -ErrorAction SilentlyContinue tests/harness/cases/go
+-New-Item -Type Directory -Force tests/harness/cases/go > $nul
+-Remove-Item -Force -Recurse -ErrorAction SilentlyContinue tests/harness/cases/other_package/go
+-New-Item -Type Directory -Force tests/harness/cases/other_package/go > $nul
+-Remove-Item -Force -Recurse -ErrorAction SilentlyContinue tests/harness/cases/gogo
+-New-Item -Type Directory -Force tests/harness/cases/gogo > $nul
+-Remove-Item -Force -Recurse -ErrorAction SilentlyContinue tests/harness/cases/other_package/gogo
+-New-Item -Type Directory -Force tests/harness/cases/other_package/gogo > $nul
+-
+-# protoc-gen-go makes us go a package at a time
+-pushd tests/harness/cases/other_package
+-  $protos = ""
+-  (get-item -Path "*.proto") | foreach {$protos += "$_ "}
+-  protoc `
+-    -I "$PWD" `
+-    -I "$PWD\..\..\..\.." `
+-    "--go_out=$go_import`:./go" `
+-    "--validate_out=lang=go:./go" `
+-    "--plugin=protoc-gen-gogofast=$gogofast_exe" `
+-    "--gogofast_out=$gogo_import`:./gogo" `
+-    "--validate_out=lang=gogo:./gogo" `
+-    $protos.Split(" ")
+-
+-  $le = $LASTEXITCODE
+-  if ($le -ne 0) {
+-    popd
+-    exit $le
+-  }
+-popd
+-
+-pushd tests/harness/cases
+-  $protos = ""
+-  (get-item -Path "*.proto") | foreach {$protos += "$_ "}
+-  protoc `
+-    -I "$PWD" `
+-    -I "$PWD\..\..\.." `
+-    "--go_out=Mtests/harness/cases/other_package/embed.proto=$package/tests/harness/cases/other_package/go,$go_import`:./go" `
+-    "--plugin=protoc-gen-gogofast=$gogofast_exe" `
+-    "--gogofast_out=Mtests/harness/cases/other_package/embed.proto=$package/tests/harness/cases/other_package/gogo,$gogo_import`:./gogo" `
+-    "--validate_out=lang=go:./go" `
+-    "--validate_out=lang=gogo:./gogo" `
+-    $protos.Split(" ")
+-
+-  $le = $LASTEXITCODE
+-  if ($le -ne 0) {
+-    popd
+-    exit $le
+-  }
+-popd
+-
+-
+-#tests/harness/go/harness.pb.go:
+-# generates the test harness protos
+-pushd tests/harness
+-  protoc -I "$PWD" "--go_out=$go_import`:./go" harness.proto
+-  $le = $LASTEXITCODE
+-  if ($le -ne 0) {
+-    popd
+-    exit $le
+-  }
+-popd
+-
+-#tests/harness/gogo/harness.pb.go: gogofast
+-# generates the test harness protos
+-pushd tests/harness/
+-  protoc -I "$PWD" "--plugin=protoc-gen-gogofast=$gogofast_exe" "--gogofast_out=$gogo_import`:./gogo" harness.proto
+-  $le = $LASTEXITCODE
+-  if ($le -ne 0) {
+-    popd
+-    exit $le
+-  }
+-popd
+-
+-#tests/harness/go/main/go-harness
+-# generates the go-specific test harness
+-go build -o ./tests/harness/go/main/go-harness.exe ./tests/harness/go/main
+-$le = $LASTEXITCODE
+-if ($le -ne 0) {
+-  exit $le
+-}
+-
+-#tests/harness/gogo/main/go-harness:
+-#generates the gogo-specific test harness
+-go build -o ./tests/harness/gogo/main/go-harness.exe ./tests/harness/gogo/main
+-$le = $LASTEXITCODE
+-if ($le -ne 0) {
+-  exit $le
+-}
+-
+-#tests/harness/cc/cc-harness
+-bazel "--output_base=c:\_pgv" "--bazelrc=windows\bazel.rc" build //tests/harness/cc:cc-harness
+-$le = $LASTEXITCODE
+-if ($le -ne 0) {
+-  exit $le
+-}
+-
+-cp -Force bazel-bin/tests/harness/cc/cc-harness.exe tests/harness/cc/cc-harness.exe
+-
+-#harness:
+-# runs the test harness, validating a series of test cases in all supported languages
+-$go_files = ""
+-(get-item -path "tests\harness\executor\*.go") | foreach {$go_files += "$_ "}
+-go run $go_files.Split(" ")
+-$le = $LASTEXITCODE
+-if ($le -ne 0) {
+-  exit $le
+-}
+-
+-#bazel-harness
+-# runs the test harness via bazel
+-bazel "--output_base=c:\_pgv" "--bazelrc=windows\bazel.rc" run //tests/harness/executor:executor
+-$le = $LASTEXITCODE
+-if ($le -ne 0) {
+-  exit $le
+-}

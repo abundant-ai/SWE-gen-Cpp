@@ -1,0 +1,227 @@
+diff --git a/.gitignore b/.gitignore
+index 25c5ca8..468cfcc 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -33,3 +33,4 @@ bazel-*
+ .classpath
+ .settings
+ .idea/
++.ijwb/
+diff --git a/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/validation/JavaHarness.java b/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/validation/JavaHarness.java
+index 48953e6..12505fc 100644
+--- a/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/validation/JavaHarness.java
++++ b/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/validation/JavaHarness.java
+@@ -18,6 +18,7 @@ import java.util.Arrays;
+ @SuppressWarnings("unchecked")
+ public class JavaHarness {
+     public static void main(String[] args) {
++        Message message = null;
+         try {
+             ProtoTypeMap typeMap = ProtoTypeMap.of(Arrays.asList(
+                     Bool.getDescriptor().toProto(),
+@@ -41,7 +42,7 @@ public class JavaHarness {
+             Validate.registerAllExtensions(registry);
+ 
+             Harness.TestCase testCase = Harness.TestCase.parseFrom(System.in, registry);
+-            Message message = typeMap.unpackAny(testCase.getMessage());
++            message = typeMap.unpackAny(testCase.getMessage());
+             ValidatorIndex validatorIndex = new ReflectiveValidatorIndex();
+             validatorIndex.validatorFor(message).assertValid(message);
+ 
+@@ -50,6 +51,12 @@ public class JavaHarness {
+             writeResult(Harness.TestResult.newBuilder().setValid(false).setAllowFailure(true).setReason(ex.getMessage()).build());
+         } catch (ValidationException ex) {
+             writeResult(Harness.TestResult.newBuilder().setValid(false).setReason(ex.getMessage()).build());
++        } catch (NullPointerException ex) {
++            if (message.getDescriptorForType().getOptions().getExtension(Validate.ignored)) {
++                writeResult(Harness.TestResult.newBuilder().setValid(false).setAllowFailure(true).setReason("validation not generated due to ignore option").build());
++            } else {
++                writeResult(Harness.TestResult.newBuilder().setValid(false).setError(true).setReason(Throwables.getStackTraceAsString(ex)).build());
++            }
+         } catch (Throwable ex) {
+             writeResult(Harness.TestResult.newBuilder().setValid(false).setError(true).setReason(Throwables.getStackTraceAsString(ex)).build());
+         }
+diff --git a/tests/harness/executor/harness.go b/tests/harness/executor/harness.go
+index 987a0ea..33f10d7 100644
+--- a/tests/harness/executor/harness.go
++++ b/tests/harness/executor/harness.go
+@@ -20,19 +20,19 @@ import (
+ func Harnesses(goFlag, ccFlag, javaFlag, pythonFlag bool, externalHarnessFlag string) []Harness {
+ 	harnesses := make([]Harness, 0)
+ 	if goFlag {
+-		harnesses = append(harnesses, InitHarness("tests/harness/go/main/go-harness"))
++		harnesses = append(harnesses, InitHarness("tests/harness/go/main/go-harness", "go"))
+ 	}
+ 	if ccFlag {
+-		harnesses = append(harnesses, InitHarness("tests/harness/cc/cc-harness"))
++		harnesses = append(harnesses, InitHarness("tests/harness/cc/cc-harness", "cc"))
+ 	}
+ 	if javaFlag {
+-		harnesses = append(harnesses, InitHarness("tests/harness/java/java-harness"))
++		harnesses = append(harnesses, InitHarness("tests/harness/java/java-harness", "java"))
+ 	}
+ 	if pythonFlag {
+-		harnesses = append(harnesses, InitHarness("tests/harness/python/python-harness"))
++		harnesses = append(harnesses, InitHarness("tests/harness/python/python-harness", "python"))
+ 	}
+ 	if externalHarnessFlag != "" {
+-		harnesses = append(harnesses, InitHarness(externalHarnessFlag))
++		harnesses = append(harnesses, InitHarness(externalHarnessFlag, "external"))
+ 	}
+ 	return harnesses
+ }
+@@ -42,7 +42,7 @@ type Harness struct {
+ 	Exec func(context.Context, io.Reader) (*harness.TestResult, error)
+ }
+
+-func InitHarness(cmd string, args ...string) Harness {
++func InitHarness(cmd string, name string, args ...string) Harness {
+ 	if runtime.GOOS == "windows" {
+ 		// Bazel runfiles are not symlinked in on windows,
+ 		// so we have to use the manifest instead. If the manifest
+@@ -66,7 +66,7 @@ func InitHarness(cmd string, args ...string) Harness {
+ 	}
+
+ 	return Harness{
+-		Name: cmd,
++		Name: name,
+ 		Exec: initHarness(cmd, args...),
+ 	}
+ }
+diff --git a/tests/harness/executor/worker.go b/tests/harness/executor/worker.go
+index b9d76c4..db48a52 100644
+--- a/tests/harness/executor/worker.go
++++ b/tests/harness/executor/worker.go
+@@ -3,7 +3,6 @@ package main
+ import (
+ 	"bytes"
+ 	"context"
+-	"fmt"
+ 	"log"
+ 	"sync"
+ 	"time"
+@@ -15,23 +14,24 @@ import (
+
+ func Work(wg *sync.WaitGroup, in <-chan TestCase, out chan<- TestResult, harnesses []Harness) {
+ 	for tc := range in {
+-		ok, skip := execTestCase(tc, harnesses)
+-		out <- TestResult{ok, skip}
++		execTestCase(tc, harnesses, out)
+ 	}
+ 	wg.Done()
+ }
+
+-func execTestCase(tc TestCase, harnesses []Harness) (ok, skip bool) {
++func execTestCase(tc TestCase, harnesses []Harness, out chan<- TestResult) {
+ 	any, err := ptypes.MarshalAny(tc.Message)
+ 	if err != nil {
+ 		log.Printf("unable to convert test case %q to Any - %v", tc.Name, err)
+-		return false, false
++		out <- TestResult{false, false}
++		return
+ 	}
+
+ 	b, err := proto.Marshal(&harness.TestCase{Message: any})
+ 	if err != nil {
+ 		log.Printf("unable to marshal test case %q - %v", tc.Name, err)
+-		return false, false
++		out <- TestResult{false, false}
++		return
+ 	}
+
+ 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+@@ -40,8 +40,6 @@ func execTestCase(tc TestCase, harnesses []Harness) (ok, skip bool) {
+ 	wg := new(sync.WaitGroup)
+ 	wg.Add(len(harnesses))
+
+-	errs := make(chan error, len(harnesses))
+-	skips := make(chan string, len(harnesses))
+
+ 	for _, h := range harnesses {
+ 		h := h
+@@ -50,38 +48,31 @@ func execTestCase(tc TestCase, harnesses []Harness) (ok, skip bool) {
+
+ 			res, err := h.Exec(ctx, bytes.NewReader(b))
+ 			if err != nil {
+-				errs <- err
++				log.Printf("[%s] (%s harness) executor error: %s", tc.Name, h.Name, err.Error())
++				out <- TestResult{false, false}
+ 				return
+ 			}
+
+ 			if res.Error {
+-				errs <- fmt.Errorf("%s: internal harness error: %s", h.Name, res.Reason)
++				log.Printf("[%s] (%s harness) internal harness error: %s", tc.Name, h.Name, res.Reason)
++				out <- TestResult{false, false}
+ 			} else if res.Valid != tc.Valid {
+ 				if res.AllowFailure {
+-					skips <- fmt.Sprintf("%s: ignoring test failure: %s", h.Name, res.Reason)
++					log.Printf("[%s] (%s harness) ignoring test failure: %s", tc.Name, h.Name, res.Reason)
++					out <- TestResult{false, true}
+ 				} else if tc.Valid {
+-					errs <- fmt.Errorf("%s: expected valid, got: %s", h.Name, res.Reason)
++					log.Printf("[%s] (%s harness) expected valid, got invalid: %s", tc.Name, h.Name, res.Reason)
++					out <- TestResult{false, false}
+ 				} else {
+-					errs <- fmt.Errorf("%s: expected invalid, but got valid", h.Name)
++					log.Printf("[%s] (%s harness) expected invalid, got valid: %s", tc.Name, h.Name, res.Reason)
++					out <- TestResult{false, false}
+ 				}
++			} else {
++				out <- TestResult{true, false}
+ 			}
+ 		}()
+ 	}
+
+ 	wg.Wait()
+-	close(errs)
+-	close(skips)
+-
+-	ok = true
+-
+-	for err := range errs {
+-		log.Printf("[%s] %v", tc.Name, err)
+-		ok = false
+-	}
+-	for out := range skips {
+-		log.Printf("[%s] %v", tc.Name, out)
+-		skip = true
+-	}
+-
+ 	return
+ }
+diff --git a/validate/validator.py b/validate/validator.py
+index 3217d29..225507b 100644
+--- a/validate/validator.py
++++ b/validate/validator.py
+@@ -976,17 +976,12 @@ def rule_type(field):
+
+ def file_template(proto_message):
+     file_tmp = """
+-{%- set ns = namespace(ignored=false) -%}
+-{%- for option_descriptor, option_value in p.DESCRIPTOR.GetOptions().ListFields() -%}
+-    {%- if option_descriptor.full_name == "validate.ignored" and option_value -%}
+-        {%- set ns.found = true -%}
+-    {%- endif -%}
+-{%- endfor -%}
+-{%- if not ns.ignored -%}
+ # Validates {{ p.DESCRIPTOR.name }}
+ def generate_validate(p):
+     {%- for option_descriptor, option_value in p.DESCRIPTOR.GetOptions().ListFields() %}
+         {%- if option_descriptor.full_name == "validate.disabled" and option_value %}
++    return None
++        {%- elif option_descriptor.full_name == "validate.ignored" and option_value %}
+     return None
+         {%- endif -%}
+     {%- endfor -%}
+@@ -1009,9 +1004,7 @@ def generate_validate(p):
+     {{ rule_type(field) -}}
+         {%- endif %}
+     {%- endfor %}
+-    return None
+-{%- endif -%}
+-"""
++    return None"""
+     return Template(file_tmp).render(rule_type = rule_type, p = proto_message)
+
+ class UnimplementedException(Exception):

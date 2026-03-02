@@ -1,0 +1,648 @@
+diff --git a/examples/CMakeLists.txt b/examples/CMakeLists.txt
+index f564ae532..eed7bc5f5 100644
+--- a/examples/CMakeLists.txt
++++ b/examples/CMakeLists.txt
+@@ -93,10 +93,6 @@ add_executable(example_file_upload example_file_upload.cpp)
+ add_warnings_optimizations(example_file_upload)
+ target_link_libraries(example_file_upload PUBLIC Crow::Crow)
+ 
+-add_executable(example_unix_socket example_unix_socket.cpp)
+-add_warnings_optimizations(example_unix_socket)
+-target_link_libraries(example_unix_socket PUBLIC Crow::Crow)
+-
+ if(MSVC)
+   add_executable(example_vs example_vs.cpp)
+   add_warnings_optimizations(example_vs)
+diff --git a/examples/example_unix_socket.cpp b/examples/example_unix_socket.cpp
+deleted file mode 100644
+index 2c86621db..000000000
+--- a/examples/example_unix_socket.cpp
++++ /dev/null
+@@ -1,18 +0,0 @@
+-#include "crow.h"
+-
+-#include <sys/stat.h>
+-
+-int main()
+-{
+-    crow::SimpleApp app;
+-
+-    CROW_ROUTE(app, "/")
+-    ([]() {
+-        return "Hello, world!";
+-    });
+-
+-    std::string local_socket_path = "example.sock";
+-    unlink(local_socket_path.c_str());
+-    app.local_socket_path(local_socket_path).run();
+-
+-}
+diff --git a/include/crow.h b/include/crow.h
+index cb3720cff..e2afd8ac8 100644
+--- a/include/crow.h
++++ b/include/crow.h
+@@ -5,7 +5,6 @@
+ #include "crow/TinySHA1.hpp"
+ #include "crow/settings.h"
+ #include "crow/socket_adaptors.h"
+-#include "crow/socket_acceptors.h"
+ #include "crow/json.h"
+ #include "crow/mustache.h"
+ #include "crow/logging.h"
+diff --git a/include/crow/app.h b/include/crow/app.h
+index cf1fe8852..0ce9b5b7e 100644
+--- a/include/crow/app.h
++++ b/include/crow/app.h
+@@ -202,12 +202,11 @@ namespace crow
+         using self_t = Crow;
+ 
+         /// \brief The HTTP server
+-        using server_t = Server<Crow, TCPAcceptor, SocketAdaptor, Middlewares...>;
+-        /// \brief An HTTP server that runs on unix domain socket
+-        using unix_server_t = Server<Crow, UnixSocketAcceptor, UnixSocketAdaptor, Middlewares...>;
++        using server_t = Server<Crow, SocketAdaptor, Middlewares...>;
++
+ #ifdef CROW_ENABLE_SSL
+         /// \brief An HTTP server that runs on SSL with an SSLAdaptor
+-        using ssl_server_t = Server<Crow, TCPAcceptor, SSLAdaptor, Middlewares...>;
++        using ssl_server_t = Server<Crow, SSLAdaptor, Middlewares...>;
+ #endif
+         Crow()
+         {}
+@@ -350,20 +349,6 @@ namespace crow
+             return bindaddr_;
+         }
+ 
+-        /// \brief Disable tcp/ip and use unix domain socket instead
+-        self_t& local_socket_path(std::string path)
+-        {
+-            bindaddr_ = path;
+-            use_unix_ = true;
+-            return *this;
+-        }
+-
+-        /// \brief Get the unix domain socket path
+-        std::string local_socket_path()
+-        {
+-            return bindaddr_;
+-        }
+-
+         /// \brief Run the server on multiple threads using all available threads
+         self_t& multithreaded()
+         {
+@@ -521,17 +506,16 @@ namespace crow
+ #endif
+             validate();
+ 
++            error_code ec;
++            asio::ip::address addr = asio::ip::make_address(bindaddr_,ec);
++            if (ec){
++                CROW_LOG_ERROR << ec.message() << " - Can not create valid ip address from string: \"" << bindaddr_ << "\"";
++                return;
++            }
++            tcp::endpoint endpoint(addr, port_);
+ #ifdef CROW_ENABLE_SSL
+             if (ssl_used_)
+             {
+-
+-                error_code ec;
+-                asio::ip::address addr = asio::ip::make_address(bindaddr_,ec);
+-                if (ec){
+-                    CROW_LOG_ERROR << ec.message() << " - Can not create valid ip address from string: \"" << bindaddr_ << "\"";
+-                    return;
+-                }
+-                tcp::endpoint endpoint(addr, port_);
+                 router_.using_ssl = true;
+                 ssl_server_ = std::move(std::unique_ptr<ssl_server_t>(new ssl_server_t(this, endpoint, server_name_, &middlewares_, concurrency_, timeout_, &ssl_context_)));
+                 ssl_server_->set_tick_function(tick_interval_, tick_function_);
+@@ -546,36 +530,14 @@ namespace crow
+             else
+ #endif
+             {
+-                if (use_unix_)
+-                {
+-                    UnixSocketAcceptor::endpoint endpoint(bindaddr_);
+-                    unix_server_ = std::move(std::unique_ptr<unix_server_t>(new unix_server_t(this, endpoint, server_name_, &middlewares_, concurrency_, timeout_, nullptr)));
+-                    unix_server_->set_tick_function(tick_interval_, tick_function_);
+-                    for (auto snum : signals_)
+-                    {
+-                        unix_server_->signal_add(snum);
+-                    }
+-                    notify_server_start();
+-                    unix_server_->run();
+-                }
+-                else
++                server_ = std::move(std::unique_ptr<server_t>(new server_t(this, endpoint, server_name_, &middlewares_, concurrency_, timeout_, nullptr)));
++                server_->set_tick_function(tick_interval_, tick_function_);
++                for (auto snum : signals_)
+                 {
+-                    error_code ec;
+-                    asio::ip::address addr = asio::ip::make_address(bindaddr_,ec);
+-                    if (ec){
+-                        CROW_LOG_ERROR << ec.message() << " - Can not create valid ip address from string: \"" << bindaddr_ << "\"";
+-                        return;
+-                    }
+-                    TCPAcceptor::endpoint endpoint(addr, port_);
+-                    server_ = std::move(std::unique_ptr<server_t>(new server_t(this, endpoint, server_name_, &middlewares_, concurrency_, timeout_, nullptr)));
+-                    server_->set_tick_function(tick_interval_, tick_function_);
+-                    for (auto snum : signals_)
+-                    {
+-                        server_->signal_add(snum);
+-                    }
+-                    notify_server_start();
+-                    server_->run();
++                    server_->signal_add(snum);
+                 }
++                notify_server_start();
++                server_->run();
+             }
+         }
+ 
+@@ -603,7 +565,6 @@ namespace crow
+             {
+                 close_websockets();
+                 if (server_) { server_->stop(); }
+-                if (unix_server_) { unix_server_->stop(); }
+             }
+         }
+ 
+@@ -756,12 +717,12 @@ namespace crow
+                     status = cv_started_.wait_until(lock, wait_until);
+                 }
+             }
++            
+             if (status == std::cv_status::no_timeout)
+             {
+-                if (server_) {
++                if (server_)
++                {
+                     status = server_->wait_for_start(wait_until);
+-                } else if (unix_server_) {
+-                    status = unix_server_->wait_for_start(wait_until);
+                 }
+ #ifdef CROW_ENABLE_SSL
+                 else if (ssl_server_)
+@@ -806,7 +767,6 @@ namespace crow
+         uint64_t max_payload_{UINT64_MAX};
+         std::string server_name_ = std::string("Crow/") + VERSION;
+         std::string bindaddr_ = "0.0.0.0";
+-        bool use_unix_ = false;
+         size_t res_stream_threshold_ = 1048576;
+         Router router_;
+         bool static_routes_added_{false};
+@@ -828,7 +788,6 @@ namespace crow
+ #endif
+ 
+         std::unique_ptr<server_t> server_;
+-        std::unique_ptr<unix_server_t> unix_server_;
+ 
+         std::vector<int> signals_{SIGINT, SIGTERM};
+ 
+diff --git a/include/crow/http_connection.h b/include/crow/http_connection.h
+index f7f52beb4..146c73789 100644
+--- a/include/crow/http_connection.h
++++ b/include/crow/http_connection.h
+@@ -146,7 +146,9 @@ namespace crow
+             req_.middleware_context = static_cast<void*>(&ctx_);
+             req_.middleware_container = static_cast<void*>(middlewares_);
+             req_.io_context = &adaptor_.get_io_context();
+-            req_.remote_ip_address = adaptor_.address();
++
++            req_.remote_ip_address = adaptor_.remote_endpoint().address().to_string();
++
+             add_keep_alive_ = req_.keep_alive;
+             close_connection_ = req_.close_connection;
+ 
+diff --git a/include/crow/http_server.h b/include/crow/http_server.h
+index 1f3fadf97..31088dd70 100644
+--- a/include/crow/http_server.h
++++ b/include/crow/http_server.h
+@@ -26,7 +26,6 @@
+ #include "crow/http_connection.h"
+ #include "crow/logging.h"
+ #include "crow/task_timer.h"
+-#include "crow/socket_acceptors.h"
+ 
+ 
+ namespace crow // NOTE: Already documented in "crow/app.h"
+@@ -38,14 +37,13 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+     using error_code = asio::error_code;
+ #endif
+     using tcp = asio::ip::tcp;
+-    using stream_protocol = asio::local::stream_protocol;
+ 
+-    template<typename Handler, typename Acceptor = TCPAcceptor, typename Adaptor = SocketAdaptor, typename... Middlewares>
++    template<typename Handler, typename Adaptor = SocketAdaptor, typename... Middlewares>
+     class Server
+     {
+     public:
+       Server(Handler* handler,
+-             typename Acceptor::endpoint endpoint, 
++             const tcp::endpoint& endpoint,
+              std::string server_name = std::string("Crow/") + VERSION,
+              std::tuple<Middlewares...>* middlewares = nullptr,
+              uint16_t concurrency = 1,
+@@ -69,29 +67,29 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+ 
+             error_code ec;
+ 
+-            acceptor_.raw_acceptor().open(endpoint.protocol(), ec);
++            acceptor_.open(endpoint.protocol(), ec);
+             if (ec) {
+                 CROW_LOG_ERROR << "Failed to open acceptor: " << ec.message();
+                 startup_failed_ = true;
+                 return;
+             }
+ 
+-            acceptor_.raw_acceptor().set_option(Acceptor::reuse_address_option(), ec);
++            acceptor_.set_option(tcp::acceptor::reuse_address(true), ec);
+             if (ec) {
+                 CROW_LOG_ERROR << "Failed to set socket option: " << ec.message();
+                 startup_failed_ = true;
+                 return;
+             }
+ 
+-            acceptor_.raw_acceptor().bind(endpoint, ec);
++            acceptor_.bind(endpoint, ec);
+             if (ec) {
+-                CROW_LOG_ERROR << "Failed to bind to " << acceptor_.address()
+-                            << ":" << acceptor_.port() << " - " << ec.message();
++                CROW_LOG_ERROR << "Failed to bind to " << endpoint.address().to_string()
++                            << ":" << endpoint.port() << " - " << ec.message();
+                 startup_failed_ = true;
+                 return;
+             }
+ 
+-            acceptor_.raw_acceptor().listen(tcp::acceptor::max_listen_connections, ec);
++            acceptor_.listen(tcp::acceptor::max_listen_connections, ec);
+             if (ec) {
+                 CROW_LOG_ERROR << "Failed to listen on port: " << ec.message();
+                 startup_failed_ = true;
+@@ -199,10 +197,13 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+                       on_tick();
+                   });
+             }
+-            handler_->port(acceptor_.port());
+-            CROW_LOG_INFO << server_name_ 
+-                          << " server is running at " << acceptor_.url_display(handler_->ssl_used()) 
+-                          << " using " << concurrency_ << " threads";
++
++            handler_->port(acceptor_.local_endpoint().port());
++
++
++            CROW_LOG_INFO << server_name_
++                          << " server is running at " << (handler_->ssl_used() ? "https://" : "http://")
++                          << acceptor_.local_endpoint().address() << ":" << acceptor_.local_endpoint().port() << " using " << concurrency_ << " threads";
+             CROW_LOG_INFO << "Call `app.loglevel(crow::LogLevel::Warning)` to hide Info level logs.";
+ 
+             signals_.async_wait(
+@@ -231,15 +232,10 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+             // Explicitly close the acceptor
+             // else asio will throw an exception (linux only), when trying to start server again:
+             // what():  bind: Address already in use
+-            if (acceptor_.raw_acceptor().is_open())
++            if (acceptor_.is_open())
+             {
+                 CROW_LOG_INFO << "Closing acceptor. " << &acceptor_;
+-                error_code ec;
+-                acceptor_.raw_acceptor().close(ec);
+-                if (ec)
+-                {
+-                    CROW_LOG_WARNING << "Failed to close acceptor: " << ec.message();
+-                }
++                acceptor_.close();
+             }
+ 
+             for (auto& io_context : io_context_pool_)
+@@ -311,7 +307,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+                     
+                 CROW_LOG_DEBUG << &ic << " {" << context_idx << "} queue length: " << task_queue_length_pool_[context_idx];
+ 
+-                acceptor_.raw_acceptor().async_accept(
++                acceptor_.async_accept(
+                   p->socket(),
+                   [this, p, &ic, context_idx](error_code ec) {
+                       if (!ec)
+@@ -341,7 +337,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+         asio::io_context io_context_;
+         std::vector<detail::task_timer*> task_timer_pool_;
+         std::vector<std::function<std::string()>> get_cached_date_str_pool_;
+-        Acceptor acceptor_;
++        tcp::acceptor acceptor_;
+         bool shutting_down_ = false;
+         bool server_started_{false};
+         bool startup_failed_ = false;
+@@ -354,7 +350,6 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+         Handler* handler_;
+         std::uint8_t timeout_;
+         std::string server_name_;
+-        bool use_unix_;
+ 
+         std::chrono::milliseconds tick_interval_;
+         std::function<void()> tick_function_;
+diff --git a/include/crow/routing.h b/include/crow/routing.h
+index e2c426ff4..ebe6687e5 100644
+--- a/include/crow/routing.h
++++ b/include/crow/routing.h
+@@ -121,11 +121,6 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+             res = response(404);
+             res.end();
+         }
+-        virtual void handle_upgrade(const request&, response& res, UnixSocketAdaptor&&)
+-        {
+-            res = response(404);
+-            res.end();
+-        }
+ #ifdef CROW_ENABLE_SSL
+         virtual void handle_upgrade(const request&, response& res, SSLAdaptor&&)
+         {
+@@ -447,11 +442,6 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+             max_payload_ = max_payload_override_ ? max_payload_ : app_->websocket_max_payload();
+             new crow::websocket::Connection<SocketAdaptor, App>(req, std::move(adaptor), app_, max_payload_, subprotocols_, open_handler_, message_handler_, close_handler_, error_handler_, accept_handler_, mirror_protocols_);
+         }
+-        void handle_upgrade(const request& req, response&, UnixSocketAdaptor&& adaptor) override
+-        {
+-            max_payload_ = max_payload_override_ ? max_payload_ : app_->websocket_max_payload();
+-            new crow::websocket::Connection<UnixSocketAdaptor, App>(req, std::move(adaptor), app_, max_payload_, subprotocols_, open_handler_, message_handler_, close_handler_, error_handler_, accept_handler_, mirror_protocols_);
+-        }
+ #ifdef CROW_ENABLE_SSL
+         void handle_upgrade(const request& req, response&, SSLAdaptor&& adaptor) override
+         {
+diff --git a/include/crow/socket_acceptors.h b/include/crow/socket_acceptors.h
+deleted file mode 100644
+index dfe96e45e..000000000
+--- a/include/crow/socket_acceptors.h
++++ /dev/null
+@@ -1,93 +0,0 @@
+-#pragma once
+-#ifdef CROW_USE_BOOST
+-#include <boost/asio.hpp>
+-#ifdef CROW_ENABLE_SSL
+-#include <boost/asio/ssl.hpp>
+-#endif
+-#else
+-#ifndef ASIO_STANDALONE
+-#define ASIO_STANDALONE
+-#endif
+-#include <asio.hpp>
+-#ifdef CROW_ENABLE_SSL
+-#include <asio/ssl.hpp>
+-#endif
+-#endif
+-
+-#include "crow/logging.h"
+-
+-namespace crow
+-{
+-#ifdef CROW_USE_BOOST
+-    namespace asio = boost::asio;
+-    using error_code = boost::system::error_code;
+-#else
+-    using error_code = asio::error_code;
+-#endif
+-    using tcp = asio::ip::tcp;
+-    using stream_protocol = asio::local::stream_protocol;
+-
+-    struct TCPAcceptor
+-    {
+-        using endpoint = tcp::endpoint;
+-        tcp::acceptor acceptor_;
+-        TCPAcceptor(asio::io_context& io_context):
+-          acceptor_(io_context) {}
+-
+-        int16_t port() const
+-        {
+-            return acceptor_.local_endpoint().port();
+-        }
+-        std::string address() const
+-        {
+-            return acceptor_.local_endpoint().address().to_string();
+-        }
+-        std::string url_display(bool ssl_used) const
+-        {
+-            return (ssl_used ? "https://" : "http://") + acceptor_.local_endpoint().address().to_string() + ":" + std::to_string(acceptor_.local_endpoint().port());
+-        }
+-        tcp::acceptor& raw_acceptor()
+-        {
+-            return acceptor_;
+-        }
+-        endpoint local_endpoint() const
+-        {
+-            return acceptor_.local_endpoint();
+-        }
+-        inline static tcp::acceptor::reuse_address reuse_address_option() { return tcp::acceptor::reuse_address(true); }
+-    };
+-
+-    struct UnixSocketAcceptor
+-    {
+-        using endpoint = stream_protocol::endpoint;
+-        stream_protocol::acceptor acceptor_;
+-        UnixSocketAcceptor(asio::io_context& io_context):
+-          acceptor_(io_context) {}
+-
+-        int16_t port() const
+-        {
+-            return 0;
+-        }
+-        std::string address() const
+-        {
+-            return acceptor_.local_endpoint().path();
+-        }
+-        std::string url_display(bool) const
+-        {
+-            return acceptor_.local_endpoint().path();
+-        }
+-        stream_protocol::acceptor& raw_acceptor()
+-        {
+-            return acceptor_;
+-        }
+-        endpoint local_endpoint() const
+-        {
+-            return acceptor_.local_endpoint();
+-        }
+-        inline static stream_protocol::acceptor::reuse_address reuse_address_option()
+-        {
+-            // reuse addr must be false (https://github.com/chriskohlhoff/asio/issues/622)
+-            return stream_protocol::acceptor::reuse_address(false);
+-        }
+-    };
+-} // namespace crow
+\ No newline at end of file
+diff --git a/include/crow/socket_adaptors.h b/include/crow/socket_adaptors.h
+index fc8805996..5f4d6d0ef 100644
+--- a/include/crow/socket_adaptors.h
++++ b/include/crow/socket_adaptors.h
+@@ -33,7 +33,6 @@ namespace crow
+     using error_code = asio::error_code;
+ #endif
+     using tcp = asio::ip::tcp;
+-    using stream_protocol = asio::local::stream_protocol;
+ 
+     /// A wrapper for the asio::ip::tcp::socket and asio::ssl::stream
+     struct SocketAdaptor
+@@ -65,11 +64,6 @@ namespace crow
+             return socket_.remote_endpoint();
+         }
+ 
+-        std::string address() const
+-        {
+-            return socket_.remote_endpoint().address().to_string();
+-        }
+-
+         bool is_open()
+         {
+             return socket_.is_open();
+@@ -108,77 +102,6 @@ namespace crow
+         tcp::socket socket_;
+     };
+ 
+-    struct UnixSocketAdaptor
+-    {
+-        using context = void;
+-        UnixSocketAdaptor(asio::io_context& io_context, context*):
+-          socket_(io_context)
+-        {
+-        }
+-
+-        asio::io_context& get_io_context()
+-        {
+-            return GET_IO_CONTEXT(socket_);
+-        }
+-
+-        stream_protocol::socket& raw_socket()
+-        {
+-            return socket_;
+-        }
+-
+-        stream_protocol::socket& socket()
+-        {
+-            return socket_;
+-        }
+-
+-        stream_protocol::endpoint remote_endpoint()
+-        {
+-            return socket_.local_endpoint();
+-        }
+-
+-        std::string address() const
+-        {
+-            return "";
+-        }
+-
+-        bool is_open()
+-        {
+-            return socket_.is_open();
+-        }
+-
+-        void close()
+-        {
+-            asio::error_code ec;
+-            socket_.close(ec);
+-        }
+-
+-        void shutdown_readwrite()
+-        {
+-            asio::error_code ec;
+-            socket_.shutdown(asio::socket_base::shutdown_type::shutdown_both, ec);
+-        }
+-
+-        void shutdown_write()
+-        {
+-            asio::error_code ec;
+-            socket_.shutdown(asio::socket_base::shutdown_type::shutdown_send, ec);
+-        }
+-
+-        void shutdown_read()
+-        {
+-            asio::error_code ec;
+-            socket_.shutdown(asio::socket_base::shutdown_type::shutdown_receive, ec);
+-        }
+-
+-        template<typename F>
+-        void start(F f)
+-        {
+-            f(asio::error_code());
+-        }
+-
+-        stream_protocol::socket socket_;
+-    };
+-
+ #ifdef CROW_ENABLE_SSL
+     struct SSLAdaptor
+     {
+@@ -204,11 +127,6 @@ namespace crow
+             return raw_socket().remote_endpoint();
+         }
+ 
+-        std::string address() const
+-        {
+-            return ssl_socket_->lowest_layer().remote_endpoint().address().to_string();
+-        }
+-
+         bool is_open()
+         {
+             return ssl_socket_ ? raw_socket().is_open() : false;
+diff --git a/include/crow/websocket.h b/include/crow/websocket.h
+index 9659a9de6..a315226f6 100644
+--- a/include/crow/websocket.h
++++ b/include/crow/websocket.h
+@@ -279,7 +279,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+ 
+             std::string get_remote_ip() override
+             {
+-                return adaptor_.address();
++                return adaptor_.remote_endpoint().address().to_string();
+             }
+ 
+             void set_max_payload_size(uint64_t payload)
+diff --git a/tests/unittest.cpp b/tests/unittest.cpp
+index 5038456e6..7d4ca0905 100644
+--- a/tests/unittest.cpp
++++ b/tests/unittest.cpp
+@@ -1567,9 +1567,9 @@ struct NullSimpleMiddleware
+ TEST_CASE("middleware_simple")
+ {
+     App<NullMiddleware, NullSimpleMiddleware> app;
+-    TCPAcceptor::endpoint endpoint(asio::ip::make_address(LOCALHOST_ADDRESS), 45451);
+-    decltype(app)::server_t server(&app, endpoint);
+-
++    asio::ip::address adr = asio::ip::make_address(LOCALHOST_ADDRESS);
++    tcp::endpoint ep(adr,45451);
++    decltype(app)::server_t server(&app, ep);
+     CROW_ROUTE(app, "/")
+     ([&](const crow::request& req) {
+         app.get_context<NullMiddleware>(req);
+@@ -4089,33 +4089,6 @@ TEST_CASE("http2_upgrade_is_ignored")
+     app.stop();
+ }
+ 
+-TEST_CASE("unix_socket")
+-{
+-    static char buf[2048];
+-    SimpleApp app;
+-    CROW_ROUTE(app, "/").methods("GET"_method)([] {
+-        return "A";
+-    });
+-
+-    constexpr const char* socket_path = "unittest.sock";
+-    unlink(socket_path);
+-    auto _ = app.local_socket_path(socket_path).run_async();
+-    app.wait_for_server_start();
+-
+-    std::string sendmsg = "GET / HTTP/1.0\r\n\r\n";
+-    {
+-        asio::io_context ic;
+-        asio::local::stream_protocol::socket c(ic);
+-        c.connect(asio::local::stream_protocol::endpoint(socket_path));
+-
+-        c.send(asio::buffer(sendmsg));
+-
+-        size_t recved = c.receive(asio::buffer(buf, 2048));
+-        CHECK('A' == buf[recved - 1]);
+-    }
+-    app.stop();
+-} // unix_socket
+-
+ TEST_CASE("option_header_passed_in_full")
+ {
+     const std::string ServerName = "AN_EXTREMELY_UNIQUE_SERVER_NAME";

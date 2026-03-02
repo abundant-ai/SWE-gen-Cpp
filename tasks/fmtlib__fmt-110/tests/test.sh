@@ -8,12 +8,19 @@ cp "/tests/gtest-extra.cc" "test/gtest-extra.cc"
 mkdir -p "test"
 cp "/tests/gtest-extra.h" "test/gtest-extra.h"
 
-# Rebuild after copying the updated test files
-cmake --build build --target gtest-extra-test
+# Remove test/format file to avoid header collision with std::format
+rm -f test/format
 
-# Run the gtest-extra-test binary
-./build/test/gtest-extra-test
+# Build the specific test target
+cd build
+cmake --build . --target gtest-extra-test
 test_status=$?
+
+if [ $test_status -eq 0 ]; then
+  # Run the specific test
+  ./test/gtest-extra-test
+  test_status=$?
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

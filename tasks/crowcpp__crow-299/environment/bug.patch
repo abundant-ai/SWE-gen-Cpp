@@ -1,0 +1,197 @@
+diff --git a/docs/guides/templating.md b/docs/guides/templating.md
+index cdf1952b3..92c982ecb 100644
+--- a/docs/guides/templating.md
++++ b/docs/guides/templating.md
+@@ -15,11 +15,7 @@ The HTML page (including the mustache tags). It is usually loaded into `crow::mu
+ For more information on how to formulate a template, see [this mustache manual](http://mustache.github.io/mustache.5.html).
+ 
+ ### Context
+-A JSON object containing the tags as keys and their values. `crow::mustache::context` is actually a [crow::json::wvalue](../json#wvalue).<br><br>
+-
+-!!! note
+-
+-    `crow::mustache::context` can take a C++ lambda as a value. The lambda needs to take a string as an argument and return a string, such as `#!cpp ctx[lmd] = [&](std::string){return "Hello World";};`.
++A JSON object containing the tags as keys and their values. `crow::mustache::context` is actually a [crow::json::wvalue](../json#wvalue).
+ 
+ ## Returning a template
+ To return a mustache template, you need to load a page using `#!cpp auto page = crow::mustache::load("path/to/template.html");`, keep in mind that the path is relative to the templates directory.<br>
+diff --git a/examples/example.cpp b/examples/example.cpp
+index 85be76c17..9c3c466d5 100644
+--- a/examples/example.cpp
++++ b/examples/example.cpp
+@@ -123,18 +123,6 @@ int main()
+         res.end();
+     });
+ 
+-    //same as the example above but uses mustache instead of stringstream
+-    CROW_ROUTE(app, "/add_mustache/<int>/<int>")
+-    ([](int a, int b) {
+-        auto t = crow::mustache::compile("Value is {{func}}");
+-        crow::mustache::context ctx;
+-        ctx["func"] = [&](std::string) {
+-            return std::to_string(a + b);
+-        };
+-        auto result = t.render(ctx);
+-        return result;
+-    });
+-
+     // Compile error with message "Handler type is mismatched with URL paramters"
+     //CROW_ROUTE(app,"/another/<int>")
+     //([](int a, int b){
+diff --git a/include/crow/json.h b/include/crow/json.h
+index ba4e2a2b8..6622085d6 100644
+--- a/include/crow/json.h
++++ b/include/crow/json.h
+@@ -87,7 +87,6 @@ namespace crow
+             String,
+             List,
+             Object,
+-            Function
+         };
+ 
+         inline const char* get_type_str(type t)
+@@ -100,7 +99,6 @@ namespace crow
+                 case type::List: return "List";
+                 case type::String: return "String";
+                 case type::Object: return "Object";
+-                case type::Function: return "Function";
+                 default: return "Unknown";
+             }
+         }
+@@ -768,7 +766,6 @@ namespace crow
+                         os << '}';
+                     }
+                     break;
+-                    case type::Function: os << "custom function"; break;
+                 }
+                 return os;
+             }
+@@ -1262,11 +1259,10 @@ namespace crow
+                   si(value) {}
+                 constexpr number(double value) noexcept:
+                   d(value) {}
+-            } num;                                      ///< Value if type is a number.
+-            std::string s;                              ///< Value if type is a string.
+-            std::unique_ptr<list> l;                    ///< Value if type is a list.
+-            std::unique_ptr<object> o;                  ///< Value if type is a JSON object.
+-            std::function<std::string(std::string&)> f; ///< Value if type is a function (C++ lambda)
++            } num;                     ///< Value if type is a number.
++            std::string s;             ///< Value if type is a string.
++            std::unique_ptr<list> l;   ///< Value if type is a list.
++            std::unique_ptr<object> o; ///< Value if type is a JSON object.
+ 
+         public:
+             wvalue():
+@@ -1346,7 +1342,6 @@ namespace crow
+                     case type::Null:
+                     case type::False:
+                     case type::True:
+-                    case type::Function:
+                         return;
+                     case type::Number:
+                         nt = r.nt();
+@@ -1406,8 +1401,6 @@ namespace crow
+                         o = std::unique_ptr<object>(new object{});
+                         o->insert(r.o->begin(), r.o->end());
+                         return;
+-                    case type::Function:
+-                        f = r.f;
+                 }
+             }
+ 
+@@ -1640,14 +1633,6 @@ namespace crow
+                 return *this;
+             }
+ 
+-            wvalue& operator=(std::function<std::string(std::string&)>&& func)
+-            {
+-                reset();
+-                t_ = type::Function;
+-                f = std::move(func);
+-                return *this;
+-            }
+-
+             wvalue& operator[](unsigned index)
+             {
+                 if (t_ != type::List)
+@@ -1691,13 +1676,6 @@ namespace crow
+                 return result;
+             }
+ 
+-            std::string execute(std::string txt = "") const //Not using reference because it cannot be used with a default rvalue
+-            {
+-                if (t_ != type::Function)
+-                    return "";
+-                return f(txt);
+-            }
+-
+             /// If the wvalue is a list, it returns the length of the list, otherwise it returns 1.
+             std::size_t size() const
+             {
+@@ -1743,8 +1721,6 @@ namespace crow
+                         }
+                         return sum + 2;
+                     }
+-                    case type::Function:
+-                        return 0;
+                 }
+                 return 1;
+             }
+@@ -1871,10 +1847,6 @@ namespace crow
+                         out.push_back('}');
+                     }
+                     break;
+-
+-                    case type::Function:
+-                        out += "custom function";
+-                        break;
+                 }
+             }
+ 
+diff --git a/include/crow/mustache.h b/include/crow/mustache.h
+index d5d0cb751..1b290b1c7 100644
+--- a/include/crow/mustache.h
++++ b/include/crow/mustache.h
+@@ -221,21 +221,6 @@ namespace crow
+                                     else
+                                         out += ctx.s;
+                                     break;
+-                                case json::type::Function:
+-                                {
+-                                    std::string execute_result = ctx.execute();
+-                                    while (execute_result.find("{{") != std::string::npos)
+-                                    {
+-                                        template_t result_plug(execute_result);
+-                                        execute_result = result_plug.render(*(stack[0]));
+-                                    }
+-
+-                                    if (action.t == ActionType::Tag)
+-                                        escape(execute_result, out);
+-                                    else
+-                                        out += execute_result;
+-                                }
+-                                break;
+                                 default:
+                                     throw std::runtime_error("not implemented tag type" + boost::lexical_cast<std::string>(static_cast<int>(ctx.t())));
+                             }
+diff --git a/tests/unittest.cpp b/tests/unittest.cpp
+index a5c1e65cb..5cb1eaa64 100644
+--- a/tests/unittest.cpp
++++ b/tests/unittest.cpp
+@@ -1139,16 +1139,6 @@ TEST_CASE("template_basic")
+     CHECK("attack of killer tomatoes" == result);
+ } // template_basic
+ 
+-TEST_CASE("template_function")
+-{
+-  auto t = crow::mustache::compile("attack of {{func}}");
+-  crow::mustache::context ctx;
+-  ctx["name"] = "killer tomatoes";
+-  ctx["func"] = [&](std::string){return std::string("{{name}}, IN SPACE!");};
+-  auto result = t.render(ctx);
+-  CHECK("attack of killer tomatoes, IN SPACE!" == result);
+-}
+-
+ TEST_CASE("template_load")
+ {
+     crow::mustache::set_base(".");

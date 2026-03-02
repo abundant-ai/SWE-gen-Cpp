@@ -1,0 +1,2627 @@
+diff --git a/Makefile b/Makefile
+index 135db65a8..bfb623496 100644
+--- a/Makefile
++++ b/Makefile
+@@ -12,7 +12,6 @@ SRCS = include/nlohmann/json.hpp \
+        include/nlohmann/detail/input/json_sax.hpp \
+        include/nlohmann/detail/input/lexer.hpp \
+        include/nlohmann/detail/input/parser.hpp \
+-       include/nlohmann/detail/input/position_t.hpp \
+        include/nlohmann/detail/iterators/internal_iterator.hpp \
+        include/nlohmann/detail/iterators/iter_impl.hpp \
+        include/nlohmann/detail/iterators/iteration_proxy.hpp \
+diff --git a/doc/examples/json_pointer.output b/doc/examples/json_pointer.output
+index 9e027d6dc..33e2cc683 100644
+--- a/doc/examples/json_pointer.output
++++ b/doc/examples/json_pointer.output
+@@ -1,3 +1,3 @@
+-[json.exception.parse_error.107] parse error at byte 1: JSON pointer must be empty or begin with '/' - was: 'foo'
++[json.exception.parse_error.107] parse error at 1: JSON pointer must be empty or begin with '/' - was: 'foo'
+ [json.exception.parse_error.108] parse error: escape character '~' must be followed with '0' or '1'
+ [json.exception.parse_error.108] parse error: escape character '~' must be followed with '0' or '1'
+diff --git a/doc/examples/parse_error.output b/doc/examples/parse_error.output
+index fe366ff8a..96ab5bb51 100644
+--- a/doc/examples/parse_error.output
++++ b/doc/examples/parse_error.output
+@@ -1,3 +1,3 @@
+-message: [json.exception.parse_error.101] parse error at line 1, column 8: syntax error while parsing value - unexpected ']'; expected '[', '{', or a literal
++message: [json.exception.parse_error.101] parse error at 8: syntax error - unexpected ']'; expected '[', '{', or a literal
+ exception id: 101
+ byte position of error: 8
+diff --git a/include/nlohmann/detail/exceptions.hpp b/include/nlohmann/detail/exceptions.hpp
+index 9f5961e65..b73d7b1f9 100644
+--- a/include/nlohmann/detail/exceptions.hpp
++++ b/include/nlohmann/detail/exceptions.hpp
+@@ -4,8 +4,6 @@
+ #include <stdexcept> // runtime_error
+ #include <string> // to_string
+ 
+-#include <nlohmann/detail/input/position_t.hpp>
+-
+ namespace nlohmann
+ {
+ namespace detail
+@@ -116,23 +114,15 @@ class parse_error : public exception
+     /*!
+     @brief create a parse error exception
+     @param[in] id_       the id of the exception
+-    @param[in] position  the position where the error occurred (or with
+-                         chars_read_total=0 if the position cannot be
+-                         determined)
++    @param[in] byte_     the byte index where the error occurred (or 0 if the
++                         position cannot be determined)
+     @param[in] what_arg  the explanatory string
+     @return parse_error object
+     */
+-    static parse_error create(int id_, const position_t& pos, const std::string& what_arg)
+-    {
+-        std::string w = exception::name("parse_error", id_) + "parse error" +
+-                        position_string(pos) + ": " + what_arg;
+-        return parse_error(id_, pos.chars_read_total, w.c_str());
+-    }
+-
+     static parse_error create(int id_, std::size_t byte_, const std::string& what_arg)
+     {
+         std::string w = exception::name("parse_error", id_) + "parse error" +
+-                        (byte_ != 0 ? (" at byte " + std::to_string(byte_)) : "") +
++                        (byte_ != 0 ? (" at " + std::to_string(byte_)) : "") +
+                         ": " + what_arg;
+         return parse_error(id_, byte_, w.c_str());
+     }
+@@ -151,12 +141,6 @@ class parse_error : public exception
+   private:
+     parse_error(int id_, std::size_t byte_, const char* what_arg)
+         : exception(id_, what_arg), byte(byte_) {}
+-
+-    static std::string position_string(const position_t& pos)
+-    {
+-        return " at line " + std::to_string(pos.lines_read + 1) +
+-               ", column " + std::to_string(pos.chars_read_current_line);
+-    }
+ };
+ 
+ /*!
+diff --git a/include/nlohmann/detail/input/json_sax.hpp b/include/nlohmann/detail/input/json_sax.hpp
+index 198ba70bf..1705a8611 100644
+--- a/include/nlohmann/detail/input/json_sax.hpp
++++ b/include/nlohmann/detail/input/json_sax.hpp
+@@ -113,7 +113,7 @@ struct json_sax
+     @brief a parse error occurred
+     @param[in] position    the position in the input where the error occurs
+     @param[in] last_token  the last read token
+-    @param[in] ex          an exception object describing the error
++    @param[in] error_msg   a detailed error message
+     @return whether parsing should proceed (must return false)
+     */
+     virtual bool parse_error(std::size_t position,
+diff --git a/include/nlohmann/detail/input/lexer.hpp b/include/nlohmann/detail/input/lexer.hpp
+index 05eb112e6..44165ff06 100644
+--- a/include/nlohmann/detail/input/lexer.hpp
++++ b/include/nlohmann/detail/input/lexer.hpp
+@@ -10,7 +10,6 @@
+ 
+ #include <nlohmann/detail/macro_scope.hpp>
+ #include <nlohmann/detail/input/input_adapters.hpp>
+-#include <nlohmann/detail/input/position_t.hpp>
+ 
+ namespace nlohmann
+ {
+@@ -394,194 +393,39 @@ class lexer
+ 
+                 // invalid control characters
+                 case 0x00:
+-                {
+-                    error_message = "invalid string: control character U+0000 (NUL) must be escaped to \\u0000";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x01:
+-                {
+-                    error_message = "invalid string: control character U+0001 (SOH) must be escaped to \\u0001";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x02:
+-                {
+-                    error_message = "invalid string: control character U+0002 (STX) must be escaped to \\u0002";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x03:
+-                {
+-                    error_message = "invalid string: control character U+0003 (ETX) must be escaped to \\u0003";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x04:
+-                {
+-                    error_message = "invalid string: control character U+0004 (EOT) must be escaped to \\u0004";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x05:
+-                {
+-                    error_message = "invalid string: control character U+0005 (ENQ) must be escaped to \\u0005";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x06:
+-                {
+-                    error_message = "invalid string: control character U+0006 (ACK) must be escaped to \\u0006";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x07:
+-                {
+-                    error_message = "invalid string: control character U+0007 (BEL) must be escaped to \\u0007";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x08:
+-                {
+-                    error_message = "invalid string: control character U+0008 (BS) must be escaped to \\u0008 or \\b";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x09:
+-                {
+-                    error_message = "invalid string: control character U+0009 (HT) must be escaped to \\u0009 or \\t";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0A:
+-                {
+-                    error_message = "invalid string: control character U+000A (LF) must be escaped to \\u000A or \\n";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0B:
+-                {
+-                    error_message = "invalid string: control character U+000B (VT) must be escaped to \\u000B";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0C:
+-                {
+-                    error_message = "invalid string: control character U+000C (FF) must be escaped to \\u000C or \\f";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0D:
+-                {
+-                    error_message = "invalid string: control character U+000D (CR) must be escaped to \\u000D or \\r";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0E:
+-                {
+-                    error_message = "invalid string: control character U+000E (SO) must be escaped to \\u000E";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0F:
+-                {
+-                    error_message = "invalid string: control character U+000F (SI) must be escaped to \\u000F";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x10:
+-                {
+-                    error_message = "invalid string: control character U+0010 (DLE) must be escaped to \\u0010";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x11:
+-                {
+-                    error_message = "invalid string: control character U+0011 (DC1) must be escaped to \\u0011";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x12:
+-                {
+-                    error_message = "invalid string: control character U+0012 (DC2) must be escaped to \\u0012";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x13:
+-                {
+-                    error_message = "invalid string: control character U+0013 (DC3) must be escaped to \\u0013";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x14:
+-                {
+-                    error_message = "invalid string: control character U+0014 (DC4) must be escaped to \\u0014";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x15:
+-                {
+-                    error_message = "invalid string: control character U+0015 (NAK) must be escaped to \\u0015";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x16:
+-                {
+-                    error_message = "invalid string: control character U+0016 (SYN) must be escaped to \\u0016";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x17:
+-                {
+-                    error_message = "invalid string: control character U+0017 (ETB) must be escaped to \\u0017";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x18:
+-                {
+-                    error_message = "invalid string: control character U+0018 (CAN) must be escaped to \\u0018";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x19:
+-                {
+-                    error_message = "invalid string: control character U+0019 (EM) must be escaped to \\u0019";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1A:
+-                {
+-                    error_message = "invalid string: control character U+001A (SUB) must be escaped to \\u001A";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1B:
+-                {
+-                    error_message = "invalid string: control character U+001B (ESC) must be escaped to \\u001B";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1C:
+-                {
+-                    error_message = "invalid string: control character U+001C (FS) must be escaped to \\u001C";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1D:
+-                {
+-                    error_message = "invalid string: control character U+001D (GS) must be escaped to \\u001D";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1E:
+-                {
+-                    error_message = "invalid string: control character U+001E (RS) must be escaped to \\u001E";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1F:
+                 {
+-                    error_message = "invalid string: control character U+001F (US) must be escaped to \\u001F";
++                    error_message = "invalid string: control character must be escaped";
+                     return token_type::parse_error;
+                 }
+ 
+@@ -1238,9 +1082,7 @@ scan_number_done:
+     */
+     std::char_traits<char>::int_type get()
+     {
+-        ++position.chars_read_total;
+-        ++position.chars_read_current_line;
+-
++        ++chars_read;
+         if (next_unget)
+         {
+             // just reset the next_unget variable and work with current
+@@ -1255,13 +1097,6 @@ scan_number_done:
+         {
+             token_string.push_back(std::char_traits<char>::to_char_type(current));
+         }
+-
+-        if (current == '\n')
+-        {
+-            ++position.lines_read;
+-            ++position.chars_read_current_line = 0;
+-        }
+-
+         return current;
+     }
+ 
+@@ -1269,29 +1104,14 @@ scan_number_done:
+     @brief unget current character (read it again on next get)
+ 
+     We implement unget by setting variable next_unget to true. The input is not
+-    changed - we just simulate ungetting by modifying chars_read_total,
+-    chars_read_current_line, and token_string. The next call to get() will
+-    behave as if the unget character is read again.
++    changed - we just simulate ungetting by modifying chars_read and
++    token_string. The next call to get() will behave as if the unget character
++    is read again.
+     */
+     void unget()
+     {
+         next_unget = true;
+-
+-        --position.chars_read_total;
+-
+-        // in case we "unget" a newline, we have to also decrement the lines_read
+-        if (position.chars_read_current_line == 0)
+-        {
+-            if (position.lines_read > 0)
+-            {
+-                --position.lines_read;
+-            }
+-        }
+-        else
+-        {
+-            --position.chars_read_current_line;
+-        }
+-
++        --chars_read;
+         if (JSON_LIKELY(current != std::char_traits<char>::eof()))
+         {
+             assert(token_string.size() != 0);
+@@ -1339,9 +1159,9 @@ scan_number_done:
+     /////////////////////
+ 
+     /// return position of last read token
+-    constexpr position_t get_position() const noexcept
++    constexpr std::size_t get_position() const noexcept
+     {
+-        return position;
++        return chars_read;
+     }
+ 
+     /// return the last read token (for errors only).  Will never contain EOF
+@@ -1411,7 +1231,7 @@ scan_number_done:
+     token_type scan()
+     {
+         // initially, skip the BOM
+-        if (position.chars_read_total == 0 and not skip_bom())
++        if (chars_read == 0 and not skip_bom())
+         {
+             error_message = "invalid BOM; must be 0xEF 0xBB 0xBF if given";
+             return token_type::parse_error;
+@@ -1489,8 +1309,8 @@ scan_number_done:
+     /// whether the next get() call should just return current
+     bool next_unget = false;
+ 
+-    /// the start position of the current token
+-    position_t position;
++    /// the number of characters read
++    std::size_t chars_read = 0;
+ 
+     /// raw input token string (for error messages)
+     std::vector<char> token_string {};
+diff --git a/include/nlohmann/detail/input/parser.hpp b/include/nlohmann/detail/input/parser.hpp
+index c1ea3d7e6..70d92a26e 100644
+--- a/include/nlohmann/detail/input/parser.hpp
++++ b/include/nlohmann/detail/input/parser.hpp
+@@ -91,8 +91,7 @@ class parser
+             {
+                 sdp.parse_error(m_lexer.get_position(),
+                                 m_lexer.get_token_string(),
+-                                parse_error::create(101, m_lexer.get_position(),
+-                                                    exception_message(token_type::end_of_input, "value")));
++                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_of_input)));
+             }
+ 
+             // in case of an error, return discarded value
+@@ -120,8 +119,7 @@ class parser
+             {
+                 sdp.parse_error(m_lexer.get_position(),
+                                 m_lexer.get_token_string(),
+-                                parse_error::create(101, m_lexer.get_position(),
+-                                                    exception_message(token_type::end_of_input, "value")));
++                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_of_input)));
+             }
+ 
+             // in case of an error, return discarded value
+@@ -156,8 +154,7 @@ class parser
+         {
+             return sax->parse_error(m_lexer.get_position(),
+                                     m_lexer.get_token_string(),
+-                                    parse_error::create(101, m_lexer.get_position(),
+-                                            exception_message(token_type::end_of_input, "value")));
++                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_of_input)));
+         }
+ 
+         return result;
+@@ -202,8 +199,7 @@ class parser
+                         {
+                             return sax->parse_error(m_lexer.get_position(),
+                                                     m_lexer.get_token_string(),
+-                                                    parse_error::create(101, m_lexer.get_position(),
+-                                                            exception_message(token_type::value_string, "object key")));
++                                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::value_string)));
+                         }
+                         else
+                         {
+@@ -218,8 +214,7 @@ class parser
+                         {
+                             return sax->parse_error(m_lexer.get_position(),
+                                                     m_lexer.get_token_string(),
+-                                                    parse_error::create(101, m_lexer.get_position(),
+-                                                            exception_message(token_type::name_separator, "object separator")));
++                                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::name_separator)));
+                         }
+ 
+                         // remember we are now inside an object
+@@ -333,16 +328,14 @@ class parser
+                         // using "uninitialized" to avoid "expected" message
+                         return sax->parse_error(m_lexer.get_position(),
+                                                 m_lexer.get_token_string(),
+-                                                parse_error::create(101, m_lexer.get_position(),
+-                                                        exception_message(token_type::uninitialized, "value")));
++                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::uninitialized)));
+                     }
+ 
+                     default: // the last token was unexpected
+                     {
+                         return sax->parse_error(m_lexer.get_position(),
+                                                 m_lexer.get_token_string(),
+-                                                parse_error::create(101, m_lexer.get_position(),
+-                                                        exception_message(token_type::literal_or_value, "value")));
++                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::literal_or_value)));
+                     }
+                 }
+             }
+@@ -390,8 +383,7 @@ class parser
+                     {
+                         return sax->parse_error(m_lexer.get_position(),
+                                                 m_lexer.get_token_string(),
+-                                                parse_error::create(101, m_lexer.get_position(),
+-                                                        exception_message(token_type::end_array, "array")));
++                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_array)));
+                     }
+                 }
+                 else  // object
+@@ -404,8 +396,7 @@ class parser
+                         {
+                             return sax->parse_error(m_lexer.get_position(),
+                                                     m_lexer.get_token_string(),
+-                                                    parse_error::create(101, m_lexer.get_position(),
+-                                                            exception_message(token_type::value_string, "object key")));
++                                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::value_string)));
+                         }
+                         else
+                         {
+@@ -420,8 +411,7 @@ class parser
+                         {
+                             return sax->parse_error(m_lexer.get_position(),
+                                                     m_lexer.get_token_string(),
+-                                                    parse_error::create(101, m_lexer.get_position(),
+-                                                            exception_message(token_type::name_separator, "object separator")));
++                                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::name_separator)));
+                         }
+ 
+                         // parse values
+@@ -450,8 +440,7 @@ class parser
+                     {
+                         return sax->parse_error(m_lexer.get_position(),
+                                                 m_lexer.get_token_string(),
+-                                                parse_error::create(101, m_lexer.get_position(),
+-                                                        exception_message(token_type::end_object, "object")));
++                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_object)));
+                     }
+                 }
+             }
+@@ -464,17 +453,9 @@ class parser
+         return (last_token = m_lexer.scan());
+     }
+ 
+-    std::string exception_message(const token_type expected, const std::string& context)
++    std::string exception_message(const token_type expected)
+     {
+-        std::string error_msg = "syntax error ";
+-
+-        if (not context.empty())
+-        {
+-            error_msg += "while parsing " + context + " ";
+-        }
+-
+-        error_msg += "- ";
+-
++        std::string error_msg = "syntax error - ";
+         if (last_token == token_type::parse_error)
+         {
+             error_msg += std::string(m_lexer.get_error_message()) + "; last read: '" +
+diff --git a/include/nlohmann/detail/input/position_t.hpp b/include/nlohmann/detail/input/position_t.hpp
+deleted file mode 100644
+index 37f4ab150..000000000
+--- a/include/nlohmann/detail/input/position_t.hpp
++++ /dev/null
+@@ -1,27 +0,0 @@
+-#pragma once
+-
+-#include <cstddef> // size_t
+-
+-namespace nlohmann
+-{
+-namespace detail
+-{
+-/// struct to capture the start position of the current token
+-struct position_t
+-{
+-    /// the total number of characters read
+-    std::size_t chars_read_total = 0;
+-    /// the number of characters read in the current line
+-    std::size_t chars_read_current_line = 0;
+-    /// the number of lines read
+-    std::size_t lines_read = 0;
+-
+-    /// conversion to size_t to preserve SAX interface
+-    constexpr operator size_t() const
+-    {
+-        return chars_read_total;
+-    }
+-};
+-
+-}
+-}
+diff --git a/include/nlohmann/json.hpp b/include/nlohmann/json.hpp
+index 0711bebab..52c301cf7 100644
+--- a/include/nlohmann/json.hpp
++++ b/include/nlohmann/json.hpp
+@@ -5999,8 +5999,6 @@ class basic_json
+     @param[in] cb  a parser callback function of type @ref parser_callback_t
+     which is used to control the deserialization by filtering unwanted values
+     (optional)
+-    @param[in] allow_exceptions  whether to throw exceptions in case of a
+-    parse error (optional, true by default)
+ 
+     @return result of the deserialization
+ 
+@@ -6396,7 +6394,7 @@ class basic_json
+     vector in CBOR format.,to_cbor}
+ 
+     @sa http://cbor.io
+-    @sa @ref from_cbor(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_cbor(detail::input_adapter, const bool strict) for the
+         analogous deserialization
+     @sa @ref to_msgpack(const basic_json&) for the related MessagePack format
+     @sa @ref to_ubjson(const basic_json&, const bool, const bool) for the
+@@ -6493,7 +6491,8 @@ class basic_json
+     vector in MessagePack format.,to_msgpack}
+ 
+     @sa http://msgpack.org
+-    @sa @ref from_msgpack for the analogous deserialization
++    @sa @ref from_msgpack(const std::vector<uint8_t>&, const size_t) for the
++        analogous deserialization
+     @sa @ref to_cbor(const basic_json& for the related CBOR format
+     @sa @ref to_ubjson(const basic_json&, const bool, const bool) for the
+              related UBJSON format
+@@ -6590,7 +6589,7 @@ class basic_json
+     vector in UBJSON format.,to_ubjson}
+ 
+     @sa http://ubjson.org
+-    @sa @ref from_ubjson(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_ubjson(detail::input_adapter, const bool strict) for the
+         analogous deserialization
+     @sa @ref to_cbor(const basic_json& for the related CBOR format
+     @sa @ref to_msgpack(const basic_json&) for the related MessagePack format
+@@ -6705,14 +6704,14 @@ class basic_json
+ 
+     @sa http://cbor.io
+     @sa @ref to_cbor(const basic_json&) for the analogous serialization
+-    @sa @ref from_msgpack(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_msgpack(detail::input_adapter, const bool, const bool) for the
+         related MessagePack format
+-    @sa @ref from_ubjson(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_ubjson(detail::input_adapter, const bool, const bool) for the
+         related UBJSON format
+ 
+     @since version 2.0.9; parameter @a start_index since 2.1.1; changed to
+            consume input adapters, removed start_index parameter, and added
+-           @a strict parameter since 3.0.0; added @a allow_exceptions parameter
++           @a strict parameter since 3.0.0; added @allow_exceptions parameter
+            since 3.2.0
+     */
+     static basic_json from_cbor(detail::input_adapter&& i,
+@@ -6726,7 +6725,7 @@ class basic_json
+     }
+ 
+     /*!
+-    @copydoc from_cbor(detail::input_adapter&&, const bool, const bool)
++    @copydoc from_cbor(detail::input_adapter, const bool, const bool)
+     */
+     template<typename A1, typename A2,
+              detail::enable_if_t<std::is_constructible<detail::input_adapter, A1, A2>::value, int> = 0>
+@@ -6808,14 +6807,14 @@ class basic_json
+ 
+     @sa http://msgpack.org
+     @sa @ref to_msgpack(const basic_json&) for the analogous serialization
+-    @sa @ref from_cbor(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_cbor(detail::input_adapter, const bool, const bool) for the
+         related CBOR format
+-    @sa @ref from_ubjson(detail::input_adapter&&, const bool, const bool) for
++    @sa @ref from_ubjson(detail::input_adapter, const bool, const bool) for
+         the related UBJSON format
+ 
+     @since version 2.0.9; parameter @a start_index since 2.1.1; changed to
+            consume input adapters, removed start_index parameter, and added
+-           @a strict parameter since 3.0.0; added @a allow_exceptions parameter
++           @a strict parameter since 3.0.0; added @allow_exceptions parameter
+            since 3.2.0
+     */
+     static basic_json from_msgpack(detail::input_adapter&& i,
+@@ -6829,7 +6828,7 @@ class basic_json
+     }
+ 
+     /*!
+-    @copydoc from_msgpack(detail::input_adapter&&, const bool, const bool)
++    @copydoc from_msgpack(detail::input_adapter, const bool, const bool)
+     */
+     template<typename A1, typename A2,
+              detail::enable_if_t<std::is_constructible<detail::input_adapter, A1, A2>::value, int> = 0>
+@@ -6893,12 +6892,12 @@ class basic_json
+     @sa http://ubjson.org
+     @sa @ref to_ubjson(const basic_json&, const bool, const bool) for the
+              analogous serialization
+-    @sa @ref from_cbor(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_cbor(detail::input_adapter, const bool, const bool) for the
+         related CBOR format
+-    @sa @ref from_msgpack(detail::input_adapter&&, const bool, const bool) for
++    @sa @ref from_msgpack(detail::input_adapter, const bool, const bool) for
+         the related MessagePack format
+ 
+-    @since version 3.1.0; added @a allow_exceptions parameter since 3.2.0
++    @since version 3.1.0; added @allow_exceptions parameter since 3.2.0
+     */
+     static basic_json from_ubjson(detail::input_adapter&& i,
+                                   const bool strict = true,
+@@ -6911,7 +6910,7 @@ class basic_json
+     }
+ 
+     /*!
+-    @copydoc from_ubjson(detail::input_adapter&&, const bool, const bool)
++    @copydoc from_ubjson(detail::input_adapter, const bool, const bool)
+     */
+     template<typename A1, typename A2,
+              detail::enable_if_t<std::is_constructible<detail::input_adapter, A1, A2>::value, int> = 0>
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index 1761079e2..c40620ad6 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -617,36 +617,6 @@ struct is_compatible_type
+ #include <stdexcept> // runtime_error
+ #include <string> // to_string
+ 
+-// #include <nlohmann/detail/input/position_t.hpp>
+-
+-
+-#include <cstddef> // size_t
+-
+-namespace nlohmann
+-{
+-namespace detail
+-{
+-/// struct to capture the start position of the current token
+-struct position_t
+-{
+-    /// the total number of characters read
+-    std::size_t chars_read_total = 0;
+-    /// the number of characters read in the current line
+-    std::size_t chars_read_current_line = 0;
+-    /// the number of lines read
+-    std::size_t lines_read = 0;
+-
+-    /// conversion to size_t to preserve SAX interface
+-    constexpr operator size_t() const
+-    {
+-        return chars_read_total;
+-    }
+-};
+-
+-}
+-}
+-
+-
+ namespace nlohmann
+ {
+ namespace detail
+@@ -757,23 +727,15 @@ class parse_error : public exception
+     /*!
+     @brief create a parse error exception
+     @param[in] id_       the id of the exception
+-    @param[in] position  the position where the error occurred (or with
+-                         chars_read_total=0 if the position cannot be
+-                         determined)
++    @param[in] byte_     the byte index where the error occurred (or 0 if the
++                         position cannot be determined)
+     @param[in] what_arg  the explanatory string
+     @return parse_error object
+     */
+-    static parse_error create(int id_, const position_t& pos, const std::string& what_arg)
+-    {
+-        std::string w = exception::name("parse_error", id_) + "parse error" +
+-                        position_string(pos) + ": " + what_arg;
+-        return parse_error(id_, pos.chars_read_total, w.c_str());
+-    }
+-
+     static parse_error create(int id_, std::size_t byte_, const std::string& what_arg)
+     {
+         std::string w = exception::name("parse_error", id_) + "parse error" +
+-                        (byte_ != 0 ? (" at byte " + std::to_string(byte_)) : "") +
++                        (byte_ != 0 ? (" at " + std::to_string(byte_)) : "") +
+                         ": " + what_arg;
+         return parse_error(id_, byte_, w.c_str());
+     }
+@@ -792,12 +754,6 @@ class parse_error : public exception
+   private:
+     parse_error(int id_, std::size_t byte_, const char* what_arg)
+         : exception(id_, what_arg), byte(byte_) {}
+-
+-    static std::string position_string(const position_t& pos)
+-    {
+-        return " at line " + std::to_string(pos.lines_read + 1) +
+-               ", column " + std::to_string(pos.chars_read_current_line);
+-    }
+ };
+ 
+ /*!
+@@ -2321,8 +2277,6 @@ class input_adapter
+ 
+ // #include <nlohmann/detail/input/input_adapters.hpp>
+ 
+-// #include <nlohmann/detail/input/position_t.hpp>
+-
+ 
+ namespace nlohmann
+ {
+@@ -2706,194 +2660,39 @@ class lexer
+ 
+                 // invalid control characters
+                 case 0x00:
+-                {
+-                    error_message = "invalid string: control character U+0000 (NUL) must be escaped to \\u0000";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x01:
+-                {
+-                    error_message = "invalid string: control character U+0001 (SOH) must be escaped to \\u0001";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x02:
+-                {
+-                    error_message = "invalid string: control character U+0002 (STX) must be escaped to \\u0002";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x03:
+-                {
+-                    error_message = "invalid string: control character U+0003 (ETX) must be escaped to \\u0003";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x04:
+-                {
+-                    error_message = "invalid string: control character U+0004 (EOT) must be escaped to \\u0004";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x05:
+-                {
+-                    error_message = "invalid string: control character U+0005 (ENQ) must be escaped to \\u0005";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x06:
+-                {
+-                    error_message = "invalid string: control character U+0006 (ACK) must be escaped to \\u0006";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x07:
+-                {
+-                    error_message = "invalid string: control character U+0007 (BEL) must be escaped to \\u0007";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x08:
+-                {
+-                    error_message = "invalid string: control character U+0008 (BS) must be escaped to \\u0008 or \\b";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x09:
+-                {
+-                    error_message = "invalid string: control character U+0009 (HT) must be escaped to \\u0009 or \\t";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0A:
+-                {
+-                    error_message = "invalid string: control character U+000A (LF) must be escaped to \\u000A or \\n";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0B:
+-                {
+-                    error_message = "invalid string: control character U+000B (VT) must be escaped to \\u000B";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0C:
+-                {
+-                    error_message = "invalid string: control character U+000C (FF) must be escaped to \\u000C or \\f";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0D:
+-                {
+-                    error_message = "invalid string: control character U+000D (CR) must be escaped to \\u000D or \\r";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0E:
+-                {
+-                    error_message = "invalid string: control character U+000E (SO) must be escaped to \\u000E";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x0F:
+-                {
+-                    error_message = "invalid string: control character U+000F (SI) must be escaped to \\u000F";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x10:
+-                {
+-                    error_message = "invalid string: control character U+0010 (DLE) must be escaped to \\u0010";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x11:
+-                {
+-                    error_message = "invalid string: control character U+0011 (DC1) must be escaped to \\u0011";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x12:
+-                {
+-                    error_message = "invalid string: control character U+0012 (DC2) must be escaped to \\u0012";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x13:
+-                {
+-                    error_message = "invalid string: control character U+0013 (DC3) must be escaped to \\u0013";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x14:
+-                {
+-                    error_message = "invalid string: control character U+0014 (DC4) must be escaped to \\u0014";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x15:
+-                {
+-                    error_message = "invalid string: control character U+0015 (NAK) must be escaped to \\u0015";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x16:
+-                {
+-                    error_message = "invalid string: control character U+0016 (SYN) must be escaped to \\u0016";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x17:
+-                {
+-                    error_message = "invalid string: control character U+0017 (ETB) must be escaped to \\u0017";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x18:
+-                {
+-                    error_message = "invalid string: control character U+0018 (CAN) must be escaped to \\u0018";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x19:
+-                {
+-                    error_message = "invalid string: control character U+0019 (EM) must be escaped to \\u0019";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1A:
+-                {
+-                    error_message = "invalid string: control character U+001A (SUB) must be escaped to \\u001A";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1B:
+-                {
+-                    error_message = "invalid string: control character U+001B (ESC) must be escaped to \\u001B";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1C:
+-                {
+-                    error_message = "invalid string: control character U+001C (FS) must be escaped to \\u001C";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1D:
+-                {
+-                    error_message = "invalid string: control character U+001D (GS) must be escaped to \\u001D";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1E:
+-                {
+-                    error_message = "invalid string: control character U+001E (RS) must be escaped to \\u001E";
+-                    return token_type::parse_error;
+-                }
+-
+                 case 0x1F:
+                 {
+-                    error_message = "invalid string: control character U+001F (US) must be escaped to \\u001F";
++                    error_message = "invalid string: control character must be escaped";
+                     return token_type::parse_error;
+                 }
+ 
+@@ -3550,9 +3349,7 @@ scan_number_done:
+     */
+     std::char_traits<char>::int_type get()
+     {
+-        ++position.chars_read_total;
+-        ++position.chars_read_current_line;
+-
++        ++chars_read;
+         if (next_unget)
+         {
+             // just reset the next_unget variable and work with current
+@@ -3567,13 +3364,6 @@ scan_number_done:
+         {
+             token_string.push_back(std::char_traits<char>::to_char_type(current));
+         }
+-
+-        if (current == '\n')
+-        {
+-            ++position.lines_read;
+-            ++position.chars_read_current_line = 0;
+-        }
+-
+         return current;
+     }
+ 
+@@ -3581,29 +3371,14 @@ scan_number_done:
+     @brief unget current character (read it again on next get)
+ 
+     We implement unget by setting variable next_unget to true. The input is not
+-    changed - we just simulate ungetting by modifying chars_read_total,
+-    chars_read_current_line, and token_string. The next call to get() will
+-    behave as if the unget character is read again.
++    changed - we just simulate ungetting by modifying chars_read and
++    token_string. The next call to get() will behave as if the unget character
++    is read again.
+     */
+     void unget()
+     {
+         next_unget = true;
+-
+-        --position.chars_read_total;
+-
+-        // in case we "unget" a newline, we have to also decrement the lines_read
+-        if (position.chars_read_current_line == 0)
+-        {
+-            if (position.lines_read > 0)
+-            {
+-                --position.lines_read;
+-            }
+-        }
+-        else
+-        {
+-            --position.chars_read_current_line;
+-        }
+-
++        --chars_read;
+         if (JSON_LIKELY(current != std::char_traits<char>::eof()))
+         {
+             assert(token_string.size() != 0);
+@@ -3651,9 +3426,9 @@ scan_number_done:
+     /////////////////////
+ 
+     /// return position of last read token
+-    constexpr position_t get_position() const noexcept
++    constexpr std::size_t get_position() const noexcept
+     {
+-        return position;
++        return chars_read;
+     }
+ 
+     /// return the last read token (for errors only).  Will never contain EOF
+@@ -3723,7 +3498,7 @@ scan_number_done:
+     token_type scan()
+     {
+         // initially, skip the BOM
+-        if (position.chars_read_total == 0 and not skip_bom())
++        if (chars_read == 0 and not skip_bom())
+         {
+             error_message = "invalid BOM; must be 0xEF 0xBB 0xBF if given";
+             return token_type::parse_error;
+@@ -3801,8 +3576,8 @@ scan_number_done:
+     /// whether the next get() call should just return current
+     bool next_unget = false;
+ 
+-    /// the start position of the current token
+-    position_t position;
++    /// the number of characters read
++    std::size_t chars_read = 0;
+ 
+     /// raw input token string (for error messages)
+     std::vector<char> token_string {};
+@@ -4103,7 +3878,7 @@ struct json_sax
+     @brief a parse error occurred
+     @param[in] position    the position in the input where the error occurs
+     @param[in] last_token  the last read token
+-    @param[in] ex          an exception object describing the error
++    @param[in] error_msg   a detailed error message
+     @return whether parsing should proceed (must return false)
+     */
+     virtual bool parse_error(std::size_t position,
+@@ -4772,8 +4547,7 @@ class parser
+             {
+                 sdp.parse_error(m_lexer.get_position(),
+                                 m_lexer.get_token_string(),
+-                                parse_error::create(101, m_lexer.get_position(),
+-                                                    exception_message(token_type::end_of_input, "value")));
++                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_of_input)));
+             }
+ 
+             // in case of an error, return discarded value
+@@ -4801,8 +4575,7 @@ class parser
+             {
+                 sdp.parse_error(m_lexer.get_position(),
+                                 m_lexer.get_token_string(),
+-                                parse_error::create(101, m_lexer.get_position(),
+-                                                    exception_message(token_type::end_of_input, "value")));
++                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_of_input)));
+             }
+ 
+             // in case of an error, return discarded value
+@@ -4837,8 +4610,7 @@ class parser
+         {
+             return sax->parse_error(m_lexer.get_position(),
+                                     m_lexer.get_token_string(),
+-                                    parse_error::create(101, m_lexer.get_position(),
+-                                            exception_message(token_type::end_of_input, "value")));
++                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_of_input)));
+         }
+ 
+         return result;
+@@ -4883,8 +4655,7 @@ class parser
+                         {
+                             return sax->parse_error(m_lexer.get_position(),
+                                                     m_lexer.get_token_string(),
+-                                                    parse_error::create(101, m_lexer.get_position(),
+-                                                            exception_message(token_type::value_string, "object key")));
++                                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::value_string)));
+                         }
+                         else
+                         {
+@@ -4899,8 +4670,7 @@ class parser
+                         {
+                             return sax->parse_error(m_lexer.get_position(),
+                                                     m_lexer.get_token_string(),
+-                                                    parse_error::create(101, m_lexer.get_position(),
+-                                                            exception_message(token_type::name_separator, "object separator")));
++                                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::name_separator)));
+                         }
+ 
+                         // remember we are now inside an object
+@@ -5014,16 +4784,14 @@ class parser
+                         // using "uninitialized" to avoid "expected" message
+                         return sax->parse_error(m_lexer.get_position(),
+                                                 m_lexer.get_token_string(),
+-                                                parse_error::create(101, m_lexer.get_position(),
+-                                                        exception_message(token_type::uninitialized, "value")));
++                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::uninitialized)));
+                     }
+ 
+                     default: // the last token was unexpected
+                     {
+                         return sax->parse_error(m_lexer.get_position(),
+                                                 m_lexer.get_token_string(),
+-                                                parse_error::create(101, m_lexer.get_position(),
+-                                                        exception_message(token_type::literal_or_value, "value")));
++                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::literal_or_value)));
+                     }
+                 }
+             }
+@@ -5071,8 +4839,7 @@ class parser
+                     {
+                         return sax->parse_error(m_lexer.get_position(),
+                                                 m_lexer.get_token_string(),
+-                                                parse_error::create(101, m_lexer.get_position(),
+-                                                        exception_message(token_type::end_array, "array")));
++                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_array)));
+                     }
+                 }
+                 else  // object
+@@ -5085,8 +4852,7 @@ class parser
+                         {
+                             return sax->parse_error(m_lexer.get_position(),
+                                                     m_lexer.get_token_string(),
+-                                                    parse_error::create(101, m_lexer.get_position(),
+-                                                            exception_message(token_type::value_string, "object key")));
++                                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::value_string)));
+                         }
+                         else
+                         {
+@@ -5101,8 +4867,7 @@ class parser
+                         {
+                             return sax->parse_error(m_lexer.get_position(),
+                                                     m_lexer.get_token_string(),
+-                                                    parse_error::create(101, m_lexer.get_position(),
+-                                                            exception_message(token_type::name_separator, "object separator")));
++                                                    parse_error::create(101, m_lexer.get_position(), exception_message(token_type::name_separator)));
+                         }
+ 
+                         // parse values
+@@ -5131,8 +4896,7 @@ class parser
+                     {
+                         return sax->parse_error(m_lexer.get_position(),
+                                                 m_lexer.get_token_string(),
+-                                                parse_error::create(101, m_lexer.get_position(),
+-                                                        exception_message(token_type::end_object, "object")));
++                                                parse_error::create(101, m_lexer.get_position(), exception_message(token_type::end_object)));
+                     }
+                 }
+             }
+@@ -5145,17 +4909,9 @@ class parser
+         return (last_token = m_lexer.scan());
+     }
+ 
+-    std::string exception_message(const token_type expected, const std::string& context)
++    std::string exception_message(const token_type expected)
+     {
+-        std::string error_msg = "syntax error ";
+-
+-        if (not context.empty())
+-        {
+-            error_msg += "while parsing " + context + " ";
+-        }
+-
+-        error_msg += "- ";
+-
++        std::string error_msg = "syntax error - ";
+         if (last_token == token_type::parse_error)
+         {
+             error_msg += std::string(m_lexer.get_error_message()) + "; last read: '" +
+@@ -17338,8 +17094,6 @@ class basic_json
+     @param[in] cb  a parser callback function of type @ref parser_callback_t
+     which is used to control the deserialization by filtering unwanted values
+     (optional)
+-    @param[in] allow_exceptions  whether to throw exceptions in case of a
+-    parse error (optional, true by default)
+ 
+     @return result of the deserialization
+ 
+@@ -17735,7 +17489,7 @@ class basic_json
+     vector in CBOR format.,to_cbor}
+ 
+     @sa http://cbor.io
+-    @sa @ref from_cbor(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_cbor(detail::input_adapter, const bool strict) for the
+         analogous deserialization
+     @sa @ref to_msgpack(const basic_json&) for the related MessagePack format
+     @sa @ref to_ubjson(const basic_json&, const bool, const bool) for the
+@@ -17832,7 +17586,8 @@ class basic_json
+     vector in MessagePack format.,to_msgpack}
+ 
+     @sa http://msgpack.org
+-    @sa @ref from_msgpack for the analogous deserialization
++    @sa @ref from_msgpack(const std::vector<uint8_t>&, const size_t) for the
++        analogous deserialization
+     @sa @ref to_cbor(const basic_json& for the related CBOR format
+     @sa @ref to_ubjson(const basic_json&, const bool, const bool) for the
+              related UBJSON format
+@@ -17929,7 +17684,7 @@ class basic_json
+     vector in UBJSON format.,to_ubjson}
+ 
+     @sa http://ubjson.org
+-    @sa @ref from_ubjson(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_ubjson(detail::input_adapter, const bool strict) for the
+         analogous deserialization
+     @sa @ref to_cbor(const basic_json& for the related CBOR format
+     @sa @ref to_msgpack(const basic_json&) for the related MessagePack format
+@@ -18044,14 +17799,14 @@ class basic_json
+ 
+     @sa http://cbor.io
+     @sa @ref to_cbor(const basic_json&) for the analogous serialization
+-    @sa @ref from_msgpack(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_msgpack(detail::input_adapter, const bool, const bool) for the
+         related MessagePack format
+-    @sa @ref from_ubjson(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_ubjson(detail::input_adapter, const bool, const bool) for the
+         related UBJSON format
+ 
+     @since version 2.0.9; parameter @a start_index since 2.1.1; changed to
+            consume input adapters, removed start_index parameter, and added
+-           @a strict parameter since 3.0.0; added @a allow_exceptions parameter
++           @a strict parameter since 3.0.0; added @allow_exceptions parameter
+            since 3.2.0
+     */
+     static basic_json from_cbor(detail::input_adapter&& i,
+@@ -18065,7 +17820,7 @@ class basic_json
+     }
+ 
+     /*!
+-    @copydoc from_cbor(detail::input_adapter&&, const bool, const bool)
++    @copydoc from_cbor(detail::input_adapter, const bool, const bool)
+     */
+     template<typename A1, typename A2,
+              detail::enable_if_t<std::is_constructible<detail::input_adapter, A1, A2>::value, int> = 0>
+@@ -18147,14 +17902,14 @@ class basic_json
+ 
+     @sa http://msgpack.org
+     @sa @ref to_msgpack(const basic_json&) for the analogous serialization
+-    @sa @ref from_cbor(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_cbor(detail::input_adapter, const bool, const bool) for the
+         related CBOR format
+-    @sa @ref from_ubjson(detail::input_adapter&&, const bool, const bool) for
++    @sa @ref from_ubjson(detail::input_adapter, const bool, const bool) for
+         the related UBJSON format
+ 
+     @since version 2.0.9; parameter @a start_index since 2.1.1; changed to
+            consume input adapters, removed start_index parameter, and added
+-           @a strict parameter since 3.0.0; added @a allow_exceptions parameter
++           @a strict parameter since 3.0.0; added @allow_exceptions parameter
+            since 3.2.0
+     */
+     static basic_json from_msgpack(detail::input_adapter&& i,
+@@ -18168,7 +17923,7 @@ class basic_json
+     }
+ 
+     /*!
+-    @copydoc from_msgpack(detail::input_adapter&&, const bool, const bool)
++    @copydoc from_msgpack(detail::input_adapter, const bool, const bool)
+     */
+     template<typename A1, typename A2,
+              detail::enable_if_t<std::is_constructible<detail::input_adapter, A1, A2>::value, int> = 0>
+@@ -18232,12 +17987,12 @@ class basic_json
+     @sa http://ubjson.org
+     @sa @ref to_ubjson(const basic_json&, const bool, const bool) for the
+              analogous serialization
+-    @sa @ref from_cbor(detail::input_adapter&&, const bool, const bool) for the
++    @sa @ref from_cbor(detail::input_adapter, const bool, const bool) for the
+         related CBOR format
+-    @sa @ref from_msgpack(detail::input_adapter&&, const bool, const bool) for
++    @sa @ref from_msgpack(detail::input_adapter, const bool, const bool) for
+         the related MessagePack format
+ 
+-    @since version 3.1.0; added @a allow_exceptions parameter since 3.2.0
++    @since version 3.1.0; added @allow_exceptions parameter since 3.2.0
+     */
+     static basic_json from_ubjson(detail::input_adapter&& i,
+                                   const bool strict = true,
+@@ -18250,7 +18005,7 @@ class basic_json
+     }
+ 
+     /*!
+-    @copydoc from_ubjson(detail::input_adapter&&, const bool, const bool)
++    @copydoc from_ubjson(detail::input_adapter, const bool, const bool)
+     */
+     template<typename A1, typename A2,
+              detail::enable_if_t<std::is_constructible<detail::input_adapter, A1, A2>::value, int> = 0>
+diff --git a/test/src/unit-cbor.cpp b/test/src/unit-cbor.cpp
+index 62520a0ba..0d2ca939e 100644
+--- a/test/src/unit-cbor.cpp
++++ b/test/src/unit-cbor.cpp
+@@ -831,14 +831,14 @@ TEST_CASE("CBOR")
+                     {
+                         CHECK_THROWS_AS(json::from_cbor(std::vector<uint8_t>({0xf9})), json::parse_error&);
+                         CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0xf9})),
+-                                          "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                                          "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+                         CHECK(json::from_cbor(std::vector<uint8_t>({0xf9}), true, false).is_discarded());
+                     }
+                     SECTION("only one byte follows")
+                     {
+                         CHECK_THROWS_AS(json::from_cbor(std::vector<uint8_t>({0xf9, 0x7c})), json::parse_error&);
+                         CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0xf9, 0x7c})),
+-                                          "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                                          "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+                         CHECK(json::from_cbor(std::vector<uint8_t>({0xf9, 0x7c}), true, false).is_discarded());
+                     }
+                 }
+@@ -1314,7 +1314,7 @@ TEST_CASE("CBOR")
+         {
+             CHECK_THROWS_AS(json::from_cbor(std::vector<uint8_t>()), json::parse_error&);
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>()),
+-                              "[json.exception.parse_error.110] parse error at byte 1: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 1: unexpected end of input");
+             CHECK(json::from_cbor(std::vector<uint8_t>(), true, false).is_discarded());
+         }
+ 
+@@ -1346,53 +1346,53 @@ TEST_CASE("CBOR")
+             CHECK_THROWS_AS(json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0X61})), json::parse_error&);
+ 
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x18})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x19})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x19, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1a})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1a, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1a, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1a, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 5: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 5: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1b})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1b, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1b, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1b, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 5: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 5: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1b, 0x00, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 6: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 6: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1b, 0x00, 0x00, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 7: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 7: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 8: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 8: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 9: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 9: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x62})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x62, 0x60})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x7F})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x7F, 0x60})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x82, 0x01})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x9F, 0x01})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0x61, 0xF5})),
+-                              "[json.exception.parse_error.110] parse error at byte 5: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 5: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0xA1, 0x61, 0x61})),
+-                              "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0x61})),
+-                              "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+ 
+             CHECK(json::from_cbor(std::vector<uint8_t>({0x18}), true, false).is_discarded());
+             CHECK(json::from_cbor(std::vector<uint8_t>({0x19}), true, false).is_discarded());
+@@ -1426,12 +1426,12 @@ TEST_CASE("CBOR")
+             {
+                 CHECK_THROWS_AS(json::from_cbor(std::vector<uint8_t>({0x1c})), json::parse_error&);
+                 CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0x1c})),
+-                                  "[json.exception.parse_error.112] parse error at byte 1: error reading CBOR; last byte: 0x1C");
++                                  "[json.exception.parse_error.112] parse error at 1: error reading CBOR; last byte: 0x1C");
+                 CHECK(json::from_cbor(std::vector<uint8_t>({0x1c}), true, false).is_discarded());
+ 
+                 CHECK_THROWS_AS(json::from_cbor(std::vector<uint8_t>({0xf8})), json::parse_error&);
+                 CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0xf8})),
+-                                  "[json.exception.parse_error.112] parse error at byte 1: error reading CBOR; last byte: 0xF8");
++                                  "[json.exception.parse_error.112] parse error at 1: error reading CBOR; last byte: 0xF8");
+                 CHECK(json::from_cbor(std::vector<uint8_t>({0xf8}), true, false).is_discarded());
+             }
+ 
+@@ -1491,7 +1491,7 @@ TEST_CASE("CBOR")
+         {
+             CHECK_THROWS_AS(json::from_cbor(std::vector<uint8_t>({0xa1, 0xff, 0x01})), json::parse_error&);
+             CHECK_THROWS_WITH(json::from_cbor(std::vector<uint8_t>({0xa1, 0xff, 0x01})),
+-                              "[json.exception.parse_error.113] parse error at byte 2: expected a CBOR string; last byte: 0xFF");
++                              "[json.exception.parse_error.113] parse error at 2: expected a CBOR string; last byte: 0xFF");
+             CHECK(json::from_cbor(std::vector<uint8_t>({0xa1, 0xff, 0x01}), true, false).is_discarded());
+         }
+ 
+@@ -1509,7 +1509,7 @@ TEST_CASE("CBOR")
+             {
+                 CHECK_THROWS_AS(json::from_cbor(vec), json::parse_error&);
+                 CHECK_THROWS_WITH(json::from_cbor(vec),
+-                                  "[json.exception.parse_error.110] parse error at byte 2: expected end of input");
++                                  "[json.exception.parse_error.110] parse error at 2: expected end of input");
+                 CHECK(json::from_cbor(vec, true, false).is_discarded());
+             }
+         }
+diff --git a/test/src/unit-class_parser.cpp b/test/src/unit-class_parser.cpp
+index 8d0b68d23..b467acd9a 100644
+--- a/test/src/unit-class_parser.cpp
++++ b/test/src/unit-class_parser.cpp
+@@ -313,18 +313,18 @@ TEST_CASE("parser class")
+                 // error: tab in string
+                 CHECK_THROWS_AS(parser_helper("\"\t\""), json::parse_error&);
+                 CHECK_THROWS_WITH(parser_helper("\"\t\""),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0009 (HT) must be escaped to \\u0009 or \\t; last read: '\"<U+0009>'");
++                                  "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0009>'");
+                 // error: newline in string
+                 CHECK_THROWS_AS(parser_helper("\"\n\""), json::parse_error&);
+                 CHECK_THROWS_AS(parser_helper("\"\r\""), json::parse_error&);
+                 CHECK_THROWS_WITH(parser_helper("\"\n\""),
+-                                  "[json.exception.parse_error.101] parse error at line 2, column 0: syntax error while parsing value - invalid string: control character U+000A (LF) must be escaped to \\u000A or \\n; last read: '\"<U+000A>'");
++                                  "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+000A>'");
+                 CHECK_THROWS_WITH(parser_helper("\"\r\""),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+000D (CR) must be escaped to \\u000D or \\r; last read: '\"<U+000D>'");
++                                  "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+000D>'");
+                 // error: backspace in string
+                 CHECK_THROWS_AS(parser_helper("\"\b\""), json::parse_error&);
+                 CHECK_THROWS_WITH(parser_helper("\"\b\""),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0008 (BS) must be escaped to \\u0008 or \\b; last read: '\"<U+0008>'");
++                                  "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0008>'");
+                 // improve code coverage
+                 CHECK_THROWS_AS(parser_helper("\uFF01"), json::parse_error&);
+                 CHECK_THROWS_AS(parser_helper("[-4:1,]"), json::parse_error&);
+@@ -361,38 +361,38 @@ TEST_CASE("parser class")
+                 CHECK_THROWS_AS(parser_helper("\"\x1d\""), json::parse_error&);
+                 CHECK_THROWS_AS(parser_helper("\"\x1e\""), json::parse_error&);
+                 CHECK_THROWS_AS(parser_helper("\"\x1f\""), json::parse_error&);
+-                CHECK_THROWS_WITH(parser_helper("\"\x00\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: missing closing quote; last read: '\"'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x01\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0001 (SOH) must be escaped to \\u0001; last read: '\"<U+0001>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x02\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0002 (STX) must be escaped to \\u0002; last read: '\"<U+0002>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x03\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0003 (ETX) must be escaped to \\u0003; last read: '\"<U+0003>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x04\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0004 (EOT) must be escaped to \\u0004; last read: '\"<U+0004>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x05\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0005 (ENQ) must be escaped to \\u0005; last read: '\"<U+0005>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x06\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0006 (ACK) must be escaped to \\u0006; last read: '\"<U+0006>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x07\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0007 (BEL) must be escaped to \\u0007; last read: '\"<U+0007>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x08\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0008 (BS) must be escaped to \\u0008 or \\b; last read: '\"<U+0008>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x09\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0009 (HT) must be escaped to \\u0009 or \\t; last read: '\"<U+0009>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x0a\""), "[json.exception.parse_error.101] parse error at line 2, column 0: syntax error while parsing value - invalid string: control character U+000A (LF) must be escaped to \\u000A or \\n; last read: '\"<U+000A>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x0b\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+000B (VT) must be escaped to \\u000B; last read: '\"<U+000B>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x0c\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+000C (FF) must be escaped to \\u000C or \\f; last read: '\"<U+000C>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x0d\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+000D (CR) must be escaped to \\u000D or \\r; last read: '\"<U+000D>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x0e\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+000E (SO) must be escaped to \\u000E; last read: '\"<U+000E>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x0f\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+000F (SI) must be escaped to \\u000F; last read: '\"<U+000F>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x10\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0010 (DLE) must be escaped to \\u0010; last read: '\"<U+0010>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x11\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0011 (DC1) must be escaped to \\u0011; last read: '\"<U+0011>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x12\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0012 (DC2) must be escaped to \\u0012; last read: '\"<U+0012>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x13\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0013 (DC3) must be escaped to \\u0013; last read: '\"<U+0013>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x14\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0014 (DC4) must be escaped to \\u0014; last read: '\"<U+0014>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x15\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0015 (NAK) must be escaped to \\u0015; last read: '\"<U+0015>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x16\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0016 (SYN) must be escaped to \\u0016; last read: '\"<U+0016>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x17\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0017 (ETB) must be escaped to \\u0017; last read: '\"<U+0017>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x18\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0018 (CAN) must be escaped to \\u0018; last read: '\"<U+0018>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x19\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0019 (EM) must be escaped to \\u0019; last read: '\"<U+0019>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x1a\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+001A (SUB) must be escaped to \\u001A; last read: '\"<U+001A>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x1b\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+001B (ESC) must be escaped to \\u001B; last read: '\"<U+001B>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x1c\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+001C (FS) must be escaped to \\u001C; last read: '\"<U+001C>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x1d\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+001D (GS) must be escaped to \\u001D; last read: '\"<U+001D>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x1e\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+001E (RS) must be escaped to \\u001E; last read: '\"<U+001E>'");
+-                CHECK_THROWS_WITH(parser_helper("\"\x1f\""), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+001F (US) must be escaped to \\u001F; last read: '\"<U+001F>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x00\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: missing closing quote; last read: '\"'");
++                CHECK_THROWS_WITH(parser_helper("\"\x01\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0001>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x02\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0002>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x03\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0003>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x04\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0004>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x05\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0005>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x06\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0006>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x07\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0007>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x08\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0008>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x09\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0009>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x0a\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+000A>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x0b\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+000B>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x0c\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+000C>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x0d\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+000D>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x0e\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+000E>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x0f\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+000F>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x10\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0010>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x11\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0011>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x12\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0012>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x13\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0013>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x14\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0014>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x15\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0015>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x16\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0016>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x17\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0017>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x18\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0018>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x19\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0019>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x1a\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+001A>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x1b\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+001B>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x1c\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+001C>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x1d\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+001D>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x1e\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+001E>'");
++                CHECK_THROWS_WITH(parser_helper("\"\x1f\""), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+001F>'");
+ 
+                 SECTION("additional test for null byte")
+                 {
+@@ -403,7 +403,7 @@ TEST_CASE("parser class")
+                     std::string s = "\"1\"";
+                     s[1] = '\0';
+                     CHECK_THROWS_AS(json::parse(s.begin(), s.end()), json::parse_error&);
+-                    CHECK_THROWS_WITH(json::parse(s.begin(), s.end()), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0000 (NUL) must be escaped to \\u0000; last read: '\"<U+0000>'");
++                    CHECK_THROWS_WITH(json::parse(s.begin(), s.end()), "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: control character must be escaped; last read: '\"<U+0000>'");
+                 }
+             }
+ 
+@@ -603,39 +603,39 @@ TEST_CASE("parser class")
+                 CHECK_THROWS_AS(parser_helper("+0"), json::parse_error&);
+ 
+                 CHECK_THROWS_WITH(parser_helper("01"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - unexpected number literal; expected end of input");
++                                  "[json.exception.parse_error.101] parse error at 2: syntax error - unexpected number literal; expected end of input");
+                 CHECK_THROWS_WITH(parser_helper("-01"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - unexpected number literal; expected end of input");
++                                  "[json.exception.parse_error.101] parse error at 3: syntax error - unexpected number literal; expected end of input");
+                 CHECK_THROWS_WITH(parser_helper("--1"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid number; expected digit after '-'; last read: '--'");
++                                  "[json.exception.parse_error.101] parse error at 2: syntax error - invalid number; expected digit after '-'; last read: '--'");
+                 CHECK_THROWS_WITH(parser_helper("1."),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected digit after '.'; last read: '1.'");
++                                  "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected digit after '.'; last read: '1.'");
+                 CHECK_THROWS_WITH(parser_helper("1E"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected '+', '-', or digit after exponent; last read: '1E'");
++                                  "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected '+', '-', or digit after exponent; last read: '1E'");
+                 CHECK_THROWS_WITH(parser_helper("1E-"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid number; expected digit after exponent sign; last read: '1E-'");
++                                  "[json.exception.parse_error.101] parse error at 4: syntax error - invalid number; expected digit after exponent sign; last read: '1E-'");
+                 CHECK_THROWS_WITH(parser_helper("1.E1"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected digit after '.'; last read: '1.E'");
++                                  "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected digit after '.'; last read: '1.E'");
+                 CHECK_THROWS_WITH(parser_helper("-1E"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid number; expected '+', '-', or digit after exponent; last read: '-1E'");
++                                  "[json.exception.parse_error.101] parse error at 4: syntax error - invalid number; expected '+', '-', or digit after exponent; last read: '-1E'");
+                 CHECK_THROWS_WITH(parser_helper("-0E#"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid number; expected '+', '-', or digit after exponent; last read: '-0E#'");
++                                  "[json.exception.parse_error.101] parse error at 4: syntax error - invalid number; expected '+', '-', or digit after exponent; last read: '-0E#'");
+                 CHECK_THROWS_WITH(parser_helper("-0E-#"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 5: syntax error while parsing value - invalid number; expected digit after exponent sign; last read: '-0E-#'");
++                                  "[json.exception.parse_error.101] parse error at 5: syntax error - invalid number; expected digit after exponent sign; last read: '-0E-#'");
+                 CHECK_THROWS_WITH(parser_helper("-0#"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid literal; last read: '-0#'; expected end of input");
++                                  "[json.exception.parse_error.101] parse error at 3: syntax error - invalid literal; last read: '-0#'; expected end of input");
+                 CHECK_THROWS_WITH(parser_helper("-0.0:"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 5: syntax error while parsing value - unexpected ':'; expected end of input");
++                                  "[json.exception.parse_error.101] parse error at 5: syntax error - unexpected ':'; expected end of input");
+                 CHECK_THROWS_WITH(parser_helper("-0.0Z"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 5: syntax error while parsing value - invalid literal; last read: '-0.0Z'; expected end of input");
++                                  "[json.exception.parse_error.101] parse error at 5: syntax error - invalid literal; last read: '-0.0Z'; expected end of input");
+                 CHECK_THROWS_WITH(parser_helper("-0E123:"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 7: syntax error while parsing value - unexpected ':'; expected end of input");
++                                  "[json.exception.parse_error.101] parse error at 7: syntax error - unexpected ':'; expected end of input");
+                 CHECK_THROWS_WITH(parser_helper("-0e0-:"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 6: syntax error while parsing value - invalid number; expected digit after '-'; last read: '-:'; expected end of input");
++                                  "[json.exception.parse_error.101] parse error at 6: syntax error - invalid number; expected digit after '-'; last read: '-:'; expected end of input");
+                 CHECK_THROWS_WITH(parser_helper("-0e-:"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 5: syntax error while parsing value - invalid number; expected digit after exponent sign; last read: '-0e-:'");
++                                  "[json.exception.parse_error.101] parse error at 5: syntax error - invalid number; expected digit after exponent sign; last read: '-0e-:'");
+                 CHECK_THROWS_WITH(parser_helper("-0f"),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid literal; last read: '-0f'; expected end of input");
++                                  "[json.exception.parse_error.101] parse error at 4: syntax error - invalid literal; last read: '-0f'; expected end of input");
+             }
+         }
+     }
+@@ -920,33 +920,33 @@ TEST_CASE("parser class")
+         CHECK_THROWS_AS(parser_helper("1E/"), json::parse_error&);
+         CHECK_THROWS_AS(parser_helper("1E:"), json::parse_error&);
+         CHECK_THROWS_WITH(parser_helper("0."),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected digit after '.'; last read: '0.'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected digit after '.'; last read: '0.'");
+         CHECK_THROWS_WITH(parser_helper("-"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid number; expected digit after '-'; last read: '-'");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - invalid number; expected digit after '-'; last read: '-'");
+         CHECK_THROWS_WITH(parser_helper("--"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid number; expected digit after '-'; last read: '--'");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - invalid number; expected digit after '-'; last read: '--'");
+         CHECK_THROWS_WITH(parser_helper("-0."),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid number; expected digit after '.'; last read: '-0.'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid number; expected digit after '.'; last read: '-0.'");
+         CHECK_THROWS_WITH(parser_helper("-."),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid number; expected digit after '-'; last read: '-.'");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - invalid number; expected digit after '-'; last read: '-.'");
+         CHECK_THROWS_WITH(parser_helper("-:"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid number; expected digit after '-'; last read: '-:'");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - invalid number; expected digit after '-'; last read: '-:'");
+         CHECK_THROWS_WITH(parser_helper("0.:"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected digit after '.'; last read: '0.:'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected digit after '.'; last read: '0.:'");
+         CHECK_THROWS_WITH(parser_helper("e."),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - invalid literal; last read: 'e'");
++                          "[json.exception.parse_error.101] parse error at 1: syntax error - invalid literal; last read: 'e'");
+         CHECK_THROWS_WITH(parser_helper("1e."),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected '+', '-', or digit after exponent; last read: '1e.'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected '+', '-', or digit after exponent; last read: '1e.'");
+         CHECK_THROWS_WITH(parser_helper("1e/"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected '+', '-', or digit after exponent; last read: '1e/'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected '+', '-', or digit after exponent; last read: '1e/'");
+         CHECK_THROWS_WITH(parser_helper("1e:"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected '+', '-', or digit after exponent; last read: '1e:'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected '+', '-', or digit after exponent; last read: '1e:'");
+         CHECK_THROWS_WITH(parser_helper("1E."),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected '+', '-', or digit after exponent; last read: '1E.'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected '+', '-', or digit after exponent; last read: '1E.'");
+         CHECK_THROWS_WITH(parser_helper("1E/"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected '+', '-', or digit after exponent; last read: '1E/'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected '+', '-', or digit after exponent; last read: '1E/'");
+         CHECK_THROWS_WITH(parser_helper("1E:"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid number; expected '+', '-', or digit after exponent; last read: '1E:'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid number; expected '+', '-', or digit after exponent; last read: '1E:'");
+ 
+         // unexpected end of null
+         CHECK_THROWS_AS(parser_helper("n"), json::parse_error&);
+@@ -955,15 +955,15 @@ TEST_CASE("parser class")
+         CHECK_THROWS_AS(parser_helper("nulk"), json::parse_error&);
+         CHECK_THROWS_AS(parser_helper("nulm"), json::parse_error&);
+         CHECK_THROWS_WITH(parser_helper("n"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid literal; last read: 'n'");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - invalid literal; last read: 'n'");
+         CHECK_THROWS_WITH(parser_helper("nu"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid literal; last read: 'nu'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid literal; last read: 'nu'");
+         CHECK_THROWS_WITH(parser_helper("nul"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid literal; last read: 'nul'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid literal; last read: 'nul'");
+         CHECK_THROWS_WITH(parser_helper("nulk"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid literal; last read: 'nulk'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid literal; last read: 'nulk'");
+         CHECK_THROWS_WITH(parser_helper("nulm"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid literal; last read: 'nulm'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid literal; last read: 'nulm'");
+ 
+         // unexpected end of true
+         CHECK_THROWS_AS(parser_helper("t"), json::parse_error&);
+@@ -972,15 +972,15 @@ TEST_CASE("parser class")
+         CHECK_THROWS_AS(parser_helper("trud"), json::parse_error&);
+         CHECK_THROWS_AS(parser_helper("truf"), json::parse_error&);
+         CHECK_THROWS_WITH(parser_helper("t"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid literal; last read: 't'");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - invalid literal; last read: 't'");
+         CHECK_THROWS_WITH(parser_helper("tr"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid literal; last read: 'tr'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid literal; last read: 'tr'");
+         CHECK_THROWS_WITH(parser_helper("tru"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid literal; last read: 'tru'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid literal; last read: 'tru'");
+         CHECK_THROWS_WITH(parser_helper("trud"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid literal; last read: 'trud'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid literal; last read: 'trud'");
+         CHECK_THROWS_WITH(parser_helper("truf"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid literal; last read: 'truf'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid literal; last read: 'truf'");
+ 
+         // unexpected end of false
+         CHECK_THROWS_AS(parser_helper("f"), json::parse_error&);
+@@ -990,17 +990,17 @@ TEST_CASE("parser class")
+         CHECK_THROWS_AS(parser_helper("falsd"), json::parse_error&);
+         CHECK_THROWS_AS(parser_helper("falsf"), json::parse_error&);
+         CHECK_THROWS_WITH(parser_helper("f"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid literal; last read: 'f'");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - invalid literal; last read: 'f'");
+         CHECK_THROWS_WITH(parser_helper("fa"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid literal; last read: 'fa'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid literal; last read: 'fa'");
+         CHECK_THROWS_WITH(parser_helper("fal"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid literal; last read: 'fal'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid literal; last read: 'fal'");
+         CHECK_THROWS_WITH(parser_helper("fals"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 5: syntax error while parsing value - invalid literal; last read: 'fals'");
++                          "[json.exception.parse_error.101] parse error at 5: syntax error - invalid literal; last read: 'fals'");
+         CHECK_THROWS_WITH(parser_helper("falsd"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 5: syntax error while parsing value - invalid literal; last read: 'falsd'");
++                          "[json.exception.parse_error.101] parse error at 5: syntax error - invalid literal; last read: 'falsd'");
+         CHECK_THROWS_WITH(parser_helper("falsf"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 5: syntax error while parsing value - invalid literal; last read: 'falsf'");
++                          "[json.exception.parse_error.101] parse error at 5: syntax error - invalid literal; last read: 'falsf'");
+ 
+         // missing/unexpected end of array
+         CHECK_THROWS_AS(parser_helper("["), json::parse_error&);
+@@ -1009,15 +1009,15 @@ TEST_CASE("parser class")
+         CHECK_THROWS_AS(parser_helper("[1,]"), json::parse_error&);
+         CHECK_THROWS_AS(parser_helper("]"), json::parse_error&);
+         CHECK_THROWS_WITH(parser_helper("["),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         CHECK_THROWS_WITH(parser_helper("[1"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing array - unexpected end of input; expected ']'");
++                          "[json.exception.parse_error.101] parse error at 3: syntax error - unexpected end of input; expected ']'");
+         CHECK_THROWS_WITH(parser_helper("[1,"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         CHECK_THROWS_WITH(parser_helper("[1,]"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - unexpected ']'; expected '[', '{', or a literal");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - unexpected ']'; expected '[', '{', or a literal");
+         CHECK_THROWS_WITH(parser_helper("]"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected ']'; expected '[', '{', or a literal");
++                          "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected ']'; expected '[', '{', or a literal");
+ 
+         // missing/unexpected end of object
+         CHECK_THROWS_AS(parser_helper("{"), json::parse_error&);
+@@ -1027,17 +1027,17 @@ TEST_CASE("parser class")
+         CHECK_THROWS_AS(parser_helper("{\"foo\":1,}"), json::parse_error&);
+         CHECK_THROWS_AS(parser_helper("}"), json::parse_error&);
+         CHECK_THROWS_WITH(parser_helper("{"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing object key - unexpected end of input; expected string literal");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - unexpected end of input; expected string literal");
+         CHECK_THROWS_WITH(parser_helper("{\"foo\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 7: syntax error while parsing object separator - unexpected end of input; expected ':'");
++                          "[json.exception.parse_error.101] parse error at 7: syntax error - unexpected end of input; expected ':'");
+         CHECK_THROWS_WITH(parser_helper("{\"foo\":"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 8: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                          "[json.exception.parse_error.101] parse error at 8: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         CHECK_THROWS_WITH(parser_helper("{\"foo\":}"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 8: syntax error while parsing value - unexpected '}'; expected '[', '{', or a literal");
++                          "[json.exception.parse_error.101] parse error at 8: syntax error - unexpected '}'; expected '[', '{', or a literal");
+         CHECK_THROWS_WITH(parser_helper("{\"foo\":1,}"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 10: syntax error while parsing object key - unexpected '}'; expected string literal");
++                          "[json.exception.parse_error.101] parse error at 10: syntax error - unexpected '}'; expected string literal");
+         CHECK_THROWS_WITH(parser_helper("}"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected '}'; expected '[', '{', or a literal");
++                          "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected '}'; expected '[', '{', or a literal");
+ 
+         // missing/unexpected end of string
+         CHECK_THROWS_AS(parser_helper("\""), json::parse_error&);
+@@ -1051,25 +1051,25 @@ TEST_CASE("parser class")
+         CHECK_THROWS_AS(parser_helper("\"\\u01"), json::parse_error&);
+         CHECK_THROWS_AS(parser_helper("\"\\u012"), json::parse_error&);
+         CHECK_THROWS_WITH(parser_helper("\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: missing closing quote; last read: '\"'");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - invalid string: missing closing quote; last read: '\"'");
+         CHECK_THROWS_WITH(parser_helper("\"\\\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid string: missing closing quote; last read: '\"\\\"'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid string: missing closing quote; last read: '\"\\\"'");
+         CHECK_THROWS_WITH(parser_helper("\"\\u\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u\"'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u\"'");
+         CHECK_THROWS_WITH(parser_helper("\"\\u0\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 5: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u0\"'");
++                          "[json.exception.parse_error.101] parse error at 5: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u0\"'");
+         CHECK_THROWS_WITH(parser_helper("\"\\u01\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 6: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u01\"'");
++                          "[json.exception.parse_error.101] parse error at 6: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u01\"'");
+         CHECK_THROWS_WITH(parser_helper("\"\\u012\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 7: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u012\"'");
++                          "[json.exception.parse_error.101] parse error at 7: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u012\"'");
+         CHECK_THROWS_WITH(parser_helper("\"\\u"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u'");
++                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u'");
+         CHECK_THROWS_WITH(parser_helper("\"\\u0"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 5: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u0'");
++                          "[json.exception.parse_error.101] parse error at 5: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u0'");
+         CHECK_THROWS_WITH(parser_helper("\"\\u01"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 6: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u01'");
++                          "[json.exception.parse_error.101] parse error at 6: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u01'");
+         CHECK_THROWS_WITH(parser_helper("\"\\u012"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 7: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u012'");
++                          "[json.exception.parse_error.101] parse error at 7: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\u012'");
+ 
+         // invalid escapes
+         for (int c = 1; c < 128; ++c)
+@@ -1106,7 +1106,7 @@ TEST_CASE("parser class")
+                     if (c > 0x1f)
+                     {
+                         CHECK_THROWS_WITH(parser_helper(s.c_str()),
+-                                          "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid string: forbidden character after backslash; last read: '\"\\" + std::string(1, static_cast<char>(c)) + "'");
++                                          "[json.exception.parse_error.101] parse error at 3: syntax error - invalid string: forbidden character after backslash; last read: '\"\\" + std::string(1, static_cast<char>(c)) + "'");
+                     }
+                     break;
+                 }
+@@ -1182,7 +1182,7 @@ TEST_CASE("parser class")
+                     if (c > 0x1f)
+                     {
+                         CHECK_THROWS_WITH(parser_helper(s1.c_str()),
+-                                          "[json.exception.parse_error.101] parse error at line 1, column 7: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '" + s1.substr(0, 7) + "'");
++                                          "[json.exception.parse_error.101] parse error at 7: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '" + s1.substr(0, 7) + "'");
+                     }
+ 
+                     CAPTURE(s2);
+@@ -1191,7 +1191,7 @@ TEST_CASE("parser class")
+                     if (c > 0x1f)
+                     {
+                         CHECK_THROWS_WITH(parser_helper(s2.c_str()),
+-                                          "[json.exception.parse_error.101] parse error at line 1, column 6: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '" + s2.substr(0, 6) + "'");
++                                          "[json.exception.parse_error.101] parse error at 6: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '" + s2.substr(0, 6) + "'");
+                     }
+ 
+                     CAPTURE(s3);
+@@ -1200,7 +1200,7 @@ TEST_CASE("parser class")
+                     if (c > 0x1f)
+                     {
+                         CHECK_THROWS_WITH(parser_helper(s3.c_str()),
+-                                          "[json.exception.parse_error.101] parse error at line 1, column 5: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '" + s3.substr(0, 5) + "'");
++                                          "[json.exception.parse_error.101] parse error at 5: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '" + s3.substr(0, 5) + "'");
+                     }
+ 
+                     CAPTURE(s4);
+@@ -1209,7 +1209,7 @@ TEST_CASE("parser class")
+                     if (c > 0x1f)
+                     {
+                         CHECK_THROWS_WITH(parser_helper(s4.c_str()),
+-                                          "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '" + s4.substr(0, 4) + "'");
++                                          "[json.exception.parse_error.101] parse error at 4: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '" + s4.substr(0, 4) + "'");
+                     }
+                 }
+             }
+@@ -1218,17 +1218,17 @@ TEST_CASE("parser class")
+         // missing part of a surrogate pair
+         CHECK_THROWS_AS(json::parse("\"\\uD80C\""), json::parse_error&);
+         CHECK_THROWS_WITH(json::parse("\"\\uD80C\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 8: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\"'");
++                          "[json.exception.parse_error.101] parse error at 8: syntax error - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\"'");
+         // invalid surrogate pair
+         CHECK_THROWS_AS(json::parse("\"\\uD80C\\uD80C\""), json::parse_error&);
+         CHECK_THROWS_AS(json::parse("\"\\uD80C\\u0000\""), json::parse_error&);
+         CHECK_THROWS_AS(json::parse("\"\\uD80C\\uFFFF\""), json::parse_error&);
+         CHECK_THROWS_WITH(json::parse("\"\\uD80C\\uD80C\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\\uD80C'");
++                          "[json.exception.parse_error.101] parse error at 13: syntax error - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\\uD80C'");
+         CHECK_THROWS_WITH(json::parse("\"\\uD80C\\u0000\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\\u0000'");
++                          "[json.exception.parse_error.101] parse error at 13: syntax error - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\\u0000'");
+         CHECK_THROWS_WITH(json::parse("\"\\uD80C\\uFFFF\""),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\\uFFFF'");
++                          "[json.exception.parse_error.101] parse error at 13: syntax error - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\\uFFFF'");
+     }
+ 
+     SECTION("parse errors (accept)")
+@@ -1292,9 +1292,6 @@ TEST_CASE("parser class")
+         CHECK(accept_helper("\"\\u01") == false);
+         CHECK(accept_helper("\"\\u012") == false);
+ 
+-        // unget of newline
+-        CHECK(parser_helper("\n123\n") == 123);
+-
+         // invalid escapes
+         for (int c = 1; c < 128; ++c)
+         {
+@@ -1422,11 +1419,11 @@ TEST_CASE("parser class")
+         // test case to make sure no comma preceeds the first key
+         CHECK_THROWS_AS(parser_helper("{,\"key\": false}"), json::parse_error&);
+         CHECK_THROWS_WITH(parser_helper("{,\"key\": false}"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing object key - unexpected ','; expected string literal");
++                          "[json.exception.parse_error.101] parse error at 2: syntax error - unexpected ','; expected string literal");
+         // test case to make sure an object is properly closed
+         CHECK_THROWS_AS(parser_helper("[{\"key\": false true]"), json::parse_error&);
+         CHECK_THROWS_WITH(parser_helper("[{\"key\": false true]"),
+-                          "[json.exception.parse_error.101] parse error at line 1, column 19: syntax error while parsing object - unexpected true literal; expected '}'");
++                          "[json.exception.parse_error.101] parse error at 19: syntax error - unexpected true literal; expected '}'");
+ 
+         // test case to make sure the callback is properly evaluated after reading a key
+         {
+@@ -1677,7 +1674,7 @@ TEST_CASE("parser class")
+ 
+             CHECK_THROWS_AS(json::parse("{\"foo\": true:", cb), json::parse_error&);
+             CHECK_THROWS_WITH(json::parse("{\"foo\": true:", cb),
+-                              "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing object - unexpected ':'; expected '}'");
++                              "[json.exception.parse_error.101] parse error at 13: syntax error - unexpected ':'; expected '}'");
+ 
+             CHECK_THROWS_AS(json::parse("1.18973e+4932", cb), json::out_of_range&);
+             CHECK_THROWS_WITH(json::parse("1.18973e+4932", cb),
+diff --git a/test/src/unit-deserialization.cpp b/test/src/unit-deserialization.cpp
+index 8610cebdd..f6c75d11b 100644
+--- a/test/src/unit-deserialization.cpp
++++ b/test/src/unit-deserialization.cpp
+@@ -267,7 +267,7 @@ TEST_CASE("deserialization")
+             ss5 << "[\"foo\",1,2,3,false,{\"one\":1}";
+             CHECK_THROWS_AS(json::parse(ss1), json::parse_error&);
+             CHECK_THROWS_WITH(json::parse(ss2),
+-                              "[json.exception.parse_error.101] parse error at line 1, column 29: syntax error while parsing array - unexpected end of input; expected ']'");
++                              "[json.exception.parse_error.101] parse error at 29: syntax error - unexpected end of input; expected ']'");
+             CHECK(not json::accept(ss3));
+ 
+             json j_error;
+@@ -291,7 +291,7 @@ TEST_CASE("deserialization")
+             json::string_t s = "[\"foo\",1,2,3,false,{\"one\":1}";
+             CHECK_THROWS_AS(json::parse(s), json::parse_error&);
+             CHECK_THROWS_WITH(json::parse(s),
+-                              "[json.exception.parse_error.101] parse error at line 1, column 29: syntax error while parsing array - unexpected end of input; expected ']'");
++                              "[json.exception.parse_error.101] parse error at 29: syntax error - unexpected end of input; expected ']'");
+             CHECK(not json::accept(s));
+ 
+             json j_error;
+@@ -318,7 +318,7 @@ TEST_CASE("deserialization")
+             json j;
+             CHECK_THROWS_AS(j << ss1, json::parse_error&);
+             CHECK_THROWS_WITH(j << ss2,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 29: syntax error while parsing array - unexpected end of input; expected ']'");
++                              "[json.exception.parse_error.101] parse error at 29: syntax error - unexpected end of input; expected ']'");
+         }
+ 
+         SECTION("operator>>")
+@@ -329,14 +329,14 @@ TEST_CASE("deserialization")
+             json j;
+             CHECK_THROWS_AS(ss1 >> j, json::parse_error&);
+             CHECK_THROWS_WITH(ss2 >> j,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 29: syntax error while parsing array - unexpected end of input; expected ']'");
++                              "[json.exception.parse_error.101] parse error at 29: syntax error - unexpected end of input; expected ']'");
+         }
+ 
+         SECTION("user-defined string literal")
+         {
+             CHECK_THROWS_AS("[\"foo\",1,2,3,false,{\"one\":1}"_json, json::parse_error&);
+             CHECK_THROWS_WITH("[\"foo\",1,2,3,false,{\"one\":1}"_json,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 29: syntax error while parsing array - unexpected end of input; expected ']'");
++                              "[json.exception.parse_error.101] parse error at 29: syntax error - unexpected end of input; expected ']'");
+         }
+     }
+ 
+@@ -612,7 +612,7 @@ TEST_CASE("deserialization")
+                 uint8_t v[] = {'\"', 0x7F, 0xDF, 0x7F};
+                 CHECK_THROWS_AS(json::parse(std::begin(v), std::end(v)), json::parse_error&);
+                 CHECK_THROWS_WITH(json::parse(std::begin(v), std::end(v)),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid string: ill-formed UTF-8 byte; last read: '\"\x7f\xdf\x7f'");
++                                  "[json.exception.parse_error.101] parse error at 4: syntax error - invalid string: ill-formed UTF-8 byte; last read: '\"\x7f\xdf\x7f'");
+                 CHECK(not json::accept(std::begin(v), std::end(v)));
+ 
+                 json j_error;
+@@ -799,11 +799,11 @@ TEST_CASE("deserialization")
+         {
+             CHECK_THROWS_AS(json::parse(bom), json::parse_error&);
+             CHECK_THROWS_WITH(json::parse(bom),
+-                              "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                              "[json.exception.parse_error.101] parse error at 4: syntax error - unexpected end of input; expected '[', '{', or a literal");
+ 
+             CHECK_THROWS_AS(json::parse(std::istringstream(bom)), json::parse_error&);
+             CHECK_THROWS_WITH(json::parse(std::istringstream(bom)),
+-                              "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                              "[json.exception.parse_error.101] parse error at 4: syntax error - unexpected end of input; expected '[', '{', or a literal");
+ 
+             SaxEventLogger l;
+             CHECK(not json::sax_parse(bom, &l));
+@@ -838,11 +838,11 @@ TEST_CASE("deserialization")
+         {
+             CHECK_THROWS_AS(json::parse(bom.substr(0, 2)), json::parse_error&);
+             CHECK_THROWS_WITH(json::parse(bom.substr(0, 2)),
+-                              "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid BOM; must be 0xEF 0xBB 0xBF if given; last read: '\xEF\xBB'");
++                              "[json.exception.parse_error.101] parse error at 3: syntax error - invalid BOM; must be 0xEF 0xBB 0xBF if given; last read: '\xEF\xBB'");
+ 
+             CHECK_THROWS_AS(json::parse(std::istringstream(bom.substr(0, 2))), json::parse_error&);
+             CHECK_THROWS_WITH(json::parse(std::istringstream(bom.substr(0, 2))),
+-                              "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid BOM; must be 0xEF 0xBB 0xBF if given; last read: '\xEF\xBB'");
++                              "[json.exception.parse_error.101] parse error at 3: syntax error - invalid BOM; must be 0xEF 0xBB 0xBF if given; last read: '\xEF\xBB'");
+ 
+             SaxEventLogger l1, l2;
+             CHECK(not json::sax_parse(std::istringstream(bom.substr(0, 2)), &l1));
+@@ -863,11 +863,11 @@ TEST_CASE("deserialization")
+         {
+             CHECK_THROWS_AS(json::parse(bom.substr(0, 1)), json::parse_error&);
+             CHECK_THROWS_WITH(json::parse(bom.substr(0, 1)),
+-                              "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid BOM; must be 0xEF 0xBB 0xBF if given; last read: '\xEF'");
++                              "[json.exception.parse_error.101] parse error at 2: syntax error - invalid BOM; must be 0xEF 0xBB 0xBF if given; last read: '\xEF'");
+ 
+             CHECK_THROWS_AS(json::parse(std::istringstream(bom.substr(0, 1))), json::parse_error&);
+             CHECK_THROWS_WITH(json::parse(std::istringstream(bom.substr(0, 1))),
+-                              "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid BOM; must be 0xEF 0xBB 0xBF if given; last read: '\xEF'");
++                              "[json.exception.parse_error.101] parse error at 2: syntax error - invalid BOM; must be 0xEF 0xBB 0xBF if given; last read: '\xEF'");
+ 
+             SaxEventLogger l1, l2;
+             CHECK(not json::sax_parse(std::istringstream(bom.substr(0, 1)), &l1));
+diff --git a/test/src/unit-json_pointer.cpp b/test/src/unit-json_pointer.cpp
+index 7f5605d9e..d02bd9396 100644
+--- a/test/src/unit-json_pointer.cpp
++++ b/test/src/unit-json_pointer.cpp
+@@ -39,7 +39,7 @@ TEST_CASE("JSON pointers")
+     {
+         CHECK_THROWS_AS(json::json_pointer("foo"), json::parse_error&);
+         CHECK_THROWS_WITH(json::json_pointer("foo"),
+-                          "[json.exception.parse_error.107] parse error at byte 1: JSON pointer must be empty or begin with '/' - was: 'foo'");
++                          "[json.exception.parse_error.107] parse error at 1: JSON pointer must be empty or begin with '/' - was: 'foo'");
+ 
+         CHECK_THROWS_AS(json::json_pointer("/~~"), json::parse_error&);
+         CHECK_THROWS_WITH(json::json_pointer("/~~"),
+diff --git a/test/src/unit-msgpack.cpp b/test/src/unit-msgpack.cpp
+index f75cedce9..0848ef087 100644
+--- a/test/src/unit-msgpack.cpp
++++ b/test/src/unit-msgpack.cpp
+@@ -1124,7 +1124,7 @@ TEST_CASE("MessagePack")
+         {
+             CHECK_THROWS_AS(json::from_msgpack(std::vector<uint8_t>()), json::parse_error&);
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>()),
+-                              "[json.exception.parse_error.110] parse error at byte 1: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 1: unexpected end of input");
+             CHECK(json::from_msgpack(std::vector<uint8_t>(), true, false).is_discarded());
+         }
+ 
+@@ -1151,43 +1151,43 @@ TEST_CASE("MessagePack")
+             CHECK_THROWS_AS(json::from_msgpack(std::vector<uint8_t>({0x81, 0xa1, 0x61})), json::parse_error&);
+ 
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0x87})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcc})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcd})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcd, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xce})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xce, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xce, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xce, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 5: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 5: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcf})),
+-                              "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcf, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcf, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcf, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 5: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 5: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcf, 0x00, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 6: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 6: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcf, 0x00, 0x00, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 7: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 7: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 8: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 8: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xcf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})),
+-                              "[json.exception.parse_error.110] parse error at byte 9: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 9: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xa5, 0x68, 0x65})),
+-                              "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0x92, 0x01})),
+-                              "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0x81, 0xa1, 0x61})),
+-                              "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+ 
+             CHECK(json::from_msgpack(std::vector<uint8_t>({0x87}), true, false).is_discarded());
+             CHECK(json::from_msgpack(std::vector<uint8_t>({0xcc}), true, false).is_discarded());
+@@ -1216,12 +1216,12 @@ TEST_CASE("MessagePack")
+             {
+                 CHECK_THROWS_AS(json::from_msgpack(std::vector<uint8_t>({0xc1})), json::parse_error&);
+                 CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xc1})),
+-                                  "[json.exception.parse_error.112] parse error at byte 1: error reading MessagePack; last byte: 0xC1");
++                                  "[json.exception.parse_error.112] parse error at 1: error reading MessagePack; last byte: 0xC1");
+                 CHECK(json::from_msgpack(std::vector<uint8_t>({0xc6}), true, false).is_discarded());
+ 
+                 CHECK_THROWS_AS(json::from_msgpack(std::vector<uint8_t>({0xc6})), json::parse_error&);
+                 CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0xc6})),
+-                                  "[json.exception.parse_error.112] parse error at byte 1: error reading MessagePack; last byte: 0xC6");
++                                  "[json.exception.parse_error.112] parse error at 1: error reading MessagePack; last byte: 0xC6");
+                 CHECK(json::from_msgpack(std::vector<uint8_t>({0xc6}), true, false).is_discarded());
+             }
+ 
+@@ -1249,7 +1249,7 @@ TEST_CASE("MessagePack")
+         {
+             CHECK_THROWS_AS(json::from_msgpack(std::vector<uint8_t>({0x81, 0xff, 0x01})), json::parse_error&);
+             CHECK_THROWS_WITH(json::from_msgpack(std::vector<uint8_t>({0x81, 0xff, 0x01})),
+-                              "[json.exception.parse_error.113] parse error at byte 2: expected a MessagePack string; last byte: 0xFF");
++                              "[json.exception.parse_error.113] parse error at 2: expected a MessagePack string; last byte: 0xFF");
+             CHECK(json::from_msgpack(std::vector<uint8_t>({0x81, 0xff, 0x01}), true, false).is_discarded());
+         }
+ 
+@@ -1266,7 +1266,7 @@ TEST_CASE("MessagePack")
+             {
+                 CHECK_THROWS_AS(json::from_msgpack(vec), json::parse_error&);
+                 CHECK_THROWS_WITH(json::from_msgpack(vec),
+-                                  "[json.exception.parse_error.110] parse error at byte 2: expected end of input");
++                                  "[json.exception.parse_error.110] parse error at 2: expected end of input");
+                 CHECK(json::from_msgpack(vec, true, false).is_discarded());
+             }
+         }
+diff --git a/test/src/unit-regression.cpp b/test/src/unit-regression.cpp
+index fe4913cb5..6b9fd9573 100644
+--- a/test/src/unit-regression.cpp
++++ b/test/src/unit-regression.cpp
+@@ -725,7 +725,7 @@ TEST_CASE("regression tests")
+     {
+         std::ifstream f("file_not_found.json");
+         CHECK_THROWS_AS(json::parse(f), json::parse_error&);
+-        CHECK_THROWS_WITH(json::parse(f), "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++        CHECK_THROWS_WITH(json::parse(f), "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected end of input; expected '[', '{', or a literal");
+     }
+ 
+     SECTION("issue #367 - calling stream at EOF")
+@@ -741,7 +741,7 @@ TEST_CASE("regression tests")
+         // a parse error because of the EOF.
+         CHECK_THROWS_AS(ss >> j, json::parse_error&);
+         CHECK_THROWS_WITH(ss >> j,
+-                          "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                          "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected end of input; expected '[', '{', or a literal");
+     }
+ 
+     SECTION("issue #367 - behavior of operator>> should more closely resemble that of built-in overloads")
+@@ -752,7 +752,7 @@ TEST_CASE("regression tests")
+             json j;
+             CHECK_THROWS_AS(ss >> j, json::parse_error&);
+             CHECK_THROWS_WITH(ss >> j,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                              "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         }
+ 
+         SECTION("(whitespace)")
+@@ -762,7 +762,7 @@ TEST_CASE("regression tests")
+             json j;
+             CHECK_THROWS_AS(ss >> j, json::parse_error&);
+             CHECK_THROWS_WITH(ss >> j,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                              "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         }
+ 
+         SECTION("one value")
+@@ -775,7 +775,7 @@ TEST_CASE("regression tests")
+ 
+             CHECK_THROWS_AS(ss >> j, json::parse_error&);
+             CHECK_THROWS_WITH(ss >> j,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                              "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         }
+ 
+         SECTION("one value + whitespace")
+@@ -788,7 +788,7 @@ TEST_CASE("regression tests")
+ 
+             CHECK_THROWS_AS(ss >> j, json::parse_error&);
+             CHECK_THROWS_WITH(ss >> j,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                              "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         }
+ 
+         SECTION("whitespace + one value")
+@@ -801,7 +801,7 @@ TEST_CASE("regression tests")
+ 
+             CHECK_THROWS_AS(ss >> j, json::parse_error&);
+             CHECK_THROWS_WITH(ss >> j,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                              "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         }
+ 
+         SECTION("three values")
+@@ -818,7 +818,7 @@ TEST_CASE("regression tests")
+ 
+             CHECK_THROWS_AS(ss >> j, json::parse_error&);
+             CHECK_THROWS_WITH(ss >> j,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                              "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         }
+ 
+         SECTION("literals without whitespace")
+@@ -837,7 +837,7 @@ TEST_CASE("regression tests")
+ 
+             CHECK_THROWS_AS(ss >> j, json::parse_error&);
+             CHECK_THROWS_WITH(ss >> j,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                              "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         }
+ 
+         SECTION("example from #529")
+@@ -852,7 +852,7 @@ TEST_CASE("regression tests")
+ 
+             CHECK_THROWS_AS(ss >> j, json::parse_error&);
+             CHECK_THROWS_WITH(ss >> j,
+-                              "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal");
++                              "[json.exception.parse_error.101] parse error at 1: syntax error - unexpected end of input; expected '[', '{', or a literal");
+         }
+ 
+         SECTION("second example from #529")
+@@ -922,7 +922,7 @@ TEST_CASE("regression tests")
+         std::vector<uint8_t> vec {0x65, 0xf5, 0x0a, 0x48, 0x21};
+         CHECK_THROWS_AS(json::from_cbor(vec), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec),
+-                          "[json.exception.parse_error.110] parse error at byte 6: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 6: unexpected end of input");
+     }
+ 
+     SECTION("issue #407 - Heap-buffer-overflow (OSS-Fuzz issue 343)")
+@@ -931,31 +931,31 @@ TEST_CASE("regression tests")
+         std::vector<uint8_t> vec1 {0xcb, 0x8f, 0x0a};
+         CHECK_THROWS_AS(json::from_msgpack(vec1), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_msgpack(vec1),
+-                          "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+ 
+         // related test case: incomplete float32
+         std::vector<uint8_t> vec2 {0xca, 0x8f, 0x0a};
+         CHECK_THROWS_AS(json::from_msgpack(vec2), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_msgpack(vec2),
+-                          "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+ 
+         // related test case: incomplete Half-Precision Float (CBOR)
+         std::vector<uint8_t> vec3 {0xf9, 0x8f};
+         CHECK_THROWS_AS(json::from_cbor(vec3), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec3),
+-                          "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+ 
+         // related test case: incomplete Single-Precision Float (CBOR)
+         std::vector<uint8_t> vec4 {0xfa, 0x8f, 0x0a};
+         CHECK_THROWS_AS(json::from_cbor(vec4), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec4),
+-                          "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+ 
+         // related test case: incomplete Double-Precision Float (CBOR)
+         std::vector<uint8_t> vec5 {0xfb, 0x8f, 0x0a};
+         CHECK_THROWS_AS(json::from_cbor(vec5), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec5),
+-                          "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+     }
+ 
+     SECTION("issue #408 - Heap-buffer-overflow (OSS-Fuzz issue 344)")
+@@ -964,7 +964,7 @@ TEST_CASE("regression tests")
+         std::vector<uint8_t> vec1 {0x87};
+         CHECK_THROWS_AS(json::from_msgpack(vec1), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_msgpack(vec1),
+-                          "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+ 
+         // more test cases for MessagePack
+         for (auto b :
+@@ -998,10 +998,10 @@ TEST_CASE("regression tests")
+         std::vector<uint8_t> vec2;
+         CHECK_THROWS_AS(json::from_cbor(vec2), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec2),
+-                          "[json.exception.parse_error.110] parse error at byte 1: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 1: unexpected end of input");
+         CHECK_THROWS_AS(json::from_msgpack(vec2), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_msgpack(vec2),
+-                          "[json.exception.parse_error.110] parse error at byte 1: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 1: unexpected end of input");
+     }
+ 
+     SECTION("issue #411 - Heap-buffer-overflow (OSS-Fuzz issue 366)")
+@@ -1010,19 +1010,19 @@ TEST_CASE("regression tests")
+         std::vector<uint8_t> vec1 {0x7f};
+         CHECK_THROWS_AS(json::from_cbor(vec1), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec1),
+-                          "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+ 
+         // related test case: empty array (indefinite length)
+         std::vector<uint8_t> vec2 {0x9f};
+         CHECK_THROWS_AS(json::from_cbor(vec2), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec2),
+-                          "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+ 
+         // related test case: empty map (indefinite length)
+         std::vector<uint8_t> vec3 {0xbf};
+         CHECK_THROWS_AS(json::from_cbor(vec3), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec3),
+-                          "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+     }
+ 
+     SECTION("issue #412 - Heap-buffer-overflow (OSS-Fuzz issue 367)")
+@@ -1050,25 +1050,25 @@ TEST_CASE("regression tests")
+         };
+         CHECK_THROWS_AS(json::from_cbor(vec), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec),
+-                          "[json.exception.parse_error.113] parse error at byte 2: expected a CBOR string; last byte: 0x98");
++                          "[json.exception.parse_error.113] parse error at 2: expected a CBOR string; last byte: 0x98");
+ 
+         // related test case: nonempty UTF-8 string (indefinite length)
+         std::vector<uint8_t> vec1 {0x7f, 0x61, 0x61};
+         CHECK_THROWS_AS(json::from_cbor(vec1), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec1),
+-                          "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+ 
+         // related test case: nonempty array (indefinite length)
+         std::vector<uint8_t> vec2 {0x9f, 0x01};
+         CHECK_THROWS_AS(json::from_cbor(vec2), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec2),
+-                          "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+ 
+         // related test case: nonempty map (indefinite length)
+         std::vector<uint8_t> vec3 {0xbf, 0x61, 0x61, 0x01};
+         CHECK_THROWS_AS(json::from_cbor(vec3), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec3),
+-                          "[json.exception.parse_error.110] parse error at byte 5: unexpected end of input");
++                          "[json.exception.parse_error.110] parse error at 5: unexpected end of input");
+     }
+ 
+     SECTION("issue #414 - compare with literal 0)")
+@@ -1103,7 +1103,7 @@ TEST_CASE("regression tests")
+         };
+         CHECK_THROWS_AS(json::from_cbor(vec1), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec1),
+-                          "[json.exception.parse_error.113] parse error at byte 13: expected a CBOR string; last byte: 0xB4");
++                          "[json.exception.parse_error.113] parse error at 13: expected a CBOR string; last byte: 0xB4");
+ 
+         // related test case: double-precision
+         std::vector<uint8_t> vec2
+@@ -1117,7 +1117,7 @@ TEST_CASE("regression tests")
+         };
+         CHECK_THROWS_AS(json::from_cbor(vec2), json::parse_error&);
+         CHECK_THROWS_WITH(json::from_cbor(vec2),
+-                          "[json.exception.parse_error.113] parse error at byte 13: expected a CBOR string; last byte: 0xB4");
++                          "[json.exception.parse_error.113] parse error at 13: expected a CBOR string; last byte: 0xB4");
+     }
+ 
+     SECTION("issue #452 - Heap-buffer-overflow (OSS-Fuzz issue 585)")
+diff --git a/test/src/unit-ubjson.cpp b/test/src/unit-ubjson.cpp
+index d2410ff6b..3b060c977 100644
+--- a/test/src/unit-ubjson.cpp
++++ b/test/src/unit-ubjson.cpp
+@@ -1299,7 +1299,7 @@ TEST_CASE("UBJSON")
+             {
+                 CHECK_THROWS_AS(json::from_ubjson(vec), json::parse_error&);
+                 CHECK_THROWS_WITH(json::from_ubjson(vec),
+-                                  "[json.exception.parse_error.110] parse error at byte 2: expected end of input");
++                                  "[json.exception.parse_error.110] parse error at 2: expected end of input");
+             }
+         }
+ 
+@@ -1529,7 +1529,7 @@ TEST_CASE("UBJSON")
+         {
+             CHECK_THROWS_AS(json::from_ubjson(std::vector<uint8_t>()), json::parse_error&);
+             CHECK_THROWS_WITH(json::from_ubjson(std::vector<uint8_t>()),
+-                              "[json.exception.parse_error.110] parse error at byte 1: unexpected end of input");
++                              "[json.exception.parse_error.110] parse error at 1: unexpected end of input");
+         }
+ 
+         SECTION("char")
+@@ -1538,14 +1538,14 @@ TEST_CASE("UBJSON")
+             {
+                 std::vector<uint8_t> v = {'C'};
+                 CHECK_THROWS_AS(json::from_ubjson(v), json::parse_error&);
+-                CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             }
+ 
+             SECTION("byte out of range")
+             {
+                 std::vector<uint8_t> v = {'C', 130};
+                 CHECK_THROWS_AS(json::from_ubjson(v), json::parse_error&);
+-                CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.113] parse error at byte 2: byte after 'C' must be in range 0x00..0x7F; last byte: 0x82");
++                CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.113] parse error at 2: byte after 'C' must be in range 0x00..0x7F; last byte: 0x82");
+             }
+         }
+ 
+@@ -1555,14 +1555,14 @@ TEST_CASE("UBJSON")
+             {
+                 std::vector<uint8_t> v = {'S'};
+                 CHECK_THROWS_AS(json::from_ubjson(v), json::parse_error&);
+-                CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++                CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             }
+ 
+             SECTION("invalid byte")
+             {
+                 std::vector<uint8_t> v = {'S', '1', 'a'};
+                 CHECK_THROWS_AS(json::from_ubjson(v), json::parse_error&);
+-                CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.113] parse error at byte 2: expected a UBJSON string; last byte: 0x31");
++                CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.113] parse error at 2: expected a UBJSON string; last byte: 0x31");
+             }
+         }
+ 
+@@ -1572,7 +1572,7 @@ TEST_CASE("UBJSON")
+             {
+                 std::vector<uint8_t> v = {'[', '$', 'i', 2};
+                 CHECK_THROWS_AS(json::from_ubjson(v), json::parse_error&);
+-                CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.112] parse error at byte 4: expected '#' after UBJSON type information; last byte: 0x02");
++                CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.112] parse error at 4: expected '#' after UBJSON type information; last byte: 0x02");
+             }
+         }
+ 
+@@ -1580,17 +1580,17 @@ TEST_CASE("UBJSON")
+         {
+             std::vector<uint8_t> vS = {'S'};
+             CHECK_THROWS_AS(json::from_ubjson(vS), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vS), "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vS), "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK(json::from_ubjson(vS, true, false).is_discarded());
+ 
+             std::vector<uint8_t> v = {'S', 'i', '2', 'a'};
+             CHECK_THROWS_AS(json::from_ubjson(v), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.110] parse error at byte 5: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.110] parse error at 5: unexpected end of input");
+             CHECK(json::from_ubjson(v, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vC = {'C'};
+             CHECK_THROWS_AS(json::from_ubjson(vC), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vC), "[json.exception.parse_error.110] parse error at byte 2: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vC), "[json.exception.parse_error.110] parse error at 2: unexpected end of input");
+             CHECK(json::from_ubjson(vC, true, false).is_discarded());
+         }
+ 
+@@ -1598,32 +1598,32 @@ TEST_CASE("UBJSON")
+         {
+             std::vector<uint8_t> vU = {'[', '#', 'U'};
+             CHECK_THROWS_AS(json::from_ubjson(vU), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vU), "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vU), "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK(json::from_ubjson(vU, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vi = {'[', '#', 'i'};
+             CHECK_THROWS_AS(json::from_ubjson(vi), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vi), "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vi), "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK(json::from_ubjson(vi, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vI = {'[', '#', 'I'};
+             CHECK_THROWS_AS(json::from_ubjson(vI), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vI), "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vI), "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK(json::from_ubjson(vI, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vl = {'[', '#', 'l'};
+             CHECK_THROWS_AS(json::from_ubjson(vl), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vl), "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vl), "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK(json::from_ubjson(vl, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vL = {'[', '#', 'L'};
+             CHECK_THROWS_AS(json::from_ubjson(vL), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vL), "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vL), "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK(json::from_ubjson(vL, true, false).is_discarded());
+ 
+             std::vector<uint8_t> v0 = {'[', '#', 'T', ']'};
+             CHECK_THROWS_AS(json::from_ubjson(v0), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(v0), "[json.exception.parse_error.113] parse error at byte 3: byte after '#' must denote a number type; last byte: 0x54");
++            CHECK_THROWS_WITH(json::from_ubjson(v0), "[json.exception.parse_error.113] parse error at 3: byte after '#' must denote a number type; last byte: 0x54");
+             CHECK(json::from_ubjson(v0, true, false).is_discarded());
+         }
+ 
+@@ -1631,17 +1631,17 @@ TEST_CASE("UBJSON")
+         {
+             std::vector<uint8_t> v0 = {'[', '$'};
+             CHECK_THROWS_AS(json::from_ubjson(v0), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(v0), "[json.exception.parse_error.110] parse error at byte 3: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(v0), "[json.exception.parse_error.110] parse error at 3: unexpected end of input");
+             CHECK(json::from_ubjson(v0, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vi = {'[', '$', '#'};
+             CHECK_THROWS_AS(json::from_ubjson(vi), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vi), "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vi), "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK(json::from_ubjson(vi, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vT = {'[', '$', 'T'};
+             CHECK_THROWS_AS(json::from_ubjson(vT), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vT), "[json.exception.parse_error.110] parse error at byte 4: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vT), "[json.exception.parse_error.110] parse error at 4: unexpected end of input");
+             CHECK(json::from_ubjson(vT, true, false).is_discarded());
+         }
+ 
+@@ -1649,17 +1649,17 @@ TEST_CASE("UBJSON")
+         {
+             std::vector<uint8_t> vST = {'[', '$', 'i', '#', 'i', 2, 1};
+             CHECK_THROWS_AS(json::from_ubjson(vST), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vST), "[json.exception.parse_error.110] parse error at byte 8: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vST), "[json.exception.parse_error.110] parse error at 8: unexpected end of input");
+             CHECK(json::from_ubjson(vST, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vS = {'[', '#', 'i', 2, 'i', 1};
+             CHECK_THROWS_AS(json::from_ubjson(vS), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vS), "[json.exception.parse_error.110] parse error at byte 7: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vS), "[json.exception.parse_error.110] parse error at 7: unexpected end of input");
+             CHECK(json::from_ubjson(vS, true, false).is_discarded());
+ 
+             std::vector<uint8_t> v = {'[', 'i', 2, 'i', 1};
+             CHECK_THROWS_AS(json::from_ubjson(v), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.110] parse error at byte 6: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.110] parse error at 6: unexpected end of input");
+             CHECK(json::from_ubjson(v, true, false).is_discarded());
+         }
+ 
+@@ -1667,42 +1667,42 @@ TEST_CASE("UBJSON")
+         {
+             std::vector<uint8_t> vST = {'{', '$', 'i', '#', 'i', 2, 'i', 1, 'a', 1};
+             CHECK_THROWS_AS(json::from_ubjson(vST), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vST), "[json.exception.parse_error.110] parse error at byte 11: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vST), "[json.exception.parse_error.110] parse error at 11: unexpected end of input");
+             CHECK(json::from_ubjson(vST, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vT = {'{', '$', 'i', 'i', 1, 'a', 1};
+             CHECK_THROWS_AS(json::from_ubjson(vT), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vT), "[json.exception.parse_error.112] parse error at byte 4: expected '#' after UBJSON type information; last byte: 0x69");
++            CHECK_THROWS_WITH(json::from_ubjson(vT), "[json.exception.parse_error.112] parse error at 4: expected '#' after UBJSON type information; last byte: 0x69");
+             CHECK(json::from_ubjson(vT, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vS = {'{', '#', 'i', 2, 'i', 1, 'a', 'i', 1};
+             CHECK_THROWS_AS(json::from_ubjson(vS), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vS), "[json.exception.parse_error.110] parse error at byte 10: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vS), "[json.exception.parse_error.110] parse error at 10: unexpected end of input");
+             CHECK(json::from_ubjson(vS, true, false).is_discarded());
+ 
+             std::vector<uint8_t> v = {'{', 'i', 1, 'a', 'i', 1};
+             CHECK_THROWS_AS(json::from_ubjson(v), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.110] parse error at byte 7: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(v), "[json.exception.parse_error.110] parse error at 7: unexpected end of input");
+             CHECK(json::from_ubjson(v, true, false).is_discarded());
+ 
+             std::vector<uint8_t> v2 = {'{', 'i', 1, 'a', 'i', 1, 'i'};
+             CHECK_THROWS_AS(json::from_ubjson(v2), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(v2), "[json.exception.parse_error.110] parse error at byte 8: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(v2), "[json.exception.parse_error.110] parse error at 8: unexpected end of input");
+             CHECK(json::from_ubjson(v2, true, false).is_discarded());
+ 
+             std::vector<uint8_t> v3 = {'{', 'i', 1, 'a'};
+             CHECK_THROWS_AS(json::from_ubjson(v3), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(v3), "[json.exception.parse_error.110] parse error at byte 5: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(v3), "[json.exception.parse_error.110] parse error at 5: unexpected end of input");
+             CHECK(json::from_ubjson(v3, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vST1 = {'{', '$', 'd', '#', 'i', 2, 'i', 1, 'a'};
+             CHECK_THROWS_AS(json::from_ubjson(vST1), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vST1), "[json.exception.parse_error.110] parse error at byte 10: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vST1), "[json.exception.parse_error.110] parse error at 10: unexpected end of input");
+             CHECK(json::from_ubjson(vST1, true, false).is_discarded());
+ 
+             std::vector<uint8_t> vST2 = {'{', '#', 'i', 2, 'i', 1, 'a'};
+             CHECK_THROWS_AS(json::from_ubjson(vST2), json::parse_error&);
+-            CHECK_THROWS_WITH(json::from_ubjson(vST2), "[json.exception.parse_error.110] parse error at byte 8: unexpected end of input");
++            CHECK_THROWS_WITH(json::from_ubjson(vST2), "[json.exception.parse_error.110] parse error at 8: unexpected end of input");
+             CHECK(json::from_ubjson(vST2, true, false).is_discarded());
+         }
+     }
+diff --git a/test/src/unit-unicode.cpp b/test/src/unit-unicode.cpp
+index 4def1a3e8..ae580e3e3 100644
+--- a/test/src/unit-unicode.cpp
++++ b/test/src/unit-unicode.cpp
+@@ -931,31 +931,31 @@ TEST_CASE("Unicode", "[hide]")
+             {
+                 CHECK_THROWS_AS(json::parse("\"\\uDC00\\uDC00\""), json::parse_error&);
+                 CHECK_THROWS_WITH(json::parse("\"\\uDC00\\uDC00\""),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 7: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must follow U+D800..U+DBFF; last read: '\"\\uDC00'");
++                                  "[json.exception.parse_error.101] parse error at 7: syntax error - invalid string: surrogate U+DC00..U+DFFF must follow U+D800..U+DBFF; last read: '\"\\uDC00'");
+ 
+                 CHECK_THROWS_AS(json::parse("\"\\uD7FF\\uDC00\""), json::parse_error&);
+                 CHECK_THROWS_WITH(json::parse("\"\\uD7FF\\uDC00\""),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must follow U+D800..U+DBFF; last read: '\"\\uD7FF\\uDC00'");
++                                  "[json.exception.parse_error.101] parse error at 13: syntax error - invalid string: surrogate U+DC00..U+DFFF must follow U+D800..U+DBFF; last read: '\"\\uD7FF\\uDC00'");
+ 
+                 CHECK_THROWS_AS(json::parse("\"\\uD800]\""), json::parse_error&);
+                 CHECK_THROWS_WITH(json::parse("\"\\uD800]\""),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 8: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD800]'");
++                                  "[json.exception.parse_error.101] parse error at 8: syntax error - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD800]'");
+ 
+                 CHECK_THROWS_AS(json::parse("\"\\uD800\\v\""), json::parse_error&);
+                 CHECK_THROWS_WITH(json::parse("\"\\uD800\\v\""),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 9: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD800\\v'");
++                                  "[json.exception.parse_error.101] parse error at 9: syntax error - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD800\\v'");
+ 
+                 CHECK_THROWS_AS(json::parse("\"\\uD800\\u123\""), json::parse_error&);
+                 CHECK_THROWS_WITH(json::parse("\"\\uD800\\u123\""),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing value - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\uD800\\u123\"'");
++                                  "[json.exception.parse_error.101] parse error at 13: syntax error - invalid string: '\\u' must be followed by 4 hex digits; last read: '\"\\uD800\\u123\"'");
+ 
+                 CHECK_THROWS_AS(json::parse("\"\\uD800\\uDBFF\""), json::parse_error&);
+                 CHECK_THROWS_WITH(json::parse("\"\\uD800\\uDBFF\""),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD800\\uDBFF'");
++                                  "[json.exception.parse_error.101] parse error at 13: syntax error - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD800\\uDBFF'");
+ 
+                 CHECK_THROWS_AS(json::parse("\"\\uD800\\uE000\""), json::parse_error&);
+                 CHECK_THROWS_WITH(json::parse("\"\\uD800\\uE000\""),
+-                                  "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD800\\uE000'");
++                                  "[json.exception.parse_error.101] parse error at 13: syntax error - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD800\\uE000'");
+             }
+         }
+ 

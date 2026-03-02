@@ -1,0 +1,506 @@
+diff --git a/include/spdlog/common.h b/include/spdlog/common.h
+index 443c058a..8259c733 100644
+--- a/include/spdlog/common.h
++++ b/include/spdlog/common.h
+@@ -44,13 +44,15 @@
+ 
+ #include <spdlog/fmt/fmt.h>
+ 
+-#if !defined(SPDLOG_USE_STD_FORMAT) && FMT_VERSION >= 80000 // backward compatibility with fmt versions older than 8
+-#    define SPDLOG_FMT_RUNTIME(format_string) fmt::runtime(format_string)
+-#    if defined(SPDLOG_WCHAR_FILENAMES) || defined(SPDLOG_WCHAR_TO_UTF8_SUPPORT)
+-#        include <spdlog/fmt/xchar.h>
++#ifndef SPDLOG_USE_STD_FORMAT
++#    if FMT_VERSION >= 80000 // backward compatibility with fmt versions older than 8
++#        define SPDLOG_FMT_RUNTIME(format_string) fmt::runtime(format_string)
++#        if defined(SPDLOG_WCHAR_FILENAMES) || defined(SPDLOG_WCHAR_TO_UTF8_SUPPORT)
++#            include <spdlog/fmt/xchar.h>
++#        endif
++#    else
++#        define SPDLOG_FMT_RUNTIME(format_string) format_string
+ #    endif
+-#else
+-#    define SPDLOG_FMT_RUNTIME(format_string) format_string
+ #endif
+ 
+ // visual studio up to 2013 does not support noexcept nor constexpr
+@@ -145,7 +147,7 @@ using wmemory_buf_t = std::wstring;
+ template<typename... Args>
+ using wformat_string_t = std::wstring_view;
+ #    endif
+-#    define SPDLOG_BUF_TO_STRING(x) x
++
+ #else // use fmt lib instead of std::format
+ namespace fmt_lib = fmt;
+ 
+@@ -173,7 +175,6 @@ using wmemory_buf_t = fmt::basic_memory_buffer<wchar_t, 250>;
+ template<typename... Args>
+ using wformat_string_t = fmt::wformat_string<Args...>;
+ #    endif
+-#    define SPDLOG_BUF_TO_STRING(x) fmt::to_string(x)
+ #endif
+ 
+ #ifdef SPDLOG_WCHAR_TO_UTF8_SUPPORT
+@@ -324,7 +325,7 @@ template<bool B, class T = void>
+ using enable_if_t = typename std::enable_if<B, T>::type;
+ 
+ template<typename T, typename... Args>
+-std::unique_ptr<T> make_unique(Args &&...args)
++std::unique_ptr<T> make_unique(Args &&... args)
+ {
+     static_assert(!std::is_array<T>::value, "arrays not supported");
+     return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
+diff --git a/include/spdlog/details/os-inl.h b/include/spdlog/details/os-inl.h
+index b9bab53c..c3bf691c 100644
+--- a/include/spdlog/details/os-inl.h
++++ b/include/spdlog/details/os-inl.h
+@@ -388,7 +388,11 @@ SPDLOG_INLINE std::string filename_to_str(const filename_t &filename)
+ {
+     memory_buf_t buf;
+     wstr_to_utf8buf(filename, buf);
+-    return SPDLOG_BUF_TO_STRING(buf);
++#    ifdef SPDLOG_USE_STD_FORMAT
++    return buf;
++#    else
++    return fmt::to_string(buf);
++#    endif
+ }
+ #else
+ SPDLOG_INLINE std::string filename_to_str(const filename_t &filename)
+diff --git a/include/spdlog/logger.h b/include/spdlog/logger.h
+index 05a40a52..a8abae41 100644
+--- a/include/spdlog/logger.h
++++ b/include/spdlog/logger.h
+@@ -363,9 +363,12 @@ protected:
+         }
+         SPDLOG_TRY
+         {
++#ifdef SPDLOG_USE_STD_FORMAT
++            memory_buf_t buf = std::vformat(fmt, std::make_format_args(std::forward<Args>(args)...));
++#else
+             memory_buf_t buf;
+-            fmt_lib::vformat_to(std::back_inserter(buf), fmt, fmt_lib::make_format_args(std::forward<Args>(args)...));
+-
++            fmt::detail::vformat_to(buf, fmt, fmt::make_format_args(std::forward<Args>(args)...));
++#endif
+             details::log_msg log_msg(loc, name_, lvl, string_view_t(buf.data(), buf.size()));
+             log_it_(log_msg, log_enabled, traceback_enabled);
+         }
+@@ -385,9 +388,13 @@ protected:
+         SPDLOG_TRY
+         {
+             // format to wmemory_buffer and convert to utf8
++            ;
++#    ifdef SPDLOG_USE_STD_FORMAT
++            wmemory_buf_t wbuf = std::vformat(fmt, std::make_wformat_args(std::forward<Args>(args)...));
++#    else
+             wmemory_buf_t wbuf;
+-            fmt_lib::vformat_to(std::back_inserter(wbuf), fmt, fmt_lib::make_format_args<fmt_lib::wformat_context>(std::forward<Args>(args)...));
+-
++            fmt::detail::vformat_to(wbuf, fmt, fmt::make_format_args<fmt::wformat_context>(std::forward<Args>(args)...));
++#    endif
+             memory_buf_t buf;
+             details::os::wstr_to_utf8buf(wstring_view_t(wbuf.data(), wbuf.size()), buf);
+             details::log_msg log_msg(loc, name_, lvl, string_view_t(buf.data(), buf.size()));
+diff --git a/include/spdlog/sinks/msvc_sink.h b/include/spdlog/sinks/msvc_sink.h
+index b1dfd305..cf2516d7 100644
+--- a/include/spdlog/sinks/msvc_sink.h
++++ b/include/spdlog/sinks/msvc_sink.h
+@@ -30,8 +30,11 @@ protected:
+     {
+         memory_buf_t formatted;
+         base_sink<Mutex>::formatter_->format(msg, formatted);
+-        formatted.push_back('\0'); // add a null terminator for OutputDebugStringA
+-        OutputDebugStringA(formatted.data());
++#    ifdef SPDLOG_USE_STD_FORMAT
++        OutputDebugStringA(formatted.c_str());
++#    else
++        OutputDebugStringA(fmt::to_string(formatted).c_str());
++#    endif
+     }
+ 
+     void flush_() override {}
+diff --git a/include/spdlog/sinks/ringbuffer_sink.h b/include/spdlog/sinks/ringbuffer_sink.h
+index d2fc8c49..5836d98b 100644
+--- a/include/spdlog/sinks/ringbuffer_sink.h
++++ b/include/spdlog/sinks/ringbuffer_sink.h
+@@ -50,7 +50,11 @@ public:
+         {
+             memory_buf_t formatted;
+             base_sink<Mutex>::formatter_->format(q_.at(i), formatted);
+-            ret.push_back(SPDLOG_BUF_TO_STRING(std::move(formatted)));
++#ifdef SPDLOG_USE_STD_FORMAT
++            ret.push_back(std::move(formatted));
++#else
++            ret.push_back(fmt::to_string(formatted));
++#endif
+         }
+         return ret;
+     }
+diff --git a/tests/includes.h b/tests/includes.h
+index e6805280..7285873a 100644
+--- a/tests/includes.h
++++ b/tests/includes.h
+@@ -17,7 +17,6 @@
+ 
+ #include "spdlog/spdlog.h"
+ #include "spdlog/async.h"
+-#include "spdlog/details/fmt_helper.h"
+ #include "spdlog/sinks/basic_file_sink.h"
+ #include "spdlog/sinks/daily_file_sink.h"
+ #include "spdlog/sinks/null_sink.h"
+diff --git a/tests/test_daily_logger.cpp b/tests/test_daily_logger.cpp
+index c6e685de..cf93c46e 100644
+--- a/tests/test_daily_logger.cpp
++++ b/tests/test_daily_logger.cpp
+@@ -9,20 +9,6 @@ using filename_memory_buf_t = std::basic_string<spdlog::filename_t::value_type>;
+ using filename_memory_buf_t = fmt::basic_memory_buffer<spdlog::filename_t::value_type, 250>;
+ #endif
+ 
+-#ifdef SPDLOG_WCHAR_FILENAMES
+-std::string filename_buf_to_utf8string(const filename_memory_buf_t &w)
+-{
+-    spdlog::memory_buf_t buf;
+-    spdlog::details::os::wstr_to_utf8buf(spdlog::wstring_view_t(w.data(), w.size()), buf);
+-    return SPDLOG_BUF_TO_STRING(buf);
+-}
+-#else
+-std::string filename_buf_to_utf8string(const filename_memory_buf_t &w)
+-{
+-    return SPDLOG_BUF_TO_STRING(w);
+-}
+-#endif
+-
+ TEST_CASE("daily_logger with dateonly calculator", "[daily_logger]")
+ {
+     using sink_type = spdlog::sinks::daily_file_sink<std::mutex, spdlog::sinks::daily_filename_calculator>;
+@@ -44,7 +30,23 @@ TEST_CASE("daily_logger with dateonly calculator", "[daily_logger]")
+     }
+     logger->flush();
+ 
+-    require_message_count(filename_buf_to_utf8string(w), 10);
++#ifdef SPDLOG_WCHAR_FILENAMES
++    spdlog::memory_buf_t buf;
++#    ifdef SPDLOG_USE_STD_FORMAT
++    spdlog::details::os::wstr_to_utf8buf(w, buf);
++    auto &filename = buf;
++#    else
++    spdlog::details::os::wstr_to_utf8buf(fmt::to_string(w), buf);
++    auto filename = fmt::to_string(buf);
++#    endif
++#else
++#    ifdef SPDLOG_USE_STD_FORMAT
++    auto &filename = w;
++#    else
++    auto filename = fmt::to_string(w);
++#    endif
++#endif
++    require_message_count(filename, 10);
+ }
+ 
+ struct custom_daily_file_name_calculator
+@@ -54,8 +56,11 @@ struct custom_daily_file_name_calculator
+         filename_memory_buf_t w;
+         spdlog::fmt_lib::format_to(std::back_inserter(w), SPDLOG_FILENAME_T("{}{:04d}{:02d}{:02d}"), basename, now_tm.tm_year + 1900,
+             now_tm.tm_mon + 1, now_tm.tm_mday);
+-
+-        return SPDLOG_BUF_TO_STRING(w);
++#ifdef SPDLOG_USE_STD_FORMAT
++        return w;
++#else
++        return fmt::to_string(w);
++#endif
+     }
+ };
+ 
+@@ -80,7 +85,23 @@ TEST_CASE("daily_logger with custom calculator", "[daily_logger]")
+ 
+     logger->flush();
+ 
+-    require_message_count(filename_buf_to_utf8string(w), 10);
++#ifdef SPDLOG_WCHAR_FILENAMES
++    spdlog::memory_buf_t buf;
++#    ifdef SPDLOG_USE_STD_FORMAT
++    spdlog::details::os::wstr_to_utf8buf(w, buf);
++    auto &filename = buf;
++#    else
++    spdlog::details::os::wstr_to_utf8buf(fmt::to_string(w), buf);
++    auto filename = fmt::to_string(buf);
++#    endif
++#else
++#    ifdef SPDLOG_USE_STD_FORMAT
++    auto &filename = w;
++#    else
++    auto filename = fmt::to_string(w);
++#    endif
++#endif
++    require_message_count(filename, 10);
+ }
+ 
+ /*
+diff --git a/tests/test_errors.cpp b/tests/test_errors.cpp
+index 896e5b0a..c7aef812 100644
+--- a/tests/test_errors.cpp
++++ b/tests/test_errors.cpp
+@@ -29,7 +29,11 @@ TEST_CASE("default_error_handler", "[errors]]")
+ 
+     auto logger = spdlog::create<spdlog::sinks::basic_file_sink_mt>("test-error", filename, true);
+     logger->set_pattern("%v");
+-    logger->info(SPDLOG_FMT_RUNTIME("Test message {} {}"), 1);
++#ifdef SPDLOG_USE_STD_FORMAT
++    logger->info("Test message {} {}", 1);
++#else
++    logger->info(fmt::runtime("Test message {} {}"), 1);
++#endif
+     logger->info("Test message {}", 2);
+     logger->flush();
+ 
+@@ -49,7 +53,11 @@ TEST_CASE("custom_error_handler", "[errors]]")
+     logger->set_error_handler([=](const std::string &) { throw custom_ex(); });
+     logger->info("Good message #1");
+ 
+-    REQUIRE_THROWS_AS(logger->info(SPDLOG_FMT_RUNTIME("Bad format msg {} {}"), "xxx"), custom_ex);
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE_THROWS_AS(logger->info("Bad format msg {} {}", "xxx"), custom_ex);
++#else
++    REQUIRE_THROWS_AS(logger->info(fmt::runtime("Bad format msg {} {}"), "xxx"), custom_ex);
++#endif
+     logger->info("Good message #2");
+     require_message_count(SIMPLE_LOG, 2);
+ }
+@@ -88,7 +96,11 @@ TEST_CASE("async_error_handler", "[errors]]")
+             ofs << err_msg;
+         });
+         logger->info("Good message #1");
+-        logger->info(SPDLOG_FMT_RUNTIME("Bad format msg {} {}"), "xxx");
++#ifdef SPDLOG_USE_STD_FORMAT
++        logger->info("Bad format msg {} {}", "xxx");
++#else
++        logger->info(fmt::runtime("Bad format msg {} {}"), "xxx");
++#endif
+         logger->info("Good message #2");
+         spdlog::drop("logger"); // force logger to drain the queue and shutdown
+     }
+diff --git a/tests/test_fmt_helper.cpp b/tests/test_fmt_helper.cpp
+index a9db5d02..dde5d482 100644
+--- a/tests/test_fmt_helper.cpp
++++ b/tests/test_fmt_helper.cpp
+@@ -1,15 +1,19 @@
+ 
+ #include "includes.h"
++#include "spdlog/details/fmt_helper.h"
+ 
+ using spdlog::memory_buf_t;
+-using spdlog::details::fmt_helper::to_string_view;
+ 
+ void test_pad2(int n, const char *expected)
+ {
+     memory_buf_t buf;
+     spdlog::details::fmt_helper::pad2(n, buf);
+ 
+-    REQUIRE(to_string_view(buf) == expected);
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(buf == expected);
++#else
++    REQUIRE(fmt::to_string(buf) == expected);
++#endif
+ }
+ 
+ void test_pad3(uint32_t n, const char *expected)
+@@ -17,7 +21,11 @@ void test_pad3(uint32_t n, const char *expected)
+     memory_buf_t buf;
+     spdlog::details::fmt_helper::pad3(n, buf);
+ 
+-    REQUIRE(to_string_view(buf) == expected);
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(buf == expected);
++#else
++    REQUIRE(fmt::to_string(buf) == expected);
++#endif
+ }
+ 
+ void test_pad6(std::size_t n, const char *expected)
+@@ -25,7 +33,11 @@ void test_pad6(std::size_t n, const char *expected)
+     memory_buf_t buf;
+     spdlog::details::fmt_helper::pad6(n, buf);
+ 
+-    REQUIRE(to_string_view(buf) == expected);
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(buf == expected);
++#else
++    REQUIRE(fmt::to_string(buf) == expected);
++#endif
+ }
+ 
+ void test_pad9(std::size_t n, const char *expected)
+@@ -33,7 +45,11 @@ void test_pad9(std::size_t n, const char *expected)
+     memory_buf_t buf;
+     spdlog::details::fmt_helper::pad9(n, buf);
+ 
+-    REQUIRE(to_string_view(buf) == expected);
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(buf == expected);
++#else
++    REQUIRE(fmt::to_string(buf) == expected);
++#endif
+ }
+ 
+ TEST_CASE("pad2", "[fmt_helper]")
+diff --git a/tests/test_pattern_formatter.cpp b/tests/test_pattern_formatter.cpp
+index e4ea6cc3..02a1bc2b 100644
+--- a/tests/test_pattern_formatter.cpp
++++ b/tests/test_pattern_formatter.cpp
+@@ -2,7 +2,6 @@
+ #include "test_sink.h"
+ 
+ using spdlog::memory_buf_t;
+-using spdlog::details::fmt_helper::to_string_view;
+ 
+ // log to str and return it
+ template<typename... Args>
+@@ -274,7 +273,11 @@ TEST_CASE("clone-default-formatter", "[pattern_formatter]")
+     formatter_1->format(msg, formatted_1);
+     formatter_2->format(msg, formatted_2);
+ 
+-    REQUIRE(to_string_view(formatted_1) == to_string_view(formatted_2));
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted_1 == formatted_2);
++#else
++    REQUIRE(fmt::to_string(formatted_1) == fmt::to_string(formatted_2));
++#endif
+ }
+ 
+ TEST_CASE("clone-default-formatter2", "[pattern_formatter]")
+@@ -289,7 +292,11 @@ TEST_CASE("clone-default-formatter2", "[pattern_formatter]")
+     formatter_1->format(msg, formatted_1);
+     formatter_2->format(msg, formatted_2);
+ 
+-    REQUIRE(to_string_view(formatted_1) == to_string_view(formatted_2));
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted_1 == formatted_2);
++#else
++    REQUIRE(fmt::to_string(formatted_1) == fmt::to_string(formatted_2));
++#endif
+ }
+ 
+ TEST_CASE("clone-formatter", "[pattern_formatter]")
+@@ -304,7 +311,11 @@ TEST_CASE("clone-formatter", "[pattern_formatter]")
+     formatter_1->format(msg, formatted_1);
+     formatter_2->format(msg, formatted_2);
+ 
+-    REQUIRE(to_string_view(formatted_1) == to_string_view(formatted_2));
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted_1 == formatted_2);
++#else
++    REQUIRE(fmt::to_string(formatted_1) == fmt::to_string(formatted_2));
++#endif
+ }
+ 
+ TEST_CASE("clone-formatter-2", "[pattern_formatter]")
+@@ -320,7 +331,11 @@ TEST_CASE("clone-formatter-2", "[pattern_formatter]")
+     formatter_1->format(msg, formatted_1);
+     formatter_2->format(msg, formatted_2);
+ 
+-    REQUIRE(to_string_view(formatted_1) == to_string_view(formatted_2));
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted_1 == formatted_2);
++#else
++    REQUIRE(fmt::to_string(formatted_1) == fmt::to_string(formatted_2));
++#endif
+ }
+ 
+ class custom_test_flag : public spdlog::custom_flag_formatter
+@@ -367,8 +382,13 @@ TEST_CASE("clone-custom_formatter", "[pattern_formatter]")
+ 
+     auto expected = spdlog::fmt_lib::format("[logger-name] [custom_output] some message{}", spdlog::details::os::default_eol);
+ 
+-    REQUIRE(to_string_view(formatted_1) == expected);
+-    REQUIRE(to_string_view(formatted_2) == expected);
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted_1 == expected);
++    REQUIRE(formatted_2 == expected);
++#else
++    REQUIRE(fmt::to_string(formatted_1) == expected);
++    REQUIRE(fmt::to_string(formatted_2) == expected);
++#endif
+ }
+ 
+ //
+@@ -390,7 +410,11 @@ TEST_CASE("short filename formatter-1", "[pattern_formatter]")
+     spdlog::details::log_msg msg(source_loc, "logger-name", spdlog::level::info, "Hello");
+     formatter.format(msg, formatted);
+ 
+-    REQUIRE(to_string_view(formatted) == "myfile.cpp");
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted == "myfile.cpp");
++#else
++    REQUIRE(fmt::to_string(formatted) == "myfile.cpp");
++#endif
+ }
+ 
+ TEST_CASE("short filename formatter-2", "[pattern_formatter]")
+@@ -402,7 +426,11 @@ TEST_CASE("short filename formatter-2", "[pattern_formatter]")
+     spdlog::details::log_msg msg(source_loc, "logger-name", spdlog::level::info, "Hello");
+     formatter.format(msg, formatted);
+ 
+-    REQUIRE(to_string_view(formatted) == "myfile.cpp:123");
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted == "myfile.cpp:123");
++#else
++    REQUIRE(fmt::to_string(formatted) == "myfile.cpp:123");
++#endif
+ }
+ 
+ TEST_CASE("short filename formatter-3", "[pattern_formatter]")
+@@ -414,7 +442,11 @@ TEST_CASE("short filename formatter-3", "[pattern_formatter]")
+     spdlog::details::log_msg msg(source_loc, "logger-name", spdlog::level::info, "Hello");
+     formatter.format(msg, formatted);
+ 
+-    REQUIRE(to_string_view(formatted) == " Hello");
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted == " Hello");
++#else
++    REQUIRE(fmt::to_string(formatted) == " Hello");
++#endif
+ }
+ 
+ TEST_CASE("full filename formatter", "[pattern_formatter]")
+@@ -426,7 +458,11 @@ TEST_CASE("full filename formatter", "[pattern_formatter]")
+     spdlog::details::log_msg msg(source_loc, "logger-name", spdlog::level::info, "Hello");
+     formatter.format(msg, formatted);
+ 
+-    REQUIRE(to_string_view(formatted) == test_path);
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted == test_path);
++#else
++    REQUIRE(fmt::to_string(formatted) == test_path);
++#endif
+ }
+ 
+ TEST_CASE("custom flags", "[pattern_formatter]")
+@@ -440,7 +476,11 @@ TEST_CASE("custom flags", "[pattern_formatter]")
+     formatter->format(msg, formatted);
+     auto expected = spdlog::fmt_lib::format("[logger-name] [custom1] [custom2] some message{}", spdlog::details::os::default_eol);
+ 
+-    REQUIRE(to_string_view(formatted) == expected);
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted == expected);
++#else
++    REQUIRE(fmt::to_string(formatted) == expected);
++#endif
+ }
+ 
+ TEST_CASE("custom flags-padding", "[pattern_formatter]")
+@@ -454,7 +494,11 @@ TEST_CASE("custom flags-padding", "[pattern_formatter]")
+     formatter->format(msg, formatted);
+     auto expected = spdlog::fmt_lib::format("[logger-name] [custom1] [     custom2] some message{}", spdlog::details::os::default_eol);
+ 
+-    REQUIRE(to_string_view(formatted) == expected);
++#ifdef SPDLOG_USE_STD_FORMAT
++    REQUIRE(formatted == expected);
++#else
++    REQUIRE(fmt::to_string(formatted) == expected);
++#endif
+ }
+ 
+ TEST_CASE("custom flags-exception", "[pattern_formatter]")

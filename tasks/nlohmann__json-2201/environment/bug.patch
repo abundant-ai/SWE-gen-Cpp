@@ -1,0 +1,265 @@
+diff --git a/cmake/download_test_data.cmake b/cmake/download_test_data.cmake
+index b023d8b45..fe95235f8 100644
+--- a/cmake/download_test_data.cmake
++++ b/cmake/download_test_data.cmake
+@@ -1,7 +1,7 @@
+ find_package(Git)
+ 
+ set(JSON_TEST_DATA_URL     https://github.com/nlohmann/json_test_data)
+-set(JSON_TEST_DATA_VERSION 3.0.0)
++set(JSON_TEST_DATA_VERSION 2.0.0)
+ 
+ # target to download test data
+ add_custom_target(download_test_data
+diff --git a/doc/mkdocs/docs/features/binary_formats/messagepack.md b/doc/mkdocs/docs/features/binary_formats/messagepack.md
+index 3e041bb70..ed0610569 100644
+--- a/doc/mkdocs/docs/features/binary_formats/messagepack.md
++++ b/doc/mkdocs/docs/features/binary_formats/messagepack.md
+@@ -31,8 +31,7 @@ number_unsigned | 128..255                          | uint 8           | 0xCC
+ number_unsigned | 256..65535                        | uint 16          | 0xCD
+ number_unsigned | 65536..4294967295                 | uint 32          | 0xCE
+ number_unsigned | 4294967296..18446744073709551615  | uint 64          | 0xCF
+-number_float    | *any value representable by a float*     | float 32  | 0xCA
+-number_float    | *any value NOT representable by a float* | float 64  | 0xCB
++number_float    | *any value*                       | float 64         | 0xCB
+ string          | *length*: 0..31                   | fixstr           | 0xA0..0xBF
+ string          | *length*: 32..255                 | str 8            | 0xD9
+ string          | *length*: 256..65535              | str 16           | 0xDA
+@@ -62,6 +61,10 @@ binary          | *size*: 65536..4294967295         | bin 32           | 0xC6
+ 	  - arrays with more than 4294967295 elements
+ 	  - objects with more than 4294967295 elements
+ 
++!!! info "Unused MessagePack types"
++
++	The following MessagePack types are not used in the conversion: float 32 (0xCA)
++
+ !!! info "NaN/infinity handling"
+ 
+ 	If NaN or Infinity are stored inside a JSON number, they are serialized properly. function which serializes NaN or Infinity to `null`.
+diff --git a/include/nlohmann/detail/output/binary_writer.hpp b/include/nlohmann/detail/output/binary_writer.hpp
+index 7289da3dc..269df0d55 100644
+--- a/include/nlohmann/detail/output/binary_writer.hpp
++++ b/include/nlohmann/detail/output/binary_writer.hpp
+@@ -28,7 +28,6 @@ class binary_writer
+ {
+     using string_t = typename BasicJsonType::string_t;
+     using binary_t = typename BasicJsonType::binary_t;
+-    using number_float_t = typename BasicJsonType::number_float_t;
+ 
+   public:
+     /*!
+@@ -195,7 +194,18 @@ class binary_writer
+                 }
+                 else
+                 {
+-                    write_compact_float(j.m_value.number_float, detail::input_format_t::cbor);
++                    if (static_cast<double>(j.m_value.number_float) >= static_cast<double>(std::numeric_limits<float>::lowest()) and
++                            static_cast<double>(j.m_value.number_float) <= static_cast<double>((std::numeric_limits<float>::max)()) and
++                            static_cast<double>(static_cast<float>(j.m_value.number_float)) == static_cast<double>(j.m_value.number_float))
++                    {
++                        oa->write_character(get_cbor_float_prefix(static_cast<float>(j.m_value.number_float)));
++                        write_number(static_cast<float>(j.m_value.number_float));
++                    }
++                    else
++                    {
++                        oa->write_character(get_cbor_float_prefix(j.m_value.number_float));
++                        write_number(j.m_value.number_float);
++                    }
+                 }
+                 break;
+             }
+@@ -494,7 +504,8 @@ class binary_writer
+ 
+             case value_t::number_float:
+             {
+-                write_compact_float(j.m_value.number_float, detail::input_format_t::msgpack);
++                oa->write_character(get_msgpack_float_prefix(j.m_value.number_float));
++                write_number(j.m_value.number_float);
+                 break;
+             }
+ 
+@@ -1507,26 +1518,6 @@ class binary_writer
+         oa->write_characters(vec.data(), sizeof(NumberType));
+     }
+ 
+-    void write_compact_float(const number_float_t n, detail::input_format_t format)
+-    {
+-        if (static_cast<double>(n) >= static_cast<double>(std::numeric_limits<float>::lowest()) and
+-                static_cast<double>(n) <= static_cast<double>((std::numeric_limits<float>::max)()) and
+-                static_cast<double>(static_cast<float>(n)) == static_cast<double>(n))
+-        {
+-            oa->write_character(format == detail::input_format_t::cbor
+-                                ? get_cbor_float_prefix(static_cast<float>(n))
+-                                : get_msgpack_float_prefix(static_cast<float>(n)));
+-            write_number(static_cast<float>(n));
+-        }
+-        else
+-        {
+-            oa->write_character(format == detail::input_format_t::cbor
+-                                ? get_cbor_float_prefix(n)
+-                                : get_msgpack_float_prefix(n));
+-            write_number(n);
+-        }
+-    }
+-
+   public:
+     // The following to_char_type functions are implement the conversion
+     // between uint8_t and CharType. In case CharType is not unsigned,
+diff --git a/include/nlohmann/json.hpp b/include/nlohmann/json.hpp
+index 790ecd4b2..409a6e799 100644
+--- a/include/nlohmann/json.hpp
++++ b/include/nlohmann/json.hpp
+@@ -7040,8 +7040,7 @@ class basic_json
+     number_unsigned | 256..65535                        | uint 16          | 0xCD
+     number_unsigned | 65536..4294967295                 | uint 32          | 0xCE
+     number_unsigned | 4294967296..18446744073709551615  | uint 64          | 0xCF
+-    number_float    | *any value representable by a float*     | float 32 | 0xCA
+-    number_float    | *any value NOT representable by a float* | float 64 | 0xCB
++    number_float    | *any value*                       | float 64         | 0xCB
+     string          | *length*: 0..31                   | fixstr           | 0xA0..0xBF
+     string          | *length*: 32..255                 | str 8            | 0xD9
+     string          | *length*: 256..65535              | str 16           | 0xDA
+@@ -7065,6 +7064,9 @@ class basic_json
+           - arrays with more than 4294967295 elements
+           - objects with more than 4294967295 elements
+ 
++    @note The following MessagePack types are not used in the conversion:
++          - float 32 (0xCA)
++
+     @note Any MessagePack output created @ref to_msgpack can be successfully
+           parsed by @ref from_msgpack.
+ 
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index 33d0c3577..cc822a543 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -12238,7 +12238,6 @@ class binary_writer
+ {
+     using string_t = typename BasicJsonType::string_t;
+     using binary_t = typename BasicJsonType::binary_t;
+-    using number_float_t = typename BasicJsonType::number_float_t;
+ 
+   public:
+     /*!
+@@ -12405,7 +12404,18 @@ class binary_writer
+                 }
+                 else
+                 {
+-                    write_compact_float(j.m_value.number_float, detail::input_format_t::cbor);
++                    if (static_cast<double>(j.m_value.number_float) >= static_cast<double>(std::numeric_limits<float>::lowest()) and
++                            static_cast<double>(j.m_value.number_float) <= static_cast<double>((std::numeric_limits<float>::max)()) and
++                            static_cast<double>(static_cast<float>(j.m_value.number_float)) == static_cast<double>(j.m_value.number_float))
++                    {
++                        oa->write_character(get_cbor_float_prefix(static_cast<float>(j.m_value.number_float)));
++                        write_number(static_cast<float>(j.m_value.number_float));
++                    }
++                    else
++                    {
++                        oa->write_character(get_cbor_float_prefix(j.m_value.number_float));
++                        write_number(j.m_value.number_float);
++                    }
+                 }
+                 break;
+             }
+@@ -12704,7 +12714,8 @@ class binary_writer
+ 
+             case value_t::number_float:
+             {
+-                write_compact_float(j.m_value.number_float, detail::input_format_t::msgpack);
++                oa->write_character(get_msgpack_float_prefix(j.m_value.number_float));
++                write_number(j.m_value.number_float);
+                 break;
+             }
+ 
+@@ -13717,26 +13728,6 @@ class binary_writer
+         oa->write_characters(vec.data(), sizeof(NumberType));
+     }
+ 
+-    void write_compact_float(const number_float_t n, detail::input_format_t format)
+-    {
+-        if (static_cast<double>(n) >= static_cast<double>(std::numeric_limits<float>::lowest()) and
+-                static_cast<double>(n) <= static_cast<double>((std::numeric_limits<float>::max)()) and
+-                static_cast<double>(static_cast<float>(n)) == static_cast<double>(n))
+-        {
+-            oa->write_character(format == detail::input_format_t::cbor
+-                                ? get_cbor_float_prefix(static_cast<float>(n))
+-                                : get_msgpack_float_prefix(static_cast<float>(n)));
+-            write_number(static_cast<float>(n));
+-        }
+-        else
+-        {
+-            oa->write_character(format == detail::input_format_t::cbor
+-                                ? get_cbor_float_prefix(n)
+-                                : get_msgpack_float_prefix(n));
+-            write_number(n);
+-        }
+-    }
+-
+   public:
+     // The following to_char_type functions are implement the conversion
+     // between uint8_t and CharType. In case CharType is not unsigned,
+@@ -22830,8 +22821,7 @@ class basic_json
+     number_unsigned | 256..65535                        | uint 16          | 0xCD
+     number_unsigned | 65536..4294967295                 | uint 32          | 0xCE
+     number_unsigned | 4294967296..18446744073709551615  | uint 64          | 0xCF
+-    number_float    | *any value representable by a float*     | float 32 | 0xCA
+-    number_float    | *any value NOT representable by a float* | float 64 | 0xCB
++    number_float    | *any value*                       | float 64         | 0xCB
+     string          | *length*: 0..31                   | fixstr           | 0xA0..0xBF
+     string          | *length*: 32..255                 | str 8            | 0xD9
+     string          | *length*: 256..65535              | str 16           | 0xDA
+@@ -22855,6 +22845,9 @@ class basic_json
+           - arrays with more than 4294967295 elements
+           - objects with more than 4294967295 elements
+ 
++    @note The following MessagePack types are not used in the conversion:
++          - float 32 (0xCA)
++
+     @note Any MessagePack output created @ref to_msgpack can be successfully
+           parsed by @ref from_msgpack.
+ 
+diff --git a/test/src/unit-msgpack.cpp b/test/src/unit-msgpack.cpp
+index 5baecf027..2744a67bf 100644
+--- a/test/src/unit-msgpack.cpp
++++ b/test/src/unit-msgpack.cpp
+@@ -783,40 +783,6 @@ TEST_CASE("MessagePack")
+                     CHECK(json::from_msgpack(result) == v);
+                     CHECK(json::from_msgpack(result, true, false) == j);
+                 }
+-
+-                SECTION("1.0")
+-                {
+-                    double v = 1.0;
+-                    json j = v;
+-                    std::vector<uint8_t> expected =
+-                    {
+-                        0xca, 0x3f, 0x80, 0x00, 0x00
+-                    };
+-                    const auto result = json::to_msgpack(j);
+-                    CHECK(result == expected);
+-
+-                    // roundtrip
+-                    CHECK(json::from_msgpack(result) == j);
+-                    CHECK(json::from_msgpack(result) == v);
+-                    CHECK(json::from_msgpack(result, true, false) == j);
+-                }
+-
+-                SECTION("128.128")
+-                {
+-                    double v = 128.1280059814453125;
+-                    json j = v;
+-                    std::vector<uint8_t> expected =
+-                    {
+-                        0xca, 0x43, 0x00, 0x20, 0xc5
+-                    };
+-                    const auto result = json::to_msgpack(j);
+-                    CHECK(result == expected);
+-
+-                    // roundtrip
+-                    CHECK(json::from_msgpack(result) == j);
+-                    CHECK(json::from_msgpack(result) == v);
+-                    CHECK(json::from_msgpack(result, true, false) == j);
+-                }
+             }
+         }
+ 

@@ -1,0 +1,187 @@
+diff --git a/examples/websocket/example_ws.cpp b/examples/websocket/example_ws.cpp
+index 7079fa343..f508fa90e 100644
+--- a/examples/websocket/example_ws.cpp
++++ b/examples/websocket/example_ws.cpp
+@@ -10,7 +10,8 @@ int main()
+     std::mutex mtx;
+     std::unordered_set<crow::websocket::connection*> users;
+ 
+-    CROW_WEBSOCKET_ROUTE(app, "/ws")
++    CROW_ROUTE(app, "/ws")
++      .websocket()
+       .onopen([&](crow::websocket::connection& conn) {
+           CROW_LOG_INFO << "new websocket connection from " << conn.get_remote_ip();
+           std::lock_guard<std::mutex> _(mtx);
+diff --git a/include/crow/app.h b/include/crow/app.h
+index 01d873fd8..ff2281f8c 100644
+--- a/include/crow/app.h
++++ b/include/crow/app.h
+@@ -29,7 +29,6 @@
+ #else
+ #define CROW_ROUTE(app, url) app.route<crow::black_magic::get_parameter_tag(url)>(url)
+ #define CROW_BP_ROUTE(blueprint, url) blueprint.new_rule_tagged<crow::black_magic::get_parameter_tag(url)>(url)
+-#define CROW_WEBSOCKET_ROUTE(app, url) app.route<crow::black_magic::get_parameter_tag(url)>(url).websocket<decltype(app)>(&app)
+ #define CROW_MIDDLEWARES(app, ...) middlewares<std::remove_reference<decltype(app)>::type, __VA_ARGS__>()
+ #endif
+ #define CROW_CATCHALL_ROUTE(app) app.catchall_route()
+diff --git a/include/crow/http_connection.h b/include/crow/http_connection.h
+index b994a6c50..8a57a8b31 100644
+--- a/include/crow/http_connection.h
++++ b/include/crow/http_connection.h
+@@ -417,7 +417,6 @@ namespace crow
+             {
+                 is_writing = true;
+                 boost::asio::write(adaptor_.socket(), buffers_); // Write the response start / headers
+-                cancel_deadline_timer();
+                 if (res.body.length() > 0)
+                 {
+                     std::string buf;
+diff --git a/include/crow/routing.h b/include/crow/routing.h
+index 0122b4b9e..d626c08cc 100644
+--- a/include/crow/routing.h
++++ b/include/crow/routing.h
+@@ -368,15 +368,13 @@ namespace crow
+ 
+     ///
+     /// Provides the interface for the user to put in the necessary handlers for a websocket to work.
+-    template<typename App>
+     class WebSocketRule : public BaseRule
+     {
+         using self_t = WebSocketRule;
+ 
+     public:
+-        WebSocketRule(std::string rule, App* app):
+-          BaseRule(std::move(rule)),
+-          app_(app)
++        WebSocketRule(std::string rule):
++          BaseRule(std::move(rule))
+         {}
+ 
+         void validate() override
+@@ -390,12 +388,12 @@ namespace crow
+ 
+         void handle_upgrade(const request& req, response&, SocketAdaptor&& adaptor) override
+         {
+-            new crow::websocket::Connection<SocketAdaptor, App>(req, std::move(adaptor), app_, open_handler_, message_handler_, close_handler_, error_handler_, accept_handler_);
++            new crow::websocket::Connection<SocketAdaptor>(req, std::move(adaptor), open_handler_, message_handler_, close_handler_, error_handler_, accept_handler_);
+         }
+ #ifdef CROW_ENABLE_SSL
+         void handle_upgrade(const request& req, response&, SSLAdaptor&& adaptor) override
+         {
+-            new crow::websocket::Connection<SSLAdaptor, App>(req, std::move(adaptor), app_, open_handler_, message_handler_, close_handler_, error_handler_, accept_handler_);
++            new crow::websocket::Connection<SSLAdaptor>(req, std::move(adaptor), open_handler_, message_handler_, close_handler_, error_handler_, accept_handler_);
+         }
+ #endif
+ 
+@@ -435,7 +433,6 @@ namespace crow
+         }
+ 
+     protected:
+-        App* app_;
+         std::function<void(crow::websocket::connection&)> open_handler_;
+         std::function<void(crow::websocket::connection&, const std::string&, bool)> message_handler_;
+         std::function<void(crow::websocket::connection&, const std::string&)> close_handler_;
+@@ -451,11 +448,9 @@ namespace crow
+     struct RuleParameterTraits
+     {
+         using self_t = T;
+-
+-        template<typename App>
+-        WebSocketRule<App>& websocket(App* app)
++        WebSocketRule& websocket()
+         {
+-            auto p = new WebSocketRule<App>(static_cast<self_t*>(this)->rule_, app);
++            auto p = new WebSocketRule(static_cast<self_t*>(this)->rule_);
+             static_cast<self_t*>(this)->rule_to_upgrade_.reset(p);
+             return *p;
+         }
+diff --git a/include/crow/websocket.h b/include/crow/websocket.h
+index dd0461029..4555b70da 100644
+--- a/include/crow/websocket.h
++++ b/include/crow/websocket.h
+@@ -60,7 +60,7 @@ namespace crow
+         //
+ 
+         /// A websocket connection.
+-        template<typename Adaptor, typename Handler>
++        template<typename Adaptor>
+         class Connection : public connection
+         {
+         public:
+@@ -69,19 +69,14 @@ namespace crow
+             ///
+             /// Requires a request with an "Upgrade: websocket" header.<br>
+             /// Automatically handles the handshake.
+-            Connection(const crow::request& req, Adaptor&& adaptor, Handler* handler,
++            Connection(const crow::request& req, Adaptor&& adaptor,
+                        std::function<void(crow::websocket::connection&)> open_handler,
+                        std::function<void(crow::websocket::connection&, const std::string&, bool)> message_handler,
+                        std::function<void(crow::websocket::connection&, const std::string&)> close_handler,
+                        std::function<void(crow::websocket::connection&)> error_handler,
+                        std::function<bool(const crow::request&)> accept_handler):
+               adaptor_(std::move(adaptor)),
+-              handler_(handler),
+-              open_handler_(std::move(open_handler)),
+-              message_handler_(std::move(message_handler)),
+-              close_handler_(std::move(close_handler)),
+-              error_handler_(std::move(error_handler)),
+-              accept_handler_(std::move(accept_handler))
++              open_handler_(std::move(open_handler)), message_handler_(std::move(message_handler)), close_handler_(std::move(close_handler)), error_handler_(std::move(error_handler)), accept_handler_(std::move(accept_handler))
+             {
+                 if (!boost::iequals(req.get_header_value("upgrade"), "websocket"))
+                 {
+@@ -614,7 +609,6 @@ namespace crow
+ 
+         private:
+             Adaptor adaptor_;
+-            Handler* handler_;
+ 
+             std::vector<std::string> sending_buffers_;
+             std::vector<std::string> write_buffers_;
+diff --git a/tests/unittest.cpp b/tests/unittest.cpp
+index 18810e33d..9500f480e 100644
+--- a/tests/unittest.cpp
++++ b/tests/unittest.cpp
+@@ -2091,15 +2091,15 @@ TEST_CASE("stream_response")
+             // magic number is 102 (it's the size of the headers, which is how much this line below needs to read)
+             const size_t headers_bytes = 102;
+             while (received_headers_bytes < headers_bytes)
+-                received_headers_bytes += c.receive(asio::buffer(buf, 102));
++                received_headers_bytes += c.receive(asio::buffer(buf, 2048));
+             received += received_headers_bytes - headers_bytes; //add any extra that might have been received to the proper received count
+ 
++
+             while (received < key_response_size)
+             {
+                 asio::streambuf::mutable_buffers_type bufs = b.prepare(16384);
+ 
+-                size_t n(0);
+-                n = c.receive(bufs);
++                size_t n = c.receive(bufs);
+                 b.commit(n);
+                 received += n;
+ 
+@@ -2108,6 +2108,8 @@ TEST_CASE("stream_response")
+                 is >> s;
+ 
+                 CHECK(key_response.substr(received - n, n) == s);
++
++                //std::this_thread::sleep_for(std::chrono::milliseconds(20));
+             }
+         }
+         app.stop();
+@@ -2123,10 +2125,10 @@ TEST_CASE("websocket")
+ 
+     SimpleApp app;
+ 
+-    CROW_WEBSOCKET_ROUTE(app, "/ws").onopen([&](websocket::connection&) {
+-                                        connected = true;
+-                                        CROW_LOG_INFO << "Connected websocket and value is " << connected;
+-                                    })
++    CROW_ROUTE(app, "/ws").websocket().onopen([&](websocket::connection&) {
++                                          connected = true;
++                                          CROW_LOG_INFO << "Connected websocket and value is " << connected;
++                                      })
+       .onmessage([&](websocket::connection& conn, const std::string& message, bool isbin) {
+           CROW_LOG_INFO << "Message is \"" << message << '\"';
+           if (!isbin && message == "PINGME")

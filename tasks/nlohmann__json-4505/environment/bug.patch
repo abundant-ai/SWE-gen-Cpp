@@ -1,0 +1,302 @@
+diff --git a/.github/workflows/ubuntu.yml b/.github/workflows/ubuntu.yml
+index 31ba37060..ccc07626a 100644
+--- a/.github/workflows/ubuntu.yml
++++ b/.github/workflows/ubuntu.yml
+@@ -104,29 +104,23 @@ jobs:
+ 
+   ci_test_coverage:
+     runs-on: ubuntu-latest
++    container: ghcr.io/nlohmann/json-ci:v2.4.0
+     permissions:
+       contents: read
+       checks: write
+     steps:
+       - uses: actions/checkout@v4
+-      - name: Install dependencies and de_DE locale
+-        run: |
+-          sudo apt-get clean
+-          sudo apt-get update
+-          sudo apt-get install -y build-essential cmake lcov ninja-build make locales gcc-multilib g++-multilib
+-          sudo locale-gen de_DE
+-          sudo update-locale
+       - name: Run CMake
+         run: cmake -S . -B build -DJSON_CI=On
+       - name: Build
+         run: cmake --build build --target ci_test_coverage
+       - name: Archive coverage report
+-        uses: actions/upload-artifact@v4
++        uses: actions/upload-artifact@v3
+         with:
+           name: code-coverage-report
+           path: ${{ github.workspace }}/build/html
+       - name: Publish report to Coveralls
+-        uses: coverallsapp/github-action@v2.3.4
++        uses: coverallsapp/github-action@master
+         with:
+           github-token: ${{ secrets.GITHUB_TOKEN }}
+           path-to-lcov: ${{ github.workspace }}/build/json.info.filtered.noexcept
+diff --git a/include/nlohmann/detail/input/lexer.hpp b/include/nlohmann/detail/input/lexer.hpp
+index 6ed7912ea..059a08073 100644
+--- a/include/nlohmann/detail/input/lexer.hpp
++++ b/include/nlohmann/detail/input/lexer.hpp
+@@ -1049,7 +1049,6 @@ scan_number_zero:
+             case '.':
+             {
+                 add(decimal_point_char);
+-                decimal_point_position = token_buffer.size() - 1;
+                 goto scan_number_decimal1;
+             }
+ 
+@@ -1086,7 +1085,6 @@ scan_number_any1:
+             case '.':
+             {
+                 add(decimal_point_char);
+-                decimal_point_position = token_buffer.size() - 1;
+                 goto scan_number_decimal1;
+             }
+ 
+@@ -1324,7 +1322,6 @@ scan_number_done:
+     {
+         token_buffer.clear();
+         token_string.clear();
+-        decimal_point_position = std::string::npos;
+         token_string.push_back(char_traits<char_type>::to_char_type(current));
+     }
+ 
+@@ -1433,11 +1430,6 @@ scan_number_done:
+     /// return current string value (implicitly resets the token; useful only once)
+     string_t& get_string()
+     {
+-        // translate decimal points from locale back to '.' (#4084)
+-        if (decimal_point_char != '.' && decimal_point_position != std::string::npos)
+-        {
+-            token_buffer[decimal_point_position] = '.';
+-        }
+         return token_buffer;
+     }
+ 
+@@ -1635,8 +1627,6 @@ scan_number_done:
+ 
+     /// the decimal point
+     const char_int_type decimal_point_char = '.';
+-    /// the position of the decimal point in the input
+-    std::size_t decimal_point_position = std::string::npos;
+ };
+ 
+ }  // namespace detail
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index 18adac221..e7e8fe743 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -8518,7 +8518,6 @@ scan_number_zero:
+             case '.':
+             {
+                 add(decimal_point_char);
+-                decimal_point_position = token_buffer.size() - 1;
+                 goto scan_number_decimal1;
+             }
+ 
+@@ -8555,7 +8554,6 @@ scan_number_any1:
+             case '.':
+             {
+                 add(decimal_point_char);
+-                decimal_point_position = token_buffer.size() - 1;
+                 goto scan_number_decimal1;
+             }
+ 
+@@ -8793,7 +8791,6 @@ scan_number_done:
+     {
+         token_buffer.clear();
+         token_string.clear();
+-        decimal_point_position = std::string::npos;
+         token_string.push_back(char_traits<char_type>::to_char_type(current));
+     }
+ 
+@@ -8902,11 +8899,6 @@ scan_number_done:
+     /// return current string value (implicitly resets the token; useful only once)
+     string_t& get_string()
+     {
+-        // translate decimal points from locale back to '.' (#4084)
+-        if (decimal_point_char != '.' && decimal_point_position != std::string::npos)
+-        {
+-            token_buffer[decimal_point_position] = '.';
+-        }
+         return token_buffer;
+     }
+ 
+@@ -9104,8 +9096,6 @@ scan_number_done:
+ 
+     /// the decimal point
+     const char_int_type decimal_point_char = '.';
+-    /// the position of the decimal point in the input
+-    std::size_t decimal_point_position = std::string::npos;
+ };
+ 
+ }  // namespace detail
+diff --git a/tests/src/unit-locale-cpp.cpp b/tests/src/unit-locale-cpp.cpp
+deleted file mode 100644
+index 846b450c6..000000000
+--- a/tests/src/unit-locale-cpp.cpp
++++ /dev/null
+@@ -1,161 +0,0 @@
+-//     __ _____ _____ _____
+-//  __|  |   __|     |   | |  JSON for Modern C++ (supporting code)
+-// |  |  |__   |  |  | | | |  version 3.11.3
+-// |_____|_____|_____|_|___|  https://github.com/nlohmann/json
+-//
+-// SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+-// SPDX-License-Identifier: MIT
+-
+-#include "doctest_compatibility.h"
+-
+-#define JSON_TESTS_PRIVATE
+-#include <nlohmann/json.hpp>
+-using nlohmann::json;
+-
+-#include <clocale>
+-
+-struct ParserImpl final: public nlohmann::json_sax<json>
+-{
+-    bool null() override
+-    {
+-        return true;
+-    }
+-    bool boolean(bool /*val*/) override
+-    {
+-        return true;
+-    }
+-    bool number_integer(json::number_integer_t /*val*/) override
+-    {
+-        return true;
+-    }
+-    bool number_unsigned(json::number_unsigned_t /*val*/) override
+-    {
+-        return true;
+-    }
+-    bool number_float(json::number_float_t /*val*/, const json::string_t& s) override
+-    {
+-        float_string_copy = s;
+-        return true;
+-    }
+-    bool string(json::string_t& /*val*/) override
+-    {
+-        return true;
+-    }
+-    bool binary(json::binary_t& /*val*/) override
+-    {
+-        return true;
+-    }
+-    bool start_object(std::size_t /*val*/) override
+-    {
+-        return true;
+-    }
+-    bool key(json::string_t& /*val*/) override
+-    {
+-        return true;
+-    }
+-    bool end_object() override
+-    {
+-        return true;
+-    }
+-    bool start_array(std::size_t /*val*/) override
+-    {
+-        return true;
+-    }
+-    bool end_array() override
+-    {
+-        return true;
+-    }
+-    bool parse_error(std::size_t /*val*/, const std::string& /*val*/, const nlohmann::detail::exception& /*val*/) override
+-    {
+-        return false;
+-    }
+-
+-    ~ParserImpl() override;
+-
+-    ParserImpl()
+-        : float_string_copy("not set")
+-    {}
+-
+-    ParserImpl(const ParserImpl& other)
+-        : float_string_copy(other.float_string_copy)
+-    {}
+-
+-    ParserImpl(ParserImpl&& other) noexcept
+-        : float_string_copy(std::move(other.float_string_copy))
+-    {}
+-
+-    ParserImpl& operator=(const ParserImpl& other)
+-    {
+-        if (this != &other)
+-        {
+-            float_string_copy = other.float_string_copy;
+-        }
+-        return *this;
+-    }
+-
+-    ParserImpl& operator=(ParserImpl&& other) noexcept
+-    {
+-        if (this != &other)
+-        {
+-            float_string_copy = std::move(other.float_string_copy);
+-        }
+-        return *this;
+-    }
+-
+-    json::string_t float_string_copy;
+-};
+-
+-ParserImpl::~ParserImpl() = default;
+-
+-TEST_CASE("locale-dependent test (LC_NUMERIC=C)")
+-{
+-    WARN_MESSAGE(std::setlocale(LC_NUMERIC, "C") != nullptr, "could not set locale");
+-
+-    SECTION("check if locale is properly set")
+-    {
+-        std::array<char, 6> buffer = {};
+-        CHECK(std::snprintf(buffer.data(), buffer.size(), "%.2f", 12.34) == 5); // NOLINT(cppcoreguidelines-pro-type-vararg,hicpp-vararg)
+-        CHECK(std::string(buffer.data()) == "12.34");
+-    }
+-
+-    SECTION("parsing")
+-    {
+-        CHECK(json::parse("12.34").dump() == "12.34");
+-    }
+-
+-    SECTION("SAX parsing")
+-    {
+-        ParserImpl sax {};
+-        json::sax_parse( "12.34", &sax );
+-        CHECK(sax.float_string_copy == "12.34");
+-    }
+-}
+-
+-TEST_CASE("locale-dependent test (LC_NUMERIC=de_DE)")
+-{
+-    if (std::setlocale(LC_NUMERIC, "de_DE") != nullptr)
+-    {
+-        SECTION("check if locale is properly set")
+-        {
+-            std::array<char, 6> buffer = {};
+-            CHECK(std::snprintf(buffer.data(), buffer.size(), "%.2f", 12.34) == 5); // NOLINT(cppcoreguidelines-pro-type-vararg,hicpp-vararg)
+-            CHECK(std::string(buffer.data()) == "12,34");
+-        }
+-
+-        SECTION("parsing")
+-        {
+-            CHECK(json::parse("12.34").dump() == "12.34");
+-        }
+-
+-        SECTION("SAX parsing")
+-        {
+-            ParserImpl sax{};
+-            json::sax_parse("12.34", &sax);
+-            CHECK(sax.float_string_copy == "12.34");
+-        }
+-    }
+-    else
+-    {
+-        MESSAGE("locale de_DE is not usable");
+-    }
+-}

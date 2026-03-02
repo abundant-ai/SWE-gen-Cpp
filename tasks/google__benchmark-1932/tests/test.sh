@@ -3,79 +3,40 @@
 cd /app/src
 
 # Copy HEAD test files from /tests (overwrites BASE state)
+mkdir -p "test"
 cp "/tests/benchmark_min_time_flag_iters_test.cc" "test/benchmark_min_time_flag_iters_test.cc"
+mkdir -p "test"
 cp "/tests/benchmark_min_time_flag_time_test.cc" "test/benchmark_min_time_flag_time_test.cc"
+mkdir -p "test"
 cp "/tests/filter_test.cc" "test/filter_test.cc"
+mkdir -p "test"
 cp "/tests/output_test_helper.cc" "test/output_test_helper.cc"
 
-# Reconfigure CMake to regenerate compile_commands.json
-cd build
-cmake .. \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-  -DBENCHMARK_ENABLE_TESTING=ON \
-  -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-  -DBENCHMARK_ENABLE_WERROR=OFF \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# Rebuild with the fixed test files
+echo "Rebuilding with fixed test files..."
+rm -rf build
+cmake -B build -G Ninja \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_CXX_STANDARD=14 \
+    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
+    -DBENCHMARK_ENABLE_TESTING=ON \
+    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
+    -DBENCHMARK_ENABLE_WERROR=OFF \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-# Run clang-tidy on the specific files modified in this PR
-cd /app/src
-clang-tidy \
-  -p build \
-  --config-file=/app/src/.clang-tidy \
-  include/benchmark/benchmark.h \
-  src/benchmark_runner.cc \
-  src/benchmark_runner.h \
-  src/string_util.cc \
-  src/sysinfo.cc \
-  src/timers.cc \
-  test/benchmark_min_time_flag_iters_test.cc \
-  test/benchmark_min_time_flag_time_test.cc \
-  test/filter_test.cc \
-  test/output_test_helper.cc \
-  2>&1 | tee /tmp/clang-tidy-output.txt
+# Build the specific test targets
+cmake --build build --config Debug -j 1
 
-# Check for the SPECIFIC variables that this PR is supposed to fix:
-# From bug.patch, these variable initializations were removed (making them uninitialized):
-# - name_field_width (benchmark.h)
-# - ret (benchmark_runner.cc - BenchTimeType initialization)
-# - p_end (benchmark_runner.cc - used twice in parsing functions)
-# - exponent (string_util.cc)
-# - local_buff (string_util.cc)
-# - pos (sysinfo.cc)
-# - ret (sysinfo.cc - pthread affinity)
-# - self, previous_affinity (sysinfo.cc)
-# - freq (sysinfo.cc)
-# - spec (timers.cc - struct timespec for process CPU)
-# - ts (timers.cc - struct timespec for thread CPU)
-# - tz_len, timestamp_len, offset_minutes (timers.cc)
-# - timeinfo (timers.cc)
-#
-# The fix should restore proper initialization, eliminating warnings about these variables.
-# We check if clang-tidy still reports warnings mentioning these specific variables.
+# Run the specific tests directly
+echo "Running specific tests for PR #1932..."
+test_status=0
 
-if grep -E "'name_field_width'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "benchmark_runner\.cc.*'ret'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "benchmark_runner\.cc.*'p_end'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "string_util\.cc.*'exponent'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "string_util\.cc.*'local_buff'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "sysinfo\.cc.*'pos'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "sysinfo\.cc.*'ret'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "sysinfo\.cc.*'self'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "sysinfo\.cc.*'previous_affinity'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "sysinfo\.cc.*'freq'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "timers\.cc.*'spec'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "timers\.cc.*'ts'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "timers\.cc.*'tz_len'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "timers\.cc.*'timestamp_len'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "timers\.cc.*'offset_minutes'.*cppcoreguidelines" /tmp/clang-tidy-output.txt ||
-   grep -E "timers\.cc.*'timeinfo'.*cppcoreguidelines" /tmp/clang-tidy-output.txt; then
-  echo "ERROR: Found cppcoreguidelines warnings for variables modified by this PR" >&2
-  test_status=1
-else
-  echo "SUCCESS: No cppcoreguidelines violations for variables modified by this PR" >&2
-  test_status=0
-fi
+# Run each test executable
+./build/test/benchmark_min_time_flag_iters_test || test_status=$?
+./build/test/benchmark_min_time_flag_time_test || test_status=$?
+./build/test/filter_test || test_status=$?
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

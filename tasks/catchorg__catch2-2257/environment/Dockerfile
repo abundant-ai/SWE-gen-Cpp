@@ -9,11 +9,11 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install C++ compiler, CMake, and Python (needed for tests)
+# Install C++ compiler (Clang), CMake, and Python (needed for tests)
 RUN apt-get update && apt-get install -y \
     cmake \
     ninja-build \
-    g++ \
+    clang \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,34 +28,60 @@ RUN git clone https://github.com/catchorg/Catch2.git src && \
 
 WORKDIR /app/src
 
-# Fix GCC 13 build issue (missing cstdint includes) - needed for this commit to compile
-RUN sed -i '/#include <catch2\/internal\/catch_stringref.hpp>/a \\n#include <cstdint>' src/catch2/internal/catch_string_manip.hpp && \
-    sed -i '/#include <catch2\/internal\/catch_unique_ptr.hpp>/a \\n#include <cstdint>' src/catch2/catch_test_case_info.hpp && \
-    sed -i '/#include <catch2\/internal\/catch_xmlwriter.hpp>/a \\n#include <cstdint>' src/catch2/internal/catch_xmlwriter.cpp
+# Use Clang as the C++ compiler (required for unreachable-code warnings)
+ENV CC=clang
+ENV CXX=clang++
+# Suppress unrelated literal operator warning for Clang 18 compatibility
+ENV CXXFLAGS="-Wno-error=deprecated-literal-operator"
 
-# Configure and build Catch2 with CMake (disable extra tests to avoid MINSIGSTKSZ issues)
-# Disable -Wdangling-reference warning which causes false positives in GCC 13+
+# Configure and build Catch2 with CMake
+# Enable development build which treats warnings as errors
 RUN cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
     -DCATCH_BUILD_TESTING=ON \
-    -DCATCH_BUILD_EXTRA_TESTS=OFF \
-    -DCMAKE_CXX_FLAGS="-Wno-error=dangling-reference" \
+    -DCATCH_BUILD_EXTRA_TESTS=ON \
+    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
     -G Ninja
 
+# Fix missing <cstdint> includes that were added in a later commit
+# The PR 2257 code uses uint64_t/uint8_t/uint32_t but forgot to include <cstdint>
+RUN sed -i '15i #include <cstdint>' src/catch2/internal/catch_string_manip.hpp && \
+    sed -i '10i #include <cstdint>' src/catch2/catch_test_case_info.hpp && \
+    sed -i '10i #include <cstdint>' src/catch2/internal/catch_xmlwriter.cpp
+
+# Fix unused variable warning in catch_session.cpp (reporterIdx is incremented but never used)
+RUN sed -i '/reporterIdx++;/a\                (void)reporterIdx; \/\/ Suppress unused variable warning' src/catch2/catch_session.cpp
+
+# Fix MINSIGSTKSZ constexpr issue with newer glibc - hardcode a safe value
+RUN find . \( -name "*.cpp" -o -name "*.hpp" \) -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
+    xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' && \
+    find extras -name "*.cpp" -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
+    xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' || true
+
+# Build will fail if there are unreachable-code warnings (development build treats warnings as errors)
 RUN cmake --build build
 
-# Reset tracked files so bug.patch applies cleanly
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Re-apply GCC 13 build fixes after git reset removed them
-RUN sed -i '/#include <catch2\/internal\/catch_stringref.hpp>/a \\n#include <cstdint>' src/catch2/internal/catch_string_manip.hpp && \
-    sed -i '/#include <catch2\/internal\/catch_unique_ptr.hpp>/a \\n#include <cstdint>' src/catch2/catch_test_case_info.hpp && \
-    sed -i '/#include <catch2\/internal\/catch_xmlwriter.hpp>/a \\n#include <cstdint>' src/catch2/internal/catch_xmlwriter.cpp
+# Fix missing includes again (undone by git reset)
+RUN sed -i '15i #include <cstdint>' src/catch2/internal/catch_string_manip.hpp && \
+    sed -i '10i #include <cstdint>' src/catch2/catch_test_case_info.hpp && \
+    sed -i '10i #include <cstdint>' src/catch2/internal/catch_xmlwriter.cpp
+
+# Fix unused variable warning again (undone by git reset)
+RUN sed -i '/reporterIdx++;/a\                (void)reporterIdx; \/\/ Suppress unused variable warning' src/catch2/catch_session.cpp
+
+# Fix MINSIGSTKSZ constexpr issue again (undone by git reset)
+RUN find . \( -name "*.cpp" -o -name "*.hpp" \) -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
+    xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' && \
+    find extras -name "*.cpp" -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
+    xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' || true
 
 # Rebuild after applying bug.patch (C++ is a compiled language)
 RUN cmake --build build

@@ -1,0 +1,859 @@
+diff --git a/doc/builder.md b/doc/builder.md
+index 9764a5f9..68d6f70f 100644
+--- a/doc/builder.md
++++ b/doc/builder.md
+@@ -295,6 +295,27 @@ if(error) { /* there was an error */ }
+ 
+ You can then also add a third parameter for the expected output size in bytes.
+ 
++### Extracting just some fields
++In some instances, your class might have many fields that you do not want to serialize.
++You can achieve this result with the `simdjson::extract_from` template. In the following
++example, we serialize only the `year` and `price` fields on the `Car` instance.
++```cpp
++struct Car {
++    std::string make;
++    std::string model;
++    int year;
++    double price;
++    bool electric;
++};
++Car car{"Ford", "F-150", 2024, 55000.0, false};
++// Extract year and price
++std::string json_result = simdjson::extract_from<"year", "price">(car);
++// Alternatively:
++// std::string json_result;
++// auto error =  extract_from<"year", "price">(car).get(json_result);
++// if(error) { /* error handling */ }
++```
++
+ ### Without `string_buffer` instance but with explicit error handling
+ 
+ If prefer a version without exceptions and explicit error handling, you can use the following
+diff --git a/include/simdjson/generic/ondemand/json_builder.h b/include/simdjson/generic/ondemand/json_builder.h
+index a50c815c..fa938395 100644
+--- a/include/simdjson/generic/ondemand/json_builder.h
++++ b/include/simdjson/generic/ondemand/json_builder.h
+@@ -293,17 +293,88 @@ string_builder& operator<<(string_builder& b, const Z& z) {
+   append(b, z);
+   return b;
+ }
++
++// extract_from: Serialize only specific fields from a struct to JSON
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++void extract_from(string_builder &b, const T &obj) {
++  // Helper to check if a field name matches any of the requested fields
++  auto should_extract = [](std::string_view field_name) constexpr -> bool {
++    return ((FieldNames.view() == field_name) || ...);
++  };
++
++  b.append('{');
++  bool first = true;
++
++  // Iterate through all members of T using reflection
++  template for (constexpr auto mem : std::define_static_array(
++      std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
++
++    if constexpr (std::meta::is_public(mem)) {
++      constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
++
++      // Only serialize this field if it's in our list of requested fields
++      if constexpr (should_extract(key)) {
++        if (!first) {
++          b.append(',');
++        }
++        first = false;
++
++        // Serialize the key
++        constexpr auto quoted_key = std::define_static_string(constevalutil::consteval_to_quoted_escaped(std::meta::identifier_of(mem)));
++        b.append_raw(quoted_key);
++        b.append(':');
++
++        // Serialize the value
++        atom(b, obj.[:mem:]);
++      }
++    }
++  };
++
++  b.append('}');
++}
++
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  string_builder b(initial_capacity);
++  extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
++}
++
+ } // namespace builder
+ } // namespace SIMDJSON_IMPLEMENTATION
+ // Alias the function template to 'to' in the global namespace
+ template <class Z>
+ simdjson_warn_unused simdjson_result<std::string> to_json(const Z &z, size_t initial_capacity = SIMDJSON_IMPLEMENTATION::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return SIMDJSON_IMPLEMENTATION::builder::to_json_string(z, initial_capacity);
++  SIMDJSON_IMPLEMENTATION::builder::string_builder b(initial_capacity);
++  SIMDJSON_IMPLEMENTATION::builder::append(b, z);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
+ template <class Z>
+ simdjson_warn_unused simdjson_error to_json(const Z &z, std::string &s, size_t initial_capacity = SIMDJSON_IMPLEMENTATION::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return SIMDJSON_IMPLEMENTATION::builder::to_json(z, s, initial_capacity);
++  SIMDJSON_IMPLEMENTATION::builder::string_builder b(initial_capacity);
++  SIMDJSON_IMPLEMENTATION::builder::append(b, z);
++  std::string_view view;
++  if(auto e = b.view().get(view); e) { return e; }
++  s.assign(view);
++  return SUCCESS;
++}
++// Global namespace function for extract_from
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = SIMDJSON_IMPLEMENTATION::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  SIMDJSON_IMPLEMENTATION::builder::string_builder b(initial_capacity);
++  SIMDJSON_IMPLEMENTATION::builder::extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
++
+ } // namespace simdjson
+ 
+ #endif // SIMDJSON_STATIC_REFLECTION
+diff --git a/singleheader/simdjson.h b/singleheader/simdjson.h
+index b6fbb1a1..d4754448 100644
+--- a/singleheader/simdjson.h
++++ b/singleheader/simdjson.h
+@@ -46335,17 +46335,88 @@ string_builder& operator<<(string_builder& b, const Z& z) {
+   append(b, z);
+   return b;
+ }
++
++// extract_from: Serialize only specific fields from a struct to JSON
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++void extract_from(string_builder &b, const T &obj) {
++  // Helper to check if a field name matches any of the requested fields
++  auto should_extract = [](std::string_view field_name) constexpr -> bool {
++    return ((FieldNames.view() == field_name) || ...);
++  };
++
++  b.append('{');
++  bool first = true;
++
++  // Iterate through all members of T using reflection
++  template for (constexpr auto mem : std::define_static_array(
++      std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
++
++    if constexpr (std::meta::is_public(mem)) {
++      constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
++
++      // Only serialize this field if it's in our list of requested fields
++      if constexpr (should_extract(key)) {
++        if (!first) {
++          b.append(',');
++        }
++        first = false;
++
++        // Serialize the key
++        constexpr auto quoted_key = std::define_static_string(constevalutil::consteval_to_quoted_escaped(std::meta::identifier_of(mem)));
++        b.append_raw(quoted_key);
++        b.append(':');
++
++        // Serialize the value
++        atom(b, obj.[:mem:]);
++      }
++    }
++  };
++
++  b.append('}');
++}
++
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  string_builder b(initial_capacity);
++  extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
++}
++
+ } // namespace builder
+ } // namespace arm64
+ // Alias the function template to 'to' in the global namespace
+ template <class Z>
+ simdjson_warn_unused simdjson_result<std::string> to_json(const Z &z, size_t initial_capacity = arm64::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return arm64::builder::to_json_string(z, initial_capacity);
++  arm64::builder::string_builder b(initial_capacity);
++  arm64::builder::append(b, z);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
+ template <class Z>
+ simdjson_warn_unused simdjson_error to_json(const Z &z, std::string &s, size_t initial_capacity = arm64::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return arm64::builder::to_json(z, s, initial_capacity);
++  arm64::builder::string_builder b(initial_capacity);
++  arm64::builder::append(b, z);
++  std::string_view view;
++  if(auto e = b.view().get(view); e) { return e; }
++  s.assign(view);
++  return SUCCESS;
++}
++// Global namespace function for extract_from
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = arm64::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  arm64::builder::string_builder b(initial_capacity);
++  arm64::builder::extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
++
+ } // namespace simdjson
+ 
+ #endif // SIMDJSON_STATIC_REFLECTION
+@@ -59570,17 +59641,88 @@ string_builder& operator<<(string_builder& b, const Z& z) {
+   append(b, z);
+   return b;
+ }
++
++// extract_from: Serialize only specific fields from a struct to JSON
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++void extract_from(string_builder &b, const T &obj) {
++  // Helper to check if a field name matches any of the requested fields
++  auto should_extract = [](std::string_view field_name) constexpr -> bool {
++    return ((FieldNames.view() == field_name) || ...);
++  };
++
++  b.append('{');
++  bool first = true;
++
++  // Iterate through all members of T using reflection
++  template for (constexpr auto mem : std::define_static_array(
++      std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
++
++    if constexpr (std::meta::is_public(mem)) {
++      constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
++
++      // Only serialize this field if it's in our list of requested fields
++      if constexpr (should_extract(key)) {
++        if (!first) {
++          b.append(',');
++        }
++        first = false;
++
++        // Serialize the key
++        constexpr auto quoted_key = std::define_static_string(constevalutil::consteval_to_quoted_escaped(std::meta::identifier_of(mem)));
++        b.append_raw(quoted_key);
++        b.append(':');
++
++        // Serialize the value
++        atom(b, obj.[:mem:]);
++      }
++    }
++  };
++
++  b.append('}');
++}
++
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  string_builder b(initial_capacity);
++  extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
++}
++
+ } // namespace builder
+ } // namespace fallback
+ // Alias the function template to 'to' in the global namespace
+ template <class Z>
+ simdjson_warn_unused simdjson_result<std::string> to_json(const Z &z, size_t initial_capacity = fallback::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return fallback::builder::to_json_string(z, initial_capacity);
++  fallback::builder::string_builder b(initial_capacity);
++  fallback::builder::append(b, z);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
+ template <class Z>
+ simdjson_warn_unused simdjson_error to_json(const Z &z, std::string &s, size_t initial_capacity = fallback::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return fallback::builder::to_json(z, s, initial_capacity);
++  fallback::builder::string_builder b(initial_capacity);
++  fallback::builder::append(b, z);
++  std::string_view view;
++  if(auto e = b.view().get(view); e) { return e; }
++  s.assign(view);
++  return SUCCESS;
++}
++// Global namespace function for extract_from
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = fallback::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  fallback::builder::string_builder b(initial_capacity);
++  fallback::builder::extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
++
+ } // namespace simdjson
+ 
+ #endif // SIMDJSON_STATIC_REFLECTION
+@@ -73304,17 +73446,88 @@ string_builder& operator<<(string_builder& b, const Z& z) {
+   append(b, z);
+   return b;
+ }
++
++// extract_from: Serialize only specific fields from a struct to JSON
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++void extract_from(string_builder &b, const T &obj) {
++  // Helper to check if a field name matches any of the requested fields
++  auto should_extract = [](std::string_view field_name) constexpr -> bool {
++    return ((FieldNames.view() == field_name) || ...);
++  };
++
++  b.append('{');
++  bool first = true;
++
++  // Iterate through all members of T using reflection
++  template for (constexpr auto mem : std::define_static_array(
++      std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
++
++    if constexpr (std::meta::is_public(mem)) {
++      constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
++
++      // Only serialize this field if it's in our list of requested fields
++      if constexpr (should_extract(key)) {
++        if (!first) {
++          b.append(',');
++        }
++        first = false;
++
++        // Serialize the key
++        constexpr auto quoted_key = std::define_static_string(constevalutil::consteval_to_quoted_escaped(std::meta::identifier_of(mem)));
++        b.append_raw(quoted_key);
++        b.append(':');
++
++        // Serialize the value
++        atom(b, obj.[:mem:]);
++      }
++    }
++  };
++
++  b.append('}');
++}
++
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  string_builder b(initial_capacity);
++  extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
++}
++
+ } // namespace builder
+ } // namespace haswell
+ // Alias the function template to 'to' in the global namespace
+ template <class Z>
+ simdjson_warn_unused simdjson_result<std::string> to_json(const Z &z, size_t initial_capacity = haswell::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return haswell::builder::to_json_string(z, initial_capacity);
++  haswell::builder::string_builder b(initial_capacity);
++  haswell::builder::append(b, z);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
+ template <class Z>
+ simdjson_warn_unused simdjson_error to_json(const Z &z, std::string &s, size_t initial_capacity = haswell::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return haswell::builder::to_json(z, s, initial_capacity);
++  haswell::builder::string_builder b(initial_capacity);
++  haswell::builder::append(b, z);
++  std::string_view view;
++  if(auto e = b.view().get(view); e) { return e; }
++  s.assign(view);
++  return SUCCESS;
++}
++// Global namespace function for extract_from
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = haswell::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  haswell::builder::string_builder b(initial_capacity);
++  haswell::builder::extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
++
+ } // namespace simdjson
+ 
+ #endif // SIMDJSON_STATIC_REFLECTION
+@@ -87038,17 +87251,88 @@ string_builder& operator<<(string_builder& b, const Z& z) {
+   append(b, z);
+   return b;
+ }
++
++// extract_from: Serialize only specific fields from a struct to JSON
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++void extract_from(string_builder &b, const T &obj) {
++  // Helper to check if a field name matches any of the requested fields
++  auto should_extract = [](std::string_view field_name) constexpr -> bool {
++    return ((FieldNames.view() == field_name) || ...);
++  };
++
++  b.append('{');
++  bool first = true;
++
++  // Iterate through all members of T using reflection
++  template for (constexpr auto mem : std::define_static_array(
++      std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
++
++    if constexpr (std::meta::is_public(mem)) {
++      constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
++
++      // Only serialize this field if it's in our list of requested fields
++      if constexpr (should_extract(key)) {
++        if (!first) {
++          b.append(',');
++        }
++        first = false;
++
++        // Serialize the key
++        constexpr auto quoted_key = std::define_static_string(constevalutil::consteval_to_quoted_escaped(std::meta::identifier_of(mem)));
++        b.append_raw(quoted_key);
++        b.append(':');
++
++        // Serialize the value
++        atom(b, obj.[:mem:]);
++      }
++    }
++  };
++
++  b.append('}');
++}
++
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  string_builder b(initial_capacity);
++  extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
++}
++
+ } // namespace builder
+ } // namespace icelake
+ // Alias the function template to 'to' in the global namespace
+ template <class Z>
+ simdjson_warn_unused simdjson_result<std::string> to_json(const Z &z, size_t initial_capacity = icelake::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return icelake::builder::to_json_string(z, initial_capacity);
++  icelake::builder::string_builder b(initial_capacity);
++  icelake::builder::append(b, z);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
+ template <class Z>
+ simdjson_warn_unused simdjson_error to_json(const Z &z, std::string &s, size_t initial_capacity = icelake::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return icelake::builder::to_json(z, s, initial_capacity);
++  icelake::builder::string_builder b(initial_capacity);
++  icelake::builder::append(b, z);
++  std::string_view view;
++  if(auto e = b.view().get(view); e) { return e; }
++  s.assign(view);
++  return SUCCESS;
++}
++// Global namespace function for extract_from
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = icelake::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  icelake::builder::string_builder b(initial_capacity);
++  icelake::builder::extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
++
+ } // namespace simdjson
+ 
+ #endif // SIMDJSON_STATIC_REFLECTION
+@@ -100887,17 +101171,88 @@ string_builder& operator<<(string_builder& b, const Z& z) {
+   append(b, z);
+   return b;
+ }
++
++// extract_from: Serialize only specific fields from a struct to JSON
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++void extract_from(string_builder &b, const T &obj) {
++  // Helper to check if a field name matches any of the requested fields
++  auto should_extract = [](std::string_view field_name) constexpr -> bool {
++    return ((FieldNames.view() == field_name) || ...);
++  };
++
++  b.append('{');
++  bool first = true;
++
++  // Iterate through all members of T using reflection
++  template for (constexpr auto mem : std::define_static_array(
++      std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
++
++    if constexpr (std::meta::is_public(mem)) {
++      constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
++
++      // Only serialize this field if it's in our list of requested fields
++      if constexpr (should_extract(key)) {
++        if (!first) {
++          b.append(',');
++        }
++        first = false;
++
++        // Serialize the key
++        constexpr auto quoted_key = std::define_static_string(constevalutil::consteval_to_quoted_escaped(std::meta::identifier_of(mem)));
++        b.append_raw(quoted_key);
++        b.append(':');
++
++        // Serialize the value
++        atom(b, obj.[:mem:]);
++      }
++    }
++  };
++
++  b.append('}');
++}
++
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  string_builder b(initial_capacity);
++  extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
++}
++
+ } // namespace builder
+ } // namespace ppc64
+ // Alias the function template to 'to' in the global namespace
+ template <class Z>
+ simdjson_warn_unused simdjson_result<std::string> to_json(const Z &z, size_t initial_capacity = ppc64::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return ppc64::builder::to_json_string(z, initial_capacity);
++  ppc64::builder::string_builder b(initial_capacity);
++  ppc64::builder::append(b, z);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
+ template <class Z>
+ simdjson_warn_unused simdjson_error to_json(const Z &z, std::string &s, size_t initial_capacity = ppc64::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return ppc64::builder::to_json(z, s, initial_capacity);
++  ppc64::builder::string_builder b(initial_capacity);
++  ppc64::builder::append(b, z);
++  std::string_view view;
++  if(auto e = b.view().get(view); e) { return e; }
++  s.assign(view);
++  return SUCCESS;
++}
++// Global namespace function for extract_from
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = ppc64::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  ppc64::builder::string_builder b(initial_capacity);
++  ppc64::builder::extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
++
+ } // namespace simdjson
+ 
+ #endif // SIMDJSON_STATIC_REFLECTION
+@@ -115052,17 +115407,88 @@ string_builder& operator<<(string_builder& b, const Z& z) {
+   append(b, z);
+   return b;
+ }
++
++// extract_from: Serialize only specific fields from a struct to JSON
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++void extract_from(string_builder &b, const T &obj) {
++  // Helper to check if a field name matches any of the requested fields
++  auto should_extract = [](std::string_view field_name) constexpr -> bool {
++    return ((FieldNames.view() == field_name) || ...);
++  };
++
++  b.append('{');
++  bool first = true;
++
++  // Iterate through all members of T using reflection
++  template for (constexpr auto mem : std::define_static_array(
++      std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
++
++    if constexpr (std::meta::is_public(mem)) {
++      constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
++
++      // Only serialize this field if it's in our list of requested fields
++      if constexpr (should_extract(key)) {
++        if (!first) {
++          b.append(',');
++        }
++        first = false;
++
++        // Serialize the key
++        constexpr auto quoted_key = std::define_static_string(constevalutil::consteval_to_quoted_escaped(std::meta::identifier_of(mem)));
++        b.append_raw(quoted_key);
++        b.append(':');
++
++        // Serialize the value
++        atom(b, obj.[:mem:]);
++      }
++    }
++  };
++
++  b.append('}');
++}
++
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  string_builder b(initial_capacity);
++  extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
++}
++
+ } // namespace builder
+ } // namespace westmere
+ // Alias the function template to 'to' in the global namespace
+ template <class Z>
+ simdjson_warn_unused simdjson_result<std::string> to_json(const Z &z, size_t initial_capacity = westmere::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return westmere::builder::to_json_string(z, initial_capacity);
++  westmere::builder::string_builder b(initial_capacity);
++  westmere::builder::append(b, z);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
+ template <class Z>
+ simdjson_warn_unused simdjson_error to_json(const Z &z, std::string &s, size_t initial_capacity = westmere::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return westmere::builder::to_json(z, s, initial_capacity);
++  westmere::builder::string_builder b(initial_capacity);
++  westmere::builder::append(b, z);
++  std::string_view view;
++  if(auto e = b.view().get(view); e) { return e; }
++  s.assign(view);
++  return SUCCESS;
++}
++// Global namespace function for extract_from
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = westmere::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  westmere::builder::string_builder b(initial_capacity);
++  westmere::builder::extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
++
+ } // namespace simdjson
+ 
+ #endif // SIMDJSON_STATIC_REFLECTION
+@@ -128694,17 +129120,88 @@ string_builder& operator<<(string_builder& b, const Z& z) {
+   append(b, z);
+   return b;
+ }
++
++// extract_from: Serialize only specific fields from a struct to JSON
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++void extract_from(string_builder &b, const T &obj) {
++  // Helper to check if a field name matches any of the requested fields
++  auto should_extract = [](std::string_view field_name) constexpr -> bool {
++    return ((FieldNames.view() == field_name) || ...);
++  };
++
++  b.append('{');
++  bool first = true;
++
++  // Iterate through all members of T using reflection
++  template for (constexpr auto mem : std::define_static_array(
++      std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
++
++    if constexpr (std::meta::is_public(mem)) {
++      constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
++
++      // Only serialize this field if it's in our list of requested fields
++      if constexpr (should_extract(key)) {
++        if (!first) {
++          b.append(',');
++        }
++        first = false;
++
++        // Serialize the key
++        constexpr auto quoted_key = std::define_static_string(constevalutil::consteval_to_quoted_escaped(std::meta::identifier_of(mem)));
++        b.append_raw(quoted_key);
++        b.append(':');
++
++        // Serialize the value
++        atom(b, obj.[:mem:]);
++      }
++    }
++  };
++
++  b.append('}');
++}
++
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  string_builder b(initial_capacity);
++  extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
++}
++
+ } // namespace builder
+ } // namespace lsx
+ // Alias the function template to 'to' in the global namespace
+ template <class Z>
+ simdjson_warn_unused simdjson_result<std::string> to_json(const Z &z, size_t initial_capacity = lsx::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return lsx::builder::to_json_string(z, initial_capacity);
++  lsx::builder::string_builder b(initial_capacity);
++  lsx::builder::append(b, z);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
+ template <class Z>
+ simdjson_warn_unused simdjson_error to_json(const Z &z, std::string &s, size_t initial_capacity = lsx::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return lsx::builder::to_json(z, s, initial_capacity);
++  lsx::builder::string_builder b(initial_capacity);
++  lsx::builder::append(b, z);
++  std::string_view view;
++  if(auto e = b.view().get(view); e) { return e; }
++  s.assign(view);
++  return SUCCESS;
++}
++// Global namespace function for extract_from
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = lsx::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  lsx::builder::string_builder b(initial_capacity);
++  lsx::builder::extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
++
+ } // namespace simdjson
+ 
+ #endif // SIMDJSON_STATIC_REFLECTION
+@@ -142349,17 +142846,88 @@ string_builder& operator<<(string_builder& b, const Z& z) {
+   append(b, z);
+   return b;
+ }
++
++// extract_from: Serialize only specific fields from a struct to JSON
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++void extract_from(string_builder &b, const T &obj) {
++  // Helper to check if a field name matches any of the requested fields
++  auto should_extract = [](std::string_view field_name) constexpr -> bool {
++    return ((FieldNames.view() == field_name) || ...);
++  };
++
++  b.append('{');
++  bool first = true;
++
++  // Iterate through all members of T using reflection
++  template for (constexpr auto mem : std::define_static_array(
++      std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))) {
++
++    if constexpr (std::meta::is_public(mem)) {
++      constexpr std::string_view key = std::define_static_string(std::meta::identifier_of(mem));
++
++      // Only serialize this field if it's in our list of requested fields
++      if constexpr (should_extract(key)) {
++        if (!first) {
++          b.append(',');
++        }
++        first = false;
++
++        // Serialize the key
++        constexpr auto quoted_key = std::define_static_string(constevalutil::consteval_to_quoted_escaped(std::meta::identifier_of(mem)));
++        b.append_raw(quoted_key);
++        b.append(':');
++
++        // Serialize the value
++        atom(b, obj.[:mem:]);
++      }
++    }
++  };
++
++  b.append('}');
++}
++
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = string_builder::DEFAULT_INITIAL_CAPACITY) {
++  string_builder b(initial_capacity);
++  extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
++}
++
+ } // namespace builder
+ } // namespace lasx
+ // Alias the function template to 'to' in the global namespace
+ template <class Z>
+ simdjson_warn_unused simdjson_result<std::string> to_json(const Z &z, size_t initial_capacity = lasx::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return lasx::builder::to_json_string(z, initial_capacity);
++  lasx::builder::string_builder b(initial_capacity);
++  lasx::builder::append(b, z);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
+ template <class Z>
+ simdjson_warn_unused simdjson_error to_json(const Z &z, std::string &s, size_t initial_capacity = lasx::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
+-  return lasx::builder::to_json(z, s, initial_capacity);
++  lasx::builder::string_builder b(initial_capacity);
++  lasx::builder::append(b, z);
++  std::string_view view;
++  if(auto e = b.view().get(view); e) { return e; }
++  s.assign(view);
++  return SUCCESS;
++}
++// Global namespace function for extract_from
++template<constevalutil::fixed_string... FieldNames, typename T>
++  requires(std::is_class_v<T> && (sizeof...(FieldNames) > 0))
++simdjson_warn_unused simdjson_result<std::string> extract_from(const T &obj, size_t initial_capacity = lasx::builder::string_builder::DEFAULT_INITIAL_CAPACITY) {
++  lasx::builder::string_builder b(initial_capacity);
++  lasx::builder::extract_from<FieldNames...>(b, obj);
++  std::string_view s;
++  if(auto e = b.view().get(s); e) { return e; }
++  return std::string(s);
+ }
++
+ } // namespace simdjson
+ 
+ #endif // SIMDJSON_STATIC_REFLECTION

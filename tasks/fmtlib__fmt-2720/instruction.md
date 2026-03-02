@@ -1,6 +1,6 @@
-Using `FMT_COMPILE` with `fmt::join` and a format specifier fails to compile due to a const-correctness issue in the compiled-format code path.
+Using `FMT_COMPILE` with `fmt::join` fails to compile starting in v8.0.0 due to a const-correctness mismatch in the formatter used for `fmt::join_view`.
 
-Reproduction:
+A minimal reproducer is:
 ```cpp
 #include "fmt/core.h"
 #include "fmt/compile.h"
@@ -11,12 +11,14 @@ int main() {
 }
 ```
 
-Starting with fmt v8.0.0, this triggers a compilation error on GCC/Clang similar to:
+Expected behavior: the code compiles and produces a string where each element of `data` is formatted according to the `{:02x}` spec and concatenated (e.g., "0102" for the example above).
 
-"passing ‘const fmt::formatter<fmt::join_view<...>, char, ...>’ as ‘this’ argument discards qualifiers"
+Actual behavior: compilation fails on GCC with an error indicating that a `const fmt::formatter<fmt::join_view<...>>` is being used to call a non-const `format(...)` member function. The error is of the form:
 
-This indicates that, when formatting a `fmt::join_view` via a compiled format string, the compiled formatting machinery ends up calling `formatter<join_view<...>>::format(...)` on a `const formatter` even though the formatter’s `format` member function is not being treated as callable on a const instance.
+```
+error: passing ‘const fmt::formatter<fmt::join_view<...>, char, void>’ as ‘this’ argument discards qualifiers
+```
 
-`fmt::format(FMT_COMPILE(...), ...)` should compile and work the same way as runtime formatting for join views. In particular, formatting joined elements with a spec like `{:02x}` should compile and produce the expected string (for the example above, each byte formatted as two hex digits, concatenated without a separator).
+`FMT_COMPILE` expands to a compiled-format path where formatting fields are treated as `const` during formatting. Formatting a `fmt::join_view` in this path must therefore work with a formatter whose `format` can be invoked on a const formatter instance (or otherwise be const-correct), while still honoring the element format specifiers (like `02x`) and supporting joining with the provided separator.
 
-Fix the compiled-format path so that `FMT_COMPILE` supports `fmt::join` with format specifiers without const-qualification compilation errors, while preserving existing behavior for other compiled formatting cases.
+Fix the constness issue so that `fmt::format(FMT_COMPILE("{:02x}"), fmt::join(data, ""))` compiles successfully and formats correctly, without regressing runtime (non-compiled) formatting behavior for `fmt::join`.

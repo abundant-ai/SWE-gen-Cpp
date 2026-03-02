@@ -1,9 +1,18 @@
-Running clang-tidy with the cppcoreguidelines checks enabled across the project produces warnings and/or errors severe enough to block clean analysis/builds under stricter toolchain settings (reported in Issue #1925). The codebase should be clang-tidy clean for these guidelines without changing the observable behavior of the benchmarking library.
+Running Google Benchmark with certain command-line flags triggers clang-tidy cppcoreguidelines warnings/errors, and in some cases causes incorrect behavior in how configuration is reported to reporters.
 
-A few concrete user-visible scenarios must continue to work while making the code conform to cppcoreguidelines:
+In particular, the library should correctly parse and propagate the value of the `--benchmark_min_time` flag when it is specified in different forms:
 
-- Command-line parsing for `--benchmark_min_time` must continue to accept both a plain number (interpreted as seconds) and a number with an `s` suffix (e.g., `--benchmark_min_time=4` and `--benchmark_min_time=4.0s`), and internal reporting via `benchmark::ConsoleReporter::ReportRunsConfig(double min_time, bool has_explicit_iters, IterationCount iters)` must receive `min_time` equal to the parsed value (e.g., `4.0`).
-- Command-line parsing for `--benchmark_min_time=<NUM>x` must continue to set an explicit iteration count for a benchmark (e.g., `--benchmark_min_time=4x` results in a run where the single reported `Run` has `iterations == 4`).
-- Filtering and listing/running benchmarks must keep working with `benchmark::Initialize(&argc, argv)` and `benchmark::RunSpecifiedBenchmarks(...)`, including correct counts of executed benchmarks and consistent `Run::family_index` sequencing when benchmarks are run.
+- `--benchmark_min_time=<NUM>x` should be treated as an explicit iteration count and the executed benchmark run should report exactly `<NUM>` iterations via the `Run::iterations` value provided to `ConsoleReporter::ReportRuns(const std::vector<Run>&)`.
+- `--benchmark_min_time=<NUM>` (no suffix) and `--benchmark_min_time=<NUM>s` should be treated as a minimum time in seconds and should be reported consistently to reporters via `ConsoleReporter::ReportRunsConfig(double min_time, bool has_explicit_iters, IterationCount iters)`.
 
-Currently, when clang-tidy is run against the project, it reports cppcoreguidelines violations in multiple places (e.g., around ownership/raw pointer usage, const-correctness, narrowing conversions, or related guideline checks) and these diagnostics are treated as failures in the context of the linked bug report. The task is to update the library code so that it no longer triggers these cppcoreguidelines clang-tidy diagnostics while preserving the behaviors above and keeping the public API usable as shown (notably `benchmark::Initialize`, `benchmark::RunSpecifiedBenchmarks`, and the `benchmark::ConsoleReporter` overrides `ReportContext`, `ReportRuns`, and `ReportRunsConfig`).
+Currently, when initializing and running benchmarks with these flags, the behavior is not reliable: reporters do not consistently receive the expected min_time/iteration configuration, and the `x`-suffixed form does not consistently result in the requested fixed iteration count being reflected in the reported run.
+
+Reproduction examples:
+
+1) Initialize and run a benchmark with `--benchmark_min_time=4x`. After `RunSpecifiedBenchmarks`, the single reported run for the benchmark should have `iterations == 4`.
+
+2) Initialize and run a benchmark with `--benchmark_min_time=4` and with `--benchmark_min_time=4.0s`. In both cases, the reporter’s `ReportRunsConfig` callback should receive `min_time == 4.0` (within floating-point epsilon), and the benchmark should execute normally.
+
+Additionally, running clang-tidy with `cppcoreguidelines` checks enabled should not produce warnings/errors for these code paths (for example around const-correctness and safe pointer/array usage in argument handling and reporter interfaces).
+
+Fix the implementation so that these three flag forms behave as described, the correct values are delivered through the existing reporter callbacks (`ReportRuns` / `ReportRunsConfig`), and the codebase no longer triggers clang-tidy cppcoreguidelines findings in the affected areas.

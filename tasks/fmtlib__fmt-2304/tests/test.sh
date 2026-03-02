@@ -6,12 +6,40 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/compile-test.cc" "test/compile-test.cc"
 
-# Build the compile-test target using CMake
-cmake --build build --target compile-test
+test_status=0
 
-# Run the compile-test executable
-./build/bin/compile-test
-test_status=$?
+# Reconfigure CMake after copying new test files
+echo "Reconfiguring CMake..."
+cd build
+if ! cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_STANDARD=20 \
+    -DFMT_TEST=ON \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ 2>&1; then
+    echo "FAIL: CMake reconfiguration failed"
+    test_status=1
+fi
+
+if [ $test_status -eq 0 ]; then
+    # Build the specific test file
+    echo "Building compile-test..."
+    if ! cmake --build . --target compile-test 2>&1; then
+        echo "FAIL: compile-test build failed"
+        test_status=1
+    fi
+fi
+
+if [ $test_status -eq 0 ]; then
+    # Run the test executable
+    echo "Running compile-test..."
+    if ! ./bin/compile-test 2>&1; then
+        echo "FAIL: compile-test execution failed"
+        test_status=1
+    else
+        echo "PASS: compile-test passed"
+    fi
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

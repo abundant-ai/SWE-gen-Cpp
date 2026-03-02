@@ -9,7 +9,7 @@ export CI=true
 mkdir -p "bazel/tests"
 cp "/tests/bazel/tests/cc_toolchain_tests.bzl" "bazel/tests/cc_toolchain_tests.bzl"
 
-# Run the specific Bazel test suite for cc_toolchain
+# Run the specific test suite for cc_toolchain_tests using Bazel
 bazel test //bazel/tests:cc_toolchain_test_suite --test_output=errors
 test_status=$?
 

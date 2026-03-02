@@ -1,0 +1,303 @@
+diff --git a/include/crow/http_connection.h b/include/crow/http_connection.h
+index 1246fda8a..04909453e 100644
+--- a/include/crow/http_connection.h
++++ b/include/crow/http_connection.h
+@@ -50,7 +50,7 @@ namespace crow
+ 
+     public:
+         Connection(
+-          asio::io_service& io_service,
++          asio::io_context& io_context,
+           Handler* handler,
+           const std::string& server_name,
+           std::tuple<Middlewares...>* middlewares,
+@@ -58,7 +58,7 @@ namespace crow
+           detail::task_timer& task_timer,
+           typename Adaptor::context* adaptor_ctx_,
+           std::atomic<unsigned int>& queue_length):
+-          adaptor_(io_service, adaptor_ctx_),
++          adaptor_(io_context, adaptor_ctx_),
+           handler_(handler),
+           parser_(this),
+           req_(parser_.req),
+@@ -143,7 +143,7 @@ namespace crow
+             ctx_ = detail::context<Middlewares...>();
+             req_.middleware_context = static_cast<void*>(&ctx_);
+             req_.middleware_container = static_cast<void*>(middlewares_);
+-            req_.io_service = &adaptor_.get_io_service();
++            req_.io_context = &adaptor_.get_io_context();
+ 
+             req_.remote_ip_address = adaptor_.remote_endpoint().address().to_string();
+ 
+diff --git a/include/crow/http_request.h b/include/crow/http_request.h
+index d1bcc8051..bd65c0710 100644
+--- a/include/crow/http_request.h
++++ b/include/crow/http_request.h
+@@ -48,7 +48,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+ 
+         void* middleware_context{};
+         void* middleware_container{};
+-        asio::io_service* io_service{};
++        asio::io_context* io_context{};
+ 
+         /// Construct an empty request. (sets the method to `GET`)
+         request():
+@@ -88,14 +88,14 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+         template<typename CompletionHandler>
+         void post(CompletionHandler handler)
+         {
+-            io_service->post(handler);
++            asio::post(io_context, handler);
+         }
+ 
+         /// Send data to whoever made this request with a completion handler.
+         template<typename CompletionHandler>
+         void dispatch(CompletionHandler handler)
+         {
+-            io_service->dispatch(handler);
++            asio::dispatch(io_context, handler);
+         }
+     };
+ } // namespace crow
+diff --git a/include/crow/http_server.h b/include/crow/http_server.h
+index 6834a2637..ed9ae0fc1 100644
+--- a/include/crow/http_server.h
++++ b/include/crow/http_server.h
+@@ -43,9 +43,9 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+     {
+     public:
+         Server(Handler* handler, std::string bindaddr, uint16_t port, std::string server_name = std::string("Crow/") + VERSION, std::tuple<Middlewares...>* middlewares = nullptr, uint16_t concurrency = 1, uint8_t timeout = 5, typename Adaptor::context* adaptor_ctx = nullptr):
+-          acceptor_(io_service_, tcp::endpoint(asio::ip::address::from_string(bindaddr), port)),
+-          signals_(io_service_),
+-          tick_timer_(io_service_),
++          acceptor_(io_context_, tcp::endpoint(asio::ip::make_address(bindaddr), port)),
++          signals_(io_context_),
++          tick_timer_(io_context_),
+           handler_(handler),
+           concurrency_(concurrency),
+           timeout_(timeout),
+@@ -78,7 +78,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+         {
+             uint16_t worker_thread_count = concurrency_ - 1;
+             for (int i = 0; i < worker_thread_count; i++)
+-                io_service_pool_.emplace_back(new asio::io_service());
++                io_context_pool_.emplace_back(new asio::io_context());
+             get_cached_date_str_pool_.resize(worker_thread_count);
+             task_timer_pool_.resize(worker_thread_count);
+ 
+@@ -116,7 +116,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+                         };
+ 
+                         // initializing task timers
+-                        detail::task_timer task_timer(*io_service_pool_[i]);
++                        detail::task_timer task_timer(*io_context_pool_[i]);
+                         task_timer.set_default_timeout(timeout_);
+                         task_timer_pool_[i] = &task_timer;
+                         task_queue_length_pool_[i] = 0;
+@@ -126,7 +126,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+                         {
+                             try
+                             {
+-                                if (io_service_pool_[i]->run() == 0)
++                                if (io_context_pool_[i]->run() == 0)
+                                 {
+                                     // when io_service.run returns 0, there are no more works to do.
+                                     break;
+@@ -170,7 +170,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+             std::thread(
+               [this] {
+                   notify_start();
+-                  io_service_.run();
++                  io_context_.run();
+                   CROW_LOG_INFO << "Exiting.";
+               })
+               .join();
+@@ -179,17 +179,17 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+         void stop()
+         {
+             shutting_down_ = true; // Prevent the acceptor from taking new connections
+-            for (auto& io_service : io_service_pool_)
++            for (auto& io_context : io_context_pool_)
+             {
+-                if (io_service != nullptr)
++                if (io_context != nullptr)
+                 {
+-                    CROW_LOG_INFO << "Closing IO service " << &io_service;
+-                    io_service->stop(); // Close all io_services (and HTTP connections)
++                    CROW_LOG_INFO << "Closing IO service " << &io_context;
++                    io_context->stop(); // Close all io_services (and HTTP connections)
+                 }
+             }
+ 
+-            CROW_LOG_INFO << "Closing main IO service (" << &io_service_ << ')';
+-            io_service_.stop(); // Close main io_service
++            CROW_LOG_INFO << "Closing main IO service (" << &io_context_ << ')';
++            io_context_.stop(); // Close main io_service
+         }
+ 
+         uint16_t port(){
+@@ -215,7 +215,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+         }
+ 
+     private:
+-        uint16_t pick_io_service_idx()
++        uint16_t pick_io_context_idx()
+         {
+             uint16_t min_queue_idx = 0;
+ 
+@@ -235,29 +235,29 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+         {
+             if (!shutting_down_)
+             {
+-                uint16_t service_idx = pick_io_service_idx();
+-                asio::io_service& is = *io_service_pool_[service_idx];
+-                task_queue_length_pool_[service_idx]++;
+-                CROW_LOG_DEBUG << &is << " {" << service_idx << "} queue length: " << task_queue_length_pool_[service_idx];
++                uint16_t context_idx = pick_io_context_idx();
++                asio::io_context& ic = *io_context_pool_[context_idx];
++                task_queue_length_pool_[context_idx]++;
++                CROW_LOG_DEBUG << &ic << " {" << context_idx << "} queue length: " << task_queue_length_pool_[context_idx];
+ 
+                 auto p = std::make_shared<Connection<Adaptor, Handler, Middlewares...>>(
+-                  is, handler_, server_name_, middlewares_,
+-                  get_cached_date_str_pool_[service_idx], *task_timer_pool_[service_idx], adaptor_ctx_, task_queue_length_pool_[service_idx]);
++                  ic, handler_, server_name_, middlewares_,
++                  get_cached_date_str_pool_[context_idx], *task_timer_pool_[context_idx], adaptor_ctx_, task_queue_length_pool_[context_idx]);
+ 
+                 acceptor_.async_accept(
+                   p->socket(),
+-                  [this, p, &is, service_idx](error_code ec) {
++                  [this, p, &ic, context_idx](error_code ec) {
+                       if (!ec)
+                       {
+-                          is.post(
++                          asio::post(ic,
+                             [p] {
+                                 p->start();
+                             });
+                       }
+                       else
+                       {
+-                          task_queue_length_pool_[service_idx]--;
+-                          CROW_LOG_DEBUG << &is << " {" << service_idx << "} queue length: " << task_queue_length_pool_[service_idx];
++                          task_queue_length_pool_[context_idx]--;
++                          CROW_LOG_DEBUG << &ic << " {" << context_idx << "} queue length: " << task_queue_length_pool_[context_idx];
+                       }
+                       do_accept();
+                   });
+@@ -273,8 +273,8 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+         }
+ 
+     private:
+-        std::vector<std::unique_ptr<asio::io_service>> io_service_pool_;
+-        asio::io_service io_service_;
++        std::vector<std::unique_ptr<asio::io_context>> io_context_pool_;
++        asio::io_context io_context_;
+         std::vector<detail::task_timer*> task_timer_pool_;
+         std::vector<std::function<std::string()>> get_cached_date_str_pool_;
+         tcp::acceptor acceptor_;
+diff --git a/include/crow/socket_adaptors.h b/include/crow/socket_adaptors.h
+index b2e07eb15..076e4ad05 100644
+--- a/include/crow/socket_adaptors.h
++++ b/include/crow/socket_adaptors.h
+@@ -19,9 +19,9 @@
+ #include "crow/settings.h"
+ 
+ #if (CROW_USE_BOOST && BOOST_VERSION >= 107000) || (ASIO_VERSION >= 101300)
+-#define GET_IO_SERVICE(s) ((asio::io_context&)(s).get_executor().context())
++#define GET_IO_CONTEXT(s) ((asio::io_context&)(s).get_executor().context())
+ #else
+-#define GET_IO_SERVICE(s) ((s).get_io_service())
++#define GET_IO_CONTEXT(s) ((s).get_io_service())
+ #endif
+ 
+ namespace crow
+@@ -38,13 +38,13 @@ namespace crow
+     struct SocketAdaptor
+     {
+         using context = void;
+-        SocketAdaptor(asio::io_service& io_service, context*):
+-          socket_(io_service)
++        SocketAdaptor(asio::io_context& io_context, context*):
++          socket_(io_context)
+         {}
+ 
+-        asio::io_service& get_io_service()
++        asio::io_context& get_io_context()
+         {
+-            return GET_IO_SERVICE(socket_);
++            return GET_IO_CONTEXT(socket_);
+         }
+ 
+         /// Get the TCP socket handling data trasfers, regardless of what layer is handling transfers on top of the socket.
+@@ -107,8 +107,8 @@ namespace crow
+     {
+         using context = asio::ssl::context;
+         using ssl_socket_t = asio::ssl::stream<tcp::socket>;
+-        SSLAdaptor(asio::io_service& io_service, context* ctx):
+-          ssl_socket_(new ssl_socket_t(io_service, *ctx))
++        SSLAdaptor(asio::io_context& io_context, context* ctx):
++          ssl_socket_(new ssl_socket_t(io_context, *ctx))
+         {}
+ 
+         asio::ssl::stream<tcp::socket>& socket()
+@@ -168,9 +168,9 @@ namespace crow
+             }
+         }
+ 
+-        asio::io_service& get_io_service()
++        asio::io_context& get_io_context()
+         {
+-            return GET_IO_SERVICE(raw_socket());
++            return GET_IO_CONTEXT(raw_socket());
+         }
+ 
+         template<typename F>
+diff --git a/include/crow/task_timer.h b/include/crow/task_timer.h
+index 5d7518ca7..1b2f2727d 100644
+--- a/include/crow/task_timer.h
++++ b/include/crow/task_timer.h
+@@ -42,10 +42,10 @@ namespace crow
+             using clock_type = std::chrono::steady_clock;
+             using time_type = clock_type::time_point;
+         public:
+-            task_timer(asio::io_service& io_service,
++            task_timer(asio::io_context& io_context,
+                        const std::chrono::milliseconds tick_length =
+                             std::chrono::seconds(1)) :
+-              io_service_(io_service), timer_(io_service_),
++              io_context_(io_context), timer_(io_context_),
+               tick_length_ms_(tick_length)
+             {
+                 timer_.expires_after(tick_length_ms_);
+@@ -155,7 +155,7 @@ namespace crow
+             }
+ 
+         private:
+-            asio::io_service& io_service_;
++            asio::io_context& io_context_;
+             asio::basic_waitable_timer<clock_type> timer_;
+             std::map<identifier_type, std::pair<time_type, task_type>> tasks_;
+ 
+diff --git a/include/crow/websocket.h b/include/crow/websocket.h
+index 8e5bd8731..fa5e18546 100644
+--- a/include/crow/websocket.h
++++ b/include/crow/websocket.h
+@@ -202,7 +202,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+             template<typename CompletionHandler>
+             void dispatch(CompletionHandler&& handler)
+             {
+-                asio::dispatch(adaptor_.get_io_service(),
++                asio::dispatch(adaptor_.get_io_context(),
+                                WeakWrappedMessage<typename std::decay<CompletionHandler>::type>{
+                                  std::forward<CompletionHandler>(handler), anchor_});
+             }
+@@ -211,7 +211,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
+             template<typename CompletionHandler>
+             void post(CompletionHandler&& handler)
+             {
+-                asio::post(adaptor_.get_io_service(),
++                asio::post(adaptor_.get_io_context(),
+                            WeakWrappedMessage<typename std::decay<CompletionHandler>::type>{
+                              std::forward<CompletionHandler>(handler), anchor_});
+             }

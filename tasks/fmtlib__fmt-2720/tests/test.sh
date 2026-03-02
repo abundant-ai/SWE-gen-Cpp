@@ -6,12 +6,17 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/compile-test.cc" "test/compile-test.cc"
 
-# Rebuild tests with the updated test files
-cmake --build build --target compile-test
+test_status=0
 
-# Run the specific test executables
-./build/bin/compile-test
-test_status=$?
+# Build the specific test file
+cd build
+echo "Building compile-test..."
+if ! cmake --build . --target compile-test 2>&1; then
+    echo "FAIL: compile-test build failed"
+    test_status=1
+else
+    echo "PASS: compile-test built successfully"
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

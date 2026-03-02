@@ -1,0 +1,359 @@
+diff --git a/Makefile b/Makefile
+index 70006f1..50544f4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -34,8 +34,7 @@ tests:
+ 	# runs all tests against the package with race detection and coverage percentage
+ 	go test -race -cover
+ 	# tests validate proto generation
+-	bazel build //validate:go_default_library \
+-		&& diff $$(bazel info bazel-genfiles)/validate/validate.pb.go validate/validate.pb.go
++	bazel build //validate:go_default_library && diff $$(bazel info bazel-genfiles)/validate/validate.pb.go validate/validate.pb.go
+ 
+ .PHONY: cover
+ cover:
+@@ -52,7 +51,7 @@ harness: tests/harness/harness.pb.go tests/harness/go/go-harness tests/harness/c
+ .PHONY: bazel-harness
+ bazel-harness:
+ 	# runs the test harness via bazel
+-	bazel run //tests/harness/executor:executor
++	bazel run //tests/harness/executor
+ 
+ .PHONY: kitchensink
+ kitchensink:
+@@ -95,7 +94,6 @@ tests/harness/cc/cc-harness: tests/harness/cc/harness.cc
+ 	# use bazel which knows how to pull in the C++ common proto libraries
+ 	bazel build //tests/harness/cc:cc-harness
+ 	cp bazel-bin/tests/harness/cc/cc-harness $@
+-	chmod 0755 $@
+ 
+ .PHONY: ci
+ ci: lint build tests kitchensink testcases harness bazel-harness
+diff --git a/templates/cc/repeated.go b/templates/cc/repeated.go
+index 6fca277..570755d 100644
+--- a/templates/cc/repeated.go
++++ b/templates/cc/repeated.go
+@@ -46,7 +46,6 @@ const repTpl = `
+ 	{{ if or $r.GetUnique (ne (.Elem "" "").Typ "none") }}
+ 		for (int i = 0; i < {{ accessor . }}.size(); i++) {
+ 			const {{ $typ }}& item = {{ accessor . }}.Get(i);
+-			(void)item;
+ 
+ 			{{ if $r.GetUnique }}
+ 				auto p = {{ lookup $f "Unique" }}.emplace(const_cast<{{ $typ }}&>(item));
+diff --git a/templates/go/repeated.go b/templates/go/repeated.go
+index d5fe5e9..ba8d14f 100644
+--- a/templates/go/repeated.go
++++ b/templates/go/repeated.go
+@@ -31,9 +31,8 @@ const repTpl = `
+ 		{{ end -}}
+ 	{{ end }}
+ 
+-	{{ if or $r.GetUnique (ne (.Elem "" "").Typ "none") }}
++	{{ if or $r.GetUnique (ne 	(.Elem "" "").Typ "none") }}
+ 		for idx, item := range {{ accessor . }} {
+-			_, _ = idx, item
+ 			{{ if $r.GetUnique }}
+ 				if _, exists := {{ lookup $f "Unique" }}[{{ if isBytes $f.Type.Element }}string(item){{ else }}item{{ end }}]; exists {
+ 					return {{ errIdx . "idx" "repeated value must contain unique items" }}
+diff --git a/templates/shared/context.go b/templates/shared/context.go
+index 8f7e70e..992b9f9 100644
+--- a/templates/shared/context.go
++++ b/templates/shared/context.go
+@@ -166,12 +166,12 @@ func resolveRules(typ ruleTarget, rules *validate.FieldRules) (string, proto.Mes
+ 	case *validate.FieldRules_Timestamp:
+ 		return "timestamp", r.Timestamp, false
+ 	case nil:
+-		if ft, ok := typ.(pgs.FieldType); ok && ft.IsRepeated() {
+-			return "repeated", &validate.RepeatedRules{}, false
+-		} else if typ.IsEmbed() {
++		switch {
++		case typ.IsEmbed():
+ 			return "message", &validate.MessageRules{}, false
++		default:
++			return "none", nil, false
+ 		}
+-		return "none", nil, false
+ 	default:
+ 		return "error", nil, false
+ 	}
+diff --git a/tests/harness/cases/repeated.proto b/tests/harness/cases/repeated.proto
+index 0ff2b3d..ee64767 100644
+--- a/tests/harness/cases/repeated.proto
++++ b/tests/harness/cases/repeated.proto
+@@ -5,14 +5,11 @@ option go_package = "cases";
+ 
+ import "validate/validate.proto";
+ 
+-message Embed { int64 val = 1 [(validate.rules).int64.gt = 0]; }
+-
+-message RepeatedNone      { repeated int64  val = 1; }
+-message RepeatedEmbedNone { repeated Embed val = 1; }
+-message RepeatedMin       { repeated Embed val = 1 [(validate.rules).repeated.min_items = 2]; }
+-message RepeatedMax       { repeated double val = 1 [(validate.rules).repeated.max_items = 3]; }
+-message RepeatedMinMax    { repeated sfixed32 val = 1 [(validate.rules).repeated = {min_items: 2, max_items: 4}]; }
+-message RepeatedExact     { repeated uint32 val = 1 [(validate.rules).repeated = {min_items: 3, max_items: 3}]; }
+-message RepeatedUnique    { repeated string val = 1 [(validate.rules).repeated.unique = true]; }
+-message RepeatedItemRule  { repeated float val = 1 [(validate.rules).repeated.items.float.gt = 0]; }
+-message RepeatedEmbedSkip { repeated Embed val = 1 [(validate.rules).repeated.items.message.skip = true]; }
++message RepeatedNone     { repeated int64  val = 1; }
++message Embed            { int64 val = 1; }
++message RepeatedMin      { repeated Embed val = 1 [(validate.rules).repeated.min_items = 2]; }
++message RepeatedMax      { repeated double val = 1 [(validate.rules).repeated.max_items = 3]; }
++message RepeatedMinMax   { repeated sfixed32 val = 1 [(validate.rules).repeated = {min_items: 2, max_items: 4}]; }
++message RepeatedExact    { repeated uint32 val = 1 [(validate.rules).repeated = {min_items: 3, max_items: 3}]; }
++message RepeatedUnique   { repeated string val = 1 [(validate.rules).repeated.unique = true]; }
++message RepeatedItemRule { repeated float val = 1 [(validate.rules).repeated.items.float.gt = 0]; }
+diff --git a/tests/harness/executor/BUILD b/tests/harness/executor/BUILD
+index 12a88b8..65d1905 100644
+--- a/tests/harness/executor/BUILD
++++ b/tests/harness/executor/BUILD
+@@ -1,4 +1,4 @@
+-load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
++load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+ 
+ go_library(
+     name = "go_default_library",
+@@ -13,6 +13,7 @@ go_library(
+     deps = [
+         "//tests/harness:go_default_library",
+         "//tests/harness/cases:go",
++        "//tests/harness/go:go-harness",
+         "//vendor/github.com/golang/protobuf/proto:go_default_library",
+         "//vendor/github.com/golang/protobuf/ptypes:go_default_library",
+         "//vendor/golang.org/x/net/context:go_default_library",
+@@ -23,13 +24,17 @@ go_library(
+     ],
+ )
+ 
+-go_binary(
++go_test(
+     name = "executor",
+-    importpath = "github.com/lyft/protoc-gen-validate/tests/harness/executor",
+-    library = ":go_default_library",
+-    visibility = ["//visibility:private"],
+     data = [
+-        "//tests/harness/go:go-harness",
+         "//tests/harness/cc:cc-harness",
+-    ]
++        "//tests/harness/go:go-harness",
++    ],
++    importpath = "github.com/lyft/protoc-gen-validate/tests/harness/executor",
++    library = ":go_default_library",
++    rundir = ".",
++    visibility = ["//visibility:public"],
++    deps = [
++        "//tests/harness/cases:go",
++    ],
+ )
+diff --git a/tests/harness/executor/cases.go b/tests/harness/executor/cases.go
+index b767f5f..fa3c188 100644
+--- a/tests/harness/executor/cases.go
++++ b/tests/harness/executor/cases.go
+@@ -20,10 +20,6 @@ type TestCase struct {
+ 	Valid   bool
+ }
+ 
+-type TestResult struct {
+-	OK, Skipped bool
+-}
+-
+ var TestCases []TestCase
+ 
+ func init() {
+@@ -908,15 +904,9 @@ var messageCases = []TestCase{
+ var repeatedCases = []TestCase{
+ 	{"repeated - none - valid", &cases.RepeatedNone{[]int64{1, 2, 3}}, true},
+ 
+-	{"repeated - embed none - valid", &cases.RepeatedEmbedNone{[]*cases.Embed{{1}}}, true},
+-	{"repeated - embed none - valid (nil)", &cases.RepeatedEmbedNone{}, true},
+-	{"repeated - embed none - valid (empty)", &cases.RepeatedEmbedNone{[]*cases.Embed{}}, true},
+-	{"repeated - embed none - invalid", &cases.RepeatedEmbedNone{[]*cases.Embed{{-1}}}, false},
+-
+-	{"repeated - min - valid", &cases.RepeatedMin{[]*cases.Embed{{1}, {2}, {3}}}, true},
+-	{"repeated - min - valid (equal)", &cases.RepeatedMin{[]*cases.Embed{{1}, {2}}}, true},
+-	{"repeated - min - invalid", &cases.RepeatedMin{[]*cases.Embed{{1}}}, false},
+-	{"repeated - min - invalid (element)", &cases.RepeatedMin{[]*cases.Embed{{1}, {-1}}}, false},
++	{"repeated - min - valid", &cases.RepeatedMin{[]*cases.Embed{&cases.Embed{1}, &cases.Embed{2}, &cases.Embed{3}}}, true},
++	{"repeated - min - valid (equal)", &cases.RepeatedMin{[]*cases.Embed{&cases.Embed{1}, &cases.Embed{2}}}, true},
++	{"repeated - min - invalid", &cases.RepeatedMin{[]*cases.Embed{&cases.Embed{1}}}, false},
+ 
+ 	{"repeated - max - valid", &cases.RepeatedMax{[]float64{1, 2}}, true},
+ 	{"repeated - max - valid (equal)", &cases.RepeatedMax{[]float64{1, 2, 3}}, true},
+@@ -940,9 +930,6 @@ var repeatedCases = []TestCase{
+ 	{"repeated - items - valid", &cases.RepeatedItemRule{[]float32{1, 2, 3}}, true},
+ 	{"repeated - items - valid (empty)", &cases.RepeatedItemRule{[]float32{}}, true},
+ 	{"repeated - items - invalid", &cases.RepeatedItemRule{[]float32{1, -2, 3}}, false},
+-
+-	{"repeated - embed skip - valid", &cases.RepeatedEmbedSkip{[]*cases.Embed{{1}}}, true},
+-	{"repeated - embed skip - valid (invalid element)", &cases.RepeatedEmbedSkip{[]*cases.Embed{{-1}}}, true},
+ }
+ 
+ var mapCases = []TestCase{
+diff --git a/tests/harness/executor/executor.go b/tests/harness/executor/executor.go
+index 2c51b6c..92135f5 100644
+--- a/tests/harness/executor/executor.go
++++ b/tests/harness/executor/executor.go
+@@ -6,31 +6,20 @@ import (
+ 	"runtime"
+ 	"sync"
+ 	"sync/atomic"
++	"testing"
+ 	"time"
+ )
+ 
+-func init() {
+-	log.SetFlags(0)
+-}
+-
+ func main() {
+ 	start := time.Now()
+-	successes, failures, skips := run()
+-
+-	log.Printf("Successes: %d | Failures: %d | Skips: %d (%v)",
+-		successes, failures, skips, time.Since(start))
+-
+-	if failures > 0 {
+-		os.Exit(1)
+-	}
+-}
++	log.SetFlags(0)
+ 
+-func run() (successes, failures, skips uint64) {
++	successes, failures := uint64(0), uint64(0)
+ 	wg := new(sync.WaitGroup)
+ 	wg.Add(runtime.NumCPU())
+ 
+ 	in := make(chan TestCase)
+-	out := make(chan TestResult)
++	out := make(chan bool)
+ 	done := make(chan struct{})
+ 
+ 	for i := 0; i < runtime.NumCPU(); i++ {
+@@ -38,10 +27,8 @@ func run() (successes, failures, skips uint64) {
+ 	}
+ 
+ 	go func() {
+-		for res := range out {
+-			if res.Skipped {
+-				atomic.AddUint64(&skips, 1)
+-			} else if res.OK {
++		for success := range out {
++			if success {
+ 				atomic.AddUint64(&successes, 1)
+ 			} else {
+ 				atomic.AddUint64(&failures, 1)
+@@ -50,14 +37,24 @@ func run() (successes, failures, skips uint64) {
+ 		close(done)
+ 	}()
+ 
++	log.Println("loading test cases")
++
+ 	for _, test := range TestCases {
+ 		in <- test
+ 	}
+-	close(in)
+ 
++	close(in)
+ 	wg.Wait()
+ 	close(out)
+ 	<-done
+ 
+-	return
++	log.Printf("Successes: %d | Failures: %d (%v)", successes, failures, time.Since(start))
++
++	if failures > 0 {
++		os.Exit(1)
++	}
++}
++
++func TestEverything(test *testing.T) {
++	main()
+ }
+diff --git a/tests/harness/executor/harness.go b/tests/harness/executor/harness.go
+index 2d3523f..6a2b756 100644
+--- a/tests/harness/executor/harness.go
++++ b/tests/harness/executor/harness.go
+@@ -25,7 +25,6 @@ type Harness struct {
+ }
+ 
+ func InitHarness(cmd string, args ...string) Harness {
+-
+ 	return Harness{
+ 		Name: cmd,
+ 		Exec: initHarness(cmd, args...),
+diff --git a/tests/harness/executor/worker.go b/tests/harness/executor/worker.go
+index acb3052..cc80d3b 100644
+--- a/tests/harness/executor/worker.go
++++ b/tests/harness/executor/worker.go
+@@ -13,25 +13,24 @@ import (
+ 	"github.com/lyft/protoc-gen-validate/tests/harness"
+ )
+ 
+-func Work(wg *sync.WaitGroup, in <-chan TestCase, out chan<- TestResult) {
++func Work(wg *sync.WaitGroup, in <-chan TestCase, out chan<- bool) {
+ 	for tc := range in {
+-		ok, skip := execTestCase(tc)
+-		out <- TestResult{ok, skip}
++		out <- execTestCase(tc)
+ 	}
+ 	wg.Done()
+ }
+ 
+-func execTestCase(tc TestCase) (ok, skip bool) {
++func execTestCase(tc TestCase) (ok bool) {
+ 	any, err := ptypes.MarshalAny(tc.Message)
+ 	if err != nil {
+ 		log.Printf("unable to convert test case %q to Any - %v", tc.Name, err)
+-		return false, false
++		return false
+ 	}
+ 
+ 	b, err := proto.Marshal(&harness.TestCase{Message: any})
+ 	if err != nil {
+ 		log.Printf("unable to marshal test case %q - %v", tc.Name, err)
+-		return false, false
++		return false
+ 	}
+ 
+ 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+@@ -41,7 +40,7 @@ func execTestCase(tc TestCase) (ok, skip bool) {
+ 	wg.Add(len(Harnesses))
+ 
+ 	errs := make(chan error, len(Harnesses))
+-	skips := make(chan string, len(Harnesses))
++	output := make(chan string, len(Harnesses))
+ 
+ 	for _, h := range Harnesses {
+ 		h := h
+@@ -58,7 +57,7 @@ func execTestCase(tc TestCase) (ok, skip bool) {
+ 				errs <- fmt.Errorf("%s: internal harness error: %s", h.Name, res.Reason)
+ 			} else if res.Valid != tc.Valid {
+ 				if res.AllowFailure {
+-					skips <- fmt.Sprintf("%s: ignoring test failure: %s", h.Name, res.Reason)
++					output <- fmt.Sprintf("%s: ignoring test failure: %s", h.Name, res.Reason)
+ 				} else if tc.Valid {
+ 					errs <- fmt.Errorf("%s: expected valid, got: %s", h.Name, res.Reason)
+ 				} else {
+@@ -70,7 +69,7 @@ func execTestCase(tc TestCase) (ok, skip bool) {
+ 
+ 	wg.Wait()
+ 	close(errs)
+-	close(skips)
++	close(output)
+ 
+ 	ok = true
+ 
+@@ -78,10 +77,9 @@ func execTestCase(tc TestCase) (ok, skip bool) {
+ 		log.Printf("[%s] %v", tc.Name, err)
+ 		ok = false
+ 	}
+-	for out := range skips {
++	for out := range output {
+ 		log.Printf("[%s] %v", tc.Name, out)
+-		skip = true
+ 	}
+ 
+-	return
++	return ok
+ }

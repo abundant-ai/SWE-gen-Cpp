@@ -1,0 +1,485 @@
+diff --git a/docs/guides/routes.md b/docs/guides/routes.md
+index ebb906940..a8d748130 100644
+--- a/docs/guides/routes.md
++++ b/docs/guides/routes.md
+@@ -19,6 +19,10 @@ CROW_ROUTE(app, "/add/<int>/<int>")
+ });
+ ```
+ you can see the first `<int>` is defined as `a` and the second as `b`. If you were to run this and call `http://example.com/add/1/2`, the result would be a page with `3`. Exciting!
++
++##Methods
++You can change the HTTP methods the route uses from just the default `GET` by using `method()`, your route macro should look like `CROW_ROUTE(app, "/add/<int>/<int>").methods(crow::HTTPMethod::GET, crow::HTTPMethod::PATCH)` or `CROW_ROUTE(app, "/add/<int>/<int>").methods("GET"_method, "PATCH"_method)`.
++
+ ##Handler
+ Basically a piece of code that gets executed whenever the client calls the associated route, usually in the form of a [lambda expression](https://en.cppreference.com/w/cpp/language/lambda). It can be as simple as `#!cpp ([](){return "Hello World"})`.<br><br>
+ 
+@@ -40,5 +44,26 @@ For more information on `crow::response` go [here](../../reference/structcrow_1_
+ 
+ ###return statement
+ A `crow::response` is very strictly tied to a route. If you can have something in a response constructor, you can return it in a handler.<br><br>
+-The main return type is `std::string`. although you could also return a `crow::json::wvalue` directly. ***(Support for more data types including third party libraries is coming soon)***<br><br>
++The main return type is `std::string`. although you could also return a `crow::json::wvalue` or `crow::multipart::message` directly.<br><br>
+ For more information on the specific constructors for a `crow::response` go [here](../../reference/structcrow_1_1response.html).
++
++##Returning custom classes
++If you have your own class you want to return (without converting it to string and returning that), you can use the `crow::returnable` class.<br>
++to use the returnable class, you only need your class to publicly extend `crow::returnable`, add a `dump()` method that returns your class as an `std::string`, and add a constructor that has a `Content-Type` header as a string argument.<br><br>
++
++your class should look like the following:
++```cpp
++class a : public crow::returnable 
++{
++    a() : returnable("text/plain"){};
++
++    ...
++    ...
++    ...
++
++    std::string dump() override
++    {
++        return this.as_string();
++    }
++}
++```
+\ No newline at end of file
+diff --git a/examples/example_chat.cpp b/examples/example_chat.cpp
+index c510bb07c..7b9ec90cb 100644
+--- a/examples/example_chat.cpp
++++ b/examples/example_chat.cpp
+@@ -14,7 +14,7 @@ void broadcast(const string& msg)
+     crow::json::wvalue x;
+     x["msgs"][0] = msgs.back();
+     x["last"] = msgs.size();
+-    string body = crow::json::dump(x);
++    string body = x.dump();
+     for(auto p : ress)
+     {
+         auto* res = p.first;
+@@ -57,7 +57,7 @@ int main()
+                 x["msgs"][i-after] = msgs[i];
+             x["last"] = msgs.size();
+ 
+-            res.write(crow::json::dump(x));
++            res.write(x.dump());
+             res.end();
+         }
+         else
+diff --git a/include/crow/http_connection.h b/include/crow/http_connection.h
+index 94f3f8118..54b6a0212 100644
+--- a/include/crow/http_connection.h
++++ b/include/crow/http_connection.h
+@@ -428,11 +428,6 @@ namespace crow
+             buffers_.clear();
+             buffers_.reserve(4*(res.headers.size()+5)+3);
+ 
+-            if (res.body.empty() && res.json_value.t() != json::type::Null)
+-            {
+-                res.body = json::dump(res.json_value);
+-            }
+-
+             if (!statusCodes.count(res.code))
+                 res.code = 500;
+             {
+diff --git a/include/crow/http_response.h b/include/crow/http_response.h
+index d5cf25c46..5deefd796 100644
+--- a/include/crow/http_response.h
++++ b/include/crow/http_response.h
+@@ -4,15 +4,14 @@
+ #include <ios>
+ #include <fstream>
+ #include <sstream>
++#include <sys/stat.h>
+ 
+-#include "crow/json.h"
+ #include "crow/http_request.h"
+ #include "crow/ci_map.h"
+-
+ #include "crow/socket_adaptors.h"
+ #include "crow/logging.h"
+ #include "crow/mime_types.h"
+-#include <sys/stat.h>
++#include "crow/returnable.h"
+ 
+ 
+ namespace crow
+@@ -28,7 +27,6 @@ namespace crow
+ 
+         int code{200}; ///< The Status code for the response.
+         std::string body; ///< The actual payload containing the response data.
+-        json::wvalue json_value; ///< if the response body is JSON, this would be it.
+         ci_map headers; ///< HTTP headers.
+ 
+         /// Set the value of an existing header in the response.
+@@ -53,18 +51,21 @@ namespace crow
+         response() {}
+         explicit response(int code) : code(code) {}
+         response(std::string body) : body(std::move(body)) {}
+-        response(json::wvalue&& json_value) : json_value(std::move(json_value))
++        response(int code, std::string body) : code(code), body(std::move(body)) {}
++        response (returnable&& value)
+         {
+-            json_mode();
++            body = value.dump();
++            set_header("Content-Type",value.content_type);
+         }
+-        response(int code, std::string body) : code(code), body(std::move(body)) {}
+-        response(const json::wvalue& json_value) : body(json::dump(json_value))
++        response (returnable& value)
+         {
+-            json_mode();
++            body = value.dump();
++            set_header("Content-Type",value.content_type);
+         }
+-        response(int code, const json::wvalue& json_value) : code(code), body(json::dump(json_value))
++        response (int code, returnable& value) : code(code)
+         {
+-            json_mode();
++            body = value.dump();
++            set_header("Content-Type",value.content_type);
+         }
+ 
+         response(response&& r)
+@@ -77,7 +78,6 @@ namespace crow
+         response& operator = (response&& r) noexcept
+         {
+             body = std::move(r.body);
+-            json_value = std::move(r.json_value);
+             code = r.code;
+             headers = std::move(r.headers);
+             completed_ = r.completed_;
+@@ -93,7 +93,6 @@ namespace crow
+         void clear()
+         {
+             body.clear();
+-            json_value.clear();
+             code = 200;
+             headers.clear();
+             completed_ = false;
+@@ -237,12 +236,6 @@ namespace crow
+             std::function<bool()> is_alive_helper_;
+             static_file_info file_info;
+ 
+-            /// In case of a JSON object, set the Content-Type header.
+-            void json_mode()
+-            {
+-                set_header("Content-Type", "application/json");
+-            }
+-
+             template<typename Stream, typename Adaptor>
+             void write_streamed(Stream& is, Adaptor& adaptor)
+             {
+diff --git a/include/crow/json.h b/include/crow/json.h
+index 2bed8330d..f3ace745f 100644
+--- a/include/crow/json.h
++++ b/include/crow/json.h
+@@ -13,6 +13,7 @@
+ #include <vector>
+ 
+ #include "crow/settings.h"
++#include "crow/returnable.h"
+ 
+ #if defined(__GNUG__) || defined(__clang__)
+ #define crow_json_likely(x) __builtin_expect(x, 1)
+@@ -1160,7 +1161,7 @@ namespace crow
+         ///
+         /// Value can mean any json value, including a JSON object.
+         /// Write means this class is used to primarily assemble JSON objects using keys and values and export those into a string.
+-        class wvalue
++        class wvalue : public returnable
+         {
+             friend class crow::mustache::template_t;
+         public:
+@@ -1178,9 +1179,9 @@ namespace crow
+             std::unique_ptr<std::unordered_map<std::string, wvalue>> o; ///< Value if type is a JSON object.
+         public:
+ 
+-            wvalue() {}
++            wvalue() : returnable("application/json") {}
+             /// Create a write value from a read value (useful for editing JSON strings).
+-            wvalue(const rvalue& r)
++            wvalue(const rvalue& r) : returnable("application/json")
+             {
+                 t_ = r.t();
+                 switch(r.t())
+@@ -1218,7 +1219,7 @@ namespace crow
+                 }
+             }
+ 
+-            wvalue(wvalue&& r)
++            wvalue(wvalue&& r) : returnable("application/json")
+             {
+                 *this = std::move(r);
+             }
+@@ -1479,98 +1480,102 @@ namespace crow
+                 return 1;
+             }
+ 
+-            friend void dump_internal(const wvalue& v, std::string& out);
+-            friend std::string dump(const wvalue& v);
+-        };
++        private:
+ 
+-        inline void dump_string(const std::string& str, std::string& out)
+-        {
+-            out.push_back('"');
+-            escape(str, out);
+-            out.push_back('"');
+-        }
+-        inline void dump_internal(const wvalue& v, std::string& out)
+-        {
+-            switch(v.t_)
++            inline void dump_string(const std::string& str, std::string& out)
+             {
+-                case type::Null: out += "null"; break;
+-                case type::False: out += "false"; break;
+-                case type::True: out += "true"; break;
+-                case type::Number: 
+-                    {
+-                        if (v.nt == num_type::Floating_point)
+-                        {
+-#ifdef _MSC_VER
+-#define MSC_COMPATIBLE_SPRINTF(BUFFER_PTR, FORMAT_PTR, VALUE) sprintf_s((BUFFER_PTR), 128, (FORMAT_PTR), (VALUE))
+-#else
+-#define MSC_COMPATIBLE_SPRINTF(BUFFER_PTR, FORMAT_PTR, VALUE) sprintf((BUFFER_PTR), (FORMAT_PTR), (VALUE))
+-#endif
+-                            char outbuf[128];
+-                            MSC_COMPATIBLE_SPRINTF(outbuf, "%g", v.num.d);
+-                            out += outbuf;
+-#undef MSC_COMPATIBLE_SPRINTF
+-                        }
+-                        else if (v.nt == num_type::Signed_integer)
+-                        {
+-                            out += std::to_string(v.num.si);
+-                        }
+-                        else
++                out.push_back('"');
++                escape(str, out);
++                out.push_back('"');
++            }
++
++            inline void dump_internal(const wvalue& v, std::string& out)
++            {
++                switch(v.t_)
++                {
++                    case type::Null: out += "null"; break;
++                    case type::False: out += "false"; break;
++                    case type::True: out += "true"; break;
++                    case type::Number:
+                         {
+-                            out += std::to_string(v.num.ui);
++                            if (v.nt == num_type::Floating_point)
++                            {
++    #ifdef _MSC_VER
++    #define MSC_COMPATIBLE_SPRINTF(BUFFER_PTR, FORMAT_PTR, VALUE) sprintf_s((BUFFER_PTR), 128, (FORMAT_PTR), (VALUE))
++    #else
++    #define MSC_COMPATIBLE_SPRINTF(BUFFER_PTR, FORMAT_PTR, VALUE) sprintf((BUFFER_PTR), (FORMAT_PTR), (VALUE))
++    #endif
++                                char outbuf[128];
++                                MSC_COMPATIBLE_SPRINTF(outbuf, "%g", v.num.d);
++                                out += outbuf;
++    #undef MSC_COMPATIBLE_SPRINTF
++                            }
++                            else if (v.nt == num_type::Signed_integer)
++                            {
++                                out += std::to_string(v.num.si);
++                            }
++                            else
++                            {
++                                out += std::to_string(v.num.ui);
++                            }
+                         }
+-                    }
+-                    break;
+-                case type::String: dump_string(v.s, out); break;
+-                case type::List: 
+-                     {
+-                         out.push_back('[');
+-                         if (v.l)
++                        break;
++                    case type::String: dump_string(v.s, out); break;
++                    case type::List:
+                          {
+-                             bool first = true;
+-                             for(auto& x:*v.l)
++                             out.push_back('[');
++                             if (v.l)
+                              {
+-                                 if (!first)
++                                 bool first = true;
++                                 for(auto& x:*v.l)
+                                  {
+-                                     out.push_back(',');
++                                     if (!first)
++                                     {
++                                         out.push_back(',');
++                                     }
++                                     first = false;
++                                     dump_internal(x, out);
+                                  }
+-                                 first = false;
+-                                 dump_internal(x, out);
+                              }
++                             out.push_back(']');
+                          }
+-                         out.push_back(']');
+-                     }
+-                     break;
+-                case type::Object:
+-                     {
+-                         out.push_back('{');
+-                         if (v.o)
++                         break;
++                    case type::Object:
+                          {
+-                             bool first = true;
+-                             for(auto& kv:*v.o)
++                             out.push_back('{');
++                             if (v.o)
+                              {
+-                                 if (!first)
++                                 bool first = true;
++                                 for(auto& kv:*v.o)
+                                  {
+-                                     out.push_back(',');
++                                     if (!first)
++                                     {
++                                         out.push_back(',');
++                                     }
++                                     first = false;
++                                     dump_string(kv.first, out);
++                                     out.push_back(':');
++                                     dump_internal(kv.second, out);
+                                  }
+-                                 first = false;
+-                                 dump_string(kv.first, out);
+-                                 out.push_back(':');
+-                                 dump_internal(kv.second, out);
+                              }
++                             out.push_back('}');
+                          }
+-                         out.push_back('}');
+-                     }
+-                     break;
++                         break;
++                }
+             }
+-        }
+ 
+-        inline std::string dump(const wvalue& v)
+-        {
+-            std::string ret;
+-            ret.reserve(v.estimate_length());
+-            dump_internal(v, ret);
+-            return ret;
+-        }
++        public:
++            std::string dump()
++            {
++                std::string ret;
++                ret.reserve(estimate_length());
++                dump_internal(*this, ret);
++                return ret;
++            }
++
++        };
++
++
+ 
+         //std::vector<boost::asio::const_buffer> dump_ref(wvalue& v)
+         //{
+diff --git a/include/crow/multipart.h b/include/crow/multipart.h
+index 7b63c2030..fa8084f35 100644
+--- a/include/crow/multipart.h
++++ b/include/crow/multipart.h
+@@ -1,9 +1,11 @@
+ #pragma once
++
+ #include <string>
+ #include <vector>
+ #include <sstream>
++
+ #include "crow/http_request.h"
+-#include "crow/http_response.h"
++#include "crow/returnable.h"
+ 
+ namespace crow
+ {
+@@ -31,7 +33,7 @@ namespace crow
+         };
+ 
+         ///The parsed multipart request/response
+-        struct message
++        struct message : public returnable
+         {
+             ci_map headers;
+             std::string boundary; ///< The text boundary that separates different `parts`
+@@ -43,7 +45,7 @@ namespace crow
+             }
+ 
+             ///Represent all parts as a string (**does not include message headers**)
+-            const std::string dump()
++            std::string dump() override
+             {
+                 std::stringstream str;
+                 std::string delimiter = dd + boundary;
+@@ -58,7 +60,7 @@ namespace crow
+             }
+ 
+             ///Represent an individual part as a string
+-            const std::string dump(int part_)
++            std::string dump(int part_)
+             {
+                 std::stringstream str;
+                 part item = parts[part_];
+@@ -78,11 +80,12 @@ namespace crow
+ 
+             ///Default constructor using default values
+             message(const ci_map& headers, const std::string& boundary, const std::vector<part>& sections)
+-              : headers(headers), boundary(boundary), parts(sections){}
++              : returnable("multipart/form-data"), headers(headers), boundary(boundary), parts(sections){}
+ 
+             ///Create a multipart message from a request data
+             message(const request& req)
+-              : headers(req.headers),
++              : returnable("multipart/form-data"),
++                headers(req.headers),
+                 boundary(get_boundary(get_header_value("Content-Type"))),
+                 parts(parse_body(req.body))
+             {}
+diff --git a/include/crow/mustache.h b/include/crow/mustache.h
+index a76140c1f..13a6210c5 100644
+--- a/include/crow/mustache.h
++++ b/include/crow/mustache.h
+@@ -206,7 +206,7 @@ namespace crow
+                                 switch(ctx.t())
+                                 {
+                                     case json::type::Number:
+-                                        out += json::dump(ctx);
++                                        out += ctx.dump();
+                                         break;
+                                     case json::type::String:
+                                         if (action.t == ActionType::Tag)
+diff --git a/include/crow/returnable.h b/include/crow/returnable.h
+new file mode 100644
+index 000000000..1475d480a
+--- /dev/null
++++ b/include/crow/returnable.h
+@@ -0,0 +1,18 @@
++#pragma once
++
++#include <string>
++
++namespace crow
++{
++/// An abstract class that allows any other class to be returned by a handler.
++struct returnable
++{
++    std::string content_type;
++    virtual std::string dump() = 0;
++
++    returnable(std::string ctype) : content_type {ctype}
++    {}
++
++    virtual ~returnable(){};
++};
++}

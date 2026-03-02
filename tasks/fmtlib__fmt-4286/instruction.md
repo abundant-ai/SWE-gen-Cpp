@@ -1,38 +1,35 @@
-Formatting wide-character (and other non-`char`) output involving `std::bitset` and padding currently fails and can crash.
+Formatting a std::bitset with wide-character format strings (e.g., wchar_t/char16_t/char32_t) is currently broken and can crash at runtime when padding/alignment uses a fill character.
 
-1) `std::bitset` formatting is not properly supported for xchar output.
-When calling `fmt::format` with a wide format string, e.g.:
-
+Reproduction:
 ```cpp
+#include <bitset>
+#include <fmt/std.h>
+
 auto bs = std::bitset<6>(42);
-auto s1 = fmt::format(L"{}", bs);
-auto s2 = fmt::format(L"{:0>8}", bs);
-auto s3 = fmt::format(L"{:-^12}", bs);
+auto s1 = fmt::format(L"{}", bs);        // should be L"101010"
+auto s2 = fmt::format(L"{:0>8}", bs);    // should be L"00101010"
+auto s3 = fmt::format(L"{:-^12}", bs);   // should be L"---101010---"
 ```
 
-Expected results:
-- `s1 == L"101010"`
-- `s2 == L"00101010"` (left padded with `L'0'` to width 8)
-- `s3 == L"---101010---"` (centered with `L'-'` to width 12)
+Expected behavior:
+- `fmt::format(L"{}", std::bitset<6>(42))` returns `L"101010"`.
+- Width/alignment/fill should work the same way as for narrow strings, e.g. `L"{:0>8}"` produces `L"00101010"` and `L"{:-^12}"` produces `L"---101010---"`.
+- No crash should occur.
 
-Actual behavior: this use either fails to compile or triggers a crash depending on attempted workarounds.
+Actual behavior:
+- The wide-character formatting either fails to compile in some configurations (because the bitset formatter uses a narrow `string_view`-based nested formatter) or, after making it compile, can segfault at runtime during formatting with padding.
+- The crash happens while copying/applying the fill character in the padding logic: the fill pointer for non-`char` types can become null, and then code tries to build a `basic_string_view<Char>` from it and/or copy it, leading to invalid memory access.
 
-2) There is a segfault related to copying/propagating the format `fill` character(s) when formatting non-`char` output.
-A crash has been observed after a recent change when formatting styled output such as:
-
+Another observed crash (related to the same regression in fill copying) can be triggered when formatting styled output, e.g.:
 ```cpp
 std::ostringstream stream;
 std::string line;
-stream << fmt::format("{}", fmt::styled(line, fmt::fg(fmt::terminal_color::blue))) << "\n";
+stream << fmt::format("{}", fmt::styled(line, fmt::fg(fmt::terminal_color::blue)))
+       << "\n";
 ```
+This can crash with a backtrace showing a null `this` in `fmt::detail::buffer<char>::append`, indicating corruption/invalid state during formatting.
 
-This can segfault with a backtrace indicating a null `this` in `fmt::detail::buffer<char>::append`, originating from internal copy/append operations during formatting of a `styled_arg`.
-
-Separately, when attempting to enable wide `std::bitset` formatting via a nested formatter, a crash occurs during padding when `nested_formatter::write_padded` propagates fill into a new `basic_specs` via `set_fill(...)`. The failure mode is consistent with `basic_specs::fill<Char>()` returning `nullptr` for non-`char` types and that null pointer being used to build a `basic_string_view<Char>` for `set_fill`, leading to invalid memory access.
-
-Expected behavior:
-- `basic_specs` fill handling must be safe for all supported character types (`char`, `wchar_t`, `char16_t`, `char32_t`). Copying or propagating fill from one specs object to another must never create a null pointer string view or otherwise lead to UB.
-- `nested_formatter::write_padded` must correctly preserve fill and alignment for xchar contexts.
-- `formatter<std::bitset<N>, Char>` must work for `Char = wchar_t` (and other xchar types), including width/alignment/fill, without requiring user code changes.
-
-Implement the necessary fixes so that the wide `std::bitset` formatting examples above produce the exact expected strings, and formatting styled output no longer segfaults.
+Required fix:
+- Make `formatter<std::bitset<N>, Char>` support xchar format strings correctly by using the appropriate `basic_string_view<Char>`-based nested formatting so that wide-character formatting compiles and behaves like the `char` case.
+- Fix the bug in the padding/fill handling (involving copying fill from `basic_specs` and/or applying it in `nested_formatter::write_padded`) so that fill is correctly preserved for all character types and never produces a null pointer/invalid view.
+- After the fix, the wide-character bitset formatting examples above must work and must not crash, and formatting styled strings must also no longer segfault.

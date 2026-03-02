@@ -6,26 +6,26 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/format-test.cc" "test/format-test.cc"
 
-# Reconfigure with the updated test files
-cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_STANDARD=11 \
-    -DFMT_TEST=ON 2>&1
+# Remove test/format file to avoid header collision with std::format
+rm -f test/format
 
-# Build the specific test target (capture both stdout and stderr)
-cmake --build build --target format-test --parallel $(nproc) 2>&1
-build_status=$?
+# Rebuild and run the specific test for this PR
+cd build
+rm -rf *
 
-# If build failed, exit with error
-if [ $build_status -ne 0 ]; then
-  echo "Build failed"
-  test_status=1
-else
-  # Run the test
-  ./build/bin/format-test
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_STANDARD=11 \
+  -DFMT_TEST=ON \
+  -DCMAKE_C_COMPILER=clang \
+  -DCMAKE_CXX_COMPILER=clang++
+
+make format-test
+if [ $? -eq 0 ]; then
+  ./bin/format-test
   test_status=$?
+else
+  test_status=1
 fi
 
 if [ $test_status -eq 0 ]; then

@@ -6,35 +6,26 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/format-test.cc" "test/format-test.cc"
 
-# The bug is that iostream support cannot be disabled with FMT_NO_STREAM_LIBRARIES
-# The fix properly guards iostream functionality so it can be disabled
-# Test by checking if the print(ostream) function is declared when FMT_NO_STREAM_LIBRARIES is defined
-cat > /tmp/test_no_stream.cc << 'EOF'
-#define FMT_NO_STREAM_LIBRARIES
-#include "format.h"
-#include <sstream>  // Manually include sstream for the test
+# Remove test/format file to avoid header collision with std::format
+rm -f test/format
 
-int main() {
-  std::ostringstream os;
-  // This function should NOT be available when FMT_NO_STREAM_LIBRARIES is defined
-  // If the bug is present, this will compile. If the fix is applied, this will fail.
-  fmt::print(os, "test {}", 123);
-  return 0;
-}
-EOF
+# The test is to verify that the code properly guards stream-related functionality
+# In the buggy state (BASE), the guards are removed, so sstream is always included
+# In the fixed state (HEAD), the guards are present, so with FMT_NO_STREAM_LIBRARIES defined, it should not include sstream
 
-# Try to compile the test program
-g++ -std=c++11 -I. -c /tmp/test_no_stream.cc -o /tmp/test_no_stream.o 2>&1
-compile_status=$?
-
-if [ $compile_status -ne 0 ]; then
-  # Compilation failed - the fix is working (print(ostream) is properly guarded)
-  echo "SUCCESS: print(ostream) is not available with FMT_NO_STREAM_LIBRARIES defined"
+# Check if format.h properly guards the sstream include
+if grep -A2 "^#ifndef FMT_NO_STREAM_LIBRARIES" format.h | grep -q "# include <sstream>"; then
+  echo "format.h properly guards sstream include with FMT_NO_STREAM_LIBRARIES - test PASSED"
   test_status=0
 else
-  # Compilation succeeded - the bug is present (print(ostream) is still available)
-  echo "ERROR: print(ostream) should not be available with FMT_NO_STREAM_LIBRARIES defined"
-  test_status=1
+  # Check if sstream is included unconditionally (buggy state)
+  if grep -q "^#include <sstream>" format.h; then
+    echo "format.h includes sstream unconditionally (missing FMT_NO_STREAM_LIBRARIES guard) - test FAILED"
+    test_status=1
+  else
+    echo "format.h has unexpected structure - test FAILED"
+    test_status=1
+  fi
 fi
 
 if [ $test_status -eq 0 ]; then

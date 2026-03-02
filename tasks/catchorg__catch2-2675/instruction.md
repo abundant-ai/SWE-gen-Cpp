@@ -1,0 +1,9 @@
+Building the project with clang under aggressive unreachable-code diagnostics fails due to unreachable-code warnings being treated as errors. In particular, enabling clang’s `-Wunreachable-code-aggressive` (which also covers `-Wunreachable-code`, `-Wunreachable-code-break`, and `-Wunreachable-code-return`) causes the build to emit `-Wunreachable-code-return` in at least one case where a function unconditionally throws and then contains a `return` statement that can never execute.
+
+This is a regression: there is an instance of unreachable `return` after an unconditional `throw` that now prevents successful compilation when these warnings are enabled.
+
+Update the codebase so that it compiles cleanly under clang with `-Wunreachable-code-aggressive` enabled. The exception-related usage scenarios must still compile and behave the same, including functions that always throw (e.g., a function like `int thisThrows()` that throws `std::domain_error`) and `[[noreturn]]` throw helpers (e.g., a function like `throwCustom()` that always throws a custom exception). The build should no longer require suppressing `-Wunreachable-code-return` just to compile; unreachable returns after unconditional throws should be eliminated or otherwise handled so clang no longer diagnoses them.
+
+Expected behavior: compiling with clang and `-Wunreachable-code-aggressive` succeeds without emitting unreachable-code warnings.
+
+Actual behavior: compiling with clang and `-Wunreachable-code-aggressive` fails because clang reports `-Wunreachable-code-return` for code paths with unconditional `throw` followed by an unreachable `return`.

@@ -1,0 +1,16 @@
+Crow can terminate an HTTP connection early when a request’s URL is parsed and no matching route exists, which prevents the server from sending the expected error response (typically a 404). This regression affects crow v1.2.0+ after the change that attempts to search for a route as soon as the HTTP method and URL are parsed.
+
+When the parser finishes parsing the HTTP method and URL, the connection attempts to route immediately. If no route is found, this condition is currently treated like an HTTP parsing failure (ending parsing with an error such as `CHPE_INVALID_EOF_STATE`). Because the parser reports an error state, `crow::Connection<>::do_read()` terminates the socket early. However, before the socket is closed, `crow::Connection<>::handle_url()` may call `crow::Connection<>::complete_request()` which prepares a response intended to be written asynchronously (via the normal write path), but the connection is already being shut down due to the parser error, so the response is never reliably written.
+
+As a result, making a request to an invalid route (one that should produce a 404 Not Found) can result in the socket being closed before the response is sent, so the client does not receive the expected `404 Not Found` response body/status line.
+
+The routing-early behavior should still exist (route as soon as method+URL are available), but “route not found” (404) and “method not allowed” (405) must not be treated as HTTP parse errors. Instead, early routing outcomes must be handled as valid request-processing outcomes: the server should generate and write the correct response, and the connection should be closed only according to the normal HTTP connection rules after the response is written.
+
+Concretely:
+- Early route lookup (triggered once the method and URL are parsed) must distinguish between true HTTP parser failures and a normal routing outcome where the route does not exist.
+- If early routing determines the request should return an error response (e.g., 404 for no route, 405 for method not allowed), Crow must reliably send that response to the client before closing the socket.
+- The connection state must be consistent with completing a response after early routing. In particular, if early routing decides the request is complete (because it will respond immediately without parsing the rest of the request), the connection must ensure it does not close the socket prematurely (due to a parser error state) and must also ensure the socket is closed appropriately after the response is written when required.
+
+Reproduction example: start a `crow::SimpleApp` (including multithreaded mode) with at least one valid route, then send an HTTP request to a different, unregistered path. Expected behavior: client receives an HTTP response with status code 404 (and the usual 404 status line/body). Actual behavior: connection may be closed before the response is delivered.
+
+Fix the interaction between the HTTP parser, `crow::Connection<>` (including `do_read()`, `handle_url()`, and `complete_request()`), and the router so that early routing cannot cause a missing route to be handled as a parser error, and so that 404/405 responses generated during early routing are always written to the socket correctly.

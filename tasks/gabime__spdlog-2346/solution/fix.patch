@@ -1,0 +1,139 @@
+diff --git a/include/spdlog/common.h b/include/spdlog/common.h
+index 8259c733..443c058a 100644
+--- a/include/spdlog/common.h
++++ b/include/spdlog/common.h
+@@ -44,15 +44,13 @@
+ 
+ #include <spdlog/fmt/fmt.h>
+ 
+-#ifndef SPDLOG_USE_STD_FORMAT
+-#    if FMT_VERSION >= 80000 // backward compatibility with fmt versions older than 8
+-#        define SPDLOG_FMT_RUNTIME(format_string) fmt::runtime(format_string)
+-#        if defined(SPDLOG_WCHAR_FILENAMES) || defined(SPDLOG_WCHAR_TO_UTF8_SUPPORT)
+-#            include <spdlog/fmt/xchar.h>
+-#        endif
+-#    else
+-#        define SPDLOG_FMT_RUNTIME(format_string) format_string
++#if !defined(SPDLOG_USE_STD_FORMAT) && FMT_VERSION >= 80000 // backward compatibility with fmt versions older than 8
++#    define SPDLOG_FMT_RUNTIME(format_string) fmt::runtime(format_string)
++#    if defined(SPDLOG_WCHAR_FILENAMES) || defined(SPDLOG_WCHAR_TO_UTF8_SUPPORT)
++#        include <spdlog/fmt/xchar.h>
+ #    endif
++#else
++#    define SPDLOG_FMT_RUNTIME(format_string) format_string
+ #endif
+ 
+ // visual studio up to 2013 does not support noexcept nor constexpr
+@@ -147,7 +145,7 @@ using wmemory_buf_t = std::wstring;
+ template<typename... Args>
+ using wformat_string_t = std::wstring_view;
+ #    endif
+-
++#    define SPDLOG_BUF_TO_STRING(x) x
+ #else // use fmt lib instead of std::format
+ namespace fmt_lib = fmt;
+ 
+@@ -175,6 +173,7 @@ using wmemory_buf_t = fmt::basic_memory_buffer<wchar_t, 250>;
+ template<typename... Args>
+ using wformat_string_t = fmt::wformat_string<Args...>;
+ #    endif
++#    define SPDLOG_BUF_TO_STRING(x) fmt::to_string(x)
+ #endif
+ 
+ #ifdef SPDLOG_WCHAR_TO_UTF8_SUPPORT
+@@ -325,7 +324,7 @@ template<bool B, class T = void>
+ using enable_if_t = typename std::enable_if<B, T>::type;
+ 
+ template<typename T, typename... Args>
+-std::unique_ptr<T> make_unique(Args &&... args)
++std::unique_ptr<T> make_unique(Args &&...args)
+ {
+     static_assert(!std::is_array<T>::value, "arrays not supported");
+     return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
+diff --git a/include/spdlog/details/os-inl.h b/include/spdlog/details/os-inl.h
+index c3bf691c..b9bab53c 100644
+--- a/include/spdlog/details/os-inl.h
++++ b/include/spdlog/details/os-inl.h
+@@ -388,11 +388,7 @@ SPDLOG_INLINE std::string filename_to_str(const filename_t &filename)
+ {
+     memory_buf_t buf;
+     wstr_to_utf8buf(filename, buf);
+-#    ifdef SPDLOG_USE_STD_FORMAT
+-    return buf;
+-#    else
+-    return fmt::to_string(buf);
+-#    endif
++    return SPDLOG_BUF_TO_STRING(buf);
+ }
+ #else
+ SPDLOG_INLINE std::string filename_to_str(const filename_t &filename)
+diff --git a/include/spdlog/logger.h b/include/spdlog/logger.h
+index a8abae41..05a40a52 100644
+--- a/include/spdlog/logger.h
++++ b/include/spdlog/logger.h
+@@ -363,12 +363,9 @@ protected:
+         }
+         SPDLOG_TRY
+         {
+-#ifdef SPDLOG_USE_STD_FORMAT
+-            memory_buf_t buf = std::vformat(fmt, std::make_format_args(std::forward<Args>(args)...));
+-#else
+             memory_buf_t buf;
+-            fmt::detail::vformat_to(buf, fmt, fmt::make_format_args(std::forward<Args>(args)...));
+-#endif
++            fmt_lib::vformat_to(std::back_inserter(buf), fmt, fmt_lib::make_format_args(std::forward<Args>(args)...));
++
+             details::log_msg log_msg(loc, name_, lvl, string_view_t(buf.data(), buf.size()));
+             log_it_(log_msg, log_enabled, traceback_enabled);
+         }
+@@ -388,13 +385,9 @@ protected:
+         SPDLOG_TRY
+         {
+             // format to wmemory_buffer and convert to utf8
+-            ;
+-#    ifdef SPDLOG_USE_STD_FORMAT
+-            wmemory_buf_t wbuf = std::vformat(fmt, std::make_wformat_args(std::forward<Args>(args)...));
+-#    else
+             wmemory_buf_t wbuf;
+-            fmt::detail::vformat_to(wbuf, fmt, fmt::make_format_args<fmt::wformat_context>(std::forward<Args>(args)...));
+-#    endif
++            fmt_lib::vformat_to(std::back_inserter(wbuf), fmt, fmt_lib::make_format_args<fmt_lib::wformat_context>(std::forward<Args>(args)...));
++
+             memory_buf_t buf;
+             details::os::wstr_to_utf8buf(wstring_view_t(wbuf.data(), wbuf.size()), buf);
+             details::log_msg log_msg(loc, name_, lvl, string_view_t(buf.data(), buf.size()));
+diff --git a/include/spdlog/sinks/msvc_sink.h b/include/spdlog/sinks/msvc_sink.h
+index cf2516d7..b1dfd305 100644
+--- a/include/spdlog/sinks/msvc_sink.h
++++ b/include/spdlog/sinks/msvc_sink.h
+@@ -30,11 +30,8 @@ protected:
+     {
+         memory_buf_t formatted;
+         base_sink<Mutex>::formatter_->format(msg, formatted);
+-#    ifdef SPDLOG_USE_STD_FORMAT
+-        OutputDebugStringA(formatted.c_str());
+-#    else
+-        OutputDebugStringA(fmt::to_string(formatted).c_str());
+-#    endif
++        formatted.push_back('\0'); // add a null terminator for OutputDebugStringA
++        OutputDebugStringA(formatted.data());
+     }
+ 
+     void flush_() override {}
+diff --git a/include/spdlog/sinks/ringbuffer_sink.h b/include/spdlog/sinks/ringbuffer_sink.h
+index 5836d98b..d2fc8c49 100644
+--- a/include/spdlog/sinks/ringbuffer_sink.h
++++ b/include/spdlog/sinks/ringbuffer_sink.h
+@@ -50,11 +50,7 @@ public:
+         {
+             memory_buf_t formatted;
+             base_sink<Mutex>::formatter_->format(q_.at(i), formatted);
+-#ifdef SPDLOG_USE_STD_FORMAT
+-            ret.push_back(std::move(formatted));
+-#else
+-            ret.push_back(fmt::to_string(formatted));
+-#endif
++            ret.push_back(SPDLOG_BUF_TO_STRING(std::move(formatted)));
+         }
+         return ret;
+     }

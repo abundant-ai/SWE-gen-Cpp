@@ -1,16 +1,17 @@
-When `TestRunOrder::Randomized` is used, Catch2 computes a per-test hash to produce a subset-stable random ordering. After recent changes that allow multiple test cases to share the same display name (as long as they differ by tags, or by the class name for type-based tests), the hashing used for randomized ordering is no longer consistent with what Catch2 considers a “unique test case”.
+When running Catch2 with randomized test ordering, test cases are hashed to create a subset-stable random order. Catch2 recently relaxed the “unique test case” criteria to allow multiple test cases that share the same name as long as they differ by tags and/or by the class name (for test cases associated with a type). However, the hashing used for randomized ordering still only considers the test case name, which makes hash collisions far more likely and guarantees collisions for intentionally duplicated names.
 
-Currently, the random-order hash only considers the test case name. This means that if two test cases have the same name but different tags, or the same name and tags but different class name, they will produce identical hashes. As a result, hash collisions become common (and even guaranteed for same-named test cases), which undermines randomized ordering by forcing frequent tie-breaking and reducing the effectiveness/quality of the randomization.
+The randomized ordering should use a hash that reflects the full identity of a test case under the new uniqueness rules. Specifically, hashing a `Catch::TestCaseInfo` must incorporate all of the following:
+- the test case’s class name (if any),
+- the test case’s name,
+- the test case’s tags string.
 
-Fix the hashing used for randomized test ordering so that it incorporates all parts that define test case identity:
-- the test case’s class name (for method/template-based test cases that “hang off” a type)
-- the test case’s name
-- the test case’s tags
+Add/implement a dedicated `Catch::TestCaseInfoHasher` callable object that can be constructed with an explicit seed and invoked as `hasher(testCaseInfo)` to return the hash value. The hasher must behave deterministically for the same seed and input.
 
-Expose this logic as a dedicated callable hasher type named `Catch::TestCaseInfoHasher` that can be constructed with an explicit seed, and invoked like `hasher(testCaseInfo)` to return a hash value.
+Expected behavior:
+- Two `Catch::TestCaseInfo` objects with equal class name, equal name, and equal tags must produce equal hashes when hashed with the same `Catch::TestCaseInfoHasher` instance (same seed).
+- If class name and name are equal but tags differ, the hashes must differ (for the same seed).
+- If class name and tags are equal but name differs, the hashes must differ (for the same seed).
+- If name and tags are equal but class name differs, the hashes must differ (for the same seed).
+- If two hashers are constructed with different seeds, hashing the same `Catch::TestCaseInfo` should produce different hash values.
 
-Expected behavior requirements:
-- Two `Catch::TestCaseInfo` objects with equal class name, equal name, and equal tags must produce equal hashes when hashed with the same `TestCaseInfoHasher` seed.
-- If any one of class name, name, or tags differ, the resulting hashes must differ (for the same hasher seed) in the scenarios above (same name different tags; same tags different name; same name+tags different class name).
-- Two `TestCaseInfoHasher` instances constructed with different seeds must produce different hashes for the same `TestCaseInfo`.
-- When `TestRunOrder::Randomized` is active, the sorting/precomputation of per-test hashes used by `getAllTestsSorted()` must use this updated hashing so that tests considered distinct under the “unique test case” rules are far less likely to collide solely due to sharing a name.
+Finally, update the randomized test ordering logic (used when `TestRunOrder::Randomized` is selected) so that it uses this new `Catch::TestCaseInfoHasher` rather than hashing only the name. This should reduce/avoid collisions for distinct test cases that are considered unique under the updated uniqueness criteria, and preserve subset-stable ordering properties.

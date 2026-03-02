@@ -1,0 +1,924 @@
+diff --git a/.travis.yml b/.travis.yml
+index 85273844..c65e84d4 100644
+--- a/.travis.yml
++++ b/.travis.yml
+@@ -85,7 +85,6 @@ script:
+   - ./"${BIN}"
+   - valgrind --trace-children=yes --leak-check=full ./"${BIN}"
+   - cd $CHECKOUT_PATH/tests; make rebuild; ./tests
+-  - cd $CHECKOUT_PATH/tests; STYLE=printf make rebuild; ./tests
+ 
+ notifications:
+   email: false
+diff --git a/include/spdlog/details/logger_impl.h b/include/spdlog/details/logger_impl.h
+index d0f4a9d5..16222909 100644
+--- a/include/spdlog/details/logger_impl.h
++++ b/include/spdlog/details/logger_impl.h
+@@ -58,6 +58,7 @@ inline void spdlog::logger::set_pattern(const std::string& pattern, pattern_time
+     _set_pattern(pattern, pattern_time);
+ }
+ 
++
+ template <typename... Args>
+ inline void spdlog::logger::log(level::level_enum lvl, const char* fmt, const Args&... args)
+ {
+@@ -66,12 +67,7 @@ inline void spdlog::logger::log(level::level_enum lvl, const char* fmt, const Ar
+     try
+     {
+         details::log_msg log_msg(&_name, lvl);
+-
+-#if defined(SPDLOG_FMT_PRINTF)
+-        fmt::printf(log_msg.raw, fmt, args...);
+-#else
+         log_msg.raw.write(fmt, args...);
+-#endif
+         _sink_it(log_msg);
+     }
+     catch (const std::exception &ex)
+diff --git a/include/spdlog/fmt/bundled/printf.cc b/include/spdlog/fmt/bundled/printf.cc
+deleted file mode 100644
+index 95d7a36a..00000000
+--- a/include/spdlog/fmt/bundled/printf.cc
++++ /dev/null
+@@ -1,32 +0,0 @@
+-/*
+- Formatting library for C++
+-
+- Copyright (c) 2012 - 2016, Victor Zverovich
+- All rights reserved.
+-
+- For the license information refer to format.h.
+- */
+-
+-#include "format.h"
+-#include "printf.h"
+-
+-namespace fmt {
+-
+-template <typename Char>
+-void printf(BasicWriter<Char> &w, BasicCStringRef<Char> format, ArgList args);
+-
+-FMT_FUNC int fprintf(std::FILE *f, CStringRef format, ArgList args) {
+-  MemoryWriter w;
+-  printf(w, format, args);
+-  std::size_t size = w.size();
+-  return std::fwrite(w.data(), 1, size, f) < size ? -1 : static_cast<int>(size);
+-}
+-
+-#ifndef FMT_HEADER_ONLY
+-
+-template void PrintfFormatter<char>::format(CStringRef format);
+-template void PrintfFormatter<wchar_t>::format(WCStringRef format);
+-
+-#endif  // FMT_HEADER_ONLY
+-
+-}  // namespace fmt
+diff --git a/include/spdlog/fmt/bundled/printf.h b/include/spdlog/fmt/bundled/printf.h
+deleted file mode 100644
+index 30cbc49b..00000000
+--- a/include/spdlog/fmt/bundled/printf.h
++++ /dev/null
+@@ -1,603 +0,0 @@
+-/*
+- Formatting library for C++
+-
+- Copyright (c) 2012 - 2016, Victor Zverovich
+- All rights reserved.
+-
+- For the license information refer to format.h.
+- */
+-
+-#ifndef FMT_PRINTF_H_
+-#define FMT_PRINTF_H_
+-
+-#include <algorithm>  // std::fill_n
+-#include <limits>     // std::numeric_limits
+-
+-#include "ostream.h"
+-
+-namespace fmt {
+-namespace internal {
+-
+-// Checks if a value fits in int - used to avoid warnings about comparing
+-// signed and unsigned integers.
+-template <bool IsSigned>
+-struct IntChecker {
+-  template <typename T>
+-  static bool fits_in_int(T value) {
+-    unsigned max = std::numeric_limits<int>::max();
+-    return value <= max;
+-  }
+-  static bool fits_in_int(bool) { return true; }
+-};
+-
+-template <>
+-struct IntChecker<true> {
+-  template <typename T>
+-  static bool fits_in_int(T value) {
+-    return value >= std::numeric_limits<int>::min() &&
+-           value <= std::numeric_limits<int>::max();
+-  }
+-  static bool fits_in_int(int) { return true; }
+-};
+-
+-class PrecisionHandler : public ArgVisitor<PrecisionHandler, int> {
+- public:
+-  void report_unhandled_arg() {
+-    FMT_THROW(FormatError("precision is not integer"));
+-  }
+-
+-  template <typename T>
+-  int visit_any_int(T value) {
+-    if (!IntChecker<std::numeric_limits<T>::is_signed>::fits_in_int(value))
+-      FMT_THROW(FormatError("number is too big"));
+-    return static_cast<int>(value);
+-  }
+-};
+-
+-// IsZeroInt::visit(arg) returns true iff arg is a zero integer.
+-class IsZeroInt : public ArgVisitor<IsZeroInt, bool> {
+- public:
+-  template <typename T>
+-  bool visit_any_int(T value) { return value == 0; }
+-};
+-
+-// returns the default type for format specific "%s"
+-class DefaultType : public ArgVisitor<DefaultType, char> {
+- public:
+-  char visit_char(int) { return 'c'; }
+-
+-  char visit_bool(bool) { return 's'; }
+-
+-  char visit_pointer(const void *) { return 'p'; }
+-
+-  template <typename T>
+-  char visit_any_int(T) { return 'd'; }
+-
+-  template <typename T>
+-  char visit_any_double(T) { return 'g'; }
+-
+-  char visit_unhandled_arg() { return 's'; }
+-};
+-
+-template <typename T, typename U>
+-struct is_same {
+-  enum { value = 0 };
+-};
+-
+-template <typename T>
+-struct is_same<T, T> {
+-  enum { value = 1 };
+-};
+-
+-// An argument visitor that converts an integer argument to T for printf,
+-// if T is an integral type. If T is void, the argument is converted to
+-// corresponding signed or unsigned type depending on the type specifier:
+-// 'd' and 'i' - signed, other - unsigned)
+-template <typename T = void>
+-class ArgConverter : public ArgVisitor<ArgConverter<T>, void> {
+- private:
+-  internal::Arg &arg_;
+-  wchar_t type_;
+-
+-  FMT_DISALLOW_COPY_AND_ASSIGN(ArgConverter);
+-
+- public:
+-  ArgConverter(internal::Arg &arg, wchar_t type)
+-    : arg_(arg), type_(type) {}
+-
+-  void visit_bool(bool value) {
+-    if (type_ != 's')
+-      visit_any_int(value);
+-  }
+-
+-  void visit_char(char value) {
+-    if (type_ != 's')
+-      visit_any_int(value);
+-  }
+-
+-  template <typename U>
+-  void visit_any_int(U value) {
+-    bool is_signed = type_ == 'd' || type_ == 'i';
+-    if (type_ == 's') {
+-      is_signed = std::numeric_limits<U>::is_signed;
+-    }
+-
+-    using internal::Arg;
+-    typedef typename internal::Conditional<
+-        is_same<T, void>::value, U, T>::type TargetType;
+-    if (sizeof(TargetType) <= sizeof(int)) {
+-      // Extra casts are used to silence warnings.
+-      if (is_signed) {
+-        arg_.type = Arg::INT;
+-        arg_.int_value = static_cast<int>(static_cast<TargetType>(value));
+-      } else {
+-        arg_.type = Arg::UINT;
+-        typedef typename internal::MakeUnsigned<TargetType>::Type Unsigned;
+-        arg_.uint_value = static_cast<unsigned>(static_cast<Unsigned>(value));
+-      }
+-    } else {
+-      if (is_signed) {
+-        arg_.type = Arg::LONG_LONG;
+-        // glibc's printf doesn't sign extend arguments of smaller types:
+-        //   std::printf("%lld", -42);  // prints "4294967254"
+-        // but we don't have to do the same because it's a UB.
+-        arg_.long_long_value = static_cast<LongLong>(value);
+-      } else {
+-        arg_.type = Arg::ULONG_LONG;
+-        arg_.ulong_long_value =
+-            static_cast<typename internal::MakeUnsigned<U>::Type>(value);
+-      }
+-    }
+-  }
+-};
+-
+-// Converts an integer argument to char for printf.
+-class CharConverter : public ArgVisitor<CharConverter, void> {
+- private:
+-  internal::Arg &arg_;
+-
+-  FMT_DISALLOW_COPY_AND_ASSIGN(CharConverter);
+-
+- public:
+-  explicit CharConverter(internal::Arg &arg) : arg_(arg) {}
+-
+-  template <typename T>
+-  void visit_any_int(T value) {
+-    arg_.type = internal::Arg::CHAR;
+-    arg_.int_value = static_cast<char>(value);
+-  }
+-};
+-
+-// Checks if an argument is a valid printf width specifier and sets
+-// left alignment if it is negative.
+-class WidthHandler : public ArgVisitor<WidthHandler, unsigned> {
+- private:
+-  FormatSpec &spec_;
+-
+-  FMT_DISALLOW_COPY_AND_ASSIGN(WidthHandler);
+-
+- public:
+-  explicit WidthHandler(FormatSpec &spec) : spec_(spec) {}
+-
+-  void report_unhandled_arg() {
+-    FMT_THROW(FormatError("width is not integer"));
+-  }
+-
+-  template <typename T>
+-  unsigned visit_any_int(T value) {
+-    typedef typename internal::IntTraits<T>::MainType UnsignedType;
+-    UnsignedType width = static_cast<UnsignedType>(value);
+-    if (internal::is_negative(value)) {
+-      spec_.align_ = ALIGN_LEFT;
+-      width = 0 - width;
+-    }
+-    unsigned int_max = std::numeric_limits<int>::max();
+-    if (width > int_max)
+-      FMT_THROW(FormatError("number is too big"));
+-    return static_cast<unsigned>(width);
+-  }
+-};
+-}  // namespace internal
+-
+-/**
+-  \rst
+-  A ``printf`` argument formatter based on the `curiously recurring template
+-  pattern <http://en.wikipedia.org/wiki/Curiously_recurring_template_pattern>`_.
+-
+-  To use `~fmt::BasicPrintfArgFormatter` define a subclass that implements some
+-  or all of the visit methods with the same signatures as the methods in
+-  `~fmt::ArgVisitor`, for example, `~fmt::ArgVisitor::visit_int()`.
+-  Pass the subclass as the *Impl* template parameter. When a formatting
+-  function processes an argument, it will dispatch to a visit method
+-  specific to the argument type. For example, if the argument type is
+-  ``double`` then the `~fmt::ArgVisitor::visit_double()` method of a subclass
+-  will be called. If the subclass doesn't contain a method with this signature,
+-  then a corresponding method of `~fmt::BasicPrintfArgFormatter` or its
+-  superclass will be called.
+-  \endrst
+- */
+-template <typename Impl, typename Char, typename Spec>
+-class BasicPrintfArgFormatter :
+-    public internal::ArgFormatterBase<Impl, Char, Spec> {
+- private:
+-  void write_null_pointer() {
+-    this->spec().type_ = 0;
+-    this->write("(nil)");
+-  }
+-
+-  typedef internal::ArgFormatterBase<Impl, Char, Spec> Base;
+-
+- public:
+-  /**
+-    \rst
+-    Constructs an argument formatter object.
+-    *writer* is a reference to the output writer and *spec* contains format
+-    specifier information for standard argument types.
+-    \endrst
+-   */
+-  BasicPrintfArgFormatter(BasicWriter<Char> &w, Spec &s)
+-  : internal::ArgFormatterBase<Impl, Char, Spec>(w, s) {}
+-
+-  /** Formats an argument of type ``bool``. */
+-  void visit_bool(bool value) {
+-    Spec &fmt_spec = this->spec();
+-    if (fmt_spec.type_ != 's')
+-      return this->visit_any_int(value);
+-    fmt_spec.type_ = 0;
+-    this->write(value);
+-  }
+-
+-  /** Formats a character. */
+-  void visit_char(int value) {
+-    const Spec &fmt_spec = this->spec();
+-    BasicWriter<Char> &w = this->writer();
+-    if (fmt_spec.type_ && fmt_spec.type_ != 'c')
+-      w.write_int(value, fmt_spec);
+-    typedef typename BasicWriter<Char>::CharPtr CharPtr;
+-    CharPtr out = CharPtr();
+-    if (fmt_spec.width_ > 1) {
+-      Char fill = ' ';
+-      out = w.grow_buffer(fmt_spec.width_);
+-      if (fmt_spec.align_ != ALIGN_LEFT) {
+-        std::fill_n(out, fmt_spec.width_ - 1, fill);
+-        out += fmt_spec.width_ - 1;
+-      } else {
+-        std::fill_n(out + 1, fmt_spec.width_ - 1, fill);
+-      }
+-    } else {
+-      out = w.grow_buffer(1);
+-    }
+-    *out = static_cast<Char>(value);
+-  }
+-
+-  /** Formats a null-terminated C string. */
+-  void visit_cstring(const char *value) {
+-    if (value)
+-      Base::visit_cstring(value);
+-    else if (this->spec().type_ == 'p')
+-      write_null_pointer();
+-    else
+-      this->write("(null)");
+-  }
+-
+-  /** Formats a pointer. */
+-  void visit_pointer(const void *value) {
+-    if (value)
+-      return Base::visit_pointer(value);
+-    this->spec().type_ = 0;
+-    write_null_pointer();
+-  }
+-
+-  /** Formats an argument of a custom (user-defined) type. */
+-  void visit_custom(internal::Arg::CustomValue c) {
+-    BasicFormatter<Char> formatter(ArgList(), this->writer());
+-    const Char format_str[] = {'}', 0};
+-    const Char *format = format_str;
+-    c.format(&formatter, c.value, &format);
+-  }
+-};
+-
+-/** The default printf argument formatter. */
+-template <typename Char>
+-class PrintfArgFormatter :
+-    public BasicPrintfArgFormatter<PrintfArgFormatter<Char>, Char, FormatSpec> {
+- public:
+-  /** Constructs an argument formatter object. */
+-  PrintfArgFormatter(BasicWriter<Char> &w, FormatSpec &s)
+-  : BasicPrintfArgFormatter<PrintfArgFormatter<Char>, Char, FormatSpec>(w, s) {}
+-};
+-
+-/** This template formats data and writes the output to a writer. */
+-template <typename Char, typename ArgFormatter = PrintfArgFormatter<Char> >
+-class PrintfFormatter : private internal::FormatterBase {
+- private:
+-  BasicWriter<Char> &writer_;
+-
+-  void parse_flags(FormatSpec &spec, const Char *&s);
+-
+-  // Returns the argument with specified index or, if arg_index is equal
+-  // to the maximum unsigned value, the next argument.
+-  internal::Arg get_arg(
+-      const Char *s,
+-      unsigned arg_index = (std::numeric_limits<unsigned>::max)());
+-
+-  // Parses argument index, flags and width and returns the argument index.
+-  unsigned parse_header(const Char *&s, FormatSpec &spec);
+-
+- public:
+-  /**
+-   \rst
+-   Constructs a ``PrintfFormatter`` object. References to the arguments and
+-   the writer are stored in the formatter object so make sure they have
+-   appropriate lifetimes.
+-   \endrst
+-   */
+-  explicit PrintfFormatter(const ArgList &al, BasicWriter<Char> &w)
+-    : FormatterBase(al), writer_(w) {}
+-
+-  /** Formats stored arguments and writes the output to the writer. */
+-  void format(BasicCStringRef<Char> format_str);
+-};
+-
+-template <typename Char, typename AF>
+-void PrintfFormatter<Char, AF>::parse_flags(FormatSpec &spec, const Char *&s) {
+-  for (;;) {
+-    switch (*s++) {
+-      case '-':
+-        spec.align_ = ALIGN_LEFT;
+-        break;
+-      case '+':
+-        spec.flags_ |= SIGN_FLAG | PLUS_FLAG;
+-        break;
+-      case '0':
+-        spec.fill_ = '0';
+-        break;
+-      case ' ':
+-        spec.flags_ |= SIGN_FLAG;
+-        break;
+-      case '#':
+-        spec.flags_ |= HASH_FLAG;
+-        break;
+-      default:
+-        --s;
+-        return;
+-    }
+-  }
+-}
+-
+-template <typename Char, typename AF>
+-internal::Arg PrintfFormatter<Char, AF>::get_arg(const Char *s,
+-                                                 unsigned arg_index) {
+-  (void)s;
+-  const char *error = FMT_NULL;
+-  internal::Arg arg = arg_index == std::numeric_limits<unsigned>::max() ?
+-    next_arg(error) : FormatterBase::get_arg(arg_index - 1, error);
+-  if (error)
+-    FMT_THROW(FormatError(!*s ? "invalid format string" : error));
+-  return arg;
+-}
+-
+-template <typename Char, typename AF>
+-unsigned PrintfFormatter<Char, AF>::parse_header(
+-  const Char *&s, FormatSpec &spec) {
+-  unsigned arg_index = std::numeric_limits<unsigned>::max();
+-  Char c = *s;
+-  if (c >= '0' && c <= '9') {
+-    // Parse an argument index (if followed by '$') or a width possibly
+-    // preceded with '0' flag(s).
+-    unsigned value = internal::parse_nonnegative_int(s);
+-    if (*s == '$') {  // value is an argument index
+-      ++s;
+-      arg_index = value;
+-    } else {
+-      if (c == '0')
+-        spec.fill_ = '0';
+-      if (value != 0) {
+-        // Nonzero value means that we parsed width and don't need to
+-        // parse it or flags again, so return now.
+-        spec.width_ = value;
+-        return arg_index;
+-      }
+-    }
+-  }
+-  parse_flags(spec, s);
+-  // Parse width.
+-  if (*s >= '0' && *s <= '9') {
+-    spec.width_ = internal::parse_nonnegative_int(s);
+-  } else if (*s == '*') {
+-    ++s;
+-    spec.width_ = internal::WidthHandler(spec).visit(get_arg(s));
+-  }
+-  return arg_index;
+-}
+-
+-template <typename Char, typename AF>
+-void PrintfFormatter<Char, AF>::format(BasicCStringRef<Char> format_str) {
+-  const Char *start = format_str.c_str();
+-  const Char *s = start;
+-  while (*s) {
+-    Char c = *s++;
+-    if (c != '%') continue;
+-    if (*s == c) {
+-      write(writer_, start, s);
+-      start = ++s;
+-      continue;
+-    }
+-    write(writer_, start, s - 1);
+-
+-    FormatSpec spec;
+-    spec.align_ = ALIGN_RIGHT;
+-
+-    // Parse argument index, flags and width.
+-    unsigned arg_index = parse_header(s, spec);
+-
+-    // Parse precision.
+-    if (*s == '.') {
+-      ++s;
+-      if ('0' <= *s && *s <= '9') {
+-        spec.precision_ = static_cast<int>(internal::parse_nonnegative_int(s));
+-      } else if (*s == '*') {
+-        ++s;
+-        spec.precision_ = internal::PrecisionHandler().visit(get_arg(s));
+-      } else {
+-        spec.precision_ = 0;
+-      }
+-    }
+-
+-    using internal::Arg;
+-    Arg arg = get_arg(s, arg_index);
+-    if (spec.flag(HASH_FLAG) && internal::IsZeroInt().visit(arg))
+-      spec.flags_ &= ~internal::to_unsigned<int>(HASH_FLAG);
+-    if (spec.fill_ == '0') {
+-      if (arg.type <= Arg::LAST_NUMERIC_TYPE)
+-        spec.align_ = ALIGN_NUMERIC;
+-      else
+-        spec.fill_ = ' ';  // Ignore '0' flag for non-numeric types.
+-    }
+-
+-    // Parse length and convert the argument to the required type.
+-    using internal::ArgConverter;
+-    switch (*s++) {
+-    case 'h':
+-      if (*s == 'h')
+-        ArgConverter<signed char>(arg, *++s).visit(arg);
+-      else
+-        ArgConverter<short>(arg, *s).visit(arg);
+-      break;
+-    case 'l':
+-      if (*s == 'l')
+-        ArgConverter<fmt::LongLong>(arg, *++s).visit(arg);
+-      else
+-        ArgConverter<long>(arg, *s).visit(arg);
+-      break;
+-    case 'j':
+-      ArgConverter<intmax_t>(arg, *s).visit(arg);
+-      break;
+-    case 'z':
+-      ArgConverter<std::size_t>(arg, *s).visit(arg);
+-      break;
+-    case 't':
+-      ArgConverter<std::ptrdiff_t>(arg, *s).visit(arg);
+-      break;
+-    case 'L':
+-      // printf produces garbage when 'L' is omitted for long double, no
+-      // need to do the same.
+-      break;
+-    default:
+-      --s;
+-      ArgConverter<void>(arg, *s).visit(arg);
+-    }
+-
+-    // Parse type.
+-    if (!*s)
+-      FMT_THROW(FormatError("invalid format string"));
+-    spec.type_ = static_cast<char>(*s++);
+-
+-    if (spec.type_ == 's') {
+-      // set the format type to the default if 's' is specified
+-      spec.type_ = internal::DefaultType().visit(arg);
+-    }
+-
+-    if (arg.type <= Arg::LAST_INTEGER_TYPE) {
+-      // Normalize type.
+-      switch (spec.type_) {
+-      case 'i': case 'u':
+-        spec.type_ = 'd';
+-        break;
+-      case 'c':
+-        // TODO: handle wchar_t
+-        internal::CharConverter(arg).visit(arg);
+-        break;
+-      }
+-    }
+-
+-    start = s;
+-
+-    // Format argument.
+-    AF(writer_, spec).visit(arg);
+-  }
+-  write(writer_, start, s);
+-}
+-
+-inline void printf(Writer &w, CStringRef format, ArgList args) {
+-  PrintfFormatter<char>(args, w).format(format);
+-}
+-FMT_VARIADIC(void, printf, Writer &, CStringRef)
+-
+-inline void printf(WWriter &w, WCStringRef format, ArgList args) {
+-  PrintfFormatter<wchar_t>(args, w).format(format);
+-}
+-FMT_VARIADIC(void, printf, WWriter &, WCStringRef)
+-
+-/**
+-  \rst
+-  Formats arguments and returns the result as a string.
+-
+-  **Example**::
+-
+-    std::string message = fmt::sprintf("The answer is %d", 42);
+-  \endrst
+-*/
+-inline std::string sprintf(CStringRef format, ArgList args) {
+-  MemoryWriter w;
+-  printf(w, format, args);
+-  return w.str();
+-}
+-FMT_VARIADIC(std::string, sprintf, CStringRef)
+-
+-inline std::wstring sprintf(WCStringRef format, ArgList args) {
+-  WMemoryWriter w;
+-  printf(w, format, args);
+-  return w.str();
+-}
+-FMT_VARIADIC_W(std::wstring, sprintf, WCStringRef)
+-
+-/**
+-  \rst
+-  Prints formatted data to the file *f*.
+-
+-  **Example**::
+-
+-    fmt::fprintf(stderr, "Don't %s!", "panic");
+-  \endrst
+- */
+-FMT_API int fprintf(std::FILE *f, CStringRef format, ArgList args);
+-FMT_VARIADIC(int, fprintf, std::FILE *, CStringRef)
+-
+-/**
+-  \rst
+-  Prints formatted data to ``stdout``.
+-
+-  **Example**::
+-
+-    fmt::printf("Elapsed time: %.2f seconds", 1.23);
+-  \endrst
+- */
+-inline int printf(CStringRef format, ArgList args) {
+-  return fprintf(stdout, format, args);
+-}
+-FMT_VARIADIC(int, printf, CStringRef)
+-
+-/**
+-  \rst
+-  Prints formatted data to the stream *os*.
+-
+-  **Example**::
+-
+-    fprintf(cerr, "Don't %s!", "panic");
+-  \endrst
+- */
+-inline int fprintf(std::ostream &os, CStringRef format_str, ArgList args) {
+-  MemoryWriter w;
+-  printf(w, format_str, args);
+-  internal::write(os, w);
+-  return static_cast<int>(w.size());
+-}
+-FMT_VARIADIC(int, fprintf, std::ostream &, CStringRef)
+-}  // namespace fmt
+-
+-#ifdef FMT_HEADER_ONLY
+-# include "printf.cc"
+-#endif
+-
+-#endif  // FMT_PRINTF_H_
+diff --git a/include/spdlog/fmt/fmt.h b/include/spdlog/fmt/fmt.h
+index 6322ba6a..a4ee4673 100644
+--- a/include/spdlog/fmt/fmt.h
++++ b/include/spdlog/fmt/fmt.h
+@@ -19,16 +19,10 @@
+ #define FMT_USE_WINDOWS_H 0
+ #endif
+ #include "spdlog/fmt/bundled/format.h"
+-#if defined(SPDLOG_FMT_PRINTF)
+-#include "spdlog/fmt/bundled/printf.h"
+-#endif
+ 
+ #else //external fmtlib
+ 
+ #include <fmt/format.h>
+-#if defined(SPDLOG_FMT_PRINTF)
+-#include <fmt/printf.h>
+-#endif
+ 
+ #endif
+ 
+diff --git a/include/spdlog/tweakme.h b/include/spdlog/tweakme.h
+index 8c424497..8d5d9485 100644
+--- a/include/spdlog/tweakme.h
++++ b/include/spdlog/tweakme.h
+@@ -96,14 +96,6 @@
+ ///////////////////////////////////////////////////////////////////////////////
+ 
+ 
+-///////////////////////////////////////////////////////////////////////////////
+-// Uncomment to use printf-style messages in your logs instead of the usual
+-// format-style used by default.
+-//
+-// #define SPDLOG_FMT_PRINTF
+-///////////////////////////////////////////////////////////////////////////////
+-
+-
+ ///////////////////////////////////////////////////////////////////////////////
+ // Uncomment to enable syslog (disabled by default)
+ //
+diff --git a/tests/Makefile b/tests/Makefile
+index b1935e75..97871bac 100644
+--- a/tests/Makefile
++++ b/tests/Makefile
+@@ -1,11 +1,5 @@
+ CXX	?= g++
+-ifeq ($(STYLE),printf)
+-    $(info *** PRINTF STYLE ***)
+-    CXXFLAGS	=  -DSPDLOG_FMT_PRINTF -Wall  -pedantic -std=c++11 -pthread -O2 -I../include
+-else
+-    $(info *** FORMAT STYLE ***)
+-    CXXFLAGS	=  -Wall  -pedantic -std=c++11 -pthread -O2 -I../include
+-endif
++CXXFLAGS	=  -Wall  -pedantic -std=c++11 -pthread -O2 -I../include
+ LDPFALGS = -pthread
+ 
+ CPP_FILES := $(wildcard *.cpp)
+diff --git a/tests/cond_logging.cpp b/tests/cond_logging.cpp
+index d501664a..dd5a6ced 100644
+--- a/tests/cond_logging.cpp
++++ b/tests/cond_logging.cpp
+@@ -135,7 +135,6 @@ TEST_CASE("conditional_trace_varargs", "[conditional_trace_varargs]")
+     //const char
+     for (auto i = 0; i < 2; i++)
+     {
+-#if !defined(SPDLOG_FMT_PRINTF)
+         REQUIRE(conditional_log_varags(spdlog::level::trace, (i % 2 == 0), "Hello {}", i) == (i % 2 == 0 ? "Hello " + std::to_string(i) : ""));
+         REQUIRE(conditional_log_varags(spdlog::level::debug, (i % 2 == 0), "Hello {}", i) == (i % 2 == 0 ? "Hello " + std::to_string(i) : ""));
+         REQUIRE(conditional_log_varags(spdlog::level::info, (i % 2 == 0), "Hello {}", i) == (i % 2 == 0 ? "Hello " + std::to_string(i) : ""));
+@@ -151,24 +150,5 @@ TEST_CASE("conditional_trace_varargs", "[conditional_trace_varargs]")
+         REQUIRE(conditional_log_varags(spdlog::level::err, (i % 2 == 0), L"Hello {}", i) == (i % 2 == 0 ? L"Hello " + std::to_wstring(i) : L""));
+         REQUIRE(conditional_log_varags(spdlog::level::critical, (i % 2 == 0), L"Hello {}", i) == (i % 2 == 0 ? L"Hello " + std::to_wstring(i) : L""));
+ #endif // SPDLOG_WCHAR_TO_UTF8_SUPPORT
+-
+-#else
+-        REQUIRE(conditional_log_varags(spdlog::level::trace, (i % 2 == 0), "Hello %d", i) == (i % 2 == 0 ? "Hello " + std::to_string(i) : ""));
+-        REQUIRE(conditional_log_varags(spdlog::level::debug, (i % 2 == 0), "Hello %d", i) == (i % 2 == 0 ? "Hello " + std::to_string(i) : ""));
+-        REQUIRE(conditional_log_varags(spdlog::level::info, (i % 2 == 0), "Hello %d", i) == (i % 2 == 0 ? "Hello " + std::to_string(i) : ""));
+-        REQUIRE(conditional_log_varags(spdlog::level::warn, (i % 2 == 0), "Hello %d", i) == (i % 2 == 0 ? "Hello " + std::to_string(i) : ""));
+-        REQUIRE(conditional_log_varags(spdlog::level::err, (i % 2 == 0), "Hello %d", i) == (i % 2 == 0 ? "Hello " + std::to_string(i) : ""));
+-        REQUIRE(conditional_log_varags(spdlog::level::critical, (i % 2 == 0), "Hello %d", i) == (i % 2 == 0 ? "Hello " + std::to_string(i) : ""));
+-
+-#ifdef SPDLOG_WCHAR_TO_UTF8_SUPPORT
+-        REQUIRE(conditional_log_varags(spdlog::level::trace, (i % 2 == 0), L"Hello %d", i) == (i % 2 == 0 ? L"Hello " + std::to_wstring(i) : L""));
+-        REQUIRE(conditional_log_varags(spdlog::level::debug, (i % 2 == 0), L"Hello %d", i) == (i % 2 == 0 ? L"Hello " + std::to_wstring(i) : L""));
+-        REQUIRE(conditional_log_varags(spdlog::level::info, (i % 2 == 0), L"Hello %d", i) == (i % 2 == 0 ? L"Hello " + std::to_wstring(i) : L""));
+-        REQUIRE(conditional_log_varags(spdlog::level::warn, (i % 2 == 0), L"Hello %d", i) == (i % 2 == 0 ? L"Hello " + std::to_wstring(i) : L""));
+-        REQUIRE(conditional_log_varags(spdlog::level::err, (i % 2 == 0), L"Hello %d", i) == (i % 2 == 0 ? L"Hello " + std::to_wstring(i) : L""));
+-        REQUIRE(conditional_log_varags(spdlog::level::critical, (i % 2 == 0), L"Hello %d", i) == (i % 2 == 0 ? L"Hello " + std::to_wstring(i) : L""));
+-#endif // SPDLOG_WCHAR_TO_UTF8_SUPPORT
+-
+-#endif // !defined(SPDLOG_FMT_PRINTF)
+     }
+ }
+\ No newline at end of file
+diff --git a/tests/errors.cpp b/tests/errors.cpp
+index 83af2051..75de900a 100644
+--- a/tests/errors.cpp
++++ b/tests/errors.cpp
+@@ -26,13 +26,8 @@ TEST_CASE("default_error_handler", "[errors]]")
+ 
+     auto logger = spdlog::create<spdlog::sinks::simple_file_sink_mt>("logger", filename, true);
+     logger->set_pattern("%v");
+-#if !defined(SPDLOG_FMT_PRINTF)
+     logger->info("Test message {} {}", 1);
+     logger->info("Test message {}", 2);
+-#else
+-    logger->info("Test message %d %d", 1);
+-    logger->info("Test message %d", 2);
+-#endif
+     logger->flush();
+ 
+     REQUIRE(file_contents(filename) == std::string("Test message 2\n"));
+@@ -55,11 +50,7 @@ TEST_CASE("custom_error_handler", "[errors]]")
+         throw custom_ex();
+     });
+     logger->info("Good message #1");
+-#if !defined(SPDLOG_FMT_PRINTF)
+     REQUIRE_THROWS_AS(logger->info("Bad format msg {} {}", "xxx"), custom_ex);
+-#else
+-    REQUIRE_THROWS_AS(logger->info("Bad format msg %s %s", "xxx"), custom_ex);
+-#endif
+     logger->info("Good message #2");
+     REQUIRE(count_lines(filename) == 2);
+ }
+@@ -90,11 +81,7 @@ TEST_CASE("async_error_handler", "[errors]]")
+             ofs << err_msg;
+         });
+         logger->info("Good message #1");
+-#if !defined(SPDLOG_FMT_PRINTF)
+         logger->info("Bad format msg {} {}", "xxx");
+-#else
+-        logger->info("Bad format msg %s %s", "xxx");
+-#endif
+         logger->info("Good message #2");
+         spdlog::drop("logger"); //force logger to drain the queue and shutdown
+         spdlog::set_sync_mode();
+diff --git a/tests/file_log.cpp b/tests/file_log.cpp
+index ff29a898..45f6e8c1 100644
+--- a/tests/file_log.cpp
++++ b/tests/file_log.cpp
+@@ -12,13 +12,9 @@ TEST_CASE("simple_file_logger", "[simple_logger]]")
+     auto logger = spdlog::create<spdlog::sinks::simple_file_sink_mt>("logger", filename);
+     logger->set_pattern("%v");
+ 
+-#if !defined(SPDLOG_FMT_PRINTF)
++
+     logger->info("Test message {}", 1);
+     logger->info("Test message {}", 2);
+-#else
+-    logger->info("Test message %d", 1);
+-    logger->info("Test message %d", 2);
+-#endif
+     logger->flush();
+     REQUIRE(file_contents(filename) == std::string("Test message 1\nTest message 2\n"));
+     REQUIRE(count_lines(filename) == 2);
+@@ -37,13 +33,8 @@ TEST_CASE("flush_on", "[flush_on]]")
+     logger->trace("Should not be flushed");
+     REQUIRE(count_lines(filename) == 0);
+ 
+-#if !defined(SPDLOG_FMT_PRINTF)
+     logger->info("Test message {}", 1);
+     logger->info("Test message {}", 2);
+-#else
+-    logger->info("Test message %d", 1);
+-    logger->info("Test message %d", 2);
+-#endif
+     logger->flush();
+     REQUIRE(file_contents(filename) == std::string("Should not be flushed\nTest message 1\nTest message 2\n"));
+     REQUIRE(count_lines(filename) == 3);
+@@ -56,13 +47,7 @@ TEST_CASE("rotating_file_logger1", "[rotating_logger]]")
+     auto logger = spdlog::rotating_logger_mt("logger", basename, 1024, 0);
+ 
+     for (int i = 0; i < 10; ++i)
+-    {
+-#if !defined(SPDLOG_FMT_PRINTF)
+         logger->info("Test message {}", i);
+-#else
+-        logger->info("Test message %d", i);
+-#endif
+-    }
+ 
+     logger->flush();
+     auto filename = basename;
+@@ -82,13 +67,7 @@ TEST_CASE("rotating_file_logger2", "[rotating_logger]]")
+     auto filename = basename;
+     REQUIRE(count_lines(filename) == 10);
+     for (int i = 0; i < 1000; i++)
+-    {
+-#if !defined(SPDLOG_FMT_PRINTF)
+         logger->info("Test message {}", i);
+-#else
+-        logger->info("Test message %d", i);
+-#endif
+-    }
+ 
+     logger->flush();
+     REQUIRE(get_filesize(filename) <= 1024);
+@@ -109,13 +88,7 @@ TEST_CASE("daily_logger", "[daily_logger]]")
+     auto logger = spdlog::daily_logger_mt("logger", basename, 0, 0);
+     logger->flush_on(spdlog::level::info);
+     for (int i = 0; i < 10; ++i)
+-    {
+-#if !defined(SPDLOG_FMT_PRINTF)
+         logger->info("Test message {}", i);
+-#else
+-        logger->info("Test message %d", i);
+-#endif
+-    }
+ 
+     auto filename = w.str();
+     REQUIRE(count_lines(filename) == 10);
+@@ -137,13 +110,7 @@ TEST_CASE("daily_logger with dateonly calculator", "[daily_logger_dateonly]]")
+ 
+     auto logger = spdlog::create<sink_type>("logger", basename, 0, 0);
+     for (int i = 0; i < 10; ++i)
+-    {
+-#if !defined(SPDLOG_FMT_PRINTF)
+         logger->info("Test message {}", i);
+-#else
+-        logger->info("Test message %d", i);
+-#endif
+-    }
+     logger->flush();
+     auto filename = w.str();
+     REQUIRE(count_lines(filename) == 10);
+@@ -175,13 +142,7 @@ TEST_CASE("daily_logger with custom calculator", "[daily_logger_custom]]")
+ 
+     auto logger = spdlog::create<sink_type>("logger", basename, 0, 0);
+     for (int i = 0; i < 10; ++i)
+-    {
+-#if !defined(SPDLOG_FMT_PRINTF)
+         logger->info("Test message {}", i);
+-#else
+-        logger->info("Test message %d", i);
+-#endif
+-    }
+ 
+     logger->flush();
+     auto filename = w.str();

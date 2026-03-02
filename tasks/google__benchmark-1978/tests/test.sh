@@ -52,22 +52,29 @@ cp "/tests/user_counters_test.cc" "test/user_counters_test.cc"
 mkdir -p "test"
 cp "/tests/user_counters_thousands_test.cc" "test/user_counters_thousands_test.cc"
 
-# Rebuild tests with the updated source files from /tests
+# Rebuild with the fixed test files
+echo "Rebuilding with fixed test files..."
+rm -rf build
+cmake -B build -G Ninja \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_CXX_STANDARD=14 \
+    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
+    -DBENCHMARK_ENABLE_TESTING=ON \
+    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
+    -DBENCHMARK_ENABLE_WERROR=OFF \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+# Build the specific test targets
+cmake --build build --config Debug -j 1
+
+# Run the specific tests using ctest
+echo "Running tests with ctest..."
 cd build
-if ! cmake --build . --config Debug -j 1; then
-  echo "Build failed" >&2
-  test_status=1
-else
-  # Run a representative subset of tests to verify the fix
-  # Some tests require specific arguments - check the test source for requirements
-  ./test/filter_test --benchmark_min_time=0.01s && \
-  ./test/diagnostics_test --benchmark_min_time=0.01s && \
-  ./test/donotoptimize_test && \
-  ./test/spec_arg_test --benchmark_filter=BM_NotChosen && \
-  ./test/spec_arg_verbosity_test --v=42 && \
-  ./test/register_benchmark_test --benchmark_min_time=0.01s
-  test_status=$?
-fi
+ctest -R "^(benchmark_min_time_flag_iters_test|benchmark_min_time_flag_time_test|benchmark_setup_teardown_test|complexity_test|diagnostics_test|display_aggregates_only_test|donotoptimize_test|filter_test|internal_threading_test|manual_threading_test|memory_manager_test|perf_counters_test|profiler_manager_iterations_test|profiler_manager_test|register_benchmark_test|repetitions_test|report_aggregates_only_test|reporter_output_test|skip_with_error_test|spec_arg_test|spec_arg_verbosity_test|user_counters_tabular_test|user_counters_test|user_counters_thousands_test)$" -VV --output-on-failure
+test_status=$?
+cd ..
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

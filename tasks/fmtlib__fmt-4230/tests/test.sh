@@ -6,23 +6,8 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/ranges-test.cc" "test/ranges-test.cc"
 
-# Reconfigure and rebuild to pick up any changes and new test files
-cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DFMT_TEST=ON
-if [ $? -ne 0 ]; then
-  echo 0 > /logs/verifier/reward.txt
-  exit 1
-fi
-
-cmake --build build --target ranges-test --parallel $(nproc)
-if [ $? -ne 0 ]; then
-  echo 0 > /logs/verifier/reward.txt
-  exit 1
-fi
-
-# Run the specific test binary for ranges-test
-./build/bin/ranges-test
+# Rebuild and run the specific test target after copying updated test files
+cmake --build build --target ranges-test && build/bin/ranges-test
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

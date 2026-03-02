@@ -1,0 +1,245 @@
+diff --git a/googlemock/include/gmock/gmock-spec-builders.h b/googlemock/include/gmock/gmock-spec-builders.h
+index 96802444..39f72129 100644
+--- a/googlemock/include/gmock/gmock-spec-builders.h
++++ b/googlemock/include/gmock/gmock-spec-builders.h
+@@ -363,6 +363,7 @@ enum CallReaction {
+   kAllow,
+   kWarn,
+   kFail,
++  kDefault = kWarn  // By default, warn about uninteresting calls.
+ };
+ 
+ }  // namespace internal
+diff --git a/googlemock/include/gmock/gmock.h b/googlemock/include/gmock/gmock.h
+index 5764bc85..6735c71b 100644
+--- a/googlemock/include/gmock/gmock.h
++++ b/googlemock/include/gmock/gmock.h
+@@ -71,7 +71,6 @@ namespace testing {
+ // Declares Google Mock flags that we want a user to use programmatically.
+ GMOCK_DECLARE_bool_(catch_leaked_mocks);
+ GMOCK_DECLARE_string_(verbose);
+-GMOCK_DECLARE_int32_(default_mock_behavior);
+ 
+ // Initializes Google Mock.  This must be called before running the
+ // tests.  In particular, it parses the command line for the flags
+diff --git a/googlemock/src/gmock-spec-builders.cc b/googlemock/src/gmock-spec-builders.cc
+index 0eaaee75..f761f97e 100644
+--- a/googlemock/src/gmock-spec-builders.cc
++++ b/googlemock/src/gmock-spec-builders.cc
+@@ -508,13 +508,6 @@ bool UntypedFunctionMockerBase::VerifyAndClearExpectationsLocked()
+   return expectations_met;
+ }
+ 
+-CallReaction intToCallReaction(int mock_behavior) {
+-  if (mock_behavior >= kAllow && mock_behavior <= kFail) {
+-    return static_cast<internal::CallReaction>(mock_behavior);
+-  }
+-  return kWarn;
+-}
+-
+ }  // namespace internal
+ 
+ // Class Mock.
+@@ -655,8 +648,7 @@ internal::CallReaction Mock::GetReactionOnUninterestingCalls(
+         GTEST_LOCK_EXCLUDED_(internal::g_gmock_mutex) {
+   internal::MutexLock l(&internal::g_gmock_mutex);
+   return (g_uninteresting_call_reaction.count(mock_obj) == 0) ?
+-      internal::intToCallReaction(GMOCK_FLAG(default_mock_behavior)) :
+-      g_uninteresting_call_reaction[mock_obj];
++      internal::kDefault : g_uninteresting_call_reaction[mock_obj];
+ }
+ 
+ // Tells Google Mock to ignore mock_obj when checking for leaked mock
+diff --git a/googlemock/src/gmock.cc b/googlemock/src/gmock.cc
+index 3c370510..eac3d842 100644
+--- a/googlemock/src/gmock.cc
++++ b/googlemock/src/gmock.cc
+@@ -48,13 +48,6 @@ GMOCK_DEFINE_string_(verbose, internal::kWarningVerbosity,
+                      "  warning - prints warnings and errors.\n"
+                      "  error   - prints errors only.");
+ 
+-GMOCK_DEFINE_int32_(default_mock_behavior, 1,
+-                    "Controls the default behavior of mocks."
+-                    "  Valid values:\n"
+-                    "  0 - by default, mocks act as NiceMocks.\n"
+-                    "  1 - by default, mocks act as NaggyMocks.\n"
+-                    "  2 - by default, mocks act as StrictMocks.");
+-
+ namespace internal {
+ 
+ // Parses a string as a command line flag.  The string should have the
+@@ -127,19 +120,6 @@ static bool ParseGoogleMockStringFlag(const char* str, const char* flag,
+   return true;
+ }
+ 
+-static bool ParseGoogleMockIntFlag(const char* str, const char* flag,
+-                                   int* value) {
+-  // Gets the value of the flag as a string.
+-  const char* const value_str = ParseGoogleMockFlagValue(str, flag, true);
+-
+-  // Aborts if the parsing failed.
+-  if (value_str == NULL) return false;
+-
+-  // Sets *value to the value of the flag.
+-  *value = atoi(value_str);
+-  return true;
+-}
+-
+ // The internal implementation of InitGoogleMock().
+ //
+ // The type parameter CharType can be instantiated to either char or
+@@ -158,9 +138,7 @@ void InitGoogleMockImpl(int* argc, CharType** argv) {
+     // Do we see a Google Mock flag?
+     if (ParseGoogleMockBoolFlag(arg, "catch_leaked_mocks",
+                                 &GMOCK_FLAG(catch_leaked_mocks)) ||
+-        ParseGoogleMockStringFlag(arg, "verbose", &GMOCK_FLAG(verbose)) ||
+-        ParseGoogleMockIntFlag(arg, "default_mock_behavior",
+-                               &GMOCK_FLAG(default_mock_behavior))) {
++        ParseGoogleMockStringFlag(arg, "verbose", &GMOCK_FLAG(verbose))) {
+       // Yes.  Shift the remainder of the argv list left by one.  Note
+       // that argv has (*argc + 1) elements, the last one always being
+       // NULL.  The following loop moves the trailing NULL element as
+diff --git a/googlemock/test/gmock-spec-builders_test.cc b/googlemock/test/gmock-spec-builders_test.cc
+index c649bfd9..389e0709 100644
+--- a/googlemock/test/gmock-spec-builders_test.cc
++++ b/googlemock/test/gmock-spec-builders_test.cc
+@@ -93,11 +93,8 @@ using testing::Sequence;
+ using testing::SetArgPointee;
+ using testing::internal::ExpectationTester;
+ using testing::internal::FormatFileLocation;
+-using testing::internal::kAllow;
+ using testing::internal::kErrorVerbosity;
+-using testing::internal::kFail;
+ using testing::internal::kInfoVerbosity;
+-using testing::internal::kWarn;
+ using testing::internal::kWarningVerbosity;
+ using testing::internal::linked_ptr;
+ 
+@@ -694,61 +691,6 @@ TEST(ExpectCallSyntaxTest, WarnsOnTooFewActions) {
+   b.DoB();
+ }
+ 
+-TEST(ExpectCallSyntaxTest, WarningIsErrorWithFlag) {
+-  int original_behavior = testing::GMOCK_FLAG(default_mock_behavior);
+-
+-  testing::GMOCK_FLAG(default_mock_behavior) = kAllow;
+-  CaptureStdout();
+-  {
+-    MockA a;
+-    a.DoA(0);
+-  }
+-  std::string output = GetCapturedStdout();
+-  EXPECT_TRUE(output.empty()) << output;
+-
+-  testing::GMOCK_FLAG(default_mock_behavior) = kWarn;
+-  CaptureStdout();
+-  {
+-    MockA a;
+-    a.DoA(0);
+-  }
+-  std::string warning_output = GetCapturedStdout();
+-  EXPECT_PRED_FORMAT2(IsSubstring, "GMOCK WARNING", warning_output);
+-  EXPECT_PRED_FORMAT2(IsSubstring, "Uninteresting mock function call",
+-                      warning_output);
+-
+-  testing::GMOCK_FLAG(default_mock_behavior) = kFail;
+-  EXPECT_NONFATAL_FAILURE({
+-    MockA a;
+-    a.DoA(0);
+-  }, "Uninteresting mock function call");
+-
+-  // Out of bounds values are converted to kWarn
+-  testing::GMOCK_FLAG(default_mock_behavior) = -1;
+-  CaptureStdout();
+-  {
+-    MockA a;
+-    a.DoA(0);
+-  }
+-  warning_output = GetCapturedStdout();
+-  EXPECT_PRED_FORMAT2(IsSubstring, "GMOCK WARNING", warning_output);
+-  EXPECT_PRED_FORMAT2(IsSubstring, "Uninteresting mock function call",
+-                      warning_output);
+-  testing::GMOCK_FLAG(default_mock_behavior) = 3;
+-  CaptureStdout();
+-  {
+-    MockA a;
+-    a.DoA(0);
+-  }
+-  warning_output = GetCapturedStdout();
+-  EXPECT_PRED_FORMAT2(IsSubstring, "GMOCK WARNING", warning_output);
+-  EXPECT_PRED_FORMAT2(IsSubstring, "Uninteresting mock function call",
+-                      warning_output);
+-
+-  testing::GMOCK_FLAG(default_mock_behavior) = original_behavior;
+-}
+-
+-
+ #endif  // GTEST_HAS_STREAM_REDIRECTION
+ 
+ // Tests the semantics of ON_CALL().
+diff --git a/googlemock/test/gmock_test.cc b/googlemock/test/gmock_test.cc
+index 28995345..d8d0c57b 100644
+--- a/googlemock/test/gmock_test.cc
++++ b/googlemock/test/gmock_test.cc
+@@ -40,7 +40,6 @@
+ 
+ #if !defined(GTEST_CUSTOM_INIT_GOOGLE_TEST_FUNCTION_)
+ 
+-using testing::GMOCK_FLAG(default_mock_behavior);
+ using testing::GMOCK_FLAG(verbose);
+ using testing::InitGoogleMock;
+ 
+@@ -104,26 +103,6 @@ TEST(InitGoogleMockTest, ParsesSingleFlag) {
+   TestInitGoogleMock(argv, new_argv, "info");
+ }
+ 
+-TEST(InitGoogleMockTest, ParsesMultipleFlags) {
+-  int old_default_behavior = GMOCK_FLAG(default_mock_behavior);
+-  const wchar_t* argv[] = {
+-    L"foo.exe",
+-    L"--gmock_verbose=info",
+-    L"--gmock_default_mock_behavior=2",
+-    NULL
+-  };
+-
+-  const wchar_t* new_argv[] = {
+-    L"foo.exe",
+-    NULL
+-  };
+-
+-  TestInitGoogleMock(argv, new_argv, "info");
+-  EXPECT_EQ(2, GMOCK_FLAG(default_mock_behavior));
+-  EXPECT_NE(2, old_default_behavior);
+-  GMOCK_FLAG(default_mock_behavior) = old_default_behavior;
+-}
+-
+ TEST(InitGoogleMockTest, ParsesUnrecognizedFlag) {
+   const char* argv[] = {
+     "foo.exe",
+@@ -198,26 +177,6 @@ TEST(WideInitGoogleMockTest, ParsesSingleFlag) {
+   TestInitGoogleMock(argv, new_argv, "info");
+ }
+ 
+-TEST(WideInitGoogleMockTest, ParsesMultipleFlags) {
+-  int old_default_behavior = GMOCK_FLAG(default_mock_behavior);
+-  const wchar_t* argv[] = {
+-    L"foo.exe",
+-    L"--gmock_verbose=info",
+-    L"--gmock_default_mock_behavior=2",
+-    NULL
+-  };
+-
+-  const wchar_t* new_argv[] = {
+-    L"foo.exe",
+-    NULL
+-  };
+-
+-  TestInitGoogleMock(argv, new_argv, "info");
+-  EXPECT_EQ(2, GMOCK_FLAG(default_mock_behavior));
+-  EXPECT_NE(2, old_default_behavior);
+-  GMOCK_FLAG(default_mock_behavior) = old_default_behavior;
+-}
+-
+ TEST(WideInitGoogleMockTest, ParsesUnrecognizedFlag) {
+   const wchar_t* argv[] = {
+     L"foo.exe",

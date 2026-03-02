@@ -1,26 +1,26 @@
-Catch2 is missing generic range quantifier matchers that let users assert properties over any iterable range using the new generic matcher support. Users want to be able to construct a matcher from a single element-matcher and then apply it to an arbitrary range in `REQUIRE_THAT`/`CHECK_THAT`.
+Catch2 is missing generic range quantifier matchers that can validate boolean-like elements across arbitrary ranges. Users need three new matchers that can be used with REQUIRE_THAT on any “range” supported by Catch2’s generic range matching (e.g., standard containers, initializer lists, and types that only provide begin/end via ADL, including ranges where begin and end have different types).
 
-Add three new generic range matchers named `AllTrue`, `AnyTrue`, and `NoneTrue`.
+Add the following generic range matchers:
 
-`AllTrue` should match a range if every element in the range compares equal to `true` (i.e., is truthy as a boolean value). `AnyTrue` should match a range if at least one element is `true`. `NoneTrue` should match a range if no elements are `true`.
+- `AllTrue` — matches a range if every element in the range evaluates to `true`.
+- `AnyTrue` — matches a range if at least one element in the range evaluates to `true`.
+- `NoneTrue` — matches a range if no element in the range evaluates to `true`.
 
-They must work with a wide variety of range types Catch2 supports for container/range matchers, including:
-- Standard containers (e.g., `std::vector`, `std::list`, etc.)
-- Ranges that rely on ADL `begin`/`end`
-- Ranges where `begin` and `end` have different types (sentinel-style end)
+These matchers should integrate with Catch2’s matcher framework so they can be used like:
 
-The matchers should provide useful failure descriptions consistent with existing matcher output (e.g., describing the quantifier that failed and indicating that the range did not satisfy the condition).
-
-Example expected usage:
 ```cpp
-REQUIRE_THAT(get_flags(), AllTrue());
-REQUIRE_THAT(get_numbers(), NoneTrue());
-REQUIRE_THAT(get_flags(), AnyTrue());
+REQUIRE_THAT(get_bools(), AllTrue());
+REQUIRE_THAT(get_bools(), AnyTrue());
+REQUIRE_THAT(get_bools(), NoneTrue());
 ```
 
-Expected behavior details:
-- For an empty range: `AllTrue` should succeed (vacuously true), while `AnyTrue` should fail, and `NoneTrue` should succeed.
-- For a range containing both `true` and `false`: `AllTrue` should fail, `AnyTrue` should succeed, `NoneTrue` should fail.
-- The matchers must be usable in typical matcher compositions where applicable (e.g., wrapped in `!` negation) without compilation errors.
+Expected behavior:
+- `AllTrue` should succeed for an empty range (vacuously true), and fail if any element is `false`.
+- `AnyTrue` should fail for an empty range, succeed if at least one element is `true`.
+- `NoneTrue` should succeed for an empty range, and fail if any element is `true`.
 
-Currently, these matchers do not exist (or do not work generically across supported ranges), preventing the above usage and causing compilation failures or incorrect matching behavior. Implement the matchers and ensure they integrate with Catch2’s existing matcher APIs so they can be used via `REQUIRE_THAT(range, <matcher>)` on generic ranges.
+The matchers must work with elements that are `bool` as well as elements that are convertible to `bool` (e.g., proxy/reference types or custom types with explicit/implicit boolean conversion).
+
+When a match fails, the matcher’s description should clearly communicate what was expected (all/any/none true) and the mismatch should be reportable through Catch2’s normal matcher diagnostics (so that failing assertions provide useful output rather than a compilation error or an unhelpful message).
+
+Also ensure these new matchers compose correctly with existing matcher infrastructure for ranges (i.e., they should accept any range type supported by Catch2’s generic range matching, not require a specific container type or iterator category).

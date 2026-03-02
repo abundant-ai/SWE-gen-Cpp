@@ -2,9 +2,6 @@
 
 cd /app/src
 
-# Remove conflicting test/format file that interferes with compilation
-rm -f test/format
-
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test"
 cp "/tests/CMakeLists.txt" "test/CMakeLists.txt"
@@ -13,22 +10,60 @@ cp "/tests/enforce-compile-string-test.cc" "test/enforce-compile-string-test.cc"
 mkdir -p "test"
 cp "/tests/ranges-test.cc" "test/ranges-test.cc"
 
-# Build the specific test targets using CMake
-cmake --build build --target ranges-test
-cmake --build build --target enforce-compile-string-test
+# Remove test/format file to avoid header collision with std::format
+rm -f test/format
 
-# Run the test executables
-./build/bin/ranges-test
-ranges_status=$?
+test_status=0
 
-./build/bin/enforce-compile-string-test
-enforce_status=$?
-
-# Both tests must pass
-if [ $ranges_status -eq 0 ] && [ $enforce_status -eq 0 ]; then
-    test_status=0
-else
+# Reconfigure CMake after copying new test files
+echo "Reconfiguring CMake..."
+cd build
+if ! cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_STANDARD=20 \
+    -DFMT_TEST=ON \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ 2>&1; then
+    echo "FAIL: CMake reconfiguration failed"
     test_status=1
+fi
+
+# Build and run enforce-compile-string-test
+if [ $test_status -eq 0 ]; then
+    echo "Building enforce-compile-string-test..."
+    if ! cmake --build . --target enforce-compile-string-test 2>&1; then
+        echo "FAIL: enforce-compile-string-test build failed"
+        test_status=1
+    fi
+fi
+
+if [ $test_status -eq 0 ]; then
+    echo "Running enforce-compile-string-test..."
+    if ! ./bin/enforce-compile-string-test 2>&1; then
+        echo "FAIL: enforce-compile-string-test execution failed"
+        test_status=1
+    else
+        echo "PASS: enforce-compile-string-test passed"
+    fi
+fi
+
+# Build and run ranges-test
+if [ $test_status -eq 0 ]; then
+    echo "Building ranges-test..."
+    if ! cmake --build . --target ranges-test 2>&1; then
+        echo "FAIL: ranges-test build failed"
+        test_status=1
+    fi
+fi
+
+if [ $test_status -eq 0 ]; then
+    echo "Running ranges-test..."
+    if ! ./bin/ranges-test 2>&1; then
+        echo "FAIL: ranges-test execution failed"
+        test_status=1
+    else
+        echo "PASS: ranges-test passed"
+    fi
 fi
 
 if [ $test_status -eq 0 ]; then

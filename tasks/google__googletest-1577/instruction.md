@@ -1,0 +1,9 @@
+Google Mock currently exposes two overlapping sets of matchers: the “generated matchers” (historically provided via a dedicated header) and the main matcher API. When users include the generated-matcher header alongside the regular matcher headers, they can encounter compilation problems due to duplicate/ambiguous matcher declarations and inconsistent integration between the two matcher sets.
+
+The matcher APIs should be merged so that the generated matchers behave as first-class matchers within the normal Google Mock matcher ecosystem. In particular:
+
+- Including the generated matcher header together with the regular matcher headers must compile cleanly, without duplicate symbol errors, redefinition errors, or ambiguous overloads.
+- The generated matchers must interoperate with core matcher building blocks such as AllOf, AnyOf, Not, Args, and with common matcher usage patterns like MakeMatcher / Matcher / MatcherInterface. They should compose the same way as other built-in matchers.
+- Any previously supported generated matcher forms (including the generated multi-argument variants that accept multiple inner matchers) must remain available and must produce the same match/no-match behavior and explanations as before.
+
+A concrete failure mode to eliminate is build breakage when a translation unit includes both the generated matcher header and the primary matcher headers and then uses common matcher constructs in the same scope (e.g., composing generated matchers with AllOf/AnyOf/Not or binding them through Matcher<T>). The expected behavior is that this setup works seamlessly and does not require users to choose one header set over the other or to apply workarounds like namespace disambiguation.

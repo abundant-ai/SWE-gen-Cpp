@@ -1,0 +1,177 @@
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index 171679d7..5333eb51 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -760,14 +760,6 @@ template <typename T> struct allocator : private std::decay<void> {
+   }
+ };
+ 
+-template <typename Formatter>
+-FMT_CONSTEXPR auto maybe_set_debug_format(Formatter& f, bool set)
+-    -> decltype(f.set_debug_format(set)) {
+-  f.set_debug_format(set);
+-}
+-template <typename Formatter>
+-FMT_CONSTEXPR void maybe_set_debug_format(Formatter&, ...) {}
+-
+ }  // namespace detail
+ 
+ FMT_BEGIN_EXPORT
+diff --git a/include/fmt/ranges.h b/include/fmt/ranges.h
+index 36b38e29..0823cbf2 100644
+--- a/include/fmt/ranges.h
++++ b/include/fmt/ranges.h
+@@ -241,6 +241,14 @@ using range_reference_type =
+ template <typename Range>
+ using uncvref_type = remove_cvref_t<range_reference_type<Range>>;
+ 
++template <typename Formatter>
++FMT_CONSTEXPR auto maybe_set_debug_format(Formatter& f, bool set)
++    -> decltype(f.set_debug_format(set)) {
++  f.set_debug_format(set);
++}
++template <typename Formatter>
++FMT_CONSTEXPR void maybe_set_debug_format(Formatter&, ...) {}
++
+ template <typename T>
+ struct range_format_kind_
+     : std::integral_constant<range_format,
+diff --git a/include/fmt/std.h b/include/fmt/std.h
+index 3fe795bf..1127feaa 100644
+--- a/include/fmt/std.h
++++ b/include/fmt/std.h
+@@ -111,17 +111,12 @@ void write_escaped_path(basic_memory_buffer<Char>& quoted,
+ #endif  // FMT_CPP_LIB_FILESYSTEM
+ 
+ #if defined(__cpp_lib_expected) || FMT_CPP_LIB_VARIANT
+-
+-template <typename Char, typename OutputIt, typename T, typename FormatContext>
+-auto write_escaped_alternative(OutputIt out, const T& v, FormatContext& ctx)
+-    -> OutputIt {
++template <typename Char, typename OutputIt, typename T>
++auto write_escaped_alternative(OutputIt out, const T& v) -> OutputIt {
+   if constexpr (has_to_string_view<T>::value)
+     return write_escaped_string<Char>(out, detail::to_string_view(v));
+   if constexpr (std::is_same_v<T, Char>) return write_escaped_char(out, v);
+-
+-  formatter<std::remove_cv_t<T>, Char> underlying;
+-  maybe_set_debug_format(underlying, true);
+-  return underlying.format(v, ctx);
++  return write<Char>(out, v);
+ }
+ #endif
+ 
+@@ -387,9 +382,18 @@ struct formatter<std::optional<T>, Char,
+   static constexpr basic_string_view<Char> none =
+       detail::string_literal<Char, 'n', 'o', 'n', 'e'>{};
+ 
++  template <class U>
++  FMT_CONSTEXPR static auto maybe_set_debug_format(U& u, bool set)
++      -> decltype(u.set_debug_format(set)) {
++    u.set_debug_format(set);
++  }
++
++  template <class U>
++  FMT_CONSTEXPR static void maybe_set_debug_format(U&, ...) {}
++
+  public:
+   FMT_CONSTEXPR auto parse(parse_context<Char>& ctx) {
+-    detail::maybe_set_debug_format(underlying_, true);
++    maybe_set_debug_format(underlying_, true);
+     return underlying_.parse(ctx);
+   }
+ 
+@@ -425,10 +429,10 @@ struct formatter<std::expected<T, E>, Char,
+     if (value.has_value()) {
+       out = detail::write<Char>(out, "expected(");
+       if constexpr (!std::is_void<T>::value)
+-        out = detail::write_escaped_alternative<Char>(out, *value, ctx);
++        out = detail::write_escaped_alternative<Char>(out, *value);
+     } else {
+       out = detail::write<Char>(out, "unexpected(");
+-      out = detail::write_escaped_alternative<Char>(out, value.error(), ctx);
++      out = detail::write_escaped_alternative<Char>(out, value.error());
+     }
+     *out++ = ')';
+     return out;
+@@ -492,7 +496,7 @@ struct formatter<Variant, Char,
+     FMT_TRY {
+       std::visit(
+           [&](const auto& v) {
+-            out = detail::write_escaped_alternative<Char>(out, v, ctx);
++            out = detail::write_escaped_alternative<Char>(out, v);
+           },
+           value);
+     }
+diff --git a/test/std-test.cc b/test/std-test.cc
+index 3fdf0532..4bd8abce 100644
+--- a/test/std-test.cc
++++ b/test/std-test.cc
+@@ -197,33 +197,7 @@ class my_class {
+     return fmt::to_string(elm.av);
+   }
+ };
+-
+-class my_class_int {
+- public:
+-  int av;
+-
+- private:
+-  friend auto format_as(const my_class_int& elm) -> int { return elm.av; }
+-};
+ }  // namespace my_nso
+-
+-TEST(std_test, expected_format_as) {
+-#ifdef __cpp_lib_expected
+-  EXPECT_EQ(
+-      fmt::format(
+-          "{}", std::expected<my_nso::my_number, int>{my_nso::my_number::one}),
+-      "expected(\"first\")");
+-  EXPECT_EQ(
+-      fmt::format("{}",
+-                  std::expected<my_nso::my_class, int>{my_nso::my_class{7}}),
+-      "expected(\"7\")");
+-  EXPECT_EQ(fmt::format("{}",
+-                        std::expected<my_nso::my_class_int, int>{
+-                            my_nso::my_class_int{8}}),
+-            "expected(8)");
+-#endif
+-}
+-
+ TEST(std_test, optional_format_as) {
+ #ifdef __cpp_lib_optional
+   EXPECT_EQ(fmt::format("{}", std::optional<my_nso::my_number>{}), "none");
+@@ -232,8 +206,6 @@ TEST(std_test, optional_format_as) {
+   EXPECT_EQ(fmt::format("{}", std::optional<my_nso::my_class>{}), "none");
+   EXPECT_EQ(fmt::format("{}", std::optional{my_nso::my_class{7}}),
+             "optional(\"7\")");
+-  EXPECT_EQ(fmt::format("{}", std::optional{my_nso::my_class_int{8}}),
+-            "optional(8)");
+ #endif
+ }
+ 
+@@ -303,24 +275,6 @@ TEST(std_test, variant) {
+ #endif
+ }
+ 
+-TEST(std_test, variant_format_as) {
+-#ifdef __cpp_lib_variant
+-
+-  EXPECT_EQ(fmt::format("{}", std::variant<my_nso::my_number>{}),
+-            "variant(\"first\")");
+-  EXPECT_EQ(fmt::format(
+-                "{}", std::variant<my_nso::my_number>{my_nso::my_number::one}),
+-            "variant(\"first\")");
+-  EXPECT_EQ(
+-      fmt::format("{}", std::variant<my_nso::my_class>{my_nso::my_class{7}}),
+-      "variant(\"7\")");
+-  EXPECT_EQ(
+-      fmt::format("{}",
+-                  std::variant<my_nso::my_class_int>{my_nso::my_class_int{8}}),
+-      "variant(8)");
+-#endif
+-}
+-
+ TEST(std_test, error_code) {
+   auto& generic = std::generic_category();
+   EXPECT_EQ(fmt::format("{}", std::error_code(42, generic)), "generic:42");

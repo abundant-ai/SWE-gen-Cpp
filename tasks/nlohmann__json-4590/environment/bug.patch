@@ -1,0 +1,166 @@
+diff --git a/docs/mkdocs/docs/features/binary_formats/bson.md b/docs/mkdocs/docs/features/binary_formats/bson.md
+index 3b925dd8d..f3b8cf18d 100644
+--- a/docs/mkdocs/docs/features/binary_formats/bson.md
++++ b/docs/mkdocs/docs/features/binary_formats/bson.md
+@@ -23,7 +23,7 @@ The library uses the following mapping from JSON values types to BSON types:
+ | number_integer  | 2147483648..9223372036854775807           | int64     | 0x12   |
+ | number_unsigned | 0..2147483647                             | int32     | 0x10   |
+ | number_unsigned | 2147483648..9223372036854775807           | int64     | 0x12   |
+-| number_unsigned | 9223372036854775808..18446744073709551615 | uint64    | 0x11   |
++| number_unsigned | 9223372036854775808..18446744073709551615 | --        | --     |
+ | number_float    | *any value*                               | double    | 0x01   |
+ | string          | *any value*                               | string    | 0x02   |
+ | array           | *any value*                               | document  | 0x04   |
+@@ -73,7 +73,7 @@ The library maps BSON record types to JSON value types as follows:
+ | Symbol                | 0x0E             | *unsupported*   |
+ | JavaScript Code       | 0x0F             | *unsupported*   |
+ | int32                 | 0x10             | number_integer  |
+-| uint64(Timestamp)     | 0x11             | number_unsigned |
++| Timestamp             | 0x11             | *unsupported*   |
+ | 128-bit decimal float | 0x13             | *unsupported*   |
+ | Max Key               | 0x7F             | *unsupported*   |
+ | Min Key               | 0xFF             | *unsupported*   |
+@@ -94,8 +94,3 @@ The library maps BSON record types to JSON value types as follows:
+     ```json
+     --8<-- "examples/from_bson.output"
+     ```
+-
+-!!! note "Handling of BSON type 0x11"
+-
+-    BSON type 0x11 is used to represent uint64 numbers. This library treats these values purely as uint64 numbers 
+-    and does not parse them into date-related formats.
+\ No newline at end of file
+diff --git a/docs/mkdocs/docs/home/exceptions.md b/docs/mkdocs/docs/home/exceptions.md
+index 21f1d0c7a..f6e586c62 100644
+--- a/docs/mkdocs/docs/home/exceptions.md
++++ b/docs/mkdocs/docs/home/exceptions.md
+@@ -839,7 +839,7 @@ A parsed number could not be stored as without changing it to NaN or INF.
+ 
+ ### json.exception.out_of_range.407
+ 
+-UBJSON only support integer numbers up to 9223372036854775807.
++UBJSON and BSON only support integer numbers up to 9223372036854775807.
+ 
+ !!! failure "Example message"
+ 
+diff --git a/include/nlohmann/detail/input/binary_reader.hpp b/include/nlohmann/detail/input/binary_reader.hpp
+index e3885f2c0..498ca6216 100644
+--- a/include/nlohmann/detail/input/binary_reader.hpp
++++ b/include/nlohmann/detail/input/binary_reader.hpp
+@@ -328,12 +328,6 @@ class binary_reader
+                 return get_number<std::int64_t, true>(input_format_t::bson, value) && sax->number_integer(value);
+             }
+ 
+-            case 0x11: // uint64
+-            {
+-                std::uint64_t value{};
+-                return get_number<std::uint64_t, true>(input_format_t::bson, value) && sax->number_unsigned(value);
+-            }
+-
+             default: // anything else not supported (yet)
+             {
+                 std::array<char, 3> cr{{}};
+diff --git a/include/nlohmann/detail/output/binary_writer.hpp b/include/nlohmann/detail/output/binary_writer.hpp
+index f1a930996..db7ed3651 100644
+--- a/include/nlohmann/detail/output/binary_writer.hpp
++++ b/include/nlohmann/detail/output/binary_writer.hpp
+@@ -1097,8 +1097,7 @@ class binary_writer
+         }
+         else
+         {
+-            write_bson_entry_header(name, 0x11 /* uint64 */);
+-            write_number<std::uint64_t>(static_cast<std::uint64_t>(j.m_data.m_value.number_unsigned), true);
++            JSON_THROW(out_of_range::create(407, concat("integer number ", std::to_string(j.m_data.m_value.number_unsigned), " cannot be represented by BSON as it does not fit int64"), &j));
+         }
+     }
+ 
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index 14a16cefa..9be8b892e 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -10006,12 +10006,6 @@ class binary_reader
+                 return get_number<std::int64_t, true>(input_format_t::bson, value) && sax->number_integer(value);
+             }
+ 
+-            case 0x11: // uint64
+-            {
+-                std::uint64_t value{};
+-                return get_number<std::uint64_t, true>(input_format_t::bson, value) && sax->number_unsigned(value);
+-            }
+-
+             default: // anything else not supported (yet)
+             {
+                 std::array<char, 3> cr{{}};
+@@ -16739,8 +16733,7 @@ class binary_writer
+         }
+         else
+         {
+-            write_bson_entry_header(name, 0x11 /* uint64 */);
+-            write_number<std::uint64_t>(static_cast<std::uint64_t>(j.m_data.m_value.number_unsigned), true);
++            JSON_THROW(out_of_range::create(407, concat("integer number ", std::to_string(j.m_data.m_value.number_unsigned), " cannot be represented by BSON as it does not fit int64"), &j));
+         }
+     }
+ 
+diff --git a/tests/src/unit-bson.cpp b/tests/src/unit-bson.cpp
+index e35c33896..96188108e 100644
+--- a/tests/src/unit-bson.cpp
++++ b/tests/src/unit-bson.cpp
+@@ -331,6 +331,7 @@ TEST_CASE("BSON")
+ 
+         SECTION("non-empty object with unsigned integer (64-bit) member")
+         {
++            // directly encoding uint64 is not supported in bson (only for timestamp values)
+             json const j =
+             {
+                 { "entry", std::uint64_t{0x1234567804030201} }
+@@ -530,6 +531,7 @@ TEST_CASE("BSON")
+ 
+         SECTION("Some more complex document")
+         {
++            // directly encoding uint64 is not supported in bson (only for timestamp values)
+             json const j =
+             {
+                 {"double", 42.5},
+@@ -1162,7 +1164,10 @@ TEST_CASE("BSON numerical data")
+                 std::vector<std::uint64_t> const numbers
+                 {
+                     static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) + 1ULL,
+-                    0xffffffffffffffff,
++                    10000000000000000000ULL,
++                    18000000000000000000ULL,
++                    (std::numeric_limits<std::uint64_t>::max)() - 1ULL,
++                    (std::numeric_limits<std::uint64_t>::max)(),
+                 };
+ 
+                 for (const auto i : numbers)
+@@ -1179,7 +1184,7 @@ TEST_CASE("BSON numerical data")
+                     std::vector<std::uint8_t> const expected_bson =
+                     {
+                         0x14u, 0x00u, 0x00u, 0x00u, // size (little endian)
+-                        0x11u, /// entry: uint64
++                        0x12u, /// entry: int64
+                         'e', 'n', 't', 'r', 'y', '\x00',
+                         static_cast<std::uint8_t>((iu >> (8u * 0u)) & 0xffu),
+                         static_cast<std::uint8_t>((iu >> (8u * 1u)) & 0xffu),
+@@ -1192,15 +1197,12 @@ TEST_CASE("BSON numerical data")
+                         0x00u // end marker
+                     };
+ 
+-                    const auto bson = json::to_bson(j);
+-                    CHECK(bson == expected_bson);
+-
+-                    auto j_roundtrip = json::from_bson(bson);
+-
+-                    CHECK(j.at("entry").is_number_unsigned());
+-                    CHECK(j_roundtrip.at("entry").is_number_unsigned());
+-                    CHECK(j_roundtrip == j);
+-                    CHECK(json::from_bson(bson, true, false) == j);
++                    CHECK_THROWS_AS(json::to_bson(j), json::out_of_range&);
++#if JSON_DIAGNOSTICS
++                    CHECK_THROWS_WITH_STD_STR(json::to_bson(j), "[json.exception.out_of_range.407] (/entry) integer number " + std::to_string(i) + " cannot be represented by BSON as it does not fit int64");
++#else
++                    CHECK_THROWS_WITH_STD_STR(json::to_bson(j), "[json.exception.out_of_range.407] integer number " + std::to_string(i) + " cannot be represented by BSON as it does not fit int64");
++#endif
+                 }
+             }
+ 

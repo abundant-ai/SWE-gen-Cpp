@@ -1,24 +1,23 @@
-When formatting floating-point values with fmt, the numeric zero-fill option ('0' in the format spec) is currently applied to non-finite values (NaN and infinity), producing incorrect output.
+Formatting floating-point special values incorrectly applies numeric sign-aware zero padding to infinity and NaN.
 
-For example, formatting NaN with sign and zero-padded width like:
+According to the formatting rules, a leading '0' in the width field enables sign-aware zero-padding for numeric types, but it must have no effect on formatting of infinity and NaN. Currently, when formatting a non-finite floating-point value (NaN/inf) with a format spec that includes sign and zero padding, the library inserts zeros before the textual representation.
+
+For example:
 
 ```cpp
-fmt::format("{:+06}", NAN)
+fmt::print("'{:+06}'\n", NAN);
 ```
 
-currently produces output similar to:
+Actual output is:
 
 ```
-00+nan
+'00+nan'
 ```
 
-This is incorrect. Per the format specification, sign-aware zero-padding is for finite numeric digits and has no effect on formatting of infinity and NaN. For non-finite values, the '0' option must be ignored, and padding should behave as if spaces were used (i.e., normal alignment/width handling without inserting zeros between the sign and the letters).
+Expected output should ignore the zero-padding behavior for non-finite values and instead use normal space padding (or no extra characters if width doesn’t require it), producing:
 
-Fix the floating-point formatting logic so that for NaN and ±infinity, specifying zero-fill does not introduce any '0' characters into the formatted representation. Width and sign handling should still work, but padding must not be zero padding for these non-finite values.
+```
+'  +nan'
+```
 
-The corrected behavior should apply consistently for:
-- NaN with sign option and width (e.g., "{:+06}" should not yield any leading zeros)
-- Positive infinity with width/sign/zero-fill combinations
-- Negative infinity with width/sign/zero-fill combinations
-
-After the fix, formatting of finite floating-point values with the '0' option should remain unchanged (still using sign-aware zero-padding for numeric digits).
+The same rule should apply to other non-finite values such as positive/negative infinity and negative NaN when a sign is requested, across relevant float presentation types. Width must still be honored, but padding for non-finite values must not be performed with '0' sign-aware padding; i.e., formatting should behave as if the '0' flag was not specified whenever the value is NaN or infinity.

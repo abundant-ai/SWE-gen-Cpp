@@ -1,13 +1,11 @@
-Formatting `std::bitset<N>` with the fmt library regressed and no longer works as it used to when the type was implicitly formattable via its `operator<<(std::ostream&)`. As a result, code like:
+Formatting a `std::bitset<N>` with `fmt::format` no longer works in current versions, even though it previously worked implicitly via streaming (`operator<<(std::ostream&)`). This is a regression for users who expect `fmt::format("{}", bitset)` to produce the same textual representation as the standard stream output (a sequence of `'0'`/`'1'` characters).
 
-```cpp
-#include <bitset>
-#include <string>
-#include <fmt/std.h>
+When calling `fmt::format("{}", std::bitset<8>(42))`, formatting should succeed and return the bit string representation (the same as `std::ostringstream() << bitset` would produce), rather than failing to compile due to a missing formatter / unsupported type.
 
-auto s = fmt::format("{}", std::bitset<8>(0b10101010));
-```
+Implement proper support for `std::bitset<N>` by making it directly formattable via a `fmt::formatter` specialization so that:
 
-should compile and produce the same textual representation as streaming the bitset to an `std::ostream` would (i.e., the standard `0`/`1` bit string for the bitset), but currently fails to format the value.
+- `fmt::format("{}", b)` works for `std::bitset<N>` and produces the standard bitset string (most significant bit first, length exactly `N`, consisting only of `'0'` and `'1'`).
+- The type is treated as a normal formattable argument (i.e., it should not require opting into ostream formatting or including ostream-specific facilities to compile).
+- This should work for multiple `N` values (e.g., small and larger bitsets) and not rely on implicit stream insertion.
 
-Make `std::bitset<N>` formattable again by providing proper `fmt::formatter` support for `std::bitset<N>` when users include the standard-library integration header (e.g., `fmt/std.h`). After the fix, `fmt::format("{}", some_bitset)` must compile and return the expected bit-string representation for any `N`. Formatting should work in the same situations where other std types supported by `fmt/std.h` work (e.g., as a direct argument to `fmt::format`).
+Currently, attempting to format `std::bitset<N>` results in a compile-time error indicating that no formatter is available for the type (or an equivalent “type is unformattable” diagnostic). The expected behavior is that formatting succeeds and matches the standard textual representation of `std::bitset`.

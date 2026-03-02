@@ -9,10 +9,10 @@ export CI=true
 mkdir -p "bazel/tests"
 cp "/tests/bazel/tests/cc_toolchain_tests.bzl" "bazel/tests/cc_toolchain_tests.bzl"
 
-# Clean Bazel cache to pick up any changes from the fix
+# Clean Bazel cache to ensure changes are picked up
 bazel clean --expunge || true
 
-# Run the specific Bazel test for cc_toolchain
+# Run the specific test for cc_toolchain_test_suite using Bazel
 bazel test //bazel/tests:cc_toolchain_test_suite --test_output=errors
 test_status=$?
 

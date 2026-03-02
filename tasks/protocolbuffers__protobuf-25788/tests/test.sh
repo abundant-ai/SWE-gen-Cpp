@@ -9,7 +9,7 @@ export CI=true
 mkdir -p "src/google/protobuf"
 cp "/tests/src/google/protobuf/generated_enum_util_test.cc" "src/google/protobuf/generated_enum_util_test.cc"
 
-# Run the specific Bazel test for generated_enum_util_test.cc
+# Run the specific test for generated_enum_util_test using Bazel
 bazel test //src/google/protobuf:generated_enum_util_test --test_output=errors
 test_status=$?
 

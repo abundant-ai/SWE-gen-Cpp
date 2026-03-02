@@ -10,53 +10,20 @@ cp "/tests/gtest-extra-test.cc" "test/gtest-extra-test.cc"
 mkdir -p "test"
 cp "/tests/os-test.cc" "test/os-test.cc"
 
-# Reconfigure and rebuild to pick up any changes and new test files
+# Reconfigure CMake to force FMT_USE_BITINT=1 (ensures bitint tests always compile)
 cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=clang++ \
     -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_STANDARD=23 \
-    -DFMT_TEST=ON
-if [ $? -ne 0 ]; then
-  echo 0 > /logs/verifier/reward.txt
-  exit 1
-fi
+    -DFMT_TEST=ON \
+    -DCMAKE_CXX_FLAGS="-DFMT_USE_BITINT=1"
 
-# Build the specific test targets
-cmake --build build --target format-impl-test --parallel $(nproc)
-if [ $? -ne 0 ]; then
-  echo 0 > /logs/verifier/reward.txt
-  exit 1
-fi
-
-cmake --build build --target gtest-extra-test --parallel $(nproc)
-if [ $? -ne 0 ]; then
-  echo 0 > /logs/verifier/reward.txt
-  exit 1
-fi
-
-cmake --build build --target os-test --parallel $(nproc)
-if [ $? -ne 0 ]; then
-  echo 0 > /logs/verifier/reward.txt
-  exit 1
-fi
-
-# Run the specific test binaries
-./build/bin/format-impl-test
-format_test_status=$?
-
-./build/bin/gtest-extra-test
-gtest_test_status=$?
-
-./build/bin/os-test
-os_test_status=$?
-
-# Overall test status (all must pass)
-if [ $format_test_status -eq 0 ] && [ $gtest_test_status -eq 0 ] && [ $os_test_status -eq 0 ]; then
-  test_status=0
-else
-  test_status=1
-fi
+# Rebuild and run the specific test targets after copying updated test files
+cmake --build build --target format-impl-test && build/bin/format-impl-test && \
+cmake --build build --target gtest-extra-test && build/bin/gtest-extra-test && \
+cmake --build build --target os-test && build/bin/os-test
+test_status=$?
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

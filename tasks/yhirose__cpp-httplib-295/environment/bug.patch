@@ -1,0 +1,347 @@
+diff --git a/README.md b/README.md
+index e28d1a3..d1e5f85 100644
+--- a/README.md
++++ b/README.md
+@@ -301,7 +301,7 @@ res = cli.Options("/resource/foo");
+ ### Connection Timeout
+ 
+ ```c++
+-cli.set_timeout_sec(5); // timeouts in 5 seconds
++httplib::Client cli("localhost", 8080, 5); // timeouts in 5 seconds
+ ```
+ ### With Progress Callback
+ 
+diff --git a/httplib.h b/httplib.h
+index bb1c979..ad4ce27 100644
+--- a/httplib.h
++++ b/httplib.h
+@@ -614,7 +614,7 @@ private:
+ 
+ class Client {
+ public:
+-  explicit Client(const char *host, int port = 80);
++  explicit Client(const char *host, int port = 80, time_t timeout_sec = 300);
+ 
+   virtual ~Client();
+ 
+@@ -734,8 +734,6 @@ public:
+   bool send(const std::vector<Request> &requests,
+             std::vector<Response> &responses);
+ 
+-  void set_timeout_sec(time_t timeout_sec);
+-
+   void set_keep_alive_max_count(size_t count);
+ 
+   void set_read_timeout(time_t sec, time_t usec);
+@@ -754,17 +752,15 @@ protected:
+ 
+   const std::string host_;
+   const int port_;
++  time_t timeout_sec_;
+   const std::string host_and_port_;
+-
+-  // Options
+-  time_t timeout_sec_ = 300;
+-  size_t keep_alive_max_count_ = CPPHTTPLIB_KEEPALIVE_MAX_COUNT;
+-  time_t read_timeout_sec_ = CPPHTTPLIB_READ_TIMEOUT_SECOND;
+-  time_t read_timeout_usec_ = CPPHTTPLIB_READ_TIMEOUT_USECOND;
++  size_t keep_alive_max_count_;
++  time_t read_timeout_sec_;
++  time_t read_timeout_usec_;
++  bool follow_location_;
+   std::string username_;
+   std::string password_;
+-  bool follow_location_ = false;
+-  bool compress_ = false;
++  bool compress_;
+   std::string interface_;
+ 
+ private:
+@@ -856,7 +852,7 @@ private:
+ 
+ class SSLClient : public Client {
+ public:
+-  SSLClient(const char *host, int port = 443,
++  SSLClient(const char *host, int port = 443, time_t timeout_sec = 300,
+             const char *client_cert_path = nullptr,
+             const char *client_key_path = nullptr);
+ 
+@@ -888,8 +884,6 @@ private:
+   SSL_CTX *ctx_;
+   std::mutex ctx_mutex_;
+   std::vector<std::string> host_components_;
+-
+-  // Options
+   std::string ca_cert_file_path_;
+   std::string ca_cert_dir_path_;
+   bool server_certificate_verification_ = false;
+@@ -3361,9 +3355,13 @@ inline bool Server::process_and_close_socket(socket_t sock) {
+ }
+ 
+ // HTTP client implementation
+-inline Client::Client(const char *host, int port)
+-    : host_(host), port_(port),
+-      host_and_port_(host_ + ":" + std::to_string(port_)) {}
++inline Client::Client(const char *host, int port, time_t timeout_sec)
++    : host_(host), port_(port), timeout_sec_(timeout_sec),
++      host_and_port_(host_ + ":" + std::to_string(port_)),
++      keep_alive_max_count_(CPPHTTPLIB_KEEPALIVE_MAX_COUNT),
++      read_timeout_sec_(CPPHTTPLIB_READ_TIMEOUT_SECOND),
++      read_timeout_usec_(CPPHTTPLIB_READ_TIMEOUT_USECOND),
++      follow_location_(false), compress_(false) {}
+ 
+ inline Client::~Client() {}
+ 
+@@ -3990,10 +3988,6 @@ inline std::shared_ptr<Response> Client::Options(const char *path,
+   return send(req, *res) ? res : nullptr;
+ }
+ 
+-inline void Client::set_timeout_sec(time_t timeout_sec) {
+-  timeout_sec_ = timeout_sec;
+-}
+-
+ inline void Client::set_keep_alive_max_count(size_t count) {
+   keep_alive_max_count_ = count;
+ }
+@@ -4233,10 +4227,10 @@ inline bool SSLServer::process_and_close_socket(socket_t sock) {
+ }
+ 
+ // SSL HTTP client implementation
+-inline SSLClient::SSLClient(const char *host, int port,
++inline SSLClient::SSLClient(const char *host, int port, time_t timeout_sec,
+                             const char *client_cert_path,
+                             const char *client_key_path)
+-    : Client(host, port) {
++    : Client(host, port, timeout_sec) {
+   ctx_ = SSL_CTX_new(SSLv23_client_method());
+ 
+   detail::split(&host_[0], &host_[host_.size()], '.',
+diff --git a/test/test.cc b/test/test.cc
+index 998a927..d436646 100644
+--- a/test/test.cc
++++ b/test/test.cc
+@@ -204,15 +204,15 @@ TEST(ParseHeaderValueTest, Range) {
+ 
+ TEST(ChunkedEncodingTest, FromHTTPWatch) {
+   auto host = "www.httpwatch.com";
++  auto sec = 2;
+ 
+ #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+   auto port = 443;
+-  httplib::SSLClient cli(host, port);
++  httplib::SSLClient cli(host, port, sec);
+ #else
+   auto port = 80;
+-  httplib::Client cli(host, port);
++  httplib::Client cli(host, port, sec);
+ #endif
+-  cli.set_timeout_sec(2);
+ 
+   auto res =
+       cli.Get("/httpgallery/chunked/chunkedimage.aspx?0.4153841143030137");
+@@ -227,15 +227,15 @@ TEST(ChunkedEncodingTest, FromHTTPWatch) {
+ 
+ TEST(ChunkedEncodingTest, WithContentReceiver) {
+   auto host = "www.httpwatch.com";
++  auto sec = 2;
+ 
+ #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+   auto port = 443;
+-  httplib::SSLClient cli(host, port);
++  httplib::SSLClient cli(host, port, sec);
+ #else
+   auto port = 80;
+-  httplib::Client cli(host, port);
++  httplib::Client cli(host, port, sec);
+ #endif
+-  cli.set_timeout_sec(2);
+ 
+   std::string body;
+   auto res =
+@@ -255,15 +255,15 @@ TEST(ChunkedEncodingTest, WithContentReceiver) {
+ 
+ TEST(ChunkedEncodingTest, WithResponseHandlerAndContentReceiver) {
+   auto host = "www.httpwatch.com";
++  auto sec = 2;
+ 
+ #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+   auto port = 443;
+-  httplib::SSLClient cli(host, port);
++  httplib::SSLClient cli(host, port, sec);
+ #else
+   auto port = 80;
+-  httplib::Client cli(host, port);
++  httplib::Client cli(host, port, sec);
+ #endif
+-  cli.set_timeout_sec(2);
+ 
+   std::string body;
+   auto res = cli.Get(
+@@ -287,15 +287,15 @@ TEST(ChunkedEncodingTest, WithResponseHandlerAndContentReceiver) {
+ 
+ TEST(RangeTest, FromHTTPBin) {
+   auto host = "httpbin.org";
++  auto sec = 5;
+ 
+ #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+   auto port = 443;
+-  httplib::SSLClient cli(host, port);
++  httplib::SSLClient cli(host, port, sec);
+ #else
+   auto port = 80;
+-  httplib::Client cli(host, port);
++  httplib::Client cli(host, port, sec);
+ #endif
+-  cli.set_timeout_sec(5);
+ 
+   {
+     httplib::Headers headers;
+@@ -347,15 +347,15 @@ TEST(RangeTest, FromHTTPBin) {
+ 
+ TEST(ConnectionErrorTest, InvalidHost) {
+   auto host = "-abcde.com";
++  auto sec = 2;
+ 
+ #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+   auto port = 443;
+-  httplib::SSLClient cli(host, port);
++  httplib::SSLClient cli(host, port, sec);
+ #else
+   auto port = 80;
+-  httplib::Client cli(host, port);
++  httplib::Client cli(host, port, sec);
+ #endif
+-  cli.set_timeout_sec(2);
+ 
+   auto res = cli.Get("/");
+   ASSERT_TRUE(res == nullptr);
+@@ -363,15 +363,15 @@ TEST(ConnectionErrorTest, InvalidHost) {
+ 
+ TEST(ConnectionErrorTest, InvalidPort) {
+   auto host = "localhost";
++  auto sec = 2;
+ 
+ #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+   auto port = 44380;
+-  httplib::SSLClient cli(host, port);
++  httplib::SSLClient cli(host, port, sec);
+ #else
+   auto port = 8080;
+-  httplib::Client cli(host, port);
++  httplib::Client cli(host, port, sec);
+ #endif
+-  cli.set_timeout_sec(2);
+ 
+   auto res = cli.Get("/");
+   ASSERT_TRUE(res == nullptr);
+@@ -379,15 +379,15 @@ TEST(ConnectionErrorTest, InvalidPort) {
+ 
+ TEST(ConnectionErrorTest, Timeout) {
+   auto host = "google.com";
++  auto sec = 2;
+ 
+ #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+   auto port = 44380;
+-  httplib::SSLClient cli(host, port);
++  httplib::SSLClient cli(host, port, sec);
+ #else
+   auto port = 8080;
+-  httplib::Client cli(host, port);
++  httplib::Client cli(host, port, sec);
+ #endif
+-  cli.set_timeout_sec(2);
+ 
+   auto res = cli.Get("/");
+   ASSERT_TRUE(res == nullptr);
+@@ -395,15 +395,15 @@ TEST(ConnectionErrorTest, Timeout) {
+ 
+ TEST(CancelTest, NoCancel) {
+   auto host = "httpbin.org";
++  auto sec = 5;
+ 
+ #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+   auto port = 443;
+-  httplib::SSLClient cli(host, port);
++  httplib::SSLClient cli(host, port, sec);
+ #else
+   auto port = 80;
+-  httplib::Client cli(host, port);
++  httplib::Client cli(host, port, sec);
+ #endif
+-  cli.set_timeout_sec(5);
+ 
+   auto res = cli.Get("/range/32", [](uint64_t, uint64_t) { return true; });
+   ASSERT_TRUE(res != nullptr);
+@@ -413,31 +413,31 @@ TEST(CancelTest, NoCancel) {
+ 
+ TEST(CancelTest, WithCancelSmallPayload) {
+   auto host = "httpbin.org";
++  auto sec = 5;
+ 
+ #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+   auto port = 443;
+-  httplib::SSLClient cli(host, port);
++  httplib::SSLClient cli(host, port, sec);
+ #else
+   auto port = 80;
+-  httplib::Client cli(host, port);
++  httplib::Client cli(host, port, sec);
+ #endif
+ 
+   auto res = cli.Get("/range/32", [](uint64_t, uint64_t) { return false; });
+-  cli.set_timeout_sec(5);
+   ASSERT_TRUE(res == nullptr);
+ }
+ 
+ TEST(CancelTest, WithCancelLargePayload) {
+   auto host = "httpbin.org";
++  auto sec = 5;
+ 
+ #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+   auto port = 443;
+-  httplib::SSLClient cli(host, port);
++  httplib::SSLClient cli(host, port, sec);
+ #else
+   auto port = 80;
+-  httplib::Client cli(host, port);
++  httplib::Client cli(host, port, sec);
+ #endif
+-  cli.set_timeout_sec(5);
+ 
+   uint32_t count = 0;
+   httplib::Headers headers;
+@@ -2090,10 +2090,9 @@ TEST(SSLClientServerTest, ClientCertPresent) {
+   thread t = thread([&]() { ASSERT_TRUE(svr.listen(HOST, PORT)); });
+   msleep(1);
+ 
+-  httplib::SSLClient cli(HOST, PORT, CLIENT_CERT_FILE,
++  httplib::SSLClient cli(HOST, PORT, 30, CLIENT_CERT_FILE,
+                          CLIENT_PRIVATE_KEY_FILE);
+   auto res = cli.Get("/test");
+-  cli.set_timeout_sec(30);
+   ASSERT_TRUE(res != nullptr);
+   ASSERT_EQ(200, res->status);
+ 
+@@ -2110,9 +2109,8 @@ TEST(SSLClientServerTest, ClientCertMissing) {
+   thread t = thread([&]() { ASSERT_TRUE(svr.listen(HOST, PORT)); });
+   msleep(1);
+ 
+-  httplib::SSLClient cli(HOST, PORT);
++  httplib::SSLClient cli(HOST, PORT, 30);
+   auto res = cli.Get("/test");
+-  cli.set_timeout_sec(30);
+   ASSERT_TRUE(res == nullptr);
+ 
+   svr.stop();
+@@ -2132,10 +2130,9 @@ TEST(SSLClientServerTest, TrustDirOptional) {
+   thread t = thread([&]() { ASSERT_TRUE(svr.listen(HOST, PORT)); });
+   msleep(1);
+ 
+-  httplib::SSLClient cli(HOST, PORT, CLIENT_CERT_FILE,
++  httplib::SSLClient cli(HOST, PORT, 30, CLIENT_CERT_FILE,
+                          CLIENT_PRIVATE_KEY_FILE);
+   auto res = cli.Get("/test");
+-  cli.set_timeout_sec(30);
+   ASSERT_TRUE(res != nullptr);
+   ASSERT_EQ(200, res->status);
+ 

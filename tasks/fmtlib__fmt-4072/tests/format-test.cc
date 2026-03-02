@@ -2510,7 +2510,8 @@ TEST(format_test, writer) {
   EXPECT_EQ(s.str(), "foo");
 }
 
-#pragma clang diagnostic ignored "-Wbit-int-extension"
+#if FMT_USE_BITINT
+#  pragma clang diagnostic ignored "-Wbit-int-extension"
 
 template <size_t N, bool is_signed>
 using bitint_helper =
@@ -2566,3 +2567,4 @@ TEST(format_test, bitint) {
             fmt::format("{}", unsigned_bitint<128>(uint128_max)));
 #  endif
 }
+#endif

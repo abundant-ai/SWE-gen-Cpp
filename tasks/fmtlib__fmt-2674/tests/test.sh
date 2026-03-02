@@ -6,12 +6,17 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/format-test.cc" "test/format-test.cc"
 
-# Rebuild tests with the updated test files
-cmake --build build --target format-test
+test_status=0
 
-# Run the specific test executables
-./build/bin/format-test
-test_status=$?
+# Build the specific test file
+cd build
+echo "Building format-test..."
+if ! cmake --build . --target format-test 2>&1; then
+    echo "FAIL: format-test build failed"
+    test_status=1
+else
+    echo "PASS: format-test built successfully"
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

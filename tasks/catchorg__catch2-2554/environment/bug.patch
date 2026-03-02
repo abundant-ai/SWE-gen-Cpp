@@ -1,0 +1,421 @@
+diff --git a/src/catch2/reporters/catch_reporter_compact.cpp b/src/catch2/reporters/catch_reporter_compact.cpp
+index ad184a1f..a09f0483 100644
+--- a/src/catch2/reporters/catch_reporter_compact.cpp
++++ b/src/catch2/reporters/catch_reporter_compact.cpp
+@@ -18,6 +18,22 @@
+ 
+ #include <ostream>
+ 
++namespace {
++
++    constexpr Catch::StringRef bothOrAll( std::uint64_t count ) {
++        switch (count) {
++        case 1:
++            return Catch::StringRef{};
++        case 2:
++            return "both "_catch_sr;
++        default:
++            return "all "_catch_sr;
++        }
++    }
++
++} // anon namespace
++
++
+ namespace Catch {
+ namespace {
+ 
+@@ -32,6 +48,42 @@ namespace {
+     static constexpr Catch::StringRef compactPassedString = "passed"_sr;
+ #endif
+ 
++// Colour, message variants:
++// - white: No tests ran.
++// -   red: Failed [both/all] N test cases, failed [both/all] M assertions.
++// - white: Passed [both/all] N test cases (no assertions).
++// -   red: Failed N tests cases, failed M assertions.
++// - green: Passed [both/all] N tests cases with M assertions.
++void printTotals(std::ostream& out, const Totals& totals, ColourImpl* colourImpl) {
++    if (totals.testCases.total() == 0) {
++        out << "No tests ran.";
++    } else if (totals.testCases.failed == totals.testCases.total()) {
++        auto guard = colourImpl->guardColour( Colour::ResultError ).engage( out );
++        const StringRef qualify_assertions_failed =
++            totals.assertions.failed == totals.assertions.total() ?
++            bothOrAll(totals.assertions.failed) : StringRef{};
++        out <<
++            "Failed " << bothOrAll(totals.testCases.failed)
++            << pluralise(totals.testCases.failed, "test case"_sr) << ", "
++            "failed " << qualify_assertions_failed <<
++            pluralise(totals.assertions.failed, "assertion"_sr) << '.';
++    } else if (totals.assertions.total() == 0) {
++        out <<
++            "Passed " << bothOrAll(totals.testCases.total())
++            << pluralise(totals.testCases.total(), "test case"_sr)
++            << " (no assertions).";
++    } else if (totals.assertions.failed) {
++        out << colourImpl->guardColour( Colour::ResultError ) <<
++            "Failed " << pluralise(totals.testCases.failed, "test case"_sr) << ", "
++            "failed " << pluralise(totals.assertions.failed, "assertion"_sr) << '.';
++    } else {
++        out << colourImpl->guardColour( Colour::ResultSuccess ) <<
++            "Passed " << bothOrAll(totals.testCases.passed)
++            << pluralise(totals.testCases.passed, "test case"_sr) <<
++            " with " << pluralise(totals.assertions.passed, "assertion"_sr) << '.';
++    }
++}
++
+ // Implementation of CompactReporter formatting
+ class AssertionPrinter {
+ public:
+@@ -239,7 +291,7 @@ private:
+         }
+ 
+         void CompactReporter::testRunEnded( TestRunStats const& _testRunStats ) {
+-            printTestRunTotals( m_stream, *m_colour, _testRunStats.totals );
++            printTotals( m_stream, _testRunStats.totals, m_colour.get() );
+             m_stream << "\n\n" << std::flush;
+             StreamingReporterBase::testRunEnded( _testRunStats );
+         }
+diff --git a/src/catch2/reporters/catch_reporter_console.cpp b/src/catch2/reporters/catch_reporter_console.cpp
+index d13be48c..88d43b53 100644
+--- a/src/catch2/reporters/catch_reporter_console.cpp
++++ b/src/catch2/reporters/catch_reporter_console.cpp
+@@ -491,7 +491,7 @@ void ConsoleReporter::testCaseEnded(TestCaseStats const& _testCaseStats) {
+ }
+ void ConsoleReporter::testRunEnded(TestRunStats const& _testRunStats) {
+     printTotalsDivider(_testRunStats.totals);
+-    printTestRunTotals( m_stream, *m_colour, _testRunStats.totals );
++    printTotals(_testRunStats.totals);
+     m_stream << '\n' << std::flush;
+     StreamingReporterBase::testRunEnded(_testRunStats);
+ }
+@@ -598,6 +598,82 @@ void ConsoleReporter::printHeaderString(std::string const& _string, std::size_t
+            << '\n';
+ }
+ 
++struct SummaryColumn {
++
++    SummaryColumn( std::string _label, Colour::Code _colour )
++    :   label( CATCH_MOVE( _label ) ),
++        colour( _colour ) {}
++    SummaryColumn addRow( std::uint64_t count ) {
++        ReusableStringStream rss;
++        rss << count;
++        std::string row = rss.str();
++        for (auto& oldRow : rows) {
++            while (oldRow.size() < row.size())
++                oldRow = ' ' + oldRow;
++            while (oldRow.size() > row.size())
++                row = ' ' + row;
++        }
++        rows.push_back(row);
++        return *this;
++    }
++
++    std::string label;
++    Colour::Code colour;
++    std::vector<std::string> rows;
++
++};
++
++void ConsoleReporter::printTotals( Totals const& totals ) {
++    if (totals.testCases.total() == 0) {
++        m_stream << m_colour->guardColour( Colour::Warning )
++                 << "No tests ran\n";
++    } else if (totals.assertions.total() > 0 && totals.testCases.allPassed()) {
++        m_stream << m_colour->guardColour( Colour::ResultSuccess )
++                 << "All tests passed";
++        m_stream << " ("
++            << pluralise(totals.assertions.passed, "assertion"_sr) << " in "
++            << pluralise(totals.testCases.passed, "test case"_sr) << ')'
++            << '\n';
++    } else {
++
++        std::vector<SummaryColumn> columns;
++        columns.push_back(SummaryColumn("", Colour::None)
++                          .addRow(totals.testCases.total())
++                          .addRow(totals.assertions.total()));
++        columns.push_back(SummaryColumn("passed", Colour::Success)
++                          .addRow(totals.testCases.passed)
++                          .addRow(totals.assertions.passed));
++        columns.push_back(SummaryColumn("failed", Colour::ResultError)
++                          .addRow(totals.testCases.failed)
++                          .addRow(totals.assertions.failed));
++        columns.push_back(SummaryColumn("failed as expected", Colour::ResultExpectedFailure)
++                          .addRow(totals.testCases.failedButOk)
++                          .addRow(totals.assertions.failedButOk));
++
++        printSummaryRow("test cases"_sr, columns, 0);
++        printSummaryRow("assertions"_sr, columns, 1);
++    }
++}
++void ConsoleReporter::printSummaryRow(StringRef label, std::vector<SummaryColumn> const& cols, std::size_t row) {
++    for (auto col : cols) {
++        std::string const& value = col.rows[row];
++        if (col.label.empty()) {
++            m_stream << label << ": ";
++            if ( value != "0" ) {
++                m_stream << value;
++            } else {
++                m_stream << m_colour->guardColour( Colour::Warning )
++                         << "- none -";
++            }
++        } else if (value != "0") {
++            m_stream << m_colour->guardColour( Colour::LightGrey ) << " | "
++                     << m_colour->guardColour( col.colour ) << value << ' '
++                     << col.label;
++        }
++    }
++    m_stream << '\n';
++}
++
+ void ConsoleReporter::printTotalsDivider(Totals const& totals) {
+     if (totals.testCases.total() > 0) {
+         std::size_t failedRatio = makeRatio(totals.testCases.failed, totals.testCases.total());
+@@ -625,6 +701,9 @@ void ConsoleReporter::printTotalsDivider(Totals const& totals) {
+     }
+     m_stream << '\n';
+ }
++void ConsoleReporter::printSummaryDivider() {
++    m_stream << lineOfChars('-') << '\n';
++}
+ 
+ } // end namespace Catch
+ 
+diff --git a/src/catch2/reporters/catch_reporter_console.hpp b/src/catch2/reporters/catch_reporter_console.hpp
+index 514e3e22..719dcc44 100644
+--- a/src/catch2/reporters/catch_reporter_console.hpp
++++ b/src/catch2/reporters/catch_reporter_console.hpp
+@@ -13,6 +13,7 @@
+ 
+ namespace Catch {
+     // Fwd decls
++    struct SummaryColumn;
+     class TablePrinter;
+ 
+     class ConsoleReporter final : public StreamingReporterBase {
+@@ -56,7 +57,12 @@ namespace Catch {
+         // subsequent lines
+         void printHeaderString(std::string const& _string, std::size_t indent = 0);
+ 
++
++        void printTotals(Totals const& totals);
++        void printSummaryRow(StringRef label, std::vector<SummaryColumn> const& cols, std::size_t row);
++
+         void printTotalsDivider(Totals const& totals);
++        void printSummaryDivider();
+ 
+         bool m_headerPrinted = false;
+         bool m_testRunInfoPrinted = false;
+diff --git a/src/catch2/reporters/catch_reporter_helpers.cpp b/src/catch2/reporters/catch_reporter_helpers.cpp
+index 319c645e..31df851a 100644
+--- a/src/catch2/reporters/catch_reporter_helpers.cpp
++++ b/src/catch2/reporters/catch_reporter_helpers.cpp
+@@ -235,102 +235,4 @@ namespace Catch {
+         out << "\n\n" << std::flush;
+     }
+ 
+-    namespace {
+-        class SummaryColumn {
+-        public:
+-            SummaryColumn( std::string suffix, Colour::Code colour ):
+-                m_suffix( CATCH_MOVE( suffix ) ), m_colour( colour ) {}
+-
+-            SummaryColumn&& addRow( std::uint64_t count ) && {
+-                std::string row = std::to_string(count);
+-                auto const new_width = std::max( m_width, row.size() );
+-                if ( new_width > m_width ) {
+-                    for ( auto& oldRow : m_rows ) {
+-                        oldRow.insert( 0, new_width - m_width, ' ' );
+-                    }
+-                } else {
+-                    row.insert( 0, m_width - row.size(), ' ' );
+-                }
+-                m_width = new_width;
+-                m_rows.push_back( row );
+-                return std::move( *this );
+-            }
+-
+-            std::string const& getSuffix() const { return m_suffix; }
+-            Colour::Code getColour() const { return m_colour; }
+-            std::string const& getRow( std::size_t index ) const {
+-                return m_rows[index];
+-            }
+-
+-        private:
+-            std::string m_suffix;
+-            Colour::Code m_colour;
+-            std::size_t m_width = 0;
+-            std::vector<std::string> m_rows;
+-        };
+-
+-        void printSummaryRow( std::ostream& stream,
+-                              ColourImpl& colour,
+-                              StringRef label,
+-                              std::vector<SummaryColumn> const& cols,
+-                              std::size_t row ) {
+-            for ( auto const& col : cols ) {
+-                auto const& value = col.getRow( row );
+-                auto const& suffix = col.getSuffix();
+-                if ( suffix.empty() ) {
+-                    stream << label << ": ";
+-                    if ( value != "0" ) {
+-                        stream << value;
+-                    } else {
+-                        stream << colour.guardColour( Colour::Warning )
+-                               << "- none -";
+-                    }
+-                } else if ( value != "0" ) {
+-                    stream << colour.guardColour( Colour::LightGrey ) << " | "
+-                           << colour.guardColour( col.getColour() ) << value
+-                           << ' ' << suffix;
+-                }
+-            }
+-            stream << '\n';
+-        }
+-    } // namespace
+-
+-    void printTestRunTotals( std::ostream& stream,
+-                             ColourImpl& streamColour,
+-                             Totals const& totals ) {
+-        if ( totals.testCases.total() == 0 ) {
+-            stream << streamColour.guardColour( Colour::Warning )
+-                   << "No tests ran\n";
+-            return;
+-        }
+-
+-        if ( totals.assertions.total() > 0 && totals.testCases.allPassed() ) {
+-            stream << streamColour.guardColour( Colour::ResultSuccess )
+-                   << "All tests passed";
+-            stream << " ("
+-                   << pluralise( totals.assertions.passed, "assertion"_sr )
+-                   << " in "
+-                   << pluralise( totals.testCases.passed, "test case"_sr )
+-                   << ')' << '\n';
+-            return;
+-        }
+-
+-        std::vector<SummaryColumn> columns;
+-        columns.push_back( SummaryColumn( "", Colour::None )
+-                               .addRow( totals.testCases.total() )
+-                               .addRow( totals.assertions.total() ) );
+-        columns.push_back( SummaryColumn( "passed", Colour::Success )
+-                               .addRow( totals.testCases.passed )
+-                               .addRow( totals.assertions.passed ) );
+-        columns.push_back( SummaryColumn( "failed", Colour::ResultError )
+-                               .addRow( totals.testCases.failed )
+-                               .addRow( totals.assertions.failed ) );
+-        columns.push_back(
+-            SummaryColumn( "failed as expected", Colour::ResultExpectedFailure )
+-                .addRow( totals.testCases.failedButOk )
+-                .addRow( totals.assertions.failedButOk ) );
+-        printSummaryRow( stream, streamColour, "test cases"_sr, columns, 0 );
+-        printSummaryRow( stream, streamColour, "assertions"_sr, columns, 1 );
+-    }
+-
+ } // namespace Catch
+diff --git a/src/catch2/reporters/catch_reporter_helpers.hpp b/src/catch2/reporters/catch_reporter_helpers.hpp
+index eb460ad5..ef43534c 100644
+--- a/src/catch2/reporters/catch_reporter_helpers.hpp
++++ b/src/catch2/reporters/catch_reporter_helpers.hpp
+@@ -14,7 +14,6 @@
+ 
+ #include <catch2/internal/catch_list.hpp>
+ #include <catch2/interfaces/catch_interfaces_config.hpp>
+-#include <catch2/catch_totals.hpp>
+ 
+ namespace Catch {
+ 
+@@ -81,15 +80,6 @@ namespace Catch {
+                            bool isFiltered,
+                            Verbosity verbosity );
+ 
+-    /**
+-     * Prints test run totals to the provided stream in user-friendly format
+-     *
+-     * Used by the console and compact reporters.
+-     */
+-    void printTestRunTotals( std::ostream& stream,
+-                      ColourImpl& streamColour,
+-                      Totals const& totals );
+-
+ } // end namespace Catch
+ 
+ #endif // CATCH_REPORTER_HELPERS_HPP_INCLUDED
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 666ecfff..0dca91e8 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -336,7 +336,7 @@ set_tests_properties(ApprovalTests
+ )
+ 
+ add_test(NAME RegressionCheck-1670 COMMAND $<TARGET_FILE:SelfTest> "#1670 regression check" -c A -r compact)
+-set_tests_properties(RegressionCheck-1670 PROPERTIES PASS_REGULAR_EXPRESSION "All tests passed \\(2 assertions in 1 test case\\)")
++set_tests_properties(RegressionCheck-1670 PROPERTIES PASS_REGULAR_EXPRESSION "Passed 1 test case with 2 assertions.")
+ 
+ add_test(NAME VersionCheck COMMAND $<TARGET_FILE:SelfTest> -h)
+ set_tests_properties(VersionCheck PROPERTIES PASS_REGULAR_EXPRESSION "Catch2 v${PROJECT_VERSION}")
+diff --git a/tests/ExtraTests/CMakeLists.txt b/tests/ExtraTests/CMakeLists.txt
+index c821f9f0..a714b230 100644
+--- a/tests/ExtraTests/CMakeLists.txt
++++ b/tests/ExtraTests/CMakeLists.txt
+@@ -210,7 +210,7 @@ add_test(NAME DeferredStaticChecks COMMAND DeferredStaticChecks -r compact)
+ set_tests_properties(
+     DeferredStaticChecks
+   PROPERTIES
+-    PASS_REGULAR_EXPRESSION "test cases: 1 \\| 1 failed\nassertions: 3 \\| 3 failed"
++    PASS_REGULAR_EXPRESSION "Failed 1 test case, failed all 3 assertions."
+ )
+ 
+ 
+diff --git a/tests/SelfTest/Baselines/compact.sw.approved.txt b/tests/SelfTest/Baselines/compact.sw.approved.txt
+index 0f62c31f..0a023565 100644
+--- a/tests/SelfTest/Baselines/compact.sw.approved.txt
++++ b/tests/SelfTest/Baselines/compact.sw.approved.txt
+@@ -2610,7 +2610,5 @@ InternalBenchmark.tests.cpp:<line number>: passed: med == 18. for: 18.0 == 18.0
+ InternalBenchmark.tests.cpp:<line number>: passed: q3 == 23. for: 23.0 == 23.0
+ Misc.tests.cpp:<line number>: passed:
+ Misc.tests.cpp:<line number>: passed:
+-test cases:  395 |  305 passed |  83 failed |  7 failed as expected
+-assertions: 2310 | 2140 passed | 143 failed | 27 failed as expected
+-
++Failed 83 test cases, failed 143 assertions.
+ 
+diff --git a/tests/SelfTest/Baselines/compact.sw.multi.approved.txt b/tests/SelfTest/Baselines/compact.sw.multi.approved.txt
+index 794af3a5..20d14da1 100644
+--- a/tests/SelfTest/Baselines/compact.sw.multi.approved.txt
++++ b/tests/SelfTest/Baselines/compact.sw.multi.approved.txt
+@@ -2602,7 +2602,5 @@ InternalBenchmark.tests.cpp:<line number>: passed: med == 18. for: 18.0 == 18.0
+ InternalBenchmark.tests.cpp:<line number>: passed: q3 == 23. for: 23.0 == 23.0
+ Misc.tests.cpp:<line number>: passed:
+ Misc.tests.cpp:<line number>: passed:
+-test cases:  395 |  305 passed |  83 failed |  7 failed as expected
+-assertions: 2310 | 2140 passed | 143 failed | 27 failed as expected
+-
++Failed 83 test cases, failed 143 assertions.
+ 
+diff --git a/tests/TestScripts/testConfigureDefaultReporter.py b/tests/TestScripts/testConfigureDefaultReporter.py
+index b10bd528..66c88da0 100644
+--- a/tests/TestScripts/testConfigureDefaultReporter.py
++++ b/tests/TestScripts/testConfigureDefaultReporter.py
+@@ -30,12 +30,15 @@ build_dir_path = os.path.join(os.path.abspath(sys.argv[2]), 'CMakeConfigTests',
+ 
+ configure_and_build(catch2_source_path,
+                     build_dir_path,
+-                    [("CATCH_CONFIG_DEFAULT_REPORTER", "xml")])
++                    [("CATCH_CONFIG_DEFAULT_REPORTER", "compact")])
+ 
+ stdout, _ = run_and_return_output(os.path.join(build_dir_path, 'tests'), 'SelfTest', ['[approx][custom]'])
+ 
+-xml_tag = '</Catch2TestRun>'
+-if xml_tag not in stdout:
+-    print("Could not find '{}' in the stdout".format(xml_tag))
++
++# This matches the summary line made by compact reporter, console reporter's
++# summary line does not match the regex.
++summary_regex = 'Passed \d+ test case with \d+ assertions.'
++if not re.search(summary_regex, stdout):
++    print("Could not find '{}' in the stdout".format(summary_regex))
+     print('stdout: "{}"'.format(stdout))
+     exit(2)

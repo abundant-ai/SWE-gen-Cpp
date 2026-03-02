@@ -1,0 +1,109 @@
+diff --git a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ExplicitValidatorIndex.java b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ExplicitValidatorIndex.java
+index d64e3ae..828d13e 100644
+--- a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ExplicitValidatorIndex.java
++++ b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ExplicitValidatorIndex.java
+@@ -4,11 +4,20 @@ import java.util.concurrent.ConcurrentHashMap;
+ 
+ /**
+  * {@code ExplicitValidatorIndex} is an explicit registry of {@link Validator} instances. If no validator is registered
+- * for {@code type}, a default {@code ALWAYS_VALID} validator will be used.
++ * for {@code type}, a fallback validator will be used (default ALWAYS_VALID).
+  */
+-public class ExplicitValidatorIndex implements ValidatorIndex {
++public final class ExplicitValidatorIndex implements ValidatorIndex {
+     private final ConcurrentHashMap<Class, ValidatorImpl> VALIDATOR_IMPL_INDEX = new ConcurrentHashMap<>();
+     private final ConcurrentHashMap<Class, Validator> VALIDATOR_INDEX = new ConcurrentHashMap<>();
++    private final ValidatorIndex fallbackIndex;
++
++    public ExplicitValidatorIndex() {
++        this(ValidatorIndex.ALWAYS_VALID);
++    }
++
++    public ExplicitValidatorIndex(ValidatorIndex fallbackIndex) {
++        this.fallbackIndex = fallbackIndex;
++    }
+ 
+     /**
+      * Adds a {@link Validator} to the set of known validators.
+@@ -24,7 +33,7 @@ public class ExplicitValidatorIndex implements ValidatorIndex {
+     @SuppressWarnings("unchecked")
+     public <T> Validator<T> validatorFor(Class clazz) {
+         return VALIDATOR_INDEX.computeIfAbsent(clazz, c ->
+-                proto -> VALIDATOR_IMPL_INDEX.getOrDefault(c, ValidatorImpl.ALWAYS_VALID)
++                proto -> VALIDATOR_IMPL_INDEX.getOrDefault(c, (p, i) -> fallbackIndex.validatorFor(c))
+                         .assertValid(proto, ExplicitValidatorIndex.this));
+     }
+ }
+diff --git a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ReflectiveValidatorIndex.java b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ReflectiveValidatorIndex.java
+index 1294de6..f9f7778 100644
+--- a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ReflectiveValidatorIndex.java
++++ b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ReflectiveValidatorIndex.java
+@@ -1,14 +1,27 @@
+ package io.envoyproxy.pgv;
+ 
++import java.sql.Ref;
+ import java.util.concurrent.ConcurrentHashMap;
+ 
+ /**
+  * {@code ReflectiveValidatorIndex} uses reflection to discover {@link Validator} implementations lazily the first
+- * time a type is validated. If no validator can be found for {@code type}, a default {@code ALWAYS_VALID} validator
+- * will be used.
++ * time a type is validated. If no validator can be found for {@code type}, a fallback validator
++ * will be used (default ALWAYS_VALID).
+  */
+ public final class ReflectiveValidatorIndex implements ValidatorIndex {
+     private final ConcurrentHashMap<Class, Validator> VALIDATOR_INDEX = new ConcurrentHashMap<>();
++    private final ValidatorIndex fallbackIndex;
++
++    public ReflectiveValidatorIndex() {
++        this(ValidatorIndex.ALWAYS_VALID);
++    }
++
++    /**
++     * @param fallbackIndex a {@link ValidatorIndex} implementation to use if reflective validator discovery fails.
++     */
++    public ReflectiveValidatorIndex(ValidatorIndex fallbackIndex) {
++        this.fallbackIndex = fallbackIndex;
++    }
+ 
+     /**
+      * Returns the validator for {@code <T>}, or {@code ALWAYS_VALID} if not found.
+@@ -20,7 +33,7 @@ public final class ReflectiveValidatorIndex implements ValidatorIndex {
+             try {
+                 return reflectiveValidatorFor(c);
+             } catch (ReflectiveOperationException ex) {
+-                return Validator.ALWAYS_VALID;
++                return fallbackIndex.validatorFor(clazz);
+             }
+         });
+     }
+diff --git a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/Validator.java b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/Validator.java
+index e2d9185..405c03c 100644
+--- a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/Validator.java
++++ b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/Validator.java
+@@ -32,4 +32,8 @@ public interface Validator<T> {
+     Validator ALWAYS_VALID = (proto) -> {
+         // Do nothing. Always valid.
+     };
++
++    Validator ALWAYS_INVALID = (proto) -> {
++        throw new ValidationException("UNKNOWN", new Object(), "Explicitly invalid");
++    };
+ }
+diff --git a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidatorIndex.java b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidatorIndex.java
+index 8071a3d..ecbe4ae 100644
+--- a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidatorIndex.java
++++ b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidatorIndex.java
+@@ -25,4 +25,12 @@ public interface ValidatorIndex {
+             return Validator.ALWAYS_VALID;
+         }
+     };
++
++    ValidatorIndex ALWAYS_INVALID = new ValidatorIndex() {
++        @Override
++        @SuppressWarnings("unchecked")
++        public <T> Validator<T> validatorFor(Class clazz) {
++            return Validator.ALWAYS_INVALID;
++        }
++    };
+ }

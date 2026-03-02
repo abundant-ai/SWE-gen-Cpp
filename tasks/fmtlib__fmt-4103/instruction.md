@@ -1,6 +1,6 @@
-`fmt::formatted_size` used to be usable in constant evaluation for C++20 builds (it was `constexpr`-enabled), which allowed computing the exact formatted output size at compile time and then formatting into a fixed-size buffer.
+In C++20/23 builds, compile-time formatting workflows that previously worked using `fmt::formatted_size()` regressed: `fmt::formatted_size()` is no longer usable in constant evaluation, which prevents computing the required buffer size at compile time for `FMT_COMPILE`/compiled format strings.
 
-After a recent change, `fmt::formatted_size(...)` is no longer `constexpr` in the compiled-formatting API, which breaks compile-time formatting patterns that rely on `fmt::detail::udl_compiled_string` formats. Code like the following should compile in C++20/C++23 constant-evaluation contexts, but currently fails because the size computation is no longer constant-evaluable:
+A typical use case is a constexpr helper that builds a preformatted string as a `static constexpr` object inside a `constexpr` function. For example, code like this should compile and be constant-evaluated:
 
 ```cpp
 template <fmt::detail::udl_compiled_string format, auto... values>
@@ -15,13 +15,17 @@ constexpr std::string_view constexpr_format() {
 }
 ```
 
-Expected behavior: when compiling with a C++20-capable compiler, `fmt::formatted_size` should be `constexpr`-usable for compiled format strings so that `result_length` can be computed at compile time (assuming the provided format and arguments are compatible with compile-time formatting).
+Currently, this pattern fails because `fmt::formatted_size(...)` is not `constexpr` in C++20 mode, and related counting functionality used by `formatted_size()` is also not usable in constant evaluation (e.g., counting/size computation via internal counting buffer/iterator).
 
-Actual behavior: `fmt::formatted_size` is not `constexpr`, preventing `result_length` from being a constant expression and breaking compile-time formatting use cases.
+Expected behavior: when compiling with C++20 (and newer), `fmt::formatted_size()` should be constexpr-capable for compiled format strings and constexpr-friendly arguments, so that it can be used to compute sizes in constant evaluation and enable fully compile-time formatting pipelines.
 
-In addition, enabling the fix for constexpr support must not introduce (or must resolve) a Visual Studio 2019 compilation error involving `fmt::detail::buffer<char>::append` failing to match/specialize during builds that use explicit instantiations. A failing build reports errors of the form:
+Actual behavior: `fmt::formatted_size()` cannot be evaluated at compile time, causing compilation failures when it is used in a `constexpr` context (such as initializing `constexpr` variables or `static constexpr` members).
 
-- `error C2672: 'fmt::v11::detail::buffer<T>::append': no matching overloaded function found`
-- `error C2893: Failed to specialize function template 'void fmt::v11::detail::buffer<T>::append(const U *,const U *)'` (with `T=char`, `U=Char`)
+Additionally, enabling/reintroducing constexpr and/or compile-time formatting support must not break MSVC 2019 builds. There is a known MSVC 2019 compilation error involving template overload resolution/specialization for `fmt::detail::buffer<T>::append` when certain explicit instantiations are not enabled. Building the library on Visual Studio 2019 should succeed without errors like:
 
-The library should build on MSVC 2019 with the relevant explicit-instantiation configuration enabled while also restoring constant-evaluable `fmt::formatted_size` behavior for compiled format strings in C++20 mode. Compile-time formatting via `FMT_COMPILE(...)` should continue to work for typical argument types (integers, floats, bool, char, strings, and custom formatters with `constexpr` parse/format where applicable).
+```
+error C2672: 'fmt::v11::detail::buffer<T>::append': no matching overloaded function found
+error C2893: Failed to specialize function template 'void fmt::v11::detail::buffer<T>::append(const U *,const U *)'
+```
+
+The fix should restore constexpr usability of `fmt::formatted_size()` for C++20 compile-time formatting while preserving correct runtime behavior of `fmt::format(FMT_COMPILE("..."), ...)` across common types and keeping MSVC 2019 builds working (including the explicit instantiation configuration needed to avoid the `buffer::append` errors).

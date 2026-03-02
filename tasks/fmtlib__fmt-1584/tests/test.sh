@@ -8,19 +8,16 @@ cp "/tests/CMakeLists.txt" "test/CMakeLists.txt"
 mkdir -p "test"
 cp "/tests/format-dyn-args-test.cc" "test/format-dyn-args-test.cc"
 
-# Reconfigure with the updated test files
-cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=g++ \
-    -DCMAKE_C_COMPILER=gcc \
-    -DCMAKE_CXX_STANDARD=20 \
-    -DFMT_TEST=ON
+# Remove test/format file to avoid header collision with std::format
+rm -f test/format
 
-# Build the specific test binary
-cmake --build build --target format-dyn-args-test
+# Rebuild the specific test
+cd build
+cmake ..
+make format-dyn-args-test
 
-# Run the specific test
-./build/bin/format-dyn-args-test
+# Run the specific test (binary is in bin/ directory)
+./bin/format-dyn-args-test
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

@@ -5,34 +5,19 @@ cd /app/src
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test"
 cp "/tests/core-test.cc" "test/core-test.cc"
-mkdir -p "test"
 cp "/tests/locale-test.cc" "test/locale-test.cc"
 
-# Reconfigure with the updated test files
-cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_STANDARD=20 \
-    -DFMT_TEST=ON
+# Remove test/format file to avoid header collision with std::format
+rm -f test/format
 
-# Build the specific test targets
-cmake --build build --target core-test --parallel $(nproc)
-cmake --build build --target locale-test --parallel $(nproc)
+# Rebuild the specific tests
+cd build
+cmake ..
+make core-test locale-test
 
-# Run the tests
-./build/bin/core-test
-core_status=$?
-
-./build/bin/locale-test
-locale_status=$?
-
-# Check if both tests passed
-if [ $core_status -eq 0 ] && [ $locale_status -eq 0 ]; then
-  test_status=0
-else
-  test_status=1
-fi
+# Run the specific tests (binaries are in bin/ directory)
+./bin/core-test && ./bin/locale-test
+test_status=$?
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

@@ -1,0 +1,290 @@
+diff --git a/java/pgv-java-grpc/src/test/java/com/lyft/pgv/grpc/ValidatingClientInterceptorTest.java b/java/pgv-java-grpc/src/test/java/com/lyft/pgv/grpc/ValidatingClientInterceptorTest.java
+index 19d729d..b03e6ce 100644
+--- a/java/pgv-java-grpc/src/test/java/com/lyft/pgv/grpc/ValidatingClientInterceptorTest.java
++++ b/java/pgv-java-grpc/src/test/java/com/lyft/pgv/grpc/ValidatingClientInterceptorTest.java
+@@ -41,8 +41,11 @@ public class ValidatingClientInterceptorTest {
+         ValidatingClientInterceptor interceptor = new ValidatingClientInterceptor(new ValidatorIndex() {
+             @Override
+             public <T> Validator<T> validatorFor(Class clazz) {
+-                return proto -> {
+-                    throw new ValidationException("one", "", "is invalid");
++                return new Validator<T>() {
++                    @Override
++                    public void assertValid(T proto) throws ValidationException {
++                        throw new ValidationException("one", "", "is invalid");
++                    }
+                 };
+             }
+         });
+diff --git a/java/pgv-java-grpc/src/test/java/com/lyft/pgv/grpc/ValidatingServerInterceptorTest.java b/java/pgv-java-grpc/src/test/java/com/lyft/pgv/grpc/ValidatingServerInterceptorTest.java
+index 72be471..98dc37c 100644
+--- a/java/pgv-java-grpc/src/test/java/com/lyft/pgv/grpc/ValidatingServerInterceptorTest.java
++++ b/java/pgv-java-grpc/src/test/java/com/lyft/pgv/grpc/ValidatingServerInterceptorTest.java
+@@ -40,8 +40,11 @@ public class ValidatingServerInterceptorTest {
+         ValidatingServerInterceptor interceptor = new ValidatingServerInterceptor(new ValidatorIndex() {
+             @Override
+             public <T> Validator<T> validatorFor(Class clazz) {
+-                return proto -> {
+-                    throw new ValidationException("one", "", "is invalid");
++                return new Validator<T>() {
++                    @Override
++                    public void assertValid(T proto) throws ValidationException {
++                        throw new ValidationException("one", "", "is invalid");
++                    }
+                 };
+             }
+         });
+diff --git a/java/pgv-java-stub/src/main/java/com/lyft/pgv/ExplicitValidatorIndex.java b/java/pgv-java-stub/src/main/java/com/lyft/pgv/ExplicitValidatorIndex.java
+index ca4631d..1533428 100644
+--- a/java/pgv-java-stub/src/main/java/com/lyft/pgv/ExplicitValidatorIndex.java
++++ b/java/pgv-java-stub/src/main/java/com/lyft/pgv/ExplicitValidatorIndex.java
+@@ -7,7 +7,6 @@ import java.util.concurrent.ConcurrentHashMap;
+  * for {@code type}, a default {@code ALWAYS_VALID} validator will be used.
+  */
+ public class ExplicitValidatorIndex implements ValidatorIndex {
+-    private final ConcurrentHashMap<Class, ValidatorImpl> VALIDATOR_IMPL_INDEX = new ConcurrentHashMap<>();
+     private final ConcurrentHashMap<Class, Validator> VALIDATOR_INDEX = new ConcurrentHashMap<>();
+ 
+     /**
+@@ -16,15 +15,13 @@ public class ExplicitValidatorIndex implements ValidatorIndex {
+      * @param validator the validator to apply
+      * @return this
+      */
+-    public <T> ExplicitValidatorIndex add(Class<T> forType, ValidatorImpl<T> validator) {
+-        VALIDATOR_IMPL_INDEX.put(forType, validator);
++    public <T> ExplicitValidatorIndex add(Class<T> forType, Validator<T> validator) {
++        VALIDATOR_INDEX.put(forType, validator);
+         return this;
+     }
+ 
+     @SuppressWarnings("unchecked")
+     public <T> Validator<T> validatorFor(Class clazz) {
+-        return VALIDATOR_INDEX.computeIfAbsent(clazz, c ->
+-                proto -> VALIDATOR_IMPL_INDEX.getOrDefault(c, ValidatorImpl.ALWAYS_VALID)
+-                        .assertValid(proto, ExplicitValidatorIndex.this));
++        return VALIDATOR_INDEX.getOrDefault(clazz, Validator.ALWAYS_VALID);
+     }
+ }
+diff --git a/java/pgv-java-stub/src/main/java/com/lyft/pgv/ReflectiveValidatorIndex.java b/java/pgv-java-stub/src/main/java/com/lyft/pgv/ReflectiveValidatorIndex.java
+index bdace4d..ce2754e 100644
+--- a/java/pgv-java-stub/src/main/java/com/lyft/pgv/ReflectiveValidatorIndex.java
++++ b/java/pgv-java-stub/src/main/java/com/lyft/pgv/ReflectiveValidatorIndex.java
+@@ -8,6 +8,11 @@ import java.util.concurrent.ConcurrentHashMap;
+  * will be used.
+  */
+ public final class ReflectiveValidatorIndex implements ValidatorIndex {
++    private ReflectiveValidatorIndex() {
++    }
++
++    private static final ReflectiveValidatorIndex INSTANCE = new ReflectiveValidatorIndex();
++
+     private final ConcurrentHashMap<Class, Validator> VALIDATOR_INDEX = new ConcurrentHashMap<>();
+ 
+     /**
+@@ -26,7 +31,7 @@ public final class ReflectiveValidatorIndex implements ValidatorIndex {
+     }
+ 
+     @SuppressWarnings("unchecked")
+-    private Validator reflectiveValidatorFor(Class clazz) throws ReflectiveOperationException {
++    private static Validator reflectiveValidatorFor(Class clazz) throws ReflectiveOperationException {
+         Class enclosingClass = clazz;
+         while (enclosingClass.getEnclosingClass() != null) {
+             enclosingClass = enclosingClass.getEnclosingClass();
+@@ -34,8 +39,14 @@ public final class ReflectiveValidatorIndex implements ValidatorIndex {
+ 
+         String validatorClassName = enclosingClass.getName() + "Validator";
+         Class validatorClass = clazz.getClassLoader().loadClass(validatorClassName);
+-        ValidatorImpl impl = (ValidatorImpl) validatorClass.getDeclaredMethod("validatorFor", Class.class).invoke(null, clazz);
++        return (Validator) validatorClass.getDeclaredMethod("validatorFor", Class.class).invoke(null, clazz);
++    }
+ 
+-        return proto -> impl.assertValid(proto, ReflectiveValidatorIndex.this);
++    /**
++     * Retuns the validator for {@code <T>}, or {@code ALWAYS_VALID} if not found.
++     */
++    @SuppressWarnings("unchecked")
++    public static <T> Validator<T> validatorFor(Object instance) {
++        return INSTANCE.validatorFor(instance == null ? null : instance.getClass());
+     }
+ }
+diff --git a/java/pgv-java-stub/src/main/java/com/lyft/pgv/Validator.java b/java/pgv-java-stub/src/main/java/com/lyft/pgv/Validator.java
+index fd080d5..0a5f559 100644
+--- a/java/pgv-java-stub/src/main/java/com/lyft/pgv/Validator.java
++++ b/java/pgv-java-stub/src/main/java/com/lyft/pgv/Validator.java
+@@ -1,18 +1,17 @@
+ package com.lyft.pgv;
+ 
+ /**
+- * {@code Validator} asserts the validity of a protobuf object.
++ * {@code Validator} is the base class for all generated PGV validators.
+  * @param <T>
+  */
+-@FunctionalInterface
+-public interface Validator<T> {
++public abstract class Validator<T> {
+     /**
+      * Asserts validation rules on a protobuf object.
+      *
+      * @param proto the protobuf object to validate.
+      * @throws ValidationException with the first validation error encountered.
+      */
+-    void assertValid(T proto) throws ValidationException;
++    public abstract void assertValid(T proto) throws ValidationException;
+ 
+     /**
+      * Checks validation rules on a protobuf object.
+@@ -20,7 +19,7 @@ public interface Validator<T> {
+      * @param proto the protobuf object to validate.
+      * @return {@code true} if all rules are valid, {@code false} if not.
+      */
+-    default boolean isValid(T proto) {
++    public boolean isValid(T proto) {
+         try {
+             assertValid(proto);
+             return true;
+@@ -29,7 +28,10 @@ public interface Validator<T> {
+         }
+     }
+ 
+-    Validator ALWAYS_VALID = (proto) -> {
+-        // Do nothing. Always valid.
++    public static Validator ALWAYS_VALID = new Validator() {
++        @Override
++        public void assertValid(Object proto) {
++            // Do nothing. Always valid.
++        }
+     };
+ }
+diff --git a/java/pgv-java-stub/src/main/java/com/lyft/pgv/ValidatorImpl.java b/java/pgv-java-stub/src/main/java/com/lyft/pgv/ValidatorImpl.java
+deleted file mode 100644
+index 165ead5..0000000
+--- a/java/pgv-java-stub/src/main/java/com/lyft/pgv/ValidatorImpl.java
++++ /dev/null
+@@ -1,20 +0,0 @@
+-package com.lyft.pgv;
+-
+-/**
+- * {@code Validator} is the base interface for all generated PGV validators.
+- * @param <T>
+- */
+-@FunctionalInterface
+-public interface ValidatorImpl<T> {
+-    /**
+-     * Asserts validation rules on a protobuf object.
+-     *
+-     * @param proto the protobuf object to validate.
+-     * @throws ValidationException with the first validation error encountered.
+-     */
+-    void assertValid(T proto, ValidatorIndex index) throws ValidationException;
+-
+-    ValidatorImpl ALWAYS_VALID = (proto, index) -> {
+-        // Do nothing. Always valid.
+-    };
+-}
+diff --git a/java/pgv-java-stub/src/main/java/com/lyft/pgv/ValidatorIndex.java b/java/pgv-java-stub/src/main/java/com/lyft/pgv/ValidatorIndex.java
+index b13f9f7..f708140 100644
+--- a/java/pgv-java-stub/src/main/java/com/lyft/pgv/ValidatorIndex.java
++++ b/java/pgv-java-stub/src/main/java/com/lyft/pgv/ValidatorIndex.java
+@@ -3,26 +3,18 @@ package com.lyft.pgv;
+ /**
+  * {@code ValidatorIndex} defines the entry point for finding {@link Validator} instances for a given type.
+  */
+-@FunctionalInterface
+ public interface ValidatorIndex {
+-    /**
+-     * Retuns the validator for {@code clazz}, or {@code ALWAYS_VALID} if not found.
+-     */
+     <T> Validator<T> validatorFor(Class clazz);
+ 
+-    /**
+-     * Retuns the validator for {@code <T>}, or {@code ALWAYS_VALID} if not found.
+-     */
+-    @SuppressWarnings("unchecked")
+-    default <T> Validator<T> validatorFor(Object instance) {
+-        return validatorFor(instance == null ? null : instance.getClass());
+-    }
+-
+     ValidatorIndex ALWAYS_VALID = new ValidatorIndex() {
+         @Override
+-        @SuppressWarnings("unchecked")
+         public <T> Validator<T> validatorFor(Class clazz) {
+-            return Validator.ALWAYS_VALID;
++            return new Validator<T>() {
++                @Override
++                public void assertValid(T proto) throws ValidationException {
++                    // it's valid
++                }
++            };
+         }
+     };
+ }
+diff --git a/java/pgv-java-validation/src/main/java/com/lyft/pgv/validation/JavaHarness.java b/java/pgv-java-validation/src/main/java/com/lyft/pgv/validation/JavaHarness.java
+index 4d403b7..36dad01 100644
+--- a/java/pgv-java-validation/src/main/java/com/lyft/pgv/validation/JavaHarness.java
++++ b/java/pgv-java-validation/src/main/java/com/lyft/pgv/validation/JavaHarness.java
+@@ -6,7 +6,6 @@ import com.google.protobuf.Message;
+ import com.lyft.pgv.ReflectiveValidatorIndex;
+ import com.lyft.pgv.UnimplementedException;
+ import com.lyft.pgv.ValidationException;
+-import com.lyft.pgv.ValidatorIndex;
+ import tests.harness.Harness;
+ import tests.harness.cases.*;
+ import tests.harness.cases.other_package.EmbedOuterClass;
+@@ -41,8 +40,7 @@ public class JavaHarness {
+ 
+             Harness.TestCase testCase = Harness.TestCase.parseFrom(System.in, registry);
+             Message message = typeMap.unpackAny(testCase.getMessage());
+-            ValidatorIndex validatorIndex = new ReflectiveValidatorIndex();
+-            validatorIndex.validatorFor(message).assertValid(message);
++            ReflectiveValidatorIndex.validatorFor(message).assertValid(message);
+ 
+             writeResult(Harness.TestResult.newBuilder().setValid(true).build());
+         } catch (UnimplementedException ex) {
+diff --git a/templates/java/file.go b/templates/java/file.go
+index 3134abf..f428971 100644
+--- a/templates/java/file.go
++++ b/templates/java/file.go
+@@ -6,7 +6,7 @@ const fileTpl = `// Code generated by protoc-gen-validate. DO NOT EDIT.
+ package {{ javaPackage . }};
+ 
+ public class {{ classNameFile . }}Validator {
+-	public static com.lyft.pgv.ValidatorImpl validatorFor(Class clazz) {
++	public static com.lyft.pgv.Validator validatorFor(Class clazz) {
+ 		{{ range .AllMessages }}
+ 		if (clazz.equals({{ qualifiedName . }}.class)) return new {{ simpleName .}}Validator();
+ 		{{- end }}
+diff --git a/templates/java/message.go b/templates/java/message.go
+index 22ab737..720f10b 100644
+--- a/templates/java/message.go
++++ b/templates/java/message.go
+@@ -7,7 +7,7 @@ const messageTpl = `{{ $f := .Field }}{{ $r := .Rules }}
+ 		{{- template "required" . }}
+ 		{{- if (isOfMessageType $f) }}
+ 			// Validate {{ $f.Name }}
+-			if ({{ hasAccessor . }}) index.validatorFor({{ accessor . }}).assertValid({{ accessor . }});
++			if ({{ hasAccessor . }}) com.lyft.pgv.ReflectiveValidatorIndex.validatorFor({{ accessor . }}).assertValid({{ accessor . }});
+ 		{{- end -}}
+ 	{{- end -}}
+ `
+diff --git a/templates/java/msg.go b/templates/java/msg.go
+index c338197..4a3839a 100644
+--- a/templates/java/msg.go
++++ b/templates/java/msg.go
+@@ -4,7 +4,7 @@ const msgTpl = `
+ 	/**
+ 	 * Validates {@code {{ simpleName . }}} protobuf objects.
+ 	 */
+-	public static class {{ simpleName . }}Validator implements com.lyft.pgv.ValidatorImpl<{{ qualifiedName . }}> {
++	public static class {{ simpleName . }}Validator extends com.lyft.pgv.Validator<{{ qualifiedName . }}> {
+ 		{{- range .NonOneOfFields }}
+ 			{{ renderConstants (context .) }}
+ 		{{ end }}
+@@ -12,7 +12,7 @@ const msgTpl = `
+ 			{{ template "oneOfConst" . }}
+ 		{{ end }}
+ 
+-		public void assertValid({{ qualifiedName . }} proto, com.lyft.pgv.ValidatorIndex index) throws com.lyft.pgv.ValidationException {
++		public void assertValid({{ qualifiedName . }} proto) throws com.lyft.pgv.ValidationException {
+ 		{{ if disabled . }}
+ 			// Validate is disabled for {{ simpleName . }}
+ 			return;

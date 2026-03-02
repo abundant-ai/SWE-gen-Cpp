@@ -1,0 +1,285 @@
+diff --git a/templates/cc/register.go b/templates/cc/register.go
+index e376be8..4881de0 100644
+--- a/templates/cc/register.go
++++ b/templates/cc/register.go
+@@ -295,20 +295,6 @@ func (fns CCFuncs) inType(f pgs.Field, x interface{}) string {
+ 		default:
+ 			return fns.className(f.Type().Element().Embed())
+ 		}
+-	case pgs.EnumT:
+-		var fldEn = f.Type().Enum()
+-		if f.Type().IsRepeated() {
+-			fldEn = f.Type().Element().Enum()
+-		}
+-
+-		if fns.ImportPath(f) == fns.ImportPath(fldEn) {
+-			if f.Type().IsRepeated() {
+-				return fns.cTypeOfString(fns.Type(f).Value().String()[2:])
+-			}
+-			return fns.cTypeOfString(fns.Type(f).Value().String())
+-		}
+-
+-		return fns.PackageName(fldEn).String() + "::" + fns.Type(f).Value().String()
+ 	default:
+ 		return fns.cType(f.Type())
+ 	}
+@@ -369,7 +355,7 @@ func (fns CCFuncs) inKey(f pgs.Field, x interface{}) string {
+ 			return fns.lit(x)
+ 		}
+ 	case pgs.EnumT:
+-		return fmt.Sprintf("%s(%d)", fns.inType(f, x), x.(int32))
++		return fmt.Sprintf("%s(%d)", fns.cType(f.Type()), x.(int32))
+ 	default:
+ 		return fns.lit(x)
+ 	}
+@@ -443,8 +429,7 @@ func (fns CCFuncs) output(file pgs.File, ext string) string {
+ func (fns CCFuncs) Type(f pgs.Field) pgsgo.TypeName {
+ 	typ := fns.Context.Type(f)
+ 
+-	// Adaptation of repeated types
+-	if f.Type().ProtoType() == pgs.EnumT {
++	if f.Type().IsEnum() {
+ 		parts := strings.Split(typ.String(), ".")
+ 		typ = pgsgo.TypeName(parts[len(parts)-1])
+ 	}
+diff --git a/templates/goshared/register.go b/templates/goshared/register.go
+index 6e3a52b..12b975a 100644
+--- a/templates/goshared/register.go
++++ b/templates/goshared/register.go
+@@ -223,22 +223,6 @@ func (fns goSharedFuncs) inType(f pgs.Field, x interface{}) string {
+ 			return pgsgo.TypeName(fmt.Sprintf("%T", x)).Element().String()
+ 		}
+ 	case pgs.EnumT:
+-		ens := fns.enumPackages(fns.externalEnums(f.File()))
+-		// Check if the imported name of the enum has collided and been renamed
+-		if len(ens) != 0 {
+-			var enType = f.Type().Enum()
+-			if f.Type().IsRepeated() {
+-				enType = f.Type().Element().Enum()
+-			}
+-
+-			enImportPath := fns.ImportPath(enType)
+-			for pkg, en := range ens {
+-				if en.FilePath == enImportPath {
+-					return pkg.String() + "." + fns.enumName(enType)
+-				}
+-			}
+-		}
+-
+ 		if f.Type().IsRepeated() {
+ 			return strings.TrimLeft(fns.Type(f).String(), "[]")
+ 		} else {
+@@ -336,7 +320,7 @@ func (fns goSharedFuncs) externalEnums(file pgs.File) []pgs.Enum {
+ 				en = fld.Type().Element().Enum()
+ 			}
+ 
+-			if en != nil && en.File().Package().ProtoName() != msg.File().Package().ProtoName() {
++			if en != nil && en.Package().ProtoName() != fld.Package().ProtoName() && fns.PackageName(en) != fns.PackageName(fld) {
+ 				out = append(out, en)
+ 			}
+ 		}
+@@ -368,27 +352,21 @@ func (fns goSharedFuncs) enumPackages(enums []pgs.Enum) map[pgs.Name]NormalizedE
+ 	out := make(map[pgs.Name]NormalizedEnum, len(enums))
+ 
+ 	nameCollision := make(map[pgs.Name]int)
+-	nameNormalized := make(map[pgs.FilePath]struct{})
+ 
+ 	for _, en := range enums {
+-		enImportPath := fns.ImportPath(en)
+-		if _, ok := nameNormalized[enImportPath]; ok {
+-			continue
+-		}
+ 
+ 		pkgName := fns.PackageName(en)
+ 
+ 		if normalized, ok := out[pkgName]; ok {
+-			if normalized.FilePath != enImportPath {
++			if normalized.FilePath != fns.ImportPath(en) {
+ 				nameCollision[pkgName] = nameCollision[pkgName] + 1
+ 				pkgName = pkgName + pgs.Name(strconv.Itoa(nameCollision[pkgName]))
+ 			}
+ 		}
+ 
+-		nameNormalized[enImportPath] = struct{}{}
+ 		out[pkgName] = NormalizedEnum{
+ 			Name:     fns.enumName(en),
+-			FilePath: enImportPath,
++			FilePath: fns.ImportPath(en),
+ 		}
+ 
+ 	}
+diff --git a/tests/go.mod b/tests/go.mod
+index 0646b8a..9c1c32c 100644
+--- a/tests/go.mod
++++ b/tests/go.mod
+@@ -3,7 +3,6 @@ module github.com/envoyproxy/protoc-gen-validate/tests
+ go 1.12
+ 
+ require (
+-	github.com/envoyproxy/protoc-gen-validate v0.0.0-00010101000000-000000000000
+ 	golang.org/x/net v0.9.0
+ 	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
+ 	google.golang.org/protobuf v1.30.0
+diff --git a/tests/go.sum b/tests/go.sum
+index e566494..4303a85 100644
+--- a/tests/go.sum
++++ b/tests/go.sum
+@@ -1,36 +1,11 @@
+-github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+-github.com/golang/protobuf v1.4.0-rc.1/go.mod h1:ceaxUfeHdC40wWswd/P6IGgMaK3YpKi5j83Wpe3EHw8=
+-github.com/golang/protobuf v1.4.0-rc.1.0.20200221234624-67d41d38c208/go.mod h1:xKAWHe0F5eneWXFV3EuXVDTCmh+JuBKY0li0aMyXATA=
+-github.com/golang/protobuf v1.4.0-rc.2/go.mod h1:LlEzMj4AhA7rCAGe4KMBDvJI+AwstrUpVNzEA03Pprs=
+-github.com/golang/protobuf v1.4.0-rc.4.0.20200313231945-b860323f09d0/go.mod h1:WU3c8KckQ9AFe+yFwt9sWVRKCVIyN9cPHBJSNnbL67w=
+-github.com/golang/protobuf v1.4.0/go.mod h1:jodUvKwWbYaEsadDk5Fwe5c77LiNKVO9IDvqG2KuDX0=
+ github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaSAoJOfIk=
+-github.com/google/go-cmp v0.3.0/go.mod h1:8QqcDgzrUqlUb/G2PQTWiueGozuR1884gddMywk6iLU=
+-github.com/google/go-cmp v0.3.1/go.mod h1:8QqcDgzrUqlUb/G2PQTWiueGozuR1884gddMywk6iLU=
+-github.com/google/go-cmp v0.4.0/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
+ github.com/google/go-cmp v0.5.5 h1:Khx7svrCpmxxtHBq5j2mp/xVjsi8hQMfNLvJFAlrGgU=
+ github.com/google/go-cmp v0.5.5/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
+-github.com/iancoleman/strcase v0.2.0/go.mod h1:iwCmte+B7n89clKwxIoIXy/HfoL7AsD47ZCWhYzw7ho=
+-github.com/kr/fs v0.1.0/go.mod h1:FFnZGqtBN9Gxj7eW1uZ42v5BccTP0vu6NEaFoC2HwRg=
+-github.com/lyft/protoc-gen-star/v2 v2.0.3/go.mod h1:amey7yeodaJhXSbf/TlLvWiqQfLOSpEk//mLlc+axEk=
+-github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
+-github.com/pkg/sftp v1.10.1/go.mod h1:lYOWFsE0bwd1+KfKJaKeuokY15vzFx25BLbzYYoAxZI=
+-github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+-github.com/spf13/afero v1.3.3/go.mod h1:5KUK8ByomD5Ti5Artl0RtHeI5pTF7MIDuXL3yY520V4=
+-github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
+-github.com/stretchr/testify v1.4.0/go.mod h1:j7eGeouHqKxXV5pUuKE4zz7dFj8WfuZ+81PSLYec5m4=
+-github.com/stretchr/testify v1.6.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
+ github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
+ golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
+-golang.org/x/crypto v0.0.0-20190820162420-60c769a6c586/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
+-golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
+ golang.org/x/crypto v0.0.0-20210921155107-089bfa567519/go.mod h1:GvvjBRRGRdwPK5ydBHafDWAxML/pGHZbMvKqRZ5+Abc=
+-golang.org/x/lint v0.0.0-20210508222113-6edffad5e616/go.mod h1:3xt1FjdF8hUf6vQPIChWIBhFzV8gjjsPE/fR3IyQdNY=
+-golang.org/x/mod v0.1.1-0.20191105210325-c90efee705ee/go.mod h1:QqPTAvyqsEbceGzBzNggFXnrqF1CaUcvgkdR5Ot7KZg=
+ golang.org/x/mod v0.6.0-dev.0.20220419223038-86c51ed26bb4/go.mod h1:jJ57K6gSWd91VN4djpZkiMVwK6gcyfeH4XE8wZrZaV4=
+ golang.org/x/mod v0.8.0/go.mod h1:iBbtSCu2XBx23ZKBPSOrRkjjQPZFPuis4dIYUhu/chs=
+-golang.org/x/mod v0.10.0/go.mod h1:iBbtSCu2XBx23ZKBPSOrRkjjQPZFPuis4dIYUhu/chs=
+-golang.org/x/net v0.0.0-20190404232315-eb5bcb51f2a3/go.mod h1:t9HGtf8HONx5eT2rtn7q6eTqICYqUVnKs3thJo3Qplg=
+ golang.org/x/net v0.0.0-20190620200207-3b0461eec859/go.mod h1:z5CRVTTTmAJ677TzLLGU+0bjPO0LkuOLi4/5GtJWs/s=
+ golang.org/x/net v0.0.0-20210226172049-e18ecbb05110/go.mod h1:m0MpNAwzfU5UDzcl9v0D8zg8gWTRqZa9RBIspLL5mdg=
+ golang.org/x/net v0.0.0-20220722155237-a158d28d115b/go.mod h1:XRhObCWvk6IyKnWLug+ECip1KBveYUHfp+8e9klMJ9c=
+@@ -41,7 +16,6 @@ golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJ
+ golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.1.0/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+-golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20201119102817-f84b799fce68/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20210615035016-665e8c7367d1/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+ golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+@@ -59,24 +33,12 @@ golang.org/x/text v0.7.0/go.mod h1:mrYo+phRRbMaCq/xk9113O4dZlRixOauAjOtrjsXDZ8=
+ golang.org/x/text v0.9.0/go.mod h1:e1OnstbJyHTd6l/uOt8jFFHp6TRDWZR/bV3emEE/zU8=
+ golang.org/x/tools v0.0.0-20180917221912-90fa682c2a6e/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
+ golang.org/x/tools v0.0.0-20191119224855-298f0cb1881e/go.mod h1:b+2E5dAYhXwXZwtnZ6UAqBI28+e2cm9otk0dWdXHAEo=
+-golang.org/x/tools v0.0.0-20200130002326-2f3ba24bd6e7/go.mod h1:TB2adYChydJhpapKDTa4BR/hXlZSLoq2Wpct/0txZ28=
+ golang.org/x/tools v0.1.12/go.mod h1:hNGJHUnrk76NpqgfD5Aqm5Crs+Hm0VOH/i9J2+nxYbc=
+ golang.org/x/tools v0.6.0/go.mod h1:Xwgl3UAJ/d3gWutnCtw505GrjyAbvKui8lOU390QaIU=
+-golang.org/x/tools v0.8.0/go.mod h1:JxBZ99ISMI5ViVkT1tr6tdNmXeTrcpVSD3vZ1RsRdN4=
+ golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+-golang.org/x/xerrors v0.0.0-20191011141410-1b5146add898/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 h1:H2TDz8ibqkAF6YGhCdN3jS9O0/s90v0rJh3X/OLHEUk=
+ golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2/go.mod h1:K8+ghG5WaK9qNqU5K3HdILfMLy1f3aNYFI/wnl100a8=
+-google.golang.org/protobuf v0.0.0-20200109180630-ec00e32a8dfd/go.mod h1:DFci5gLYBciE7Vtevhsrf46CRTquxDuWsQurQQe4oz8=
+-google.golang.org/protobuf v0.0.0-20200221191635-4d8936d0db64/go.mod h1:kwYJMbMJ01Woi6D6+Kah6886xMZcty6N08ah7+eCXa0=
+-google.golang.org/protobuf v0.0.0-20200228230310-ab0ca4ff8a60/go.mod h1:cfTl7dwQJ+fmap5saPgwCLgHXTUD7jkjRqWcaiX5VyM=
+-google.golang.org/protobuf v1.20.1-0.20200309200217-e05f789c0967/go.mod h1:A+miEFZTKqfCUM6K7xSMQL9OKL/b6hQv+e19PK+JZNE=
+-google.golang.org/protobuf v1.21.0/go.mod h1:47Nbq4nVaFHyn7ilMalzfO3qCViNmqZ2kzikPIcrTAo=
+-google.golang.org/protobuf v1.23.0/go.mod h1:EGpADcykh3NcUnDUJcl1+ZksZNG86OlYog2l/sGQquU=
+ google.golang.org/protobuf v1.26.0-rc.1/go.mod h1:jlhhOSvTdKEhbULTjvd4ARK9grFBp09yW+WbY/TyQbw=
+ google.golang.org/protobuf v1.30.0 h1:kPPoIgf3TsEvrm0PFe15JQ+570QVxYzEvvHqChK+cng=
+ google.golang.org/protobuf v1.30.0/go.mod h1:HV8QOd/L58Z+nl8r43ehVNZIU/HEI6OcFqwMG9pJV4I=
+-gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+-gopkg.in/yaml.v2 v2.2.2/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
+-gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/tests/harness/cases/enums.proto b/tests/harness/cases/enums.proto
+index 75f5787..d2e792e 100644
+--- a/tests/harness/cases/enums.proto
++++ b/tests/harness/cases/enums.proto
+@@ -40,18 +40,10 @@ message EnumAliasNotIn { TestEnumAlias val = 1 [(validate.rules).enum = { not_in
+ 
+ message EnumExternal { other_package.Embed.Enumerated val = 1 [(validate.rules).enum.defined_only = true]; }
+ message EnumExternal2 { other_package.Embed.DoubleEmbed.DoubleEnumerated val = 1 [(validate.rules).enum.defined_only = true]; }
+-message EnumExternal3 {
+-    other_package.Embed.FooNumber foo = 1 [(validate.rules).enum = { in: [0, 2] }];
+-    yet_another_package.Embed.BarNumber bar = 2 [(validate.rules).enum = { not_in: [1] }];
+-}
+ 
+ message RepeatedEnumDefined { repeated TestEnum val = 1 [(validate.rules).repeated.items.enum.defined_only = true]; }
+ message RepeatedExternalEnumDefined { repeated other_package.Embed.Enumerated val = 1 [(validate.rules).repeated.items.enum.defined_only = true]; }
+ message RepeatedYetAnotherExternalEnumDefined { repeated yet_another_package.Embed.Enumerated val = 1 [(validate.rules).repeated.items.enum.defined_only = true]; }
+-message RepeatedEnumExternal {
+-    repeated other_package.Embed.FooNumber foo = 1 [(validate.rules).repeated.items.enum = { in: [0, 2] }];
+-    repeated yet_another_package.Embed.BarNumber bar = 2 [(validate.rules).repeated.items.enum = { not_in: [1] }];
+-}
+ 
+ message MapEnumDefined { map<string, TestEnum> val = 1 [(validate.rules).map.values.enum.defined_only = true]; }
+ message MapExternalEnumDefined { map<string, other_package.Embed.Enumerated> val = 1 [(validate.rules).map.values.enum.defined_only = true]; }
+diff --git a/tests/harness/cases/other_package/embed.proto b/tests/harness/cases/other_package/embed.proto
+index cfd8d1f..22d1f14 100644
+--- a/tests/harness/cases/other_package/embed.proto
++++ b/tests/harness/cases/other_package/embed.proto
+@@ -14,10 +14,4 @@ message Embed {
+     int64 val = 1 [(validate.rules).int64.gt = 0];
+ 
+     enum Enumerated { VALUE = 0; }
+-
+-    enum FooNumber {
+-        ZERO = 0;
+-        ONE  = 1;
+-        TWO  = 2;
+-    }
+ }
+diff --git a/tests/harness/cases/yet_another_package/embed.proto b/tests/harness/cases/yet_another_package/embed.proto
+index d20e2dd..2ad1cbc 100644
+--- a/tests/harness/cases/yet_another_package/embed.proto
++++ b/tests/harness/cases/yet_another_package/embed.proto
+@@ -10,10 +10,4 @@ message Embed {
+     int64 val = 1 [(validate.rules).int64.gt = 0];
+ 
+     enum Enumerated { VALUE = 0; }
+-
+-    enum BarNumber {
+-        ZERO = 0;
+-        ONE  = 1;
+-        TWO  = 2;
+-    }
+ }
+diff --git a/tests/harness/executor/cases.go b/tests/harness/executor/cases.go
+index 0d4a8fa..32d0680 100644
+--- a/tests/harness/executor/cases.go
++++ b/tests/harness/executor/cases.go
+@@ -1021,10 +1021,6 @@ var enumCases = []TestCase{
+ 
+ 	{"enum external - defined_only - valid", &cases.EnumExternal{Val: other_package.Embed_VALUE}, 0},
+ 	{"enum external - defined_only - invalid", &cases.EnumExternal{Val: math.MaxInt32}, 1},
+-	{"enum external - in - valid", &cases.EnumExternal3{Foo: other_package.Embed_ZERO}, 0},
+-	{"enum external - in - invalid", &cases.EnumExternal3{Foo: other_package.Embed_ONE}, 1},
+-	{"enum external - not in - valid", &cases.EnumExternal3{Bar: yet_another_package.Embed_ZERO}, 0},
+-	{"enum external - not in - invalid", &cases.EnumExternal3{Bar: yet_another_package.Embed_ONE}, 1},
+ 
+ 	{"enum repeated - defined_only - valid", &cases.RepeatedEnumDefined{Val: []cases.TestEnum{cases.TestEnum_ONE, cases.TestEnum_TWO}}, 0},
+ 	{"enum repeated - defined_only - invalid", &cases.RepeatedEnumDefined{Val: []cases.TestEnum{cases.TestEnum_ONE, math.MaxInt32}}, 1},
+@@ -1034,11 +1030,6 @@ var enumCases = []TestCase{
+ 
+ 	{"enum repeated (another external) - defined_only - valid", &cases.RepeatedYetAnotherExternalEnumDefined{Val: []yet_another_package.Embed_Enumerated{yet_another_package.Embed_VALUE}}, 0},
+ 
+-	{"enum repeated (external) - in - valid", &cases.RepeatedEnumExternal{Foo: []other_package.Embed_FooNumber{other_package.Embed_ZERO, other_package.Embed_TWO}}, 0},
+-	{"enum repeated (external) - in - invalid", &cases.RepeatedEnumExternal{Foo: []other_package.Embed_FooNumber{other_package.Embed_ONE}}, 1},
+-	{"enum repeated (external) - not in - valid", &cases.RepeatedEnumExternal{Bar: []yet_another_package.Embed_BarNumber{yet_another_package.Embed_ZERO, yet_another_package.Embed_TWO}}, 0},
+-	{"enum repeated (external) - not in - invalid", &cases.RepeatedEnumExternal{Bar: []yet_another_package.Embed_BarNumber{yet_another_package.Embed_ONE}}, 1},
+-
+ 	{"enum map - defined_only - valid", &cases.MapEnumDefined{Val: map[string]cases.TestEnum{"foo": cases.TestEnum_TWO}}, 0},
+ 	{"enum map - defined_only - invalid", &cases.MapEnumDefined{Val: map[string]cases.TestEnum{"foo": math.MaxInt32}}, 1},
+ 
+@@ -1064,7 +1055,7 @@ var messageCases = []TestCase{
+ 	{"message - skip - valid", &cases.MessageSkip{Val: &cases.TestMsg{}}, 0},
+ 
+ 	{"message - required - valid", &cases.MessageRequired{Val: &cases.TestMsg{Const: "foo"}}, 0},
+-	{"message - required - valid (oneof)", &cases.MessageRequiredOneof{One: &cases.MessageRequiredOneof_Val{Val: &cases.TestMsg{Const: "foo"}}}, 0},
++	{"message - required - valid (oneof)", &cases.MessageRequiredOneof{One: &cases.MessageRequiredOneof_Val{&cases.TestMsg{Const: "foo"}}}, 0},
+ 	{"message - required - invalid", &cases.MessageRequired{}, 1},
+ 	{"message - required - invalid (oneof)", &cases.MessageRequiredOneof{}, 1},
+ 

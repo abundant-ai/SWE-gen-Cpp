@@ -1,0 +1,313 @@
+diff --git a/java/pgv-java-grpc/pom.xml b/java/pgv-java-grpc/pom.xml
+index b4d0a49..b72eba0 100644
+--- a/java/pgv-java-grpc/pom.xml
++++ b/java/pgv-java-grpc/pom.xml
+@@ -11,11 +11,6 @@
+     <name>PGV-Java gRPC Interceptors</name>
+ 
+     <dependencies>
+-        <dependency>
+-            <groupId>com.google.api.grpc</groupId>
+-            <artifactId>proto-google-common-protos</artifactId>
+-            <version>${proto-google-common-protos.version}</version>
+-        </dependency>
+         <dependency>
+             <groupId>io.grpc</groupId>
+             <artifactId>grpc-core</artifactId>
+@@ -31,6 +26,7 @@
+             <groupId>io.grpc</groupId>
+             <artifactId>grpc-protobuf</artifactId>
+             <version>${grpc.version}</version>
++            <scope>test</scope>
+         </dependency>
+         <dependency>
+             <groupId>io.grpc</groupId>
+@@ -59,7 +55,6 @@
+         </dependency>
+     </dependencies>
+ 
+-
+     <build>
+         <extensions>
+             <extension>
+diff --git a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptor.java b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptor.java
+index 3598bf9..6d2e44d 100644
+--- a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptor.java
++++ b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptor.java
+@@ -24,7 +24,7 @@ public class ValidatingClientInterceptor implements ClientInterceptor {
+                     index.validatorFor(message.getClass()).assertValid(message);
+                     super.sendMessage(message);
+                 } catch (ValidationException ex) {
+-                    throw ValidationExceptions.asStatusRuntimeException(ex);
++                    throw ValidationExceptions.asStatus(ex).asRuntimeException();
+                 }
+             }
+         };
+diff --git a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptor.java b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptor.java
+index 60b5147..2fbe7da 100644
+--- a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptor.java
++++ b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptor.java
+@@ -29,9 +29,9 @@ public class ValidatingServerInterceptor implements ServerInterceptor {
+                     index.validatorFor(message.getClass()).assertValid(message);
+                     super.onMessage(message);
+                 } catch (ValidationException ex) {
+-                    StatusRuntimeException status = ValidationExceptions.asStatusRuntimeException(ex);
++                    Status status = ValidationExceptions.asStatus(ex);
+                     aborted = true;
+-                    call.close(status.getStatus(), status.getTrailers());
++                    call.close(status, new Metadata());
+                 }
+             }
+ 
+diff --git a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidationExceptions.java b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidationExceptions.java
+index 3780f21..82d8278 100644
+--- a/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidationExceptions.java
++++ b/java/pgv-java-grpc/src/main/java/io/envoyproxy/pgv/grpc/ValidationExceptions.java
+@@ -1,38 +1,22 @@
+ package io.envoyproxy.pgv.grpc;
+ 
+-import com.google.protobuf.Any;
+-import com.google.rpc.BadRequest;
+-import com.google.rpc.Code;
+-import com.google.rpc.Status;
+ import io.envoyproxy.pgv.ValidationException;
+-import io.grpc.StatusRuntimeException;
+-import io.grpc.protobuf.StatusProto;
++import io.grpc.Status;
+ 
+ /**
+  * {@code ValidationExceptions} provides utilities for converting {@link ValidationException} objects into gRPC
+- * {@code StatusRuntimeException} objects.
++ * {@code Status} objects.
+  */
+ public final class ValidationExceptions {
+-    private ValidationExceptions() {
+-    }
++    private ValidationExceptions() { }
+ 
+     /**
+-     * Convert a {@link ValidationException} into a gRPC {@code StatusRuntimeException}
+-     * with status code {@code Code.INVALID_ARGUMENT},
+-     * the {@link ValidationException} exception message,
+-     * and {@link Any} error details containing {@link BadRequest} with field violation details.
+-     *
++     * Convert a {@link ValidationException} into a gRPC {@code Status.INVALID_ARGUMENT} with appropriate message
++     * and cause.
+      * @param ex the {@code ValidationException} to convert.
+-     * @return a gRPC {@code StatusRuntimeException}
++     * @return a gRPC {@code Status.INVALID_ARGUMENT}
+      */
+-    public static StatusRuntimeException asStatusRuntimeException(ValidationException ex) {
+-        BadRequest badRequestElement = BadRequest.newBuilder()
+-                .addFieldViolations(BadRequest.FieldViolation.newBuilder().setField(ex.getField()).setDescription(ex.getReason()).build())
+-                .build();
+-
+-        return StatusProto.toStatusRuntimeException(Status.newBuilder()
+-                .setCode(Code.INVALID_ARGUMENT.getNumber())
+-                .setMessage(ex.getMessage())
+-                .addDetails(Any.pack(badRequestElement)).build());
++    public static Status asStatus(ValidationException ex) {
++        return Status.INVALID_ARGUMENT.withDescription(ex.getMessage()).withCause(ex);
+     }
+ }
+diff --git a/java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptorTest.java b/java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptorTest.java
+index a46f729..5cf2e5b 100644
+--- a/java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptorTest.java
++++ b/java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingClientInterceptorTest.java
+@@ -1,9 +1,5 @@
+ package io.envoyproxy.pgv.grpc;
+ 
+-import com.google.protobuf.Any;
+-import com.google.protobuf.InvalidProtocolBufferException;
+-import com.google.rpc.BadRequest;
+-import com.google.rpc.Status;
+ import io.envoyproxy.pgv.ReflectiveValidatorIndex;
+ import io.envoyproxy.pgv.ValidationException;
+ import io.envoyproxy.pgv.Validator;
+@@ -13,14 +9,11 @@ import io.envoyproxy.pgv.grpc.asubpackage.HelloJKRequest;
+ import io.envoyproxy.pgv.grpc.asubpackage.HelloResponse;
+ import io.grpc.BindableService;
+ import io.grpc.StatusRuntimeException;
+-import io.grpc.protobuf.StatusProto;
+ import io.grpc.stub.StreamObserver;
+ import io.grpc.testing.GrpcServerRule;
+-import org.assertj.core.api.Condition;
+ import org.junit.Rule;
+ import org.junit.Test;
+ 
+-import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+ import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ 
+ public class ValidatingClientInterceptorTest {
+@@ -77,23 +70,13 @@ public class ValidatingClientInterceptorTest {
+     @Test
+     public void InterceptorRejectsInvalidMessagesGenerated() {
+         // Don't set up server, so it will error if the call goes through
++
+         ValidatingClientInterceptor interceptor = new ValidatingClientInterceptor(new ReflectiveValidatorIndex());
+ 
+         GreeterGrpc.GreeterBlockingStub stub = GreeterGrpc.newBlockingStub(serverRule.getChannel()).withInterceptors(interceptor);
+-
+-        assertThatExceptionOfType(StatusRuntimeException.class).isThrownBy(() -> stub.sayHello(HelloJKRequest.newBuilder().setName("Foo").build()))
+-                .withMessageStartingWith("INVALID_ARGUMENT: .io.envoyproxy.pgv.grpc.HelloJKRequest.name: must equal World")
+-                .has(new Condition<>(e -> {
+-                    try {
+-                        Status status = StatusProto.fromThrowable(e);
+-                        Any any = status.getDetailsList().get(0);
+-                        BadRequest badRequest = any.unpack(BadRequest.class);
+-                        return badRequest.getFieldViolationsCount() == 1 && badRequest.getFieldViolations(0).getField().equals(".io.envoyproxy.pgv.grpc.HelloJKRequest.name")
+-                                && badRequest.getFieldViolations(0).getDescription().equals("must equal World");
+-                    } catch (InvalidProtocolBufferException ex) {
+-                        return false;
+-                    }
+-                }, "BadRequest details"));
++        assertThatThrownBy(() -> stub.sayHello(HelloJKRequest.newBuilder().setName("Foo").build()))
++                .isInstanceOf(StatusRuntimeException.class)
++                .hasMessageStartingWith("INVALID_ARGUMENT: .io.envoyproxy.pgv.grpc.HelloJKRequest.name: must equal World");
+     }
+ 
+     // Also testing compilation of proto files with strings of uppercase characters in their filename.
+@@ -104,19 +87,8 @@ public class ValidatingClientInterceptorTest {
+         ValidatingClientInterceptor interceptor = new ValidatingClientInterceptor(new ReflectiveValidatorIndex());
+ 
+         DismisserGrpc.DismisserBlockingStub stub = DismisserGrpc.newBlockingStub(serverRule.getChannel()).withInterceptors(interceptor);
+-
+-        assertThatExceptionOfType(StatusRuntimeException.class).isThrownBy(() -> stub.sayGoodbye(GooDBYe.GoodbyeJKRequest.newBuilder().setName("Foo").build()))
+-                .withMessageStartingWith("INVALID_ARGUMENT: .io.envoyproxy.pgv.grpc.GoodbyeJKRequest.name: must equal World")
+-                .has(new Condition<>(e -> {
+-                    try {
+-                        Status status = StatusProto.fromThrowable(e);
+-                        Any any = status.getDetailsList().get(0);
+-                        BadRequest badRequest = any.unpack(BadRequest.class);
+-                        return badRequest.getFieldViolationsCount() == 1 && badRequest.getFieldViolations(0).getField().equals(".io.envoyproxy.pgv.grpc.GoodbyeJKRequest.name")
+-                                && badRequest.getFieldViolations(0).getDescription().equals("must equal World");
+-                    } catch (InvalidProtocolBufferException ex) {
+-                        return false;
+-                    }
+-                }, "BadRequest details"));
++        assertThatThrownBy(() -> stub.sayGoodbye(GooDBYe.GoodbyeJKRequest.newBuilder().setName("Foo").build()))
++                .isInstanceOf(StatusRuntimeException.class)
++                .hasMessageStartingWith("INVALID_ARGUMENT: .io.envoyproxy.pgv.grpc.GoodbyeJKRequest.name: must equal World");
+     }
+ }
+diff --git a/java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptorTest.java b/java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptorTest.java
+index 754a5ed..3476a4f 100644
+--- a/java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptorTest.java
++++ b/java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptorTest.java
+@@ -1,9 +1,5 @@
+ package io.envoyproxy.pgv.grpc;
+ 
+-import com.google.protobuf.Any;
+-import com.google.protobuf.InvalidProtocolBufferException;
+-import com.google.rpc.BadRequest;
+-import com.google.rpc.Status;
+ import io.envoyproxy.pgv.ReflectiveValidatorIndex;
+ import io.envoyproxy.pgv.ValidationException;
+ import io.envoyproxy.pgv.Validator;
+@@ -14,14 +10,12 @@ import io.envoyproxy.pgv.grpc.asubpackage.HelloResponse;
+ import io.grpc.BindableService;
+ import io.grpc.ServerInterceptors;
+ import io.grpc.StatusRuntimeException;
+-import io.grpc.protobuf.StatusProto;
+ import io.grpc.stub.StreamObserver;
+ import io.grpc.testing.GrpcServerRule;
+-import org.assertj.core.api.Condition;
+ import org.junit.Rule;
+ import org.junit.Test;
+ 
+-import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
+ 
+ public class ValidatingServerInterceptorTest {
+     @Rule
+@@ -69,19 +63,9 @@ public class ValidatingServerInterceptorTest {
+         serverRule.getServiceRegistry().addService(ServerInterceptors.intercept(svc, interceptor));
+ 
+         GreeterGrpc.GreeterBlockingStub stub = GreeterGrpc.newBlockingStub(serverRule.getChannel());
+-        assertThatExceptionOfType(StatusRuntimeException.class).isThrownBy(() -> stub.sayHello(HelloJKRequest.newBuilder().setName("World").build()))
+-                .withMessage("INVALID_ARGUMENT: one: is invalid - Got ")
+-                .has(new Condition<>(e -> {
+-                    try {
+-                        Status status = StatusProto.fromThrowable(e);
+-                        Any any = status.getDetailsList().get(0);
+-                        BadRequest badRequest = any.unpack(BadRequest.class);
+-                        return badRequest.getFieldViolationsCount() == 1 && badRequest.getFieldViolations(0).getField().equals("one")
+-                                && badRequest.getFieldViolations(0).getDescription().equals("is invalid");
+-                    } catch (InvalidProtocolBufferException ex) {
+-                        return false;
+-                    }
+-                }, "BadRequest details"));
++        assertThatThrownBy(() -> stub.sayHello(HelloJKRequest.newBuilder().setName("World").build()))
++            .isInstanceOf(StatusRuntimeException.class)
++            .hasMessage("INVALID_ARGUMENT: one: is invalid - Got ");
+     }
+ 
+     @Test
+@@ -91,19 +75,8 @@ public class ValidatingServerInterceptorTest {
+         serverRule.getServiceRegistry().addService(ServerInterceptors.intercept(svc, interceptor));
+ 
+         GreeterGrpc.GreeterBlockingStub stub = GreeterGrpc.newBlockingStub(serverRule.getChannel());
+-
+-        assertThatExceptionOfType(StatusRuntimeException.class).isThrownBy(() -> stub.sayHello(HelloJKRequest.newBuilder().setName("Bananas").build()))
+-                .withMessageStartingWith("INVALID_ARGUMENT: .io.envoyproxy.pgv.grpc.HelloJKRequest.name: must equal World")
+-                .has(new Condition<>(e -> {
+-                    try {
+-                        Status status = StatusProto.fromThrowable(e);
+-                        Any any = status.getDetailsList().get(0);
+-                        BadRequest badRequest = any.unpack(BadRequest.class);
+-                        return badRequest.getFieldViolationsCount() == 1 && badRequest.getFieldViolations(0).getField().equals(".io.envoyproxy.pgv.grpc.HelloJKRequest.name")
+-                                && badRequest.getFieldViolations(0).getDescription().equals("must equal World");
+-                    } catch (InvalidProtocolBufferException ex) {
+-                        return false;
+-                    }
+-                }, "BadRequest details"));
++        assertThatThrownBy(() -> stub.sayHello(HelloJKRequest.newBuilder().setName("Bananas").build()))
++                .isInstanceOf(StatusRuntimeException.class)
++                .hasMessageStartingWith("INVALID_ARGUMENT: .io.envoyproxy.pgv.grpc.HelloJKRequest.name: must equal World");
+     }
+ }
+diff --git a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidationException.java b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidationException.java
+index 7728b9c..44d26b7 100644
+--- a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidationException.java
++++ b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/ValidationException.java
+@@ -4,26 +4,7 @@ package io.envoyproxy.pgv;
+  * Base class for failed field validations.
+  */
+ public class ValidationException extends Exception {
+-    private String field;
+-    private Object value;
+-    private String reason;
+-
+     public ValidationException(String field, Object value, String reason) {
+         super(field + ": " + reason + " - Got " + value.toString());
+-        this.field = field;
+-        this.value = value;
+-        this.reason = reason;
+-    }
+-
+-    public String getField() {
+-        return field;
+-    }
+-
+-    public Object getValue() {
+-        return value;
+-    }
+-
+-    public String getReason() {
+-        return reason;
+     }
+ }
+diff --git a/java/pom.xml b/java/pom.xml
+index e7da6e4..7c10eb8 100644
+--- a/java/pom.xml
++++ b/java/pom.xml
+@@ -49,8 +49,8 @@
+         <grpc.version>1.12.0</grpc.version>
+         <junit.version>4.12</junit.version>
+         <assertj.version>3.11.1</assertj.version>
++
+         <java.version>1.8</java.version>
+-        <proto-google-common-protos.version>1.17.0</proto-google-common-protos.version>
+     </properties>
+ 
+     <dependencies>

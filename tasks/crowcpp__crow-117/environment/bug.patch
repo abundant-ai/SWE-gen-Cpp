@@ -1,0 +1,244 @@
+diff --git a/docs/guides/routes.md b/docs/guides/routes.md
+index da8e81650..a8d748130 100644
+--- a/docs/guides/routes.md
++++ b/docs/guides/routes.md
+@@ -23,10 +23,6 @@ you can see the first `<int>` is defined as `a` and the second as `b`. If you we
+ ##Methods
+ You can change the HTTP methods the route uses from just the default `GET` by using `method()`, your route macro should look like `CROW_ROUTE(app, "/add/<int>/<int>").methods(crow::HTTPMethod::GET, crow::HTTPMethod::PATCH)` or `CROW_ROUTE(app, "/add/<int>/<int>").methods("GET"_method, "PATCH"_method)`.
+ 
+-!!! note
+-
+-    Crow handles `HEAD` and `OPTIONS` methods automatically. So adding those to your handler has no effect.
+-
+ ##Handler
+ Basically a piece of code that gets executed whenever the client calls the associated route, usually in the form of a [lambda expression](https://en.cppreference.com/w/cpp/language/lambda). It can be as simple as `#!cpp ([](){return "Hello World"})`.<br><br>
+ 
+@@ -70,4 +66,4 @@ class a : public crow::returnable
+         return this.as_string();
+     }
+ }
+-```
++```
+\ No newline at end of file
+diff --git a/include/crow/app.h b/include/crow/app.h
+index f6582bd9c..cc625bc89 100644
+--- a/include/crow/app.h
++++ b/include/crow/app.h
+@@ -198,7 +198,7 @@ namespace crow
+         {
+ #ifndef CROW_DISABLE_STATIC_DIR
+             route<crow::black_magic::get_parameter_tag(CROW_STATIC_ENDPOINT)>(CROW_STATIC_ENDPOINT)
+-            ([](crow::response& res, std::string file_path_partial)
++            ([](const crow::request&, crow::response& res, std::string file_path_partial)
+             {
+               res.set_static_file_info(CROW_STATIC_DIRECTORY + file_path_partial);
+               res.end();
+diff --git a/include/crow/http_connection.h b/include/crow/http_connection.h
+index 5d6741dca..2fd51a7d7 100644
+--- a/include/crow/http_connection.h
++++ b/include/crow/http_connection.h
+@@ -472,7 +472,7 @@ namespace crow
+ 
+             }
+ 
+-            if (!res.manual_length_header && !res.headers.count("content-length"))
++            if (!res.headers.count("content-length"))
+             {
+                 content_length_ = std::to_string(res.body.size());
+                 static std::string content_length_tag = "Content-Length: ";
+diff --git a/include/crow/http_response.h b/include/crow/http_response.h
+index 7c7def509..4421d83d2 100644
+--- a/include/crow/http_response.h
++++ b/include/crow/http_response.h
+@@ -29,8 +29,6 @@ namespace crow
+         std::string body; ///< The actual payload containing the response data.
+         ci_map headers; ///< HTTP headers.
+         bool compressed = true; ///< If compression is enabled and this is false, the individual response will not be compressed.
+-        bool is_head_response = false; ///< Whether this is a response to a HEAD request.
+-        bool manual_length_header = false; ///< Whether Crow should automatically add a "Content-Length" header.
+ 
+         /// Set the value of an existing header in the response.
+         void set_header(std::string key, std::string value)
+@@ -149,12 +147,7 @@ namespace crow
+             if (!completed_)
+             {
+                 completed_ = true;
+-                if (is_head_response)
+-                {
+-                    set_header("Content-Length", std::to_string(body.size()));
+-                    body = "";
+-                    manual_length_header = true;
+-                }
++
+                 if (complete_request_handler_)
+                 {
+                     complete_request_handler_();
+diff --git a/include/crow/routing.h b/include/crow/routing.h
+index 240615d36..d80c779fb 100644
+--- a/include/crow/routing.h
++++ b/include/crow/routing.h
+@@ -624,13 +624,7 @@ namespace crow
+         {
+         }
+ 
+-        ///Check whether or not the trie is empty.
+-        bool is_empty()
+-        {
+-            return nodes_.size() > 1;
+-        }
+-
+-    private:
++private:
+         void optimizeNode(Node* node)
+         {
+             for(auto x : node->param_childrens)
+@@ -681,7 +675,7 @@ namespace crow
+             optimizeNode(head());
+         }
+ 
+-    public:
++public:
+         void validate()
+         {
+             if (!head()->IsSimpleNode())
+@@ -1006,7 +1000,6 @@ namespace crow
+             }
+         }
+ 
+-        //TODO maybe add actual_method
+         template <typename Adaptor>
+         void handle_upgrade(const request& req, response& res, Adaptor&& adaptor)
+         {
+@@ -1082,63 +1075,9 @@ namespace crow
+ 
+         void handle(const request& req, response& res)
+         {
+-            HTTPMethod method_actual = req.method;
+             if (req.method >= HTTPMethod::InternalMethodCount)
+                 return;
+-            else if (req.method == HTTPMethod::HEAD)
+-            {
+-                method_actual = HTTPMethod::GET;
+-                res.is_head_response = true;
+-            }
+-            else if (req.method == HTTPMethod::OPTIONS)
+-            {
+-                std::string allow = "OPTIONS, HEAD, ";
+-
+-                if (req.url == "/*")
+-                {
+-                    for(int i = 0; i < static_cast<int>(HTTPMethod::InternalMethodCount); i ++)
+-                    {
+-                        if (per_methods_[i].trie.is_empty())
+-                        {
+-                            allow += method_name(static_cast<HTTPMethod>(i)) + ", ";
+-                        }
+-                    }
+-                        allow = allow.substr(0, allow.size()-2);
+-                        res = response(204);
+-                        res.set_header("Allow", allow);
+-                        res.manual_length_header = true;
+-                        res.end();
+-                        return;
+-                }
+-                else
+-                {
+-                    for(int i = 0; i < static_cast<int>(HTTPMethod::InternalMethodCount); i ++)
+-                    {
+-                        if (per_methods_[i].trie.find(req.url).first)
+-                        {
+-                            allow += method_name(static_cast<HTTPMethod>(i)) + ", ";
+-                        }
+-                    }
+-                    if (allow != "OPTIONS, HEAD, ")
+-                    {
+-                        allow = allow.substr(0, allow.size()-2);
+-                        res = response(204);
+-                        res.set_header("Allow", allow);
+-                        res.manual_length_header = true;
+-                        res.end();
+-                        return;
+-                    }
+-                    else
+-                    {
+-                        CROW_LOG_DEBUG << "Cannot match rules " << req.url;
+-                        res = response(404);
+-                        res.end();
+-                        return;
+-                    }
+-                }
+-            }
+-
+-            auto& per_method = per_methods_[static_cast<int>(method_actual)];
++            auto& per_method = per_methods_[static_cast<int>(req.method)];
+             auto& trie = per_method.trie;
+             auto& rules = per_method.rules;
+ 
+@@ -1152,7 +1091,7 @@ namespace crow
+                 {
+                     if (per_method.trie.find(req.url).first)
+                     {
+-                        CROW_LOG_DEBUG << "Cannot match method " << req.url << " " << method_name(method_actual);
++                        CROW_LOG_DEBUG << "Cannot match method " << req.url << " " << method_name(req.method);
+                         res = response(405);
+                         res.end();
+                         return;
+diff --git a/tests/unittest.cpp b/tests/unittest.cpp
+index 16eeabc49..b18e243e2 100644
+--- a/tests/unittest.cpp
++++ b/tests/unittest.cpp
+@@ -379,54 +379,6 @@ TEST_CASE("http_method")
+ 
+     CHECK(405 == res.code);
+   }
+-
+-  {
+-    request req;
+-    response res;
+-
+-    req.url = "/get_only";
+-    req.method = "HEAD"_method;
+-    app.handle(req, res);
+-
+-    CHECK(200 == res.code);
+-    CHECK("" == res.body);
+-  }
+-
+-  {
+-    request req;
+-    response res;
+-
+-    req.url = "/";
+-    req.method = "OPTIONS"_method;
+-    app.handle(req, res);
+-
+-    CHECK(204 == res.code);
+-    CHECK("OPTIONS, HEAD, GET, POST" == res.get_header_value("Allow"));
+-  }
+-
+-  {
+-    request req;
+-    response res;
+-
+-    req.url = "/does_not_exist";
+-    req.method = "OPTIONS"_method;
+-    app.handle(req, res);
+-
+-    CHECK(404 == res.code);
+-  }
+-
+-  {
+-    request req;
+-    response res;
+-
+-    req.url = "/*";
+-    req.method = "OPTIONS"_method;
+-    app.handle(req, res);
+-
+-    CHECK(204 == res.code);
+-    CHECK("OPTIONS, HEAD, GET, POST, PATCH, PURGE" == res.get_header_value("Allow"));
+-
+-  }
+ }
+ 
+ TEST_CASE("server_handling_error_request")

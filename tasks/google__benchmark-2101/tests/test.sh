@@ -14,21 +14,35 @@ cp "/tests/register_benchmark_test.cc" "test/register_benchmark_test.cc"
 mkdir -p "test"
 cp "/tests/time_unit_gtest.cc" "test/time_unit_gtest.cc"
 
-# Rebuild tests with the updated source files from /tests
-cd build
-if ! cmake --build . --config Debug -j 1; then
-  echo "Build failed" >&2
-  test_status=1
-else
-  # Run the specific test executables
-  # GoogleTest tests can be run directly as executables
-  ./test/benchmark_setup_teardown_cb_types_gtest && \
-  ./test/memory_results_gtest && \
-  ./test/time_unit_gtest && \
-  ./test/options_test --benchmark_min_time=0.01s && \
-  ./test/register_benchmark_test --benchmark_min_time=0.01s
-  test_status=$?
-fi
+# Rebuild with the fixed test files
+echo "Rebuilding with fixed test files..."
+rm -rf build
+cmake -B build -G Ninja \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_CXX_STANDARD=14 \
+    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
+    -DBENCHMARK_ENABLE_TESTING=ON \
+    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
+    -DBENCHMARK_ENABLE_WERROR=OFF \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+# Build the specific test targets
+cmake --build build --config Debug --target benchmark_setup_teardown_cb_types_gtest -j 1
+cmake --build build --config Debug --target memory_results_gtest -j 1
+cmake --build build --config Debug --target options_test -j 1
+cmake --build build --config Debug --target register_benchmark_test -j 1
+cmake --build build --config Debug --target time_unit_gtest -j 1
+
+# Run all the specific test files
+echo "Running tests..."
+./build/test/benchmark_setup_teardown_cb_types_gtest && \
+./build/test/memory_results_gtest && \
+./build/test/options_test && \
+./build/test/register_benchmark_test && \
+./build/test/time_unit_gtest
+test_status=$?
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

@@ -1,11 +1,18 @@
-Downstream projects that consume fmt as a subproject (e.g., via CMake `add_subdirectory`) and use modern CMake to request a specific C++ standard (such as `target_compile_features(my_target PRIVATE cxx_std_17)` or otherwise relying on the target’s compile features) can have their requested language standard overridden when fmt is configured. This happens because fmt hard-codes the global CMake variable `CMAKE_CXX_STANDARD` during configuration to enforce its own minimum standard. As a result, the consuming project’s targets may end up being compiled with fmt’s default/forced standard instead of the standard the consumer requested.
+Downstream CMake projects that consume fmt via add_subdirectory() can have their chosen C++ standard silently overridden by fmt’s CMake configuration.
 
-The expected behavior is that fmt expresses its C++ standard requirement on its own targets using target-based mechanisms (CMake `target_compile_features`) rather than setting the global `CMAKE_CXX_STANDARD`. When a consumer requests C++17 (or newer) for their own targets, adding fmt as a subdirectory should not change that request or force a different standard for the consumer’s targets.
+A common modern setup is that the consuming project enables its desired C++ standard using target_compile_features() (e.g., requesting C++17 on its own targets) rather than setting the global CMAKE_CXX_STANDARD variable. When fmt is added as a subdirectory, fmt’s CMake logic currently hardcodes CMAKE_CXX_STANDARD (and related variables) to ensure fmt is compiled with at least a baseline standard (e.g., C++11/14). This global assignment leaks into the parent project’s configuration and can downgrade/override the consumer’s standard selection, breaking builds or changing compilation flags unexpectedly.
 
-Update fmt’s CMake configuration so that:
+Reproduction example:
+- A top-level project defines an executable/library target and uses target_compile_features(<target> PRIVATE cxx_std_17) (or similar) to require C++17.
+- The same project adds fmt via add_subdirectory(fmt).
+- After configuration/generation, the consuming target or other targets may end up compiling with fmt’s default standard instead of the requested one unless the user preemptively sets CMAKE_CXX_STANDARD before adding fmt.
 
-- fmt’s library targets (including the normal library target and the header-only variant when available) declare the minimum required C++ standard via `target_compile_features` (e.g., `cxx_std_11` / `cxx_std_14` as appropriate for fmt’s support policy) instead of globally setting `CMAKE_CXX_STANDARD`.
-- Consuming projects using `add_subdirectory` can set their own compile features (e.g., `cxx_std_17`) and keep that standard without needing to set `CMAKE_CXX_STANDARD` before including fmt.
-- Consumption via `find_package(FMT REQUIRED)` and linking against `fmt::fmt` (and `fmt::fmt-header-only` when present) continues to work with the same expected compile feature requirements propagated through the imported targets.
+Expected behavior:
+- Adding fmt as a subdirectory must not override the parent project’s chosen language standard policy.
+- fmt should express its own minimum required C++ standard via target-level requirements so it compiles correctly without forcing global CMAKE_CXX_STANDARD on the entire build.
+- Projects using find_package(FMT) or add_subdirectory(fmt) should both work without requiring consumers to set CMAKE_CXX_STANDARD globally.
 
-If fmt relies on `cxx_std_11` (or similar compile features), ensure the project’s minimum supported CMake version is high enough for these compile features to be available; otherwise configuration should fail clearly rather than silently falling back to overriding `CMAKE_CXX_STANDARD`.
+Actual behavior:
+- fmt’s CMake configuration sets CMAKE_CXX_STANDARD (and/or related global CMake C++ standard variables), which can override a downstream project that relies on target_compile_features() to select its standard.
+
+Implement the change so that fmt advertises/enforces its minimum C++ standard using target_compile_features() (e.g., cxx_std_11 or cxx_std_14 as appropriate) on its exported targets (including the header-only target if present), instead of hardcoding CMAKE_CXX_STANDARD globally. If this requires raising the minimum supported CMake version to one that supports the needed cxx_std_* compile features, adjust the project’s minimum accordingly so configuration is consistent.

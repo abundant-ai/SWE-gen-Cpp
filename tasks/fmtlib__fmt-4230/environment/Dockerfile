@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CMake for building C++ project
+# Install CMake for building the C++ project
 RUN apt-get update && apt-get install -y \
     cmake \
     && rm -rf /var/lib/apt/lists/*
@@ -25,25 +25,24 @@ RUN git clone https://github.com/fmtlib/fmt.git src && \
 
 WORKDIR /app/src
 
-# Configure and build the project with CMake
+# Configure the project with CMake
 RUN cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
-    -DFMT_TEST=ON \
-    && cmake --build build --parallel $(nproc)
+    -DCMAKE_CXX_STANDARD=20 \
+    -DFMT_TEST=ON
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Clean and rebuild after applying bug.patch
-RUN rm -rf build && \
-    cmake -S . -B build \
+# Reconfigure after applying bug.patch
+RUN cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
-    -DFMT_TEST=ON \
-    && cmake --build build --parallel $(nproc)
+    -DCMAKE_CXX_STANDARD=20 \
+    -DFMT_TEST=ON
 
 RUN rm -rf /app/src/.git
 

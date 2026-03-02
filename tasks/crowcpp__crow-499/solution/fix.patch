@@ -1,0 +1,705 @@
+diff --git a/include/crow/app.h b/include/crow/app.h
+index 33c2ac3e1..8ac162b25 100644
+--- a/include/crow/app.h
++++ b/include/crow/app.h
+@@ -76,10 +76,24 @@ namespace crow
+             router_.handle_upgrade(req, res, adaptor);
+         }
+ 
+-        /// Process the request and generate a response for it
+-        void handle(request& req, response& res)
++        /// Process only the method and URL of a request and provide a route (or an error response)
++        std::unique_ptr<routing_handle_result> handle_initial(request& req, response& res)
+         {
+-            router_.handle<self_t>(req, res);
++            return router_.handle_initial(req, res);
++        }
++
++        /// Process the fully parsed request and generate a response for it
++        void handle(request& req, response& res, std::unique_ptr<routing_handle_result>& found)
++        {
++            router_.handle<self_t>(req, res, *found);
++        }
++
++        /// Process a fully parsed request from start to finish (primarily used for debugging)
++        void handle_full(request& req, response& res)
++        {
++            auto found = handle_initial(req, res);
++            if (found->rule_index)
++                handle(req, res, found);
+         }
+ 
+         /// Create a dynamic route using a rule (**Use CROW_ROUTE instead**)
+@@ -327,6 +341,9 @@ namespace crow
+         }
+ 
+         /// Non-blocking version of \ref run()
++        ///
++        /// The output from this method needs to be saved into a variable!
++        /// Otherwise the call will be made on the same thread.
+         std::future<void> run_async()
+         {
+             return std::async(std::launch::async, [&] {
+diff --git a/include/crow/common.h b/include/crow/common.h
+index 9b008215b..91a77cb29 100644
+--- a/include/crow/common.h
++++ b/include/crow/common.h
+@@ -275,6 +275,27 @@ namespace crow
+         return string_params[index];
+     }
+     /// @endcond
++
++    struct routing_handle_result
++    {
++        uint16_t rule_index;
++        std::vector<uint16_t> blueprint_indices;
++        routing_params r_params;
++        HTTPMethod method;
++
++        routing_handle_result() {}
++
++        routing_handle_result(uint16_t rule_index_, std::vector<uint16_t> blueprint_indices_, routing_params r_params_):
++          rule_index(rule_index_),
++          blueprint_indices(blueprint_indices_),
++          r_params(r_params_) {}
++
++        routing_handle_result(uint16_t rule_index_, std::vector<uint16_t> blueprint_indices_, routing_params r_params_, HTTPMethod method_):
++          rule_index(rule_index_),
++          blueprint_indices(blueprint_indices_),
++          r_params(r_params_),
++          method(method_) {}
++    };
+ } // namespace crow
+ 
+ // clang-format off
+diff --git a/include/crow/http_connection.h b/include/crow/http_connection.h
+index 9d4a2b433..7e74753cb 100644
+--- a/include/crow/http_connection.h
++++ b/include/crow/http_connection.h
+@@ -48,6 +48,7 @@ namespace crow
+           adaptor_(io_service, adaptor_ctx_),
+           handler_(handler),
+           parser_(this),
++          req_(parser_.req),
+           server_name_(server_name),
+           middlewares_(middlewares),
+           get_cached_date_str(get_cached_date_str_f),
+@@ -94,10 +95,21 @@ namespace crow
+             });
+         }
+ 
++        void handle_url()
++        {
++            routing_handle_result_ = handler_->handle_initial(req_, res);
++            // if no route is found for the request method, return the response without parsing or processing anything further.
++            if (!routing_handle_result_->rule_index)
++            {
++                parser_.done();
++                complete_request();
++            }
++        }
++
+         void handle_header()
+         {
+             // HTTP 1.1 Expect: 100-continue
+-            if (parser_.http_major == 1 && parser_.http_minor == 1 && get_header_value(parser_.headers, "expect") == "100-continue") // Using the parser because the request isn't made yet.
++            if (req_.http_ver_major == 1 && req_.http_ver_minor == 1 && get_header_value(req_.headers, "expect") == "100-continue")
+             {
+                 buffers_.clear();
+                 static std::string expect_100_continue = "HTTP/1.1 100 Continue\r\n\r\n";
+@@ -108,29 +120,27 @@ namespace crow
+ 
+         void handle()
+         {
++            // TODO(EDev): cancel_deadline_timer should be looked into, it might be a good idea to add it to handle_url() and then restart the timer once everything passes
+             cancel_deadline_timer();
+             bool is_invalid_request = false;
+             add_keep_alive_ = false;
+ 
+-            req_ = std::move(parser_.to_request());
+-            request& req = req_;
+-
+-            req.remote_ip_address = adaptor_.remote_endpoint().address().to_string();
++            req_.remote_ip_address = adaptor_.remote_endpoint().address().to_string();
+ 
+-            add_keep_alive_ = req.keep_alive;
+-            close_connection_ = req.close_connection;
++            add_keep_alive_ = req_.keep_alive;
++            close_connection_ = req_.close_connection;
+ 
+-            if (req.check_version(1, 1)) // HTTP/1.1
++            if (req_.check_version(1, 1)) // HTTP/1.1
+             {
+-                if (!req.headers.count("host"))
++                if (!req_.headers.count("host"))
+                 {
+                     is_invalid_request = true;
+                     res = response(400);
+                 }
+-                if (req.upgrade)
++                if (req_.upgrade)
+                 {
+                     // h2 or h2c headers
+-                    if (req.get_header_value("upgrade").substr(0, 2) == "h2")
++                    if (req_.get_header_value("upgrade").substr(0, 2) == "h2")
+                     {
+                         // TODO(ipkn): HTTP/2
+                         // currently, ignore upgrade header
+@@ -138,13 +148,13 @@ namespace crow
+                     else
+                     {
+                         close_connection_ = true;
+-                        handler_->handle_upgrade(req, res, std::move(adaptor_));
++                        handler_->handle_upgrade(req_, res, std::move(adaptor_));
+                         return;
+                     }
+                 }
+             }
+ 
+-            CROW_LOG_INFO << "Request: " << utility::lexical_cast<std::string>(adaptor_.remote_endpoint()) << " " << this << " HTTP/" << (char)(req.http_ver_major + '0') << "." << (char)(req.http_ver_minor + '0') << ' ' << method_name(req.method) << " " << req.url;
++            CROW_LOG_INFO << "Request: " << utility::lexical_cast<std::string>(adaptor_.remote_endpoint()) << " " << this << " HTTP/" << (char)(req_.http_ver_major + '0') << "." << (char)(req_.http_ver_minor + '0') << ' ' << method_name(req_.method) << " " << req_.url;
+ 
+ 
+             need_to_call_after_handlers_ = false;
+@@ -156,12 +166,12 @@ namespace crow
+                 };
+ 
+                 ctx_ = detail::context<Middlewares...>();
+-                req.middleware_context = static_cast<void*>(&ctx_);
+-                req.middleware_container = static_cast<void*>(middlewares_);
+-                req.io_service = &adaptor_.get_io_service();
++                req_.middleware_context = static_cast<void*>(&ctx_);
++                req_.middleware_container = static_cast<void*>(middlewares_);
++                req_.io_service = &adaptor_.get_io_service();
+ 
+                 detail::middleware_call_helper<detail::middleware_call_criteria_only_global,
+-                                               0, decltype(ctx_), decltype(*middlewares_)>({}, *middlewares_, req, res, ctx_);
++                                               0, decltype(ctx_), decltype(*middlewares_)>({}, *middlewares_, req_, res, ctx_);
+ 
+                 if (!res.completed_)
+                 {
+@@ -169,7 +179,7 @@ namespace crow
+                         this->complete_request();
+                     };
+                     need_to_call_after_handlers_ = true;
+-                    handler_->handle(req, res);
++                    handler_->handle(req_, res, routing_handle_result_);
+                     if (add_keep_alive_)
+                         res.set_header("connection", "Keep-Alive");
+                 }
+@@ -593,7 +603,8 @@ namespace crow
+         std::array<char, 4096> buffer_;
+ 
+         HTTPParser<Connection> parser_;
+-        request req_;
++        std::unique_ptr<routing_handle_result> routing_handle_result_;
++        request& req_;
+         response res;
+ 
+         bool close_connection_ = false;
+diff --git a/include/crow/http_parser_merged.h b/include/crow/http_parser_merged.h
+index 737172636..547ed68ba 100644
+--- a/include/crow/http_parser_merged.h
++++ b/include/crow/http_parser_merged.h
+@@ -98,6 +98,7 @@ enum http_connection_flags // This is basically 7 booleans placed into 1 integer
+                                                                                         \
+   /* Callback-related errors */                                                         \
+   CROW_XX(CB_message_begin, "the on_message_begin callback failed")                     \
++  CROW_XX(CB_method, "the on_method callback failed")                                   \
+   CROW_XX(CB_url, "the \"on_url\" callback failed")                                     \
+   CROW_XX(CB_header_field, "the \"on_header_field\" callback failed")                   \
+   CROW_XX(CB_header_value, "the \"on_header_value\" callback failed")                   \
+@@ -179,6 +180,7 @@ enum http_errno {
+     struct http_parser_settings
+     {
+         http_cb on_message_begin;
++        http_cb on_method;
+         http_data_cb on_url;
+         http_data_cb on_header_field;
+         http_data_cb on_header_value;
+@@ -855,6 +857,8 @@ reexecute:
+           goto error;
+         }
+ 
++        CROW_CALLBACK_NOTIFY_NOADVANCE(method);
++
+         ++parser->index;
+         break;
+       }
+diff --git a/include/crow/http_request.h b/include/crow/http_request.h
+index a85eee824..6be82e7ae 100644
+--- a/include/crow/http_request.h
++++ b/include/crow/http_request.h
+@@ -29,12 +29,14 @@ namespace crow
+         HTTPMethod method;
+         std::string raw_url;     ///< The full URL containing the `?` and URL parameters.
+         std::string url;         ///< The endpoint without any parameters.
+-        query_string url_params; ///< The parameters associated with the request. (everything after the `?`)
++        query_string url_params; ///< The parameters associated with the request. (everything after the `?` in the URL)
+         ci_map headers;
+         std::string body;
+         std::string remote_ip_address; ///< The IP address from which the request was sent.
+         unsigned char http_ver_major, http_ver_minor;
+-        bool keep_alive, close_connection, upgrade;
++        bool keep_alive,    ///< Whether or not the server should send a `connection: Keep-Alive` header to the client.
++          close_connection, ///< Whether or not the server should shut down the TCP connection once a response is sent.
++          upgrade;          ///< Whether or noth the server should change the HTTP connection to a different connection.
+ 
+         void* middleware_context{};
+         void* middleware_container{};
+diff --git a/include/crow/parser.h b/include/crow/parser.h
+index 095565b32..001951f9d 100644
+--- a/include/crow/parser.h
++++ b/include/crow/parser.h
+@@ -22,10 +22,22 @@ namespace crow
+             self->clear();
+             return 0;
+         }
++        static int on_method(http_parser* self_)
++        {
++            HTTPParser* self = static_cast<HTTPParser*>(self_);
++            self->req.method = static_cast<HTTPMethod>(self->method);
++
++            return 0;
++        }
+         static int on_url(http_parser* self_, const char* at, size_t length)
+         {
+             HTTPParser* self = static_cast<HTTPParser*>(self_);
+-            self->raw_url.insert(self->raw_url.end(), at, at + length);
++            self->req.raw_url.insert(self->req.raw_url.end(), at, at + length);
++            self->req.url_params = query_string(self->req.raw_url);
++            self->req.url = self->req.raw_url.substr(0, self->qs_point != 0 ? self->qs_point : std::string::npos);
++
++            self->process_url();
++
+             return 0;
+         }
+         static int on_header_field(http_parser* self_, const char* at, size_t length)
+@@ -36,7 +48,7 @@ namespace crow
+                 case 0:
+                     if (!self->header_value.empty())
+                     {
+-                        self->headers.emplace(std::move(self->header_field), std::move(self->header_value));
++                        self->req.headers.emplace(std::move(self->header_field), std::move(self->header_value));
+                     }
+                     self->header_field.assign(at, at + length);
+                     self->header_building_state = 1;
+@@ -67,7 +79,7 @@ namespace crow
+             HTTPParser* self = static_cast<HTTPParser*>(self_);
+             if (!self->header_field.empty())
+             {
+-                self->headers.emplace(std::move(self->header_field), std::move(self->header_value));
++                self->req.headers.emplace(std::move(self->header_field), std::move(self->header_value));
+             }
+ 
+             self->set_connection_parameters();
+@@ -78,17 +90,13 @@ namespace crow
+         static int on_body(http_parser* self_, const char* at, size_t length)
+         {
+             HTTPParser* self = static_cast<HTTPParser*>(self_);
+-            self->body.insert(self->body.end(), at, at + length);
++            self->req.body.insert(self->req.body.end(), at, at + length);
+             return 0;
+         }
+         static int on_message_complete(http_parser* self_)
+         {
+             HTTPParser* self = static_cast<HTTPParser*>(self_);
+ 
+-            // url params
+-            self->url = self->raw_url.substr(0, self->qs_point != 0 ? self->qs_point : std::string::npos);
+-            self->url_params = query_string(self->raw_url);
+-
+             self->process_message();
+             return 0;
+         }
+@@ -104,6 +112,7 @@ namespace crow
+         {
+             const static http_parser_settings settings_{
+               on_message_begin,
++              on_method,
+               on_url,
+               on_header_field,
+               on_header_value,
+@@ -127,19 +136,16 @@ namespace crow
+ 
+         void clear()
+         {
+-            url.clear();
+-            raw_url.clear();
++            req = crow::request();
+             header_field.clear();
+             header_value.clear();
+-            headers.clear();
+-            url_params.clear();
+-            body.clear();
+             header_building_state = 0;
+             qs_point = 0;
+-            http_major = 0;
+-            http_minor = 0;
+-            keep_alive = false;
+-            close_connection = false;
++        }
++
++        inline void process_url()
++        {
++            handler_->handle_url();
+         }
+ 
+         inline void process_header()
+@@ -154,36 +160,32 @@ namespace crow
+ 
+         inline void set_connection_parameters()
+         {
++            req.http_ver_major = http_major;
++            req.http_ver_minor = http_minor;
++
+             //NOTE(EDev): it seems that the problem is with crow's policy on closing the connection for HTTP_VERSION < 1.0, the behaviour for that in crow is "don't close the connection, but don't send a keep-alive either"
+ 
+             // HTTP1.1 = always send keep_alive, HTTP1.0 = only send if header exists, HTTP?.? = never send
+-            keep_alive = (http_major == 1 && http_minor == 0) ?
+-                           ((flags & F_CONNECTION_KEEP_ALIVE) ? true : false) :
+-                           ((http_major == 1 && http_minor == 1) ? true : false);
++            req.keep_alive = (http_major == 1 && http_minor == 0) ?
++                               ((flags & F_CONNECTION_KEEP_ALIVE) ? true : false) :
++                               ((http_major == 1 && http_minor == 1) ? true : false);
+ 
+             // HTTP1.1 = only close if close header exists, HTTP1.0 = always close unless keep_alive header exists, HTTP?.?= never close
+-            close_connection = (http_major == 1 && http_minor == 0) ?
+-                                 ((flags & F_CONNECTION_KEEP_ALIVE) ? false : true) :
+-                                 ((http_major == 1 && http_minor == 1) ? ((flags & F_CONNECTION_CLOSE) ? true : false) : false);
+-        }
+-
+-        /// Take the parsed HTTP request data and convert it to a \ref crow.request
+-        request to_request() const
+-        {
+-            return request{static_cast<HTTPMethod>(method), std::move(raw_url), std::move(url), std::move(url_params), std::move(headers), std::move(body), http_major, http_minor, keep_alive, close_connection, static_cast<bool>(upgrade)};
++            req.close_connection = (http_major == 1 && http_minor == 0) ?
++                                     ((flags & F_CONNECTION_KEEP_ALIVE) ? false : true) :
++                                     ((http_major == 1 && http_minor == 1) ? ((flags & F_CONNECTION_CLOSE) ? true : false) : false);
++            req.upgrade = static_cast<bool>(upgrade);
+         }
+ 
+-        std::string raw_url;
+-        std::string url;
++        /// The final request that this parser outputs.
++        ///
++        /// Data parsed is put directly into this object as soon as the related callback returns. (e.g. the request will have the cooorect method as soon as on_method() returns)
++        request req;
+ 
++    private:
+         int header_building_state = 0;
+         std::string header_field;
+         std::string header_value;
+-        ci_map headers;
+-        query_string url_params; ///< What comes after the `?` in the URL.
+-        std::string body;
+-        bool keep_alive;       ///< Whether or not the server should send a `connection: Keep-Alive` header to the client.
+-        bool close_connection; ///< Whether or not the server should shut down the TCP connection once a response is sent.
+ 
+         Handler* handler_; ///< This is currently an HTTP connection object (\ref crow.Connection).
+     };
+diff --git a/include/crow/routing.h b/include/crow/routing.h
+index 8ad887bc5..c01b56705 100644
+--- a/include/crow/routing.h
++++ b/include/crow/routing.h
+@@ -1,4 +1,4 @@
+-#pragma once
++﻿#pragma once
+ 
+ #include <cstdint>
+ #include <utility>
+@@ -773,27 +773,33 @@ namespace crow
+                 switch (node->param)
+                 {
+                     case ParamType::INT:
+-                        CROW_LOG_DEBUG << std::string(2 * level, ' ') << "<int>";
++                        CROW_LOG_DEBUG << std::string(3 * level, ' ') << "└➝ "
++                                       << "<int>";
+                         break;
+                     case ParamType::UINT:
+-                        CROW_LOG_DEBUG << std::string(2 * level, ' ') << "<uint>";
++                        CROW_LOG_DEBUG << std::string(3 * level, ' ') << "└➝ "
++                                       << "<uint>";
+                         break;
+                     case ParamType::DOUBLE:
+-                        CROW_LOG_DEBUG << std::string(2 * level, ' ') << "<double>";
++                        CROW_LOG_DEBUG << std::string(3 * level, ' ') << "└➝ "
++                                       << "<double>";
+                         break;
+                     case ParamType::STRING:
+-                        CROW_LOG_DEBUG << std::string(2 * level, ' ') << "<string>";
++                        CROW_LOG_DEBUG << std::string(3 * level, ' ') << "└➝ "
++                                       << "<string>";
+                         break;
+                     case ParamType::PATH:
+-                        CROW_LOG_DEBUG << std::string(2 * level, ' ') << "<path>";
++                        CROW_LOG_DEBUG << std::string(3 * level, ' ') << "└➝ "
++                                       << "<path>";
+                         break;
+                     default:
+-                        CROW_LOG_DEBUG << std::string(2 * level, ' ') << "<ERROR>";
++                        CROW_LOG_DEBUG << std::string(3 * level, ' ') << "└➝ "
++                                       << "<ERROR>";
+                         break;
+                 }
+             }
+             else
+-                CROW_LOG_DEBUG << std::string(2 * level, ' ') << node->key;
++                CROW_LOG_DEBUG << std::string(3 * level, ' ') << "└➝ " << node->key;
+ 
+             for (auto& child : node->children)
+             {
+@@ -804,7 +810,7 @@ namespace crow
+     public:
+         void debug_print()
+         {
+-            CROW_LOG_DEBUG << "HEAD";
++            CROW_LOG_DEBUG << "└➙ ROOT";
+             for (auto& child : head_.children)
+                 debug_node_print(child, 1);
+         }
+@@ -817,7 +823,7 @@ namespace crow
+         }
+ 
+         //Rule_index, Blueprint_index, routing_params
+-        std::tuple<uint16_t, std::vector<uint16_t>, routing_params> find(const std::string& req_url, const Node* node = nullptr, unsigned pos = 0, routing_params* params = nullptr, std::vector<uint16_t>* blueprints = nullptr) const
++        routing_handle_result find(const std::string& req_url, const Node* node = nullptr, unsigned pos = 0, routing_params* params = nullptr, std::vector<uint16_t>* blueprints = nullptr) const
+         {
+             //start params as an empty struct
+             routing_params empty;
+@@ -836,12 +842,12 @@ namespace crow
+             if (node == nullptr)
+                 node = &head_;
+ 
+-            auto update_found = [&found, &found_BP, &match_params](std::tuple<uint16_t, std::vector<uint16_t>, routing_params>& ret) {
+-                found_BP = std::move(std::get<1>(ret));
+-                if (std::get<0>(ret) && (!found || found > std::get<0>(ret)))
++            auto update_found = [&found, &found_BP, &match_params](routing_handle_result& ret) {
++                found_BP = std::move(ret.blueprint_indices);
++                if (ret.rule_index && (!found || found > ret.rule_index))
+                 {
+-                    found = std::get<0>(ret);
+-                    match_params = std::move(std::get<2>(ret));
++                    found = ret.rule_index;
++                    match_params = std::move(ret.r_params);
+                 }
+             };
+ 
+@@ -849,7 +855,7 @@ namespace crow
+             if (pos == req_url.size())
+             {
+                 found_BP = std::move(*blueprints);
+-                return std::tuple<uint16_t, std::vector<uint16_t>, routing_params>{node->rule_index, *blueprints, *params};
++                return routing_handle_result{node->rule_index, *blueprints, *params};
+             }
+ 
+             bool found_fragment = false;
+@@ -976,7 +982,7 @@ namespace crow
+             if (!found_fragment)
+                 found_BP = std::move(*blueprints);
+ 
+-            return std::tuple<uint16_t, std::vector<uint16_t>, routing_params>{found, found_BP, match_params}; //Called after all the recursions have been done
++            return routing_handle_result{found, found_BP, match_params}; //Called after all the recursions have been done
+         }
+ 
+         //This functions assumes any blueprint info passed is valid
+@@ -1393,13 +1399,13 @@ namespace crow
+ 
+             auto& per_method = per_methods_[static_cast<int>(req.method)];
+             auto& rules = per_method.rules;
+-            unsigned rule_index = std::get<0>(per_method.trie.find(req.url));
++            unsigned rule_index = per_method.trie.find(req.url).rule_index;
+ 
+             if (!rule_index)
+             {
+                 for (auto& per_method : per_methods_)
+                 {
+-                    if (std::get<0>(per_method.trie.find(req.url)))
++                    if (per_method.trie.find(req.url).rule_index)
+                     {
+                         CROW_LOG_DEBUG << "Cannot match method " << req.url << " " << method_name(req.method);
+                         res = response(405);
+@@ -1500,14 +1506,14 @@ namespace crow
+         }
+ 
+         /// Is used to handle errors, you insert the error code, found route, request, and response. and it'll either call the appropriate catchall route (considering the blueprint system) and send you a status string (which is mainly used for debug messages), or just set the response code to the proper error code.
+-        std::string get_error(unsigned short code, std::tuple<uint16_t, std::vector<uint16_t>, routing_params>& found, const request& req, response& res)
++        std::string get_error(unsigned short code, routing_handle_result& found, const request& req, response& res)
+         {
+             res.code = code;
+             std::vector<Blueprint*> bps_found;
+-            get_found_bp(std::get<1>(found), blueprints_, bps_found);
++            get_found_bp(found.blueprint_indices, blueprints_, bps_found);
+             for (int i = bps_found.size() - 1; i > 0; i--)
+             {
+-                std::vector<uint16_t> bpi = std::get<1>(found);
++                std::vector<uint16_t> bpi = found.blueprint_indices;
+                 if (bps_found[i]->catchall_rule().has_handler())
+                 {
+                     bps_found[i]->catchall_rule().handler_(req, res);
+@@ -1530,19 +1536,40 @@ namespace crow
+             return std::string();
+         }
+ 
+-        template<typename App>
+-        void handle(request& req, response& res)
++        std::unique_ptr<routing_handle_result> handle_initial(request& req, response& res)
+         {
+             HTTPMethod method_actual = req.method;
+-            if (req.method >= HTTPMethod::InternalMethodCount)
+-                return;
++
++            std::unique_ptr<routing_handle_result> found{
++              new routing_handle_result(
++                0,
++                std::vector<uint16_t>(),
++                routing_params(),
++                HTTPMethod::InternalMethodCount)}; // This is always returned to avoid a null pointer dereference.
++
++            // NOTE(EDev): This most likely will never run since the parser should handle this situation and close the connection before it gets here.
++            if (CROW_UNLIKELY(req.method >= HTTPMethod::InternalMethodCount))
++                return found;
+             else if (req.method == HTTPMethod::Head)
+             {
++                *found = per_methods_[static_cast<int>(method_actual)].trie.find(req.url);
+                 // support HEAD requests using GET if not defined as method for the requested URL
+-                if (!std::get<0>(per_methods_[static_cast<int>(HTTPMethod::Head)].trie.find(req.url)))
++                if (!found->rule_index)
++                {
+                     method_actual = HTTPMethod::Get;
++                    *found = per_methods_[static_cast<int>(method_actual)].trie.find(req.url);
++                    if (!found->rule_index) // If a route is still not found, return a 404 without executing the rest of the HEAD specific code.
++                    {
++                        CROW_LOG_DEBUG << "Cannot match rules " << req.url;
++                        res = response(404); //TODO(EDev): Should this redirect to catchall?
++                        res.end();
++                        return found;
++                    }
++                }
+ 
+                 res.skip_body = true;
++                found->method = method_actual;
++                return found;
+             }
+             else if (req.method == HTTPMethod::Options)
+             {
+@@ -1564,14 +1591,15 @@ namespace crow
+                     res = response(204);
+                     res.set_header("Allow", allow);
+                     res.end();
+-                    return;
++                    found->method = method_actual;
++                    return found;
+                 }
+                 else
+                 {
+                     bool rules_matched = false;
+                     for (int i = 0; i < static_cast<int>(HTTPMethod::InternalMethodCount); i++)
+                     {
+-                        if (std::get<0>(per_methods_[i].trie.find(req.url)))
++                        if (per_methods_[i].trie.find(req.url).rule_index)
+                         {
+                             rules_matched = true;
+ 
+@@ -1587,45 +1615,53 @@ namespace crow
+                         res = response(204);
+                         res.set_header("Allow", allow);
+                         res.end();
+-                        return;
++                        found->method = method_actual;
++                        return found;
+                     }
+                     else
+                     {
+                         CROW_LOG_DEBUG << "Cannot match rules " << req.url;
+-                        res = response(404);
++                        res = response(404); //TODO(EDev): Should this redirect to catchall?
+                         res.end();
+-                        return;
++                        return found;
+                     }
+                 }
+             }
+-
+-            auto& per_method = per_methods_[static_cast<int>(method_actual)];
+-            auto& trie = per_method.trie;
+-            auto& rules = per_method.rules;
+-
+-            auto found = trie.find(req.url);
+-
+-            unsigned rule_index = std::get<0>(found);
+-
+-            if (!rule_index)
++            else // Every request that isn't a HEAD or OPTIONS request
+             {
+-                for (auto& per_method : per_methods_)
++                *found = per_methods_[static_cast<int>(method_actual)].trie.find(req.url);
++                // TODO(EDev): maybe ending the else here would allow the requests coming from above (after removing the return statement) to be checked on whether they actually point to a route
++                if (!found->rule_index)
+                 {
+-                    if (std::get<0>(per_method.trie.find(req.url))) //Route found, but in another method
++                    for (auto& per_method : per_methods_)
+                     {
+-                        const std::string error_message(get_error(405, found, req, res));
+-                        CROW_LOG_DEBUG << "Cannot match method " << req.url << " " << method_name(method_actual) << ". " << error_message;
+-                        res.end();
+-                        return;
++                        if (per_method.trie.find(req.url).rule_index) //Route found, but in another method
++                        {
++                            const std::string error_message(get_error(405, *found, req, res));
++                            CROW_LOG_DEBUG << "Cannot match method " << req.url << " " << method_name(method_actual) << ". " << error_message;
++                            res.end();
++                            return found;
++                        }
+                     }
++                    //Route does not exist anywhere
++
++                    const std::string error_message(get_error(404, *found, req, res));
++                    CROW_LOG_DEBUG << "Cannot match rules " << req.url << ". " << error_message;
++                    res.end();
++                    return found;
+                 }
+-                //Route does not exist anywhere
+ 
+-                const std::string error_message(get_error(404, found, req, res));
+-                CROW_LOG_DEBUG << "Cannot match rules " << req.url << ". " << error_message;
+-                res.end();
+-                return;
++                found->method = method_actual;
++                return found;
+             }
++        }
++
++        template<typename App>
++        void handle(request& req, response& res, routing_handle_result found)
++        {
++            HTTPMethod method_actual = found.method;
++            auto& rules = per_methods_[static_cast<int>(method_actual)].rules;
++            unsigned rule_index = found.rule_index;
+ 
+             if (rule_index >= rules.size())
+                 throw std::runtime_error("Trie internal structure corrupted!");
+@@ -1654,7 +1690,7 @@ namespace crow
+             try
+             {
+                 auto& rule = rules[rule_index];
+-                handle_rule<App>(rule, req, res, std::get<2>(found));
++                handle_rule<App>(rule, req, res, found.r_params);
+             }
+             catch (std::exception& e)
+             {
+@@ -1719,8 +1755,12 @@ namespace crow
+         {
+             for (int i = 0; i < static_cast<int>(HTTPMethod::InternalMethodCount); i++)
+             {
+-                CROW_LOG_DEBUG << method_name(static_cast<HTTPMethod>(i));
+-                per_methods_[i].trie.debug_print();
++                Trie& trie_ = per_methods_[i].trie;
++                if (!trie_.is_empty())
++                {
++                    CROW_LOG_DEBUG << method_name(static_cast<HTTPMethod>(i));
++                    trie_.debug_print();
++                }
+             }
+         }
+ 
