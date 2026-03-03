@@ -1,0 +1,1010 @@
+diff --git a/README.md b/README.md
+index 73769636..75f238ff 100644
+--- a/README.md
++++ b/README.md
+@@ -41,20 +41,11 @@ simdjson is easily consumable with a single .h and .cpp file.
+    100 results.
+    ```
+ 
+-## Real-world usage
+-
+-- [Microsoft FishStore](https://github.com/microsoft/FishStore)
+-- [Yandex ClickHouse](https://github.com/yandex/ClickHouse)
+-- [Clang Build Analyzer](https://github.com/aras-p/ClangBuildAnalyzer)
+-- [azul](https://github.com/tudelft3d/azul)
+-
+-If you are planning to use simdjson in a product, please work from one of our releases.
+-
+-## Research article (VLDB Journal)
++## How It Works
+ 
+-A description of the design and implementation of simdjson is in our research article:
++simdjson's startling speed is a result of research into the best ways to take advantage of modern superscalar architectures. The biggest factors are using parallel/vector algorithms and SIMD instructions to eliminate branches, reducing data dependency, and careful attention to cache.
+ 
+-* Geoff Langdale, Daniel Lemire, [Parsing Gigabytes of JSON per Second](https://arxiv.org/abs/1902.08318), VLDB Journal 28 (6), 2019appear)
++* A description of the design and implementation of simdjson is in our research article in VLDB journal: Geoff Langdale, Daniel Lemire, [Parsing Gigabytes of JSON per Second](https://arxiv.org/abs/1902.08318), VLDB Journal 28 (6), 2019appear)
+ 
+ We also have an informal [blog post providing some background and context](https://branchfree.org/2019/02/25/paper-parsing-gigabytes-of-json-per-second/).
+ 
+@@ -62,14 +53,20 @@ Some people [enjoy reading our paper](https://arxiv.org/abs/1902.08318):
+ 
+ [<img src="images/halvarflake.png" width="50%">](https://twitter.com/halvarflake/status/1118459536686362625)
+ 
+-
+ ## Talks
+ 
+ QCon San Francisco 2019 (best voted talk):
+ 
+ [![simdjson at QCon San Francisco 2019](http://img.youtube.com/vi/wlvKAT7SZIQ/0.jpg)](http://www.youtube.com/watch?v=wlvKAT7SZIQ)
+ 
++## Real-world usage
++
++- [Microsoft FishStore](https://github.com/microsoft/FishStore)
++- [Yandex ClickHouse](https://github.com/yandex/ClickHouse)
++- [Clang Build Analyzer](https://github.com/aras-p/ClangBuildAnalyzer)
++- [azul](https://github.com/tudelft3d/azul)
+ 
++If you are planning to use simdjson in a product, please work from one of our releases.
+ 
+ ## Performance results
+ 
+diff --git a/include/simdjson/document.h b/include/simdjson/document.h
+index d5a21b64..d1491e48 100644
+--- a/include/simdjson/document.h
++++ b/include/simdjson/document.h
+@@ -105,33 +105,6 @@ public:
+   operator object() const noexcept(false);
+ #endif // SIMDJSON_EXCEPTIONS
+ 
+-  /**
+-   * Get the value associated with the given key.
+-   *
+-   * The key will be matched against **unescaped** JSON:
+-   *
+-   *   document::parse(R"({ "a\n": 1 })")["a\n"].as_uint64_t().value == 1
+-   *   document::parse(R"({ "a\n": 1 })")["a\\n"].as_uint64_t().error == NO_SUCH_FIELD
+-   *
+-   * @return The value associated with the given key, or:
+-   *         - NO_SUCH_FIELD if the field does not exist in the object
+-   *         - UNEXPECTED_TYPE if the document is not an object
+-   */
+-  element_result operator[](const std::string_view &s) const noexcept;
+-  /**
+-   * Get the value associated with the given key.
+-   *
+-   * The key will be matched against **unescaped** JSON:
+-   *
+-   *   document::parse(R"({ "a\n": 1 })")["a\n"].as_uint64_t().value == 1
+-   *   document::parse(R"({ "a\n": 1 })")["a\\n"].as_uint64_t().error == NO_SUCH_FIELD
+-   *
+-   * @return The value associated with this field, or:
+-   *         - NO_SUCH_FIELD if the field does not exist in the object
+-   *         - UNEXPECTED_TYPE if the document is not an object
+-   */
+-  element_result operator[](const char *s) const noexcept;
+-
+   /**
+    * Dump the raw tape for debugging.
+    *
+@@ -215,6 +188,88 @@ public:
+   // We do not want to allow implicit conversion from C string to std::string.
+   doc_result parse(const char *buf, bool realloc_if_needed = true) noexcept = delete;
+ 
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc["/foo/a/1"] == 20
++   *   doc["/"]["foo"]["a"].at(1) == 20
++   *   doc[""]["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc["/foo/a/1"] == 20
++   *   doc["/"]["foo"]["a"].at(1) == 20
++   *   doc[""]["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](const char *json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc.at("/foo/a/1") == 20
++   *   doc.at("/")["foo"]["a"].at(1) == 20
++   *   doc.at("")["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result at(std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value at the given index.
++   *
++   * @return The value at the given index, or:
++   *         - INDEX_OUT_OF_BOUNDS if the array index is larger than an array length
++   */
++  inline element_result at(size_t index) const noexcept;
++
++  /**
++   * Get the value associated with the given key.
++   *
++   * The key will be matched against **unescaped** JSON:
++   *
++   *   document::parse(R"({ "a\n": 1 })")["a\n"].as_uint64_t().value == 1
++   *   document::parse(R"({ "a\n": 1 })")["a\\n"].as_uint64_t().error == NO_SUCH_FIELD
++   *
++   * @return The value associated with this field, or:
++   *         - NO_SUCH_FIELD if the field does not exist in the object
++   */
++  inline element_result at_key(std::string_view s) const noexcept;
++
++  /**
++   * Get the value associated with the given key.
++   *
++   * Note: The key will be matched against **unescaped** JSON:
++   *
++   *   document::parse(R"({ "a\n": 1 })")["a\n"].as_uint64_t().value == 1
++   *   document::parse(R"({ "a\n": 1 })")["a\\n"].as_uint64_t().error == NO_SUCH_FIELD
++   *
++   * @return The value associated with this field, or:
++   *         - NO_SUCH_FIELD if the field does not exist in the object
++   */
++  inline element_result at_key(const char *s) const noexcept;
++
+   std::unique_ptr<uint64_t[]> tape;
+   std::unique_ptr<uint8_t[]> string_buf;// should be at least byte_capacity
+ 
+@@ -268,6 +323,62 @@ public:
+    */
+   inline array_result as_array() const noexcept;
+ 
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc["/foo/a/1"] == 20
++   *   doc["/"]["foo"]["a"].at(1) == 20
++   *   doc[""]["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc["/foo/a/1"] == 20
++   *   doc["/"]["foo"]["a"].at(1) == 20
++   *   doc[""]["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](const char *json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc.at("/foo/a/1") == 20
++   *   doc.at("/")["foo"]["a"].at(1) == 20
++   *   doc.at("")["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result at(std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value at the given index.
++   *
++   * @return The value at the given index, or:
++   *         - INDEX_OUT_OF_BOUNDS if the array index is larger than an array length
++   */
++  inline element_result at(size_t index) const noexcept;
++
+   /**
+    * Get the value associated with the given key.
+    *
+@@ -278,22 +389,21 @@ public:
+    *
+    * @return The value associated with this field, or:
+    *         - NO_SUCH_FIELD if the field does not exist in the object
+-   *         - UNEXPECTED_TYPE if the document is not an object
+    */
+-  inline element_result operator[](const std::string_view &key) const noexcept;
++  inline element_result at_key(std::string_view s) const noexcept;
++
+   /**
+    * Get the value associated with the given key.
+    *
+-   * The key will be matched against **unescaped** JSON:
++   * Note: The key will be matched against **unescaped** JSON:
+    *
+    *   document::parse(R"({ "a\n": 1 })")["a\n"].as_uint64_t().value == 1
+    *   document::parse(R"({ "a\n": 1 })")["a\\n"].as_uint64_t().error == NO_SUCH_FIELD
+    *
+    * @return The value associated with this field, or:
+    *         - NO_SUCH_FIELD if the field does not exist in the object
+-   *         - UNEXPECTED_TYPE if the document is not an object
+    */
+-  inline element_result operator[](const char *key) const noexcept;
++  inline element_result at_key(const char *s) const noexcept;
+ 
+   ~doc_move_result() noexcept=default;
+   doc_move_result(document &&doc, error_code error) noexcept;
+@@ -351,6 +461,62 @@ public:
+    */
+   inline array_result as_array() const noexcept;
+ 
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc["/foo/a/1"] == 20
++   *   doc["/"]["foo"]["a"].at(1) == 20
++   *   doc[""]["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc["/foo/a/1"] == 20
++   *   doc["/"]["foo"]["a"].at(1) == 20
++   *   doc[""]["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](const char *json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc.at("/foo/a/1") == 20
++   *   doc.at("/")["foo"]["a"].at(1) == 20
++   *   doc.at("")["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result at(std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value at the given index.
++   *
++   * @return The value at the given index, or:
++   *         - INDEX_OUT_OF_BOUNDS if the array index is larger than an array length
++   */
++  inline element_result at(size_t index) const noexcept;
++
+   /**
+    * Get the value associated with the given key.
+    *
+@@ -361,23 +527,21 @@ public:
+    *
+    * @return The value associated with this field, or:
+    *         - NO_SUCH_FIELD if the field does not exist in the object
+-   *         - UNEXPECTED_TYPE if the document is not an object
+    */
+-  inline element_result operator[](const std::string_view &key) const noexcept;
++  inline element_result at_key(std::string_view s) const noexcept;
+ 
+   /**
+    * Get the value associated with the given key.
+    *
+-   * The key will be matched against **unescaped** JSON:
++   * Note: The key will be matched against **unescaped** JSON:
+    *
+    *   document::parse(R"({ "a\n": 1 })")["a\n"].as_uint64_t().value == 1
+    *   document::parse(R"({ "a\n": 1 })")["a\\n"].as_uint64_t().error == NO_SUCH_FIELD
+    *
+    * @return The value associated with this field, or:
+    *         - NO_SUCH_FIELD if the field does not exist in the object
+-   *         - UNEXPECTED_TYPE if the document is not an object
+    */
+-  inline element_result operator[](const char *key) const noexcept;
++  inline element_result at_key(const char *s) const noexcept;
+ 
+   ~doc_result()=default;
+   doc_result(document &doc, error_code error) noexcept;
+@@ -599,6 +763,62 @@ public:
+   inline operator document::object() const noexcept(false);
+ #endif // SIMDJSON_EXCEPTIONS
+ 
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc["/foo/a/1"] == 20
++   *   doc["/"]["foo"]["a"].at(1) == 20
++   *   doc[""]["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc["/foo/a/1"] == 20
++   *   doc["/"]["foo"]["a"].at(1) == 20
++   *   doc[""]["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](const char *json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document doc = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   doc.at("/foo/a/1") == 20
++   *   doc.at("/")["foo"]["a"].at(1) == 20
++   *   doc.at("")["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result at(std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value at the given index.
++   *
++   * @return The value at the given index, or:
++   *         - INDEX_OUT_OF_BOUNDS if the array index is larger than an array length
++   */
++  inline element_result at(size_t index) const noexcept;
++
+   /**
+    * Get the value associated with the given key.
+    *
+@@ -609,9 +829,8 @@ public:
+    *
+    * @return The value associated with this field, or:
+    *         - NO_SUCH_FIELD if the field does not exist in the object
+-   *         - UNEXPECTED_TYPE if the document is not an object
+    */
+-  inline element_result operator[](const std::string_view &s) const noexcept;
++  inline element_result at_key(std::string_view s) const noexcept;
+ 
+   /**
+    * Get the value associated with the given key.
+@@ -623,9 +842,8 @@ public:
+    *
+    * @return The value associated with this field, or:
+    *         - NO_SUCH_FIELD if the field does not exist in the object
+-   *         - UNEXPECTED_TYPE if the document is not an object
+    */
+-  inline element_result operator[](const char *s) const noexcept;
++  inline element_result at_key(const char *s) const noexcept;
+ 
+ private:
+   really_inline element(const document *_doc, size_t _json_index) noexcept;
+@@ -679,6 +897,59 @@ public:
+    */
+   inline iterator end() const noexcept;
+ 
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document::array a = document::parse(R"([ { "foo": { "a": [ 10, 20, 30 ] }} ])");
++   *   a.["0/foo/a/1"] == 20
++   *   a.["0"]["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document::array a = document::parse(R"([ { "foo": { "a": [ 10, 20, 30 ] }} ])");
++   *   a.["0/foo/a/1"] == 20
++   *   a.["0"]["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](const char *json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document::array a = document::parse(R"([ { "foo": { "a": [ 10, 20, 30 ] }} ])");
++   *   a.at("0/foo/a/1") == 20
++   *   a.at("0")["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result at(std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value at the given index.
++   *
++   * @return The value at the given index, or:
++   *         - INDEX_OUT_OF_BOUNDS if the array index is larger than an array length
++   */
++  inline element_result at(size_t index) const noexcept;
++
+ private:
+   really_inline array(const document *_doc, size_t _json_index) noexcept;
+   friend class document::element;
+@@ -743,6 +1014,51 @@ public:
+    */
+   inline iterator end() const noexcept;
+ 
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document::object obj = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   obj["foo/a/1"] == 20
++   *   obj["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](std::string_view json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document::object obj = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   obj["foo/a/1"] == 20
++   *   obj["foo"]["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result operator[](const char *json_pointer) const noexcept;
++
++  /**
++   * Get the value associated with the given JSON pointer.
++   *
++   *   document::object obj = document::parse(R"({ "foo": { "a": [ 10, 20, 30 ] }})");
++   *   obj.at("foo/a/1") == 20
++   *   obj.at("foo")["a"].at(1) == 20
++   *
++   * @return The value associated with the given JSON pointer, or:
++   *         - NO_SUCH_FIELD if a field does not exist in an object
++   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
++   *         - INCORRECT_TYPE if a non-integer is used to access an array
++   *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
++   */
++  inline element_result at(std::string_view json_pointer) const noexcept;
++
+   /**
+    * Get the value associated with the given key.
+    *
+@@ -754,7 +1070,7 @@ public:
+    * @return The value associated with this field, or:
+    *         - NO_SUCH_FIELD if the field does not exist in the object
+    */
+-  inline element_result operator[](const std::string_view &s) const noexcept;
++  inline element_result at_key(std::string_view s) const noexcept;
+ 
+   /**
+    * Get the value associated with the given key.
+@@ -767,7 +1083,7 @@ public:
+    * @return The value associated with this field, or:
+    *         - NO_SUCH_FIELD if the field does not exist in the object
+    */
+-  inline element_result operator[](const char *s) const noexcept;
++  inline element_result at_key(const char *s) const noexcept;
+ 
+ private:
+   really_inline object(const document *_doc, size_t _json_index) noexcept;
+@@ -808,8 +1124,12 @@ public:
+   inline array_result as_array() const noexcept;
+   inline object_result as_object() const noexcept;
+ 
+-  inline element_result operator[](const std::string_view &s) const noexcept;
+-  inline element_result operator[](const char *s) const noexcept;
++  inline element_result operator[](std::string_view json_pointer) const noexcept;
++  inline element_result operator[](const char *json_pointer) const noexcept;
++  inline element_result at(std::string_view json_pointer) const noexcept;
++  inline element_result at(size_t index) const noexcept;
++  inline element_result at_key(std::string_view key) const noexcept;
++  inline element_result at_key(const char *key) const noexcept;
+ 
+ #if SIMDJSON_EXCEPTIONS
+   inline operator bool() const noexcept(false);
+@@ -829,6 +1149,11 @@ public:
+   really_inline array_result(array value) noexcept;
+   really_inline array_result(error_code error) noexcept;
+ 
++  inline element_result operator[](std::string_view json_pointer) const noexcept;
++  inline element_result operator[](const char *json_pointer) const noexcept;
++  inline element_result at(std::string_view json_pointer) const noexcept;
++  inline element_result at(size_t index) const noexcept;
++
+ #if SIMDJSON_EXCEPTIONS
+   inline array::iterator begin() const noexcept(false);
+   inline array::iterator end() const noexcept(false);
+@@ -841,8 +1166,11 @@ public:
+   really_inline object_result(object value) noexcept;
+   really_inline object_result(error_code error) noexcept;
+ 
+-  inline element_result operator[](const std::string_view &s) const noexcept;
+-  inline element_result operator[](const char *s) const noexcept;
++  inline element_result operator[](std::string_view json_pointer) const noexcept;
++  inline element_result operator[](const char *json_pointer) const noexcept;
++  inline element_result at(std::string_view json_pointer) const noexcept;
++  inline element_result at_key(std::string_view key) const noexcept;
++  inline element_result at_key(const char *key) const noexcept;
+ 
+ #if SIMDJSON_EXCEPTIONS
+   inline object::iterator begin() const noexcept(false);
+diff --git a/include/simdjson/error.h b/include/simdjson/error.h
+index d9163f9c..b8a047e9 100644
+--- a/include/simdjson/error.h
++++ b/include/simdjson/error.h
+@@ -30,8 +30,11 @@ enum error_code {
+   UNSUPPORTED_ARCHITECTURE, ///< unsupported architecture
+   INCORRECT_TYPE,           ///< JSON element has a different type than user expected
+   NUMBER_OUT_OF_RANGE,      ///< JSON number does not fit in 64 bits
++  INDEX_OUT_OF_BOUNDS,      ///< JSON array index too large
+   NO_SUCH_FIELD,            ///< JSON field not found in object
+   IO_ERROR,                 ///< Error reading a file
++  INVALID_JSON_POINTER,     ///< Invalid JSON pointer reference
++  INVALID_URI_FRAGMENT,     ///< Invalid URI fragment
+   UNEXPECTED_ERROR,         ///< indicative of a bug in simdjson
+   /** @private Number of error codes */
+   NUM_ERROR_CODES
+@@ -77,6 +80,7 @@ private:
+  */
+ template<typename T>
+ struct simdjson_result : public std::pair<T, error_code> {
++
+   /**
+    * Move the value and the error to the provided variables.
+    */
+diff --git a/include/simdjson/inline/document.h b/include/simdjson/inline/document.h
+index f3118feb..b56080e7 100644
+--- a/include/simdjson/inline/document.h
++++ b/include/simdjson/inline/document.h
+@@ -55,13 +55,28 @@ inline document::object_result document::element_result::as_object() const noexc
+   return first.as_object();
+ }
+ 
+-inline document::element_result document::element_result::operator[](const std::string_view &key) const noexcept {
++inline document::element_result document::element_result::operator[](std::string_view key) const noexcept {
+   if (error()) { return *this; }
+   return first[key];
+ }
+-inline document::element_result document::element_result::operator[](const char *key) const noexcept {
++inline document::element_result document::element_result::operator[](const char *json_pointer) const noexcept {
++  return (*this)[std::string_view(json_pointer)];
++}
++inline document::element_result document::element_result::at(std::string_view key) const noexcept {
+   if (error()) { return *this; }
+-  return first[key];
++  return first.at(key);
++}
++inline document::element_result document::element_result::at(size_t index) const noexcept {
++  if (error()) { return *this; }
++  return first.at(index);
++}
++inline document::element_result document::element_result::at_key(std::string_view key) const noexcept {
++  if (error()) { return *this; }
++  return first.at_key(key);
++}
++inline document::element_result document::element_result::at_key(const char *key) const noexcept {
++  if (error()) { return *this; }
++  return first.at_key(key);
+ }
+ 
+ #if SIMDJSON_EXCEPTIONS
+@@ -112,19 +127,46 @@ inline document::array::iterator document::array_result::end() const noexcept(fa
+ 
+ #endif // SIMDJSON_EXCEPTIONS
+ 
++inline document::element_result document::array_result::operator[](std::string_view json_pointer) const noexcept {
++  if (error()) { return error(); }
++  return first.at(json_pointer);
++}
++inline document::element_result document::array_result::operator[](const char *json_pointer) const noexcept {
++  return (*this)[std::string_view(json_pointer)];
++}
++inline document::element_result document::array_result::at(std::string_view json_pointer) const noexcept {
++  if (error()) { return error(); }
++  return first.at(json_pointer);
++}
++inline document::element_result document::array_result::at(size_t index) const noexcept {
++  if (error()) { return error(); }
++  return first.at(index);
++}
++
+ //
+ // object_result inline implementation
+ //
+ really_inline document::object_result::object_result(object value) noexcept : simdjson_result<object>(value) {}
+ really_inline document::object_result::object_result(error_code error) noexcept : simdjson_result<object>(error) {}
+ 
+-inline document::element_result document::object_result::operator[](const std::string_view &key) const noexcept {
++inline document::element_result document::object_result::operator[](std::string_view json_pointer) const noexcept {
+   if (error()) { return error(); }
+-  return first[key];
++  return first[json_pointer];
++}
++inline document::element_result document::object_result::operator[](const char *json_pointer) const noexcept {
++  return (*this)[std::string_view(json_pointer)];
+ }
+-inline document::element_result document::object_result::operator[](const char *key) const noexcept {
++inline document::element_result document::object_result::at(std::string_view json_pointer) const noexcept {
+   if (error()) { return error(); }
+-  return first[key];
++  return first.at(json_pointer);
++}
++inline document::element_result document::object_result::at_key(std::string_view key) const noexcept {
++  if (error()) { return error(); }
++  return first.at_key(key);
++}
++inline document::element_result document::object_result::at_key(const char *key) const noexcept {
++  if (error()) { return error(); }
++  return first.at_key(key);
+ }
+ 
+ #if SIMDJSON_EXCEPTIONS
+@@ -167,13 +209,32 @@ inline document::operator document::object() const noexcept(false) {
+ 
+ #endif
+ 
+-inline document::element_result document::operator[](const std::string_view &key) const noexcept {
+-  return root()[key];
++//#define REPORT_ERROR(CODE, MESSAGE) ((std::cerr << MESSAGE << std::endl), CODE)
++#define REPORT_ERROR(CODE, MESSAGE) (CODE)
++#define RETURN_ERROR(CODE, MESSAGE) return REPORT_ERROR((CODE), (MESSAGE));
++
++inline document::element_result document::at(std::string_view json_pointer) const noexcept {
++  if (json_pointer == "") { return root(); }
++  // NOTE: JSON pointer requires a / at the beginning of the document; we allow it to be optional.
++  return root().at(json_pointer.substr(json_pointer[0] == '/' ? 1 : 0));
++}
++inline document::element_result document::at(size_t index) const noexcept {
++  return as_array().at(index);
+ }
+-inline document::element_result document::operator[](const char *key) const noexcept {
+-  return root()[key];
++inline document::element_result document::at_key(std::string_view key) const noexcept {
++  return as_object().at_key(key);
++}
++inline document::element_result document::at_key(const char *key) const noexcept {
++  return as_object().at_key(key);
++}
++inline document::element_result document::operator[](std::string_view json_pointer) const noexcept {
++  return at(json_pointer);
++}
++inline document::element_result document::operator[](const char *json_pointer) const noexcept {
++  return (*this)[std::string_view(json_pointer)];
+ }
+ 
++
+ inline document::doc_move_result document::load(const std::string &path) noexcept {
+   document::parser parser;
+   auto [doc, error] = parser.load(path);
+@@ -324,13 +385,28 @@ inline document::object_result document::doc_result::as_object() const noexcept
+   return first.root().as_object();
+ }
+ 
+-inline document::element_result document::doc_result::operator[](const std::string_view &key) const noexcept {
++inline document::element_result document::doc_result::operator[](std::string_view key) const noexcept {
+   if (error()) { return error(); }
+   return first[key];
+ }
+-inline document::element_result document::doc_result::operator[](const char *key) const noexcept {
++inline document::element_result document::doc_result::operator[](const char *json_pointer) const noexcept {
++  return (*this)[std::string_view(json_pointer)];
++}
++inline document::element_result document::doc_result::at(std::string_view key) const noexcept {
+   if (error()) { return error(); }
+-  return first[key];
++  return first.at(key);
++}
++inline document::element_result document::doc_result::at(size_t index) const noexcept {
++  if (error()) { return error(); }
++  return first.at(index);
++}
++inline document::element_result document::doc_result::at_key(std::string_view key) const noexcept {
++  if (error()) { return error(); }
++  return first.at_key(key);
++}
++inline document::element_result document::doc_result::at_key(const char *key) const noexcept {
++  if (error()) { return error(); }
++  return first.at_key(key);
+ }
+ 
+ //
+@@ -349,13 +425,28 @@ inline document::object_result document::doc_move_result::as_object() const noex
+   return first.root().as_object();
+ }
+ 
+-inline document::element_result document::doc_move_result::operator[](const std::string_view &key) const noexcept {
++inline document::element_result document::doc_move_result::operator[](std::string_view key) const noexcept {
+   if (error()) { return error(); }
+   return first[key];
+ }
+-inline document::element_result document::doc_move_result::operator[](const char *key) const noexcept {
++inline document::element_result document::doc_move_result::operator[](const char *json_pointer) const noexcept {
++  return (*this)[std::string_view(json_pointer)];
++}
++inline document::element_result document::doc_move_result::at(std::string_view key) const noexcept {
+   if (error()) { return error(); }
+-  return first[key];
++  return first.at(key);
++}
++inline document::element_result document::doc_move_result::at(size_t index) const noexcept {
++  if (error()) { return error(); }
++  return first.at(index);
++}
++inline document::element_result document::doc_move_result::at_key(std::string_view key) const noexcept {
++  if (error()) { return error(); }
++  return first.at_key(key);
++}
++inline document::element_result document::doc_move_result::at_key(const char *key) const noexcept {
++  if (error()) { return error(); }
++  return first.at_key(key);
+ }
+ 
+ //
+@@ -643,6 +734,43 @@ inline document::array::iterator document::array::end() const noexcept {
+   return iterator(doc, after_element() - 1);
+ }
+ 
++inline document::element_result document::array::at(std::string_view json_pointer) const noexcept {
++  // - means "the append position" or "the element after the end of the array"
++  // We don't support this, because we're returning a real element, not a position.
++  if (json_pointer == "-") { return INDEX_OUT_OF_BOUNDS; }
++
++  // Read the array index
++  size_t array_index = 0;
++  size_t i;
++  for (i = 0; i < json_pointer.length() && json_pointer[i] != '/'; i++) {
++    uint8_t digit = uint8_t(json_pointer[i]) - '0';
++    // Check for non-digit in array index. If it's there, we're trying to get a field in an object
++    if (digit > 9) { return INCORRECT_TYPE; }
++    array_index = array_index*10 + digit;
++  }
++
++  // 0 followed by other digits is invalid
++  if (i > 1 && json_pointer[0] == '0') { RETURN_ERROR(INVALID_JSON_POINTER, "JSON pointer array index has other characters after 0"); }
++
++  // Empty string is invalid; so is a "/" with no digits before it
++  if (i == 0) { RETURN_ERROR(INVALID_JSON_POINTER, "Empty string in JSON pointer array index"); }
++
++  // Get the child
++  auto child = array(doc, json_index).at(array_index);
++  // If there is a /, we're not done yet, call recursively.
++  if (i < json_pointer.length()) {
++    child = child.at(json_pointer.substr(i+1));
++  }
++  return child;
++}
++inline document::element_result document::array::at(size_t index) const noexcept {
++  size_t i=0;
++  for (auto element : *this) {
++    if (i == index) { return element; }
++    i++;
++  }
++  return INDEX_OUT_OF_BOUNDS;
++}
+ 
+ //
+ // document::array::iterator inline implementation
+@@ -659,7 +787,7 @@ inline void document::array::iterator::operator++() noexcept {
+ }
+ 
+ //
+-// object inline implementation
++// document::object inline implementation
+ //
+ really_inline document::object::object() noexcept : internal::tape_ref() {}
+ really_inline document::object::object(const document *_doc, size_t _json_index) noexcept : internal::tape_ref(_doc, _json_index) { };
+@@ -669,7 +797,66 @@ inline document::object::iterator document::object::begin() const noexcept {
+ inline document::object::iterator document::object::end() const noexcept {
+   return iterator(doc, after_element() - 1);
+ }
+-inline document::element_result document::object::operator[](const std::string_view &key) const noexcept {
++
++inline document::element_result document::object::operator[](std::string_view json_pointer) const noexcept {
++  return at(json_pointer);
++}
++inline document::element_result document::object::operator[](const char *json_pointer) const noexcept {
++  return (*this)[std::string_view(json_pointer)];
++}
++inline document::element_result document::object::at(std::string_view json_pointer) const noexcept {
++  // Unescape the key
++  std::string unescaped;
++  unescaped.reserve(json_pointer.length());
++  size_t i;
++  for (i = 0; i < json_pointer.length() && json_pointer[i] != '/'; i++) {
++    switch (json_pointer[i]) {
++      // Handle ~ escaping: ~0 = ~, ~1 = /
++      case '~': {
++        i++;
++        // ~ at end of string is invalid
++        if (i >= json_pointer.length()) { RETURN_ERROR(INVALID_JSON_POINTER, "~ at end of string in JSON pointer"); }
++        switch (json_pointer[i]) {
++          case '0':
++            unescaped.push_back('~');
++            break;
++          case '1':
++            unescaped.push_back('/');
++            break;
++          default:
++            RETURN_ERROR(INVALID_JSON_POINTER, "Unexpected ~ escape character in JSON pointer");
++        }
++        break;
++      }
++      // TODO backslash doesn't appear to be a thing in JSON pointer
++      case '\\': {
++        i++;
++        // backslash at end of string is invalid
++        if (i >= json_pointer.length()) { RETURN_ERROR(INVALID_JSON_POINTER, "~ at end of string in JSON pointer"); }
++        // Check for invalid escape characters
++        if (json_pointer[i] != '\\' && json_pointer[i] != '"' && json_pointer[i] > 0x1F) {
++          RETURN_ERROR(INVALID_JSON_POINTER, "Invalid backslash escape in JSON pointer");
++        }
++        unescaped.push_back(json_pointer[i]);
++        break;
++      }
++      default:
++        unescaped.push_back(json_pointer[i]);
++        break;
++    }
++  }
++
++  // Grab the child with the given key
++  auto child = at_key(unescaped);
++
++  // If there is a /, we have to recurse and look up more of the path
++  if (i < json_pointer.length()) {
++    child = child.at(json_pointer.substr(i+1));
++  }
++
++  return child;
++}
++inline document::element_result document::object::at_key(std::string_view key) const noexcept {
+   iterator end_field = end();
+   for (iterator field = begin(); field != end_field; ++field) {
+     if (key == field.key()) {
+@@ -678,7 +865,7 @@ inline document::element_result document::object::operator[](const std::string_v
+   }
+   return NO_SUCH_FIELD;
+ }
+-inline document::element_result document::object::operator[](const char *key) const noexcept {
++inline document::element_result document::object::at_key(const char *key) const noexcept {
+   iterator end_field = end();
+   for (iterator field = begin(); field != end_field; ++field) {
+     if (!strcmp(key, field.key_c_str())) {
+@@ -858,15 +1045,30 @@ inline document::object_result document::element::as_object() const noexcept {
+       return INCORRECT_TYPE;
+   }
+ }
+-inline document::element_result document::element::operator[](const std::string_view &key) const noexcept {
+-  auto [obj, error] = as_object();
+-  if (error) { return error; }
+-  return obj[key];
++inline document::element_result document::element::operator[](std::string_view json_pointer) const noexcept {
++  return at(json_pointer);
+ }
+-inline document::element_result document::element::operator[](const char *key) const noexcept {
+-  auto [obj, error] = as_object();
+-  if (error) { return error; }
+-  return obj[key];
++inline document::element_result document::element::operator[](const char *json_pointer) const noexcept {
++  return (*this)[std::string_view(json_pointer)];
++}
++inline document::element_result document::element::at(std::string_view json_pointer) const noexcept {
++  switch (type()) {
++    case internal::tape_type::START_OBJECT:
++      return object(doc, json_index).at(json_pointer);
++    case internal::tape_type::START_ARRAY:
++      return array(doc, json_index).at(json_pointer);
++    default:
++      return INCORRECT_TYPE;
++  }
++}
++inline document::element_result document::element::at(size_t index) const noexcept {
++  return as_array().at(index);
++}
++inline document::element_result document::element::at_key(std::string_view key) const noexcept {
++  return as_object().at_key(key);
++}
++inline document::element_result document::element::at_key(const char *key) const noexcept {
++  return as_object().at_key(key);
+ }
+ 
+ //
+diff --git a/include/simdjson/inline/error.h b/include/simdjson/inline/error.h
+index 8bf3d416..b07ff48e 100644
+--- a/include/simdjson/inline/error.h
++++ b/include/simdjson/inline/error.h
+@@ -31,8 +31,11 @@ namespace simdjson::internal {
+     { UNSUPPORTED_ARCHITECTURE, "simdjson does not have an implementation supported by this CPU architecture (perhaps it's a non-SIMD CPU?)." },
+     { INCORRECT_TYPE, "The JSON element does not have the requested type." },
+     { NUMBER_OUT_OF_RANGE, "The JSON number is too large or too small to fit within the requested type." },
++    { INDEX_OUT_OF_BOUNDS, "Attempted to access an element of a JSON array that is beyond its length." },
+     { NO_SUCH_FIELD, "The JSON field referenced does not exist in this object." },
+     { IO_ERROR, "Error reading the file." },
++    { INVALID_JSON_POINTER, "Invalid JSON pointer syntax." },
++    { INVALID_URI_FRAGMENT, "Invalid URI fragment syntax." },
+     { UNEXPECTED_ERROR, "Unexpected error, consider reporting this problem as you may have found a bug in simdjson" }
+   }; // error_messages[]
+ } // namespace simdjson::internal

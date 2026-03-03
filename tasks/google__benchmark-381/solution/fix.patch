@@ -1,0 +1,90 @@
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 00ffa07..8d3f406 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -252,6 +252,7 @@ BenchmarkReporter::Run CreateRunReport(
+     report.complexity = b.complexity;
+     report.complexity_lambda = b.complexity_lambda;
+     report.counters = results.counters;
++    internal::Finish(&report.counters, seconds, b.threads);
+   }
+   return report;
+ }
+diff --git a/src/check.h b/src/check.h
+index 6f1fe0c..73bead2 100644
+--- a/src/check.h
++++ b/src/check.h
+@@ -3,6 +3,7 @@
+ 
+ #include <cstdlib>
+ #include <ostream>
++#include <cmath>
+ 
+ #include "internal_macros.h"
+ #include "log.h"
+@@ -68,4 +69,11 @@ class CheckHandler {
+ #define CHECK_GT(a, b) CHECK((a) > (b))
+ #define CHECK_LT(a, b) CHECK((a) < (b))
+ 
++#define CHECK_FLOAT_EQ(a, b, eps) CHECK(std::fabs((a) - (b)) <  (eps))
++#define CHECK_FLOAT_NE(a, b, eps) CHECK(std::fabs((a) - (b)) >= (eps))
++#define CHECK_FLOAT_GE(a, b, eps) CHECK((a) - (b) > -(eps))
++#define CHECK_FLOAT_LE(a, b, eps) CHECK((b) - (a) > -(eps))
++#define CHECK_FLOAT_GT(a, b, eps) CHECK((a) - (b) >  (eps))
++#define CHECK_FLOAT_LT(a, b, eps) CHECK((b) - (a) >  (eps))
++
+ #endif  // CHECK_H_
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index 3f3de02..e812180 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -53,11 +53,10 @@ bool ConsoleReporter::ReportContext(const Context& context) {
+ 
+ void ConsoleReporter::PrintHeader(const Run& run) {
+   std::string str =
+-      FormatString("%-*s %13s %13s %10s\n", static_cast<int>(name_field_width_),
+-                   "Benchmark", "Time", "CPU", "Iterations");
+-  if(!run.counters.empty()) {
+-    str += " UserCounters...";
+-  }
++      FormatString("%-*s %13s %13s %10s%s\n", static_cast<int>(name_field_width_),
++                   "Benchmark", "Time", "CPU", "Iterations",
++                   (run.counters.empty() ? "" : " UserCounters...")
++          );
+   std::string line = std::string(str.length(), '-');
+   GetOutputStream() << line << "\n" << str << line << "\n";
+ }
+@@ -133,8 +132,9 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+   }
+ 
+   for (auto& c : result.counters) {
+-    auto const& s = HumanReadableNumber(c.second.value);
+-    printer(Out, COLOR_DEFAULT, " %s=%s", c.first.c_str(), s.c_str());
++    std::string s = HumanReadableNumber(c.second.value);
++    const char* unit = ((c.second.flags & Counter::kIsRate) ? "/s" : "");
++    printer(Out, COLOR_DEFAULT, " %s=%s%s", c.first.c_str(), s.c_str(), unit);
+   }
+ 
+   if (!rate.empty()) {
+diff --git a/src/counter.cc b/src/counter.cc
+index 307863d..2e9d918 100644
+--- a/src/counter.cc
++++ b/src/counter.cc
+@@ -30,7 +30,7 @@ double Finish(Counter const& c, double cpu_time, double num_threads) {
+ 
+ void Finish(UserCounters *l, double cpu_time, double num_threads) {
+   for (auto &c : *l) {
+-    c.second = Finish(c.second, cpu_time, num_threads);
++    c.second.value = Finish(c.second, cpu_time, num_threads);
+   }
+ }
+ 
+@@ -39,7 +39,7 @@ void Increment(UserCounters *l, UserCounters const& r) {
+   for (auto &c : *l) {
+     auto it = r.find(c.first);
+     if (it != r.end()) {
+-      c.second = c.second + it->second;
++      c.second.value = c.second + it->second;
+     }
+   }
+   // add counters present in r, but not in *l

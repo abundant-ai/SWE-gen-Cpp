@@ -1,0 +1,758 @@
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 8d3f406..00ffa07 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -252,7 +252,6 @@ BenchmarkReporter::Run CreateRunReport(
+     report.complexity = b.complexity;
+     report.complexity_lambda = b.complexity_lambda;
+     report.counters = results.counters;
+-    internal::Finish(&report.counters, seconds, b.threads);
+   }
+   return report;
+ }
+diff --git a/src/check.h b/src/check.h
+index 73bead2..6f1fe0c 100644
+--- a/src/check.h
++++ b/src/check.h
+@@ -3,7 +3,6 @@
+ 
+ #include <cstdlib>
+ #include <ostream>
+-#include <cmath>
+ 
+ #include "internal_macros.h"
+ #include "log.h"
+@@ -69,11 +68,4 @@ class CheckHandler {
+ #define CHECK_GT(a, b) CHECK((a) > (b))
+ #define CHECK_LT(a, b) CHECK((a) < (b))
+ 
+-#define CHECK_FLOAT_EQ(a, b, eps) CHECK(std::fabs((a) - (b)) <  (eps))
+-#define CHECK_FLOAT_NE(a, b, eps) CHECK(std::fabs((a) - (b)) >= (eps))
+-#define CHECK_FLOAT_GE(a, b, eps) CHECK((a) - (b) > -(eps))
+-#define CHECK_FLOAT_LE(a, b, eps) CHECK((b) - (a) > -(eps))
+-#define CHECK_FLOAT_GT(a, b, eps) CHECK((a) - (b) >  (eps))
+-#define CHECK_FLOAT_LT(a, b, eps) CHECK((b) - (a) >  (eps))
+-
+ #endif  // CHECK_H_
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index e812180..3f3de02 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -53,10 +53,11 @@ bool ConsoleReporter::ReportContext(const Context& context) {
+ 
+ void ConsoleReporter::PrintHeader(const Run& run) {
+   std::string str =
+-      FormatString("%-*s %13s %13s %10s%s\n", static_cast<int>(name_field_width_),
+-                   "Benchmark", "Time", "CPU", "Iterations",
+-                   (run.counters.empty() ? "" : " UserCounters...")
+-          );
++      FormatString("%-*s %13s %13s %10s\n", static_cast<int>(name_field_width_),
++                   "Benchmark", "Time", "CPU", "Iterations");
++  if(!run.counters.empty()) {
++    str += " UserCounters...";
++  }
+   std::string line = std::string(str.length(), '-');
+   GetOutputStream() << line << "\n" << str << line << "\n";
+ }
+@@ -132,9 +133,8 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+   }
+ 
+   for (auto& c : result.counters) {
+-    std::string s = HumanReadableNumber(c.second.value);
+-    const char* unit = ((c.second.flags & Counter::kIsRate) ? "/s" : "");
+-    printer(Out, COLOR_DEFAULT, " %s=%s%s", c.first.c_str(), s.c_str(), unit);
++    auto const& s = HumanReadableNumber(c.second.value);
++    printer(Out, COLOR_DEFAULT, " %s=%s", c.first.c_str(), s.c_str());
+   }
+ 
+   if (!rate.empty()) {
+diff --git a/src/counter.cc b/src/counter.cc
+index 2e9d918..307863d 100644
+--- a/src/counter.cc
++++ b/src/counter.cc
+@@ -30,7 +30,7 @@ double Finish(Counter const& c, double cpu_time, double num_threads) {
+ 
+ void Finish(UserCounters *l, double cpu_time, double num_threads) {
+   for (auto &c : *l) {
+-    c.second.value = Finish(c.second, cpu_time, num_threads);
++    c.second = Finish(c.second, cpu_time, num_threads);
+   }
+ }
+ 
+@@ -39,7 +39,7 @@ void Increment(UserCounters *l, UserCounters const& r) {
+   for (auto &c : *l) {
+     auto it = r.find(c.first);
+     if (it != r.end()) {
+-      c.second.value = c.second + it->second;
++      c.second = c.second + it->second;
+     }
+   }
+   // add counters present in r, but not in *l
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 40eb880..14ba7a6 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -27,7 +27,7 @@ if (DEFINED BENCHMARK_CXX_LINKER_FLAGS)
+   list(APPEND CMAKE_EXE_LINKER_FLAGS ${BENCHMARK_CXX_LINKER_FLAGS})
+ endif()
+ 
+-add_library(output_test_helper STATIC output_test_helper.cc output_test.h)
++add_library(output_test_helper STATIC output_test_helper.cc)
+ 
+ macro(compile_benchmark_test name)
+   add_executable(${name} "${name}.cc")
+@@ -92,9 +92,6 @@ add_test(multiple_ranges_test multiple_ranges_test --benchmark_min_time=0.01)
+ compile_output_test(reporter_output_test)
+ add_test(reporter_output_test reporter_output_test --benchmark_min_time=0.01)
+ 
+-compile_output_test(user_counters_test)
+-add_test(user_counters_test user_counters_test --benchmark_min_time=0.01)
+-
+ check_cxx_compiler_flag(-std=c++03 BENCHMARK_HAS_CXX03_FLAG)
+ if (BENCHMARK_HAS_CXX03_FLAG)
+   set(CXX03_FLAGS "${CMAKE_CXX_FLAGS}")
+diff --git a/test/benchmark_test.cc b/test/benchmark_test.cc
+index 7a16466..5773133 100644
+--- a/test/benchmark_test.cc
++++ b/test/benchmark_test.cc
+@@ -213,6 +213,23 @@ void BM_non_template_args(benchmark::State& state, int, double) {
+ }
+ BENCHMARK_CAPTURE(BM_non_template_args, basic_test, 0, 0);
+ 
++static void BM_UserCounter(benchmark::State& state) {
++  static const int depth = 1024;
++  while (state.KeepRunning()) {
++    benchmark::DoNotOptimize(CalculatePi(depth));
++  }
++  state.counters["Foo"] = 1;
++  state.counters["Bar"] = 2;
++  state.counters["Baz"] = 3;
++  state.counters["Bat"] = 5;
++#ifdef BENCHMARK_HAS_CXX11
++  state.counters.insert({{"Foo", 2}, {"Bar", 3}, {"Baz", 5}, {"Bat", 6}});
++#endif
++}
++BENCHMARK(BM_UserCounter)->Threads(8);
++BENCHMARK(BM_UserCounter)->ThreadRange(1, 32);
++BENCHMARK(BM_UserCounter)->ThreadPerCpu();
++
+ #endif  // __cplusplus >= 201103L
+ 
+ static void BM_DenseThreadRanges(benchmark::State& st) {
+diff --git a/test/output_test.h b/test/output_test.h
+index 897a138..57d4397 100644
+--- a/test/output_test.h
++++ b/test/output_test.h
+@@ -7,8 +7,6 @@
+ #include <string>
+ #include <utility>
+ #include <vector>
+-#include <functional>
+-#include <sstream>
+ 
+ #include "../src/re.h"
+ #include "benchmark/benchmark.h"
+@@ -60,134 +58,6 @@ int SetSubstitutions(
+ // Run all output tests.
+ void RunOutputTests(int argc, char* argv[]);
+ 
+-// ========================================================================= //
+-// ------------------------- Results checking ------------------------------ //
+-// ========================================================================= //
+-
+-// Call this macro to register a benchmark for checking its results. This
+-// should be all that's needed. It subscribes a function to check the (CSV)
+-// results of a benchmark. This is done only after verifying that the output
+-// strings are really as expected.
+-// bm_name_pattern: a name or a regex pattern which will be matched against
+-//                  all the benchmark names. Matching benchmarks
+-//                  will be the subject of a call to checker_function
+-// checker_function: should be of type ResultsCheckFn (see below)
+-#define CHECK_BENCHMARK_RESULTS(bm_name_pattern, checker_function) \
+-    size_t CONCAT(dummy, __LINE__) = AddChecker(bm_name_pattern, checker_function)
+-
+-struct Results;
+-typedef std::function< void(Results const&) > ResultsCheckFn;
+-
+-size_t AddChecker(const char* bm_name_pattern, ResultsCheckFn fn);
+-
+-// Class holding the results of a benchmark.
+-// It is passed in calls to checker functions.
+-struct Results {
+-
+-  // the benchmark name
+-  std::string name;
+-  // the benchmark fields
+-  std::map< std::string, std::string > values;
+-
+-  Results(const std::string& n) : name(n) {}
+-
+-  int NumThreads() const;
+-
+-  typedef enum { kCpuTime, kRealTime } BenchmarkTime;
+-
+-  // get cpu_time or real_time in seconds
+-  double GetTime(BenchmarkTime which) const;
+-
+-  // get the real_time duration of the benchmark in seconds.
+-  // it is better to use fuzzy float checks for this, as the float
+-  // ASCII formatting is lossy.
+-  double DurationRealTime() const {
+-    return GetAs< double >("iterations") * GetTime(kRealTime);
+-  }
+-  // get the cpu_time duration of the benchmark in seconds
+-  double DurationCPUTime() const {
+-    return GetAs< double >("iterations") * GetTime(kCpuTime);
+-  }
+-
+-  // get the string for a result by name, or nullptr if the name
+-  // is not found
+-  const std::string* Get(const char* entry_name) const {
+-    auto it = values.find(entry_name);
+-    if(it == values.end()) return nullptr;
+-    return &it->second;
+-  }
+-
+-  // get a result by name, parsed as a specific type.
+-  // NOTE: for counters, use GetCounterAs instead.
+-  template <class T>
+-  T GetAs(const char* entry_name) const;
+-
+-  // counters are written as doubles, so they have to be read first
+-  // as a double, and only then converted to the asked type.
+-  template <class T>
+-  T GetCounterAs(const char* entry_name) const {
+-    double dval = GetAs< double >(entry_name);
+-    T tval = static_cast< T >(dval);
+-    return tval;
+-  }
+-};
+-
+-template <class T>
+-T Results::GetAs(const char* entry_name) const {
+-  auto *sv = Get(entry_name);
+-  CHECK(sv != nullptr && !sv->empty());
+-  std::stringstream ss;
+-  ss << *sv;
+-  T out;
+-  ss >> out;
+-  CHECK(!ss.fail());
+-  return out;
+-}
+-
+-//----------------------------------
+-// Macros to help in result checking. Do not use them with arguments causing
+-// side-effects.
+-
+-#define _CHECK_RESULT_VALUE(entry, getfn, var_type, var_name, relationship, value) \
+-    CONCAT(CHECK_, relationship)                                        \
+-    (entry.getfn< var_type >(var_name), (value)) << "\n"                \
+-    << __FILE__ << ":" << __LINE__ << ": " << (entry).name << ":\n"     \
+-    << __FILE__ << ":" << __LINE__ << ": "                              \
+-    << "expected (" << #var_type << ")" << (var_name)                   \
+-    << "=" << (entry).getfn< var_type >(var_name)                       \
+-    << " to be " #relationship " to " << (value) << "\n"
+-
+-// check with tolerance. eps_factor is the tolerance window, which is
+-// interpreted relative to value (eg, 0.1 means 10% of value).
+-#define _CHECK_FLOAT_RESULT_VALUE(entry, getfn, var_type, var_name, relationship, value, eps_factor) \
+-    CONCAT(CHECK_FLOAT_, relationship)                                  \
+-    (entry.getfn< var_type >(var_name), (value), (eps_factor) * (value)) << "\n" \
+-    << __FILE__ << ":" << __LINE__ << ": " << (entry).name << ":\n"     \
+-    << __FILE__ << ":" << __LINE__ << ": "                              \
+-    << "expected (" << #var_type << ")" << (var_name)                   \
+-    << "=" << (entry).getfn< var_type >(var_name)                       \
+-    << " to be " #relationship " to " << (value) << "\n"                \
+-    << __FILE__ << ":" << __LINE__ << ": "                              \
+-    << "with tolerance of " << (eps_factor) * (value)                   \
+-    << " (" << (eps_factor)*100. << "%), "                              \
+-    << "but delta was " << ((entry).getfn< var_type >(var_name) - (value)) \
+-    << " (" << (((entry).getfn< var_type >(var_name) - (value))         \
+-               /                                                        \
+-               ((value) > 1.e-5 || value < -1.e-5 ? value : 1.e-5)*100.) \
+-    << "%)"
+-
+-#define CHECK_RESULT_VALUE(entry, var_type, var_name, relationship, value) \
+-    _CHECK_RESULT_VALUE(entry, GetAs, var_type, var_name, relationship, value)
+-
+-#define CHECK_COUNTER_VALUE(entry, var_type, var_name, relationship, value) \
+-    _CHECK_RESULT_VALUE(entry, GetCounterAs, var_type, var_name, relationship, value)
+-
+-#define CHECK_FLOAT_RESULT_VALUE(entry, var_name, relationship, value, eps_factor) \
+-    _CHECK_FLOAT_RESULT_VALUE(entry, GetAs, double, var_name, relationship, value, eps_factor)
+-
+-#define CHECK_FLOAT_COUNTER_VALUE(entry, var_name, relationship, value, eps_factor) \
+-    _CHECK_FLOAT_RESULT_VALUE(entry, GetCounterAs, double, var_name, relationship, value, eps_factor)
+-
+ // ========================================================================= //
+ // --------------------------- Misc Utilities ------------------------------ //
+ // ========================================================================= //
+diff --git a/test/output_test_helper.cc b/test/output_test_helper.cc
+index fe750c7..54c028a 100644
+--- a/test/output_test_helper.cc
++++ b/test/output_test_helper.cc
+@@ -2,7 +2,6 @@
+ #include <map>
+ #include <memory>
+ #include <sstream>
+-#include <cstring>
+ 
+ #include "../src/check.h"  // NOTE: check.h is for internal use only!
+ #include "../src/re.h"     // NOTE: re.h is for internal use only
+@@ -35,25 +34,17 @@ SubMap& GetSubstitutions() {
+   static std::string safe_dec_re = "[0-9]*[.]?[0-9]+([eE][-+][0-9]+)?";
+   static SubMap map = {
+       {"%float", "[0-9]*[.]?[0-9]+([eE][-+][0-9]+)?"},
+-      // human-readable float
+-      {"%hrfloat", "[0-9]*[.]?[0-9]+([eE][-+][0-9]+)?[kMGTPEZYmunpfazy]?"},
+       {"%int", "[ ]*[0-9]+"},
+       {" %s ", "[ ]+"},
+       {"%time", "[ ]*[0-9]{1,5} ns"},
+       {"%console_report", "[ ]*[0-9]{1,5} ns [ ]*[0-9]{1,5} ns [ ]*[0-9]+"},
+       {"%console_us_report", "[ ]*[0-9] us [ ]*[0-9] us [ ]*[0-9]+"},
+-      {"%csv_header",
+-       "name,iterations,real_time,cpu_time,time_unit,bytes_per_second,"
+-       "items_per_second,label,error_occurred,error_message"},
+       {"%csv_report", "[0-9]+," + safe_dec_re + "," + safe_dec_re + ",ns,,,,,"},
+       {"%csv_us_report", "[0-9]+," + safe_dec_re + "," + safe_dec_re + ",us,,,,,"},
+       {"%csv_bytes_report",
+        "[0-9]+," + safe_dec_re + "," + safe_dec_re + ",ns," + safe_dec_re + ",,,,"},
+       {"%csv_items_report",
+        "[0-9]+," + safe_dec_re + "," + safe_dec_re + ",ns,," + safe_dec_re + ",,,"},
+-      {"%csv_bytes_items_report",
+-       "[0-9]+," + safe_dec_re + "," + safe_dec_re + ",ns," + safe_dec_re +
+-       "," + safe_dec_re + ",,,"},
+       {"%csv_label_report_begin", "[0-9]+," + safe_dec_re + "," + safe_dec_re + ",ns,,,"},
+       {"%csv_label_report_end", ",,"}};
+   return map;
+@@ -149,180 +140,8 @@ class TestReporter : public benchmark::BenchmarkReporter {
+   std::vector<benchmark::BenchmarkReporter *> reporters_;
+ };
+ }
+-
+ }  // end namespace internal
+ 
+-// ========================================================================= //
+-// -------------------------- Results checking ----------------------------- //
+-// ========================================================================= //
+-
+-namespace internal {
+-
+-// Utility class to manage subscribers for checking benchmark results.
+-// It works by parsing the CSV output to read the results.
+-class ResultsChecker {
+- public:
+-
+-  struct PatternAndFn : public TestCase { // reusing TestCase for its regexes
+-    PatternAndFn(const std::string& rx, ResultsCheckFn fn_)
+-    : TestCase(rx), fn(fn_) {}
+-    ResultsCheckFn fn;
+-  };
+-
+-  std::vector< PatternAndFn > check_patterns;
+-  std::vector< Results > results;
+-  std::vector< std::string > field_names;
+-
+-  void Add(const std::string& entry_pattern, ResultsCheckFn fn);
+-
+-  void CheckResults(std::stringstream& output);
+-
+- private:
+-
+-  void SetHeader_(const std::string& csv_header);
+-  void SetValues_(const std::string& entry_csv_line);
+-
+-  std::vector< std::string > SplitCsv_(const std::string& line);
+-
+-};
+-
+-// store the static ResultsChecker in a function to prevent initialization
+-// order problems
+-ResultsChecker& GetResultsChecker() {
+-  static ResultsChecker rc;
+-  return rc;
+-}
+-
+-// add a results checker for a benchmark
+-void ResultsChecker::Add(const std::string& entry_pattern, ResultsCheckFn fn) {
+-  check_patterns.emplace_back(entry_pattern, fn);
+-}
+-
+-// check the results of all subscribed benchmarks
+-void ResultsChecker::CheckResults(std::stringstream& output) {
+-  // first reset the stream to the start
+-  {
+-    auto start = std::ios::streampos(0);
+-    // clear before calling tellg()
+-    output.clear();
+-    // seek to zero only when needed
+-    if(output.tellg() > start) output.seekg(start);
+-    // and just in case
+-    output.clear();
+-  }
+-  // now go over every line and publish it to the ResultsChecker
+-  std::string line;
+-  bool on_first = true;
+-  while (output.eof() == false) {
+-    CHECK(output.good());
+-    std::getline(output, line);
+-    if (on_first) {
+-      SetHeader_(line); // this is important
+-      on_first = false;
+-      continue;
+-    }
+-    SetValues_(line);
+-  }
+-  // finally we can call the subscribed check functions
+-  for(const auto& p : check_patterns) {
+-    VLOG(2) << "--------------------------------\n";
+-    VLOG(2) << "checking for benchmarks matching " << p.regex_str << "...\n";
+-    for(const auto& r : results) {
+-      if(!p.regex->Match(r.name)) {
+-        VLOG(2) << p.regex_str << " is not matched by " << r.name << "\n";
+-        continue;
+-      }
+-      else {
+-        VLOG(2) << p.regex_str << " is matched by " << r.name << "\n";
+-      }
+-      VLOG(1) << "Checking results of " << r.name << ": ... \n";
+-      p.fn(r);
+-      VLOG(1) << "Checking results of " << r.name << ": OK.\n";
+-    }
+-  }
+-}
+-
+-// prepare for the names in this header
+-void ResultsChecker::SetHeader_(const std::string& csv_header) {
+-  field_names = SplitCsv_(csv_header);
+-}
+-
+-// set the values for a benchmark
+-void ResultsChecker::SetValues_(const std::string& entry_csv_line) {
+-  if(entry_csv_line.empty()) return; // some lines are empty
+-  CHECK(!field_names.empty());
+-  auto vals = SplitCsv_(entry_csv_line);
+-  CHECK_EQ(vals.size(), field_names.size());
+-  results.emplace_back(vals[0]); // vals[0] is the benchmark name
+-  auto &entry = results.back();
+-  for (size_t i = 1, e = vals.size(); i < e; ++i) {
+-    entry.values[field_names[i]] = vals[i];
+-  }
+-}
+-
+-// a quick'n'dirty csv splitter (eliminating quotes)
+-std::vector< std::string > ResultsChecker::SplitCsv_(const std::string& line) {
+-  std::vector< std::string > out;
+-  if(line.empty()) return out;
+-  if(!field_names.empty()) out.reserve(field_names.size());
+-  size_t prev = 0, pos = line.find_first_of(','), curr = pos;
+-  while(pos != line.npos) {
+-    CHECK(curr > 0);
+-    if(line[prev] == '"') ++prev;
+-    if(line[curr-1] == '"') --curr;
+-    out.push_back(line.substr(prev, curr-prev));
+-    prev = pos + 1;
+-    pos = line.find_first_of(',', pos + 1);
+-    curr = pos;
+-  }
+-  curr = line.size();
+-  if(line[prev] == '"') ++prev;
+-  if(line[curr-1] == '"') --curr;
+-  out.push_back(line.substr(prev, curr-prev));
+-  return out;
+-}
+-
+-}  // end namespace internal
+-
+-size_t AddChecker(const char* bm_name, ResultsCheckFn fn)
+-{
+-  auto &rc = internal::GetResultsChecker();
+-  rc.Add(bm_name, fn);
+-  return rc.results.size();
+-}
+-
+-int Results::NumThreads() const {
+-  auto pos = name.find("/threads:");
+-  if(pos == name.npos) return 1;
+-  auto end = name.find('/', pos + 9);
+-  std::stringstream ss;
+-  ss << name.substr(pos + 9, end);
+-  int num = 1;
+-  ss >> num;
+-  CHECK(!ss.fail());
+-  return num;
+-}
+-
+-double Results::GetTime(BenchmarkTime which) const {
+-  CHECK(which == kCpuTime || which == kRealTime);
+-  const char *which_str = which == kCpuTime ? "cpu_time" : "real_time";
+-  double val = GetAs< double >(which_str);
+-  auto unit = Get("time_unit");
+-  CHECK(unit);
+-  if(*unit == "ns") {
+-    return val * 1.e-9;
+-  } else if(*unit == "us") {
+-    return val * 1.e-6;
+-  } else if(*unit == "ms") {
+-    return val * 1.e-3;
+-  } else if(*unit == "s") {
+-    return val;
+-  } else {
+-    CHECK(1 == 0) << "unknown time unit: " << *unit;
+-    return 0;
+-  }
+-}
+-
+ // ========================================================================= //
+ // -------------------------- Public API Definitions------------------------ //
+ // ========================================================================= //
+@@ -412,11 +231,4 @@ void RunOutputTests(int argc, char* argv[]) {
+ 
+     std::cout << "\n";
+   }
+-
+-  // now that we know the output is as expected, we can dispatch
+-  // the checks to subscribees.
+-  auto &csv = TestCases[2];
+-  // would use == but gcc spits a warning
+-  CHECK(std::strcmp(csv.name, "CSVReporter") == 0);
+-  internal::GetResultsChecker().CheckResults(csv.out_stream);
+ }
+diff --git a/test/reporter_output_test.cc b/test/reporter_output_test.cc
+index 4a48143..cb52aec 100644
+--- a/test/reporter_output_test.cc
++++ b/test/reporter_output_test.cc
+@@ -13,7 +13,9 @@ ADD_CASES(TC_ConsoleOut,
+           {{"^[-]+$", MR_Next},
+            {"^Benchmark %s Time %s CPU %s Iterations$", MR_Next},
+            {"^[-]+$", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"%csv_header"}});
++ADD_CASES(TC_CSVOut,
++          {{"name,iterations,real_time,cpu_time,time_unit,bytes_per_second,"
++            "items_per_second,label,error_occurred,error_message"}});
+ 
+ // ========================================================================= //
+ // ------------------------ Testing Basic Output --------------------------- //
+diff --git a/test/user_counters_test.cc b/test/user_counters_test.cc
+deleted file mode 100644
+index 66df48b..0000000
+--- a/test/user_counters_test.cc
++++ /dev/null
+@@ -1,217 +0,0 @@
+-
+-#undef NDEBUG
+-
+-#include "benchmark/benchmark.h"
+-#include "output_test.h"
+-
+-// ========================================================================= //
+-// ---------------------- Testing Prologue Output -------------------------- //
+-// ========================================================================= //
+-
+-ADD_CASES(TC_ConsoleOut,
+-          {{"^[-]+$", MR_Next},
+-           {"^Benchmark %s Time %s CPU %s Iterations UserCounters...$", MR_Next},
+-           {"^[-]+$", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"%csv_header,\"bar\",\"foo\""}});
+-
+-// ========================================================================= //
+-// ------------------------- Simple Counters Output ------------------------ //
+-// ========================================================================= //
+-
+-void BM_Counters_Simple(benchmark::State& state) {
+-  while (state.KeepRunning()) {
+-  }
+-  state.counters["foo"] = 1;
+-  state.counters["bar"] = 2 * (double)state.iterations();
+-}
+-BENCHMARK(BM_Counters_Simple);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_Simple %console_report bar=%hrfloat foo=%hrfloat$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_Simple\",$"},
+-                       {"\"iterations\": %int,$", MR_Next},
+-                       {"\"real_time\": %int,$", MR_Next},
+-                       {"\"cpu_time\": %int,$", MR_Next},
+-                       {"\"time_unit\": \"ns\",$", MR_Next},
+-                       {"\"bar\": %float,$", MR_Next},
+-                       {"\"foo\": %float$", MR_Next},
+-                       {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_Simple\",%csv_report,%float,%float$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckSimple(Results const& e) {
+-  double its = e.GetAs< double >("iterations");
+-  CHECK_COUNTER_VALUE(e, int, "foo", EQ, 1);
+-  // check that the value of bar is within 0.1% of the expected value
+-  CHECK_FLOAT_COUNTER_VALUE(e, "bar", EQ, 2.*its, 0.001);
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_Simple", &CheckSimple);
+-
+-// ========================================================================= //
+-// --------------------- Counters+Items+Bytes/s Output --------------------- //
+-// ========================================================================= //
+-
+-namespace { int num_calls1 = 0; }
+-void BM_Counters_WithBytesAndItemsPSec(benchmark::State& state) {
+-  while (state.KeepRunning()) {
+-  }
+-  state.counters["foo"] = 1;
+-  state.counters["bar"] = ++num_calls1;
+-  state.SetBytesProcessed(364);
+-  state.SetItemsProcessed(150);
+-}
+-BENCHMARK(BM_Counters_WithBytesAndItemsPSec);
+-ADD_CASES(TC_ConsoleOut,
+-          {{"^BM_Counters_WithBytesAndItemsPSec %console_report "
+-            "bar=%hrfloat foo=%hrfloat +%hrfloatB/s +%hrfloat items/s$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_WithBytesAndItemsPSec\",$"},
+-                       {"\"iterations\": %int,$", MR_Next},
+-                       {"\"real_time\": %int,$", MR_Next},
+-                       {"\"cpu_time\": %int,$", MR_Next},
+-                       {"\"time_unit\": \"ns\",$", MR_Next},
+-                       {"\"bytes_per_second\": %int,$", MR_Next},
+-                       {"\"items_per_second\": %int,$", MR_Next},
+-                       {"\"bar\": %float,$", MR_Next},
+-                       {"\"foo\": %float$", MR_Next},
+-                       {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_WithBytesAndItemsPSec\","
+-                       "%csv_bytes_items_report,%float,%float$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckBytesAndItemsPSec(Results const& e) {
+-  double t = e.DurationCPUTime(); // this (and not real time) is the time used
+-  CHECK_COUNTER_VALUE(e, int, "foo", EQ, 1);
+-  CHECK_COUNTER_VALUE(e, int, "bar", EQ, num_calls1);
+-  // check that the values are within 0.1% of the expected values
+-  CHECK_FLOAT_RESULT_VALUE(e, "bytes_per_second", EQ, 364./t, 0.001);
+-  CHECK_FLOAT_RESULT_VALUE(e, "items_per_second", EQ, 150./t, 0.001);
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_WithBytesAndItemsPSec",
+-                        &CheckBytesAndItemsPSec);
+-
+-// ========================================================================= //
+-// ------------------------- Rate Counters Output -------------------------- //
+-// ========================================================================= //
+-
+-void BM_Counters_Rate(benchmark::State& state) {
+-  while (state.KeepRunning()) {
+-  }
+-  namespace bm = benchmark;
+-  state.counters["foo"] = bm::Counter{1, bm::Counter::kIsRate};
+-  state.counters["bar"] = bm::Counter{2, bm::Counter::kIsRate};
+-}
+-BENCHMARK(BM_Counters_Rate);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_Rate %console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_Rate\",$"},
+-                       {"\"iterations\": %int,$", MR_Next},
+-                       {"\"real_time\": %int,$", MR_Next},
+-                       {"\"cpu_time\": %int,$", MR_Next},
+-                       {"\"time_unit\": \"ns\",$", MR_Next},
+-                       {"\"bar\": %float,$", MR_Next},
+-                       {"\"foo\": %float$", MR_Next},
+-                       {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_Rate\",%csv_report,%float,%float$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckRate(Results const& e) {
+-  double t = e.DurationCPUTime(); // this (and not real time) is the time used
+-  // check that the values are within 0.1% of the expected values
+-  CHECK_FLOAT_COUNTER_VALUE(e, "foo", EQ, 1./t, 0.001);
+-  CHECK_FLOAT_COUNTER_VALUE(e, "bar", EQ, 2./t, 0.001);
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_Rate", &CheckRate);
+-
+-// ========================================================================= //
+-// ------------------------- Thread Counters Output ------------------------ //
+-// ========================================================================= //
+-
+-void BM_Counters_Threads(benchmark::State& state) {
+-  while (state.KeepRunning()) {
+-  }
+-  state.counters["foo"] = 1;
+-  state.counters["bar"] = 2;
+-}
+-BENCHMARK(BM_Counters_Threads)->ThreadRange(1, 8);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_Threads/threads:%int %console_report bar=%hrfloat foo=%hrfloat$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_Threads/threads:%int\",$"},
+-                       {"\"iterations\": %int,$", MR_Next},
+-                       {"\"real_time\": %int,$", MR_Next},
+-                       {"\"cpu_time\": %int,$", MR_Next},
+-                       {"\"time_unit\": \"ns\",$", MR_Next},
+-                       {"\"bar\": %float,$", MR_Next},
+-                       {"\"foo\": %float$", MR_Next},
+-                       {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_Threads/threads:%int\",%csv_report,%float,%float$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckThreads(Results const& e) {
+-  CHECK_COUNTER_VALUE(e, int, "foo", EQ, e.NumThreads());
+-  CHECK_COUNTER_VALUE(e, int, "bar", EQ, 2 * e.NumThreads());
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_Threads/threads:%int", &CheckThreads);
+-
+-// ========================================================================= //
+-// ---------------------- ThreadAvg Counters Output ------------------------ //
+-// ========================================================================= //
+-
+-void BM_Counters_AvgThreads(benchmark::State& state) {
+-  while (state.KeepRunning()) {
+-  }
+-  namespace bm = benchmark;
+-  state.counters["foo"] = bm::Counter{1, bm::Counter::kAvgThreads};
+-  state.counters["bar"] = bm::Counter{2, bm::Counter::kAvgThreads};
+-}
+-BENCHMARK(BM_Counters_AvgThreads)->ThreadRange(1, 8);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_AvgThreads/threads:%int %console_report bar=%hrfloat foo=%hrfloat$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_AvgThreads/threads:%int\",$"},
+-                       {"\"iterations\": %int,$", MR_Next},
+-                       {"\"real_time\": %int,$", MR_Next},
+-                       {"\"cpu_time\": %int,$", MR_Next},
+-                       {"\"time_unit\": \"ns\",$", MR_Next},
+-                       {"\"bar\": %float,$", MR_Next},
+-                       {"\"foo\": %float$", MR_Next},
+-                       {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_AvgThreads/threads:%int\",%csv_report,%float,%float$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckAvgThreads(Results const& e) {
+-  CHECK_COUNTER_VALUE(e, int, "foo", EQ, 1);
+-  CHECK_COUNTER_VALUE(e, int, "bar", EQ, 2);
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_AvgThreads/threads:%int",
+-                        &CheckAvgThreads);
+-
+-// ========================================================================= //
+-// ---------------------- ThreadAvg Counters Output ------------------------ //
+-// ========================================================================= //
+-
+-void BM_Counters_AvgThreadsRate(benchmark::State& state) {
+-  while (state.KeepRunning()) {
+-  }
+-  namespace bm = benchmark;
+-  state.counters["foo"] = bm::Counter{1, bm::Counter::kAvgThreadsRate};
+-  state.counters["bar"] = bm::Counter{2, bm::Counter::kAvgThreadsRate};
+-}
+-BENCHMARK(BM_Counters_AvgThreadsRate)->ThreadRange(1, 8);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_AvgThreadsRate/threads:%int %console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_AvgThreadsRate/threads:%int\",$"},
+-                       {"\"iterations\": %int,$", MR_Next},
+-                       {"\"real_time\": %int,$", MR_Next},
+-                       {"\"cpu_time\": %int,$", MR_Next},
+-                       {"\"time_unit\": \"ns\",$", MR_Next},
+-                       {"\"bar\": %float,$", MR_Next},
+-                       {"\"foo\": %float$", MR_Next},
+-                       {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_AvgThreadsRate/threads:%int\",%csv_report,%float,%float$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckAvgThreadsRate(Results const& e) {
+-  CHECK_FLOAT_COUNTER_VALUE(e, "foo", EQ, 1./e.DurationCPUTime(), 0.001);
+-  CHECK_FLOAT_COUNTER_VALUE(e, "bar", EQ, 2./e.DurationCPUTime(), 0.001);
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_AvgThreadsRate/threads:%int",
+-                        &CheckAvgThreadsRate);
+-
+-// ========================================================================= //
+-// --------------------------- TEST CASES END ------------------------------ //
+-// ========================================================================= //
+-
+-int main(int argc, char* argv[]) { RunOutputTests(argc, argv); }

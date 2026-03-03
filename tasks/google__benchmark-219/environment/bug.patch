@@ -1,0 +1,786 @@
+diff --git a/include/benchmark/reporter.h b/include/benchmark/reporter.h
+index ded01d2..56fe1f9 100644
+--- a/include/benchmark/reporter.h
++++ b/include/benchmark/reporter.h
+@@ -14,8 +14,6 @@
+ #ifndef BENCHMARK_REPORTER_H_
+ #define BENCHMARK_REPORTER_H_
+ 
+-#include <cassert>
+-#include <iosfwd>
+ #include <string>
+ #include <utility>
+ #include <vector>
+@@ -83,10 +81,6 @@ class BenchmarkReporter {
+     bool report_rms;
+   };
+ 
+-  // Construct a BenchmarkReporter with the output stream set to 'std::cout'
+-  // and the error stream set to 'std::cerr'
+-  BenchmarkReporter();
+-
+   // Called once for every suite of benchmarks run.
+   // The parameter "context" contains information that the
+   // reporter may wish to use when generating its report, for example the
+@@ -111,38 +105,12 @@ class BenchmarkReporter {
+   // reported.
+   virtual void Finalize();
+ 
+-  // REQUIRES: The object referenced by 'out' is valid for the lifetime
+-  // of the reporter.
+-  void SetOutputStream(std::ostream* out) {
+-    assert(out);
+-    output_stream_ = out;
+-  }
+-
+-  // REQUIRES: The object referenced by 'err' is valid for the lifetime
+-  // of the reporter.
+-  void SetErrorStream(std::ostream* err) {
+-    assert(err);
+-    error_stream_ = err;
+-  }
+-
+-  std::ostream& GetOutputStream() const {
+-    return *output_stream_;
+-  }
+-
+-  std::ostream& GetErrorStream() const {
+-    return *error_stream_;
+-  }
+-
+   virtual ~BenchmarkReporter();
+ protected:
+   static void ComputeStats(const std::vector<Run>& reports,
+                            Run* mean, Run* stddev);
+   static void ComputeBigO(const std::vector<Run>& reports, Run* bigO, Run* rms);
+   static TimeUnitMultiplier GetTimeUnitAndMultiplier(TimeUnit unit);
+-
+-private:
+-  std::ostream* output_stream_;
+-  std::ostream* error_stream_;
+ };
+ 
+ // Simple reporter that outputs benchmark data to the console. This is the
+diff --git a/src/colorprint.cc b/src/colorprint.cc
+index efb8626..81f917b 100644
+--- a/src/colorprint.cc
++++ b/src/colorprint.cc
+@@ -16,12 +16,8 @@
+ 
+ #include <cstdarg>
+ #include <cstdio>
+-#include <cstdarg>
+-#include <string>
+-#include <memory>
+ 
+ #include "commandlineflags.h"
+-#include "check.h"
+ #include "internal_macros.h"
+ 
+ #ifdef BENCHMARK_OS_WINDOWS
+@@ -78,51 +74,14 @@ PlatformColorCode GetPlatformColorCode(LogColor color) {
+   };
+ #endif
+ }
+-
+ }  // end namespace
+ 
+-std::string FormatString(const char *msg, va_list args) {
+-  // we might need a second shot at this, so pre-emptivly make a copy
+-  va_list args_cp;
+-  va_copy(args_cp, args);
+-
+-  std::size_t size = 256;
+-  char local_buff[256];
+-  auto ret = std::vsnprintf(local_buff, size, msg, args_cp);
+-
+-  va_end(args_cp);
+-
+-  // currently there is no error handling for failure, so this is hack.
+-  CHECK(ret >= 0);
+-
+-  if (ret == 0) // handle empty expansion
+-    return {};
+-  else if (static_cast<size_t>(ret) < size)
+-    return local_buff;
+-  else {
+-    // we did not provide a long enough buffer on our first attempt.
+-    size = (size_t)ret + 1; // + 1 for the null byte
+-    std::unique_ptr<char[]> buff(new char[size]);
+-    ret = std::vsnprintf(buff.get(), size, msg, args);
+-    CHECK(ret > 0 && ((size_t)ret) < size);
+-    return buff.get();
+-  }
+-}
+-
+-std::string FormatString(const char *msg, ...) {
+-  va_list args;
+-  va_start(args, msg);
+-  auto tmp = FormatString(msg, args);
+-  va_end(args);
+-  return tmp;
+-}
+-
+-void ColorPrintf(std::ostream& out, LogColor color, const char* fmt, ...) {
++void ColorPrintf(LogColor color, const char* fmt, ...) {
+   va_list args;
+   va_start(args, fmt);
+ 
+   if (!FLAGS_color_print) {
+-    out << FormatString(fmt, args);
++    vprintf(fmt, args);
+     va_end(args);
+     return;
+   }
+@@ -148,11 +107,10 @@ void ColorPrintf(std::ostream& out, LogColor color, const char* fmt, ...) {
+   SetConsoleTextAttribute(stdout_handle, old_color_attrs);
+ #else
+   const char* color_code = GetPlatformColorCode(color);
+-  if (color_code) out << FormatString("\033[0;3%sm", color_code);
+-  out << FormatString(fmt, args) << "\033[m";
++  if (color_code) fprintf(stdout, "\033[0;3%sm", color_code);
++  vprintf(fmt, args);
++  printf("\033[m");  // Resets the terminal to default.
+ #endif
+-
+   va_end(args);
+ }
+-
+ }  // end namespace benchmark
+diff --git a/src/colorprint.h b/src/colorprint.h
+index 2b3c082..54d1f66 100644
+--- a/src/colorprint.h
++++ b/src/colorprint.h
+@@ -1,10 +1,6 @@
+ #ifndef BENCHMARK_COLORPRINT_H_
+ #define BENCHMARK_COLORPRINT_H_
+ 
+-#include <cstdarg>
+-#include <string>
+-#include <iostream>
+-
+ namespace benchmark {
+ enum LogColor {
+   COLOR_DEFAULT,
+@@ -17,11 +13,7 @@ enum LogColor {
+   COLOR_WHITE
+ };
+ 
+-std::string FormatString(const char* msg, va_list args);
+-std::string FormatString(const char* msg, ...);
+-
+-void ColorPrintf(std::ostream& out, LogColor color, const char* fmt, ...);
+-
++void ColorPrintf(LogColor color, const char* fmt, ...);
+ }  // end namespace benchmark
+ 
+ #endif  // BENCHMARK_COLORPRINT_H_
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index 6e39ad9..5dd98f6 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -25,8 +25,6 @@
+ 
+ #include "check.h"
+ #include "colorprint.h"
+-#include "commandlineflags.h"
+-#include "internal_macros.h"
+ #include "string_util.h"
+ #include "walltime.h"
+ 
+@@ -35,36 +33,26 @@ namespace benchmark {
+ bool ConsoleReporter::ReportContext(const Context& context) {
+   name_field_width_ = context.name_field_width;
+ 
+-  auto& Out = GetOutputStream();
+-  auto& Err = GetErrorStream();
+-
+-#ifdef BENCHMARK_OS_WINDOWS
+-  if (FLAGS_color_print && &Out != &std::cout) {
+-      Err << "Color printing is only supported for stdout on windows. "
+-              "Disabling color printing\n";
+-      FLAGS_color_print = false;
+-  }
+-#endif
+-
+-  Err << "Run on (" << context.num_cpus << " X " << context.mhz_per_cpu
++  std::cerr << "Run on (" << context.num_cpus << " X " << context.mhz_per_cpu
+             << " MHz CPU " << ((context.num_cpus > 1) ? "s" : "") << ")\n";
+ 
+-  Err << LocalDateTimeString() << "\n";
++  std::cerr << LocalDateTimeString() << "\n";
+ 
+   if (context.cpu_scaling_enabled) {
+-    Err << "***WARNING*** CPU scaling is enabled, the benchmark "
++    std::cerr << "***WARNING*** CPU scaling is enabled, the benchmark "
+                  "real time measurements may be noisy and will incur extra "
+                  "overhead.\n";
+   }
+ 
+ #ifndef NDEBUG
+-  Err << "***WARNING*** Library was built as DEBUG. Timings may be "
++  std::cerr << "***WARNING*** Library was built as DEBUG. Timings may be "
+                "affected.\n";
+ #endif
+-  std::string str = FormatString("%-*s %13s %13s %10s\n",
++
++  int output_width = fprintf(stdout, "%-*s %13s %13s %10s\n",
+                              static_cast<int>(name_field_width_), "Benchmark",
+                              "Time", "CPU", "Iterations");
+-  Out << str << std::string(str.length() - 1, '-') << "\n";
++  std::cout << std::string(output_width - 1, '-') << "\n";
+ 
+   return true;
+ }
+@@ -113,17 +101,15 @@ void ConsoleReporter::ReportComplexity(const std::vector<Run> & complexity_repor
+ }
+ 
+ void ConsoleReporter::PrintRunData(const Run& result) {
+-  auto& Out = GetOutputStream();
+-
+   auto name_color = (result.report_big_o || result.report_rms)
+       ? COLOR_BLUE : COLOR_GREEN;
+-  ColorPrintf(Out, name_color, "%-*s ", name_field_width_,
++  ColorPrintf(name_color, "%-*s ", name_field_width_,
+               result.benchmark_name.c_str());
+ 
+   if (result.error_occurred) {
+-    ColorPrintf(Out, COLOR_RED, "ERROR OCCURRED: \'%s\'",
++    ColorPrintf(COLOR_RED, "ERROR OCCURRED: \'%s\'",
+                 result.error_message.c_str());
+-    ColorPrintf(Out, COLOR_DEFAULT, "\n");
++    ColorPrintf(COLOR_DEFAULT, "\n");
+     return;
+   }
+   // Format bytes per second
+@@ -145,24 +131,24 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+ 
+   if(result.report_big_o) {
+     std::string big_o = result.report_big_o ? GetBigOString(result.complexity) : "";
+-    ColorPrintf(Out, COLOR_YELLOW, "%10.4f %s %10.4f %s ",
++    ColorPrintf(COLOR_YELLOW, "%10.4f %s %10.4f %s ",
+                 result.real_accumulated_time * multiplier,
+                 big_o.c_str(),
+                 result.cpu_accumulated_time * multiplier,
+                 big_o.c_str());
+   } else if(result.report_rms) {
+-    ColorPrintf(Out, COLOR_YELLOW, "%10.0f %% %10.0f %% ",
++    ColorPrintf(COLOR_YELLOW, "%10.0f %% %10.0f %% ",
+                 result.real_accumulated_time * multiplier * 100,
+                 result.cpu_accumulated_time * multiplier * 100);
+   } else if (result.iterations == 0) {
+ 
+-    ColorPrintf(Out, COLOR_YELLOW, "%10.0f %s %10.0f %s ",
++    ColorPrintf(COLOR_YELLOW, "%10.0f %s %10.0f %s ",
+                 result.real_accumulated_time * multiplier,
+                 timeLabel,
+                 result.cpu_accumulated_time * multiplier,
+                 timeLabel);
+   } else {
+-    ColorPrintf(Out, COLOR_YELLOW, "%10.0f %s %10.0f %s ",
++    ColorPrintf(COLOR_YELLOW, "%10.0f %s %10.0f %s ",
+                 (result.real_accumulated_time * multiplier) /
+                     (static_cast<double>(result.iterations)),
+                 timeLabel,
+@@ -172,22 +158,22 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+   }
+ 
+   if(!result.report_big_o && !result.report_rms) {
+-    ColorPrintf(Out, COLOR_CYAN, "%10lld", result.iterations);
++    ColorPrintf(COLOR_CYAN, "%10lld", result.iterations);
+   }
+ 
+   if (!rate.empty()) {
+-    ColorPrintf(Out, COLOR_DEFAULT, " %*s", 13, rate.c_str());
++    ColorPrintf(COLOR_DEFAULT, " %*s", 13, rate.c_str());
+   }
+ 
+   if (!items.empty()) {
+-    ColorPrintf(Out, COLOR_DEFAULT, " %*s", 18, items.c_str());
++    ColorPrintf(COLOR_DEFAULT, " %*s", 18, items.c_str());
+   }
+ 
+   if (!result.report_label.empty()) {
+-    ColorPrintf(Out, COLOR_DEFAULT, " %s", result.report_label.c_str());
++    ColorPrintf(COLOR_DEFAULT, " %s", result.report_label.c_str());
+   }
+ 
+-  ColorPrintf(Out, COLOR_DEFAULT, "\n");
++  ColorPrintf(COLOR_DEFAULT, "\n");
+ }
+ 
+ }  // end namespace benchmark
+diff --git a/src/csv_reporter.cc b/src/csv_reporter.cc
+index 36f149b..ac4bd3d 100644
+--- a/src/csv_reporter.cc
++++ b/src/csv_reporter.cc
+@@ -44,30 +44,27 @@ std::vector<std::string> elements = {
+ }
+ 
+ bool CSVReporter::ReportContext(const Context& context) {
+-  std::ostream& Err = GetErrorStream();
+-  std::ostream& Out = GetOutputStream();
+-
+-  Err << "Run on (" << context.num_cpus << " X " << context.mhz_per_cpu
++  std::cerr << "Run on (" << context.num_cpus << " X " << context.mhz_per_cpu
+             << " MHz CPU " << ((context.num_cpus > 1) ? "s" : "") << ")\n";
+ 
+-  Err << LocalDateTimeString() << "\n";
++  std::cerr << LocalDateTimeString() << "\n";
+ 
+   if (context.cpu_scaling_enabled) {
+-    Err << "***WARNING*** CPU scaling is enabled, the benchmark "
++    std::cerr << "***WARNING*** CPU scaling is enabled, the benchmark "
+                  "real time measurements may be noisy and will incur extra "
+                  "overhead.\n";
+   }
+ 
+ #ifndef NDEBUG
+-  Err << "***WARNING*** Library was built as DEBUG. Timings may be "
++  std::cerr << "***WARNING*** Library was built as DEBUG. Timings may be "
+                "affected.\n";
+ #endif
+   for (auto B = elements.begin(); B != elements.end(); ) {
+-    Out << *B++;
++    std::cout << *B++;
+     if (B != elements.end())
+-      Out << ",";
++      std::cout << ",";
+   }
+-  Out << "\n";
++  std::cout << "\n";
+   return true;
+ }
+ 
+@@ -109,19 +106,19 @@ void CSVReporter::ReportComplexity(const std::vector<Run>& complexity_reports) {
+ }
+ 
+ void CSVReporter::PrintRunData(const Run & run) {
+-  std::ostream& Out = GetOutputStream();
++
+ 
+   // Field with embedded double-quote characters must be doubled and the field
+   // delimited with double-quotes.
+   std::string name = run.benchmark_name;
+   ReplaceAll(&name, "\"", "\"\"");
+-  Out << '"' << name << "\",";
++  std::cout << '"' << name << "\",";
+   if (run.error_occurred) {
+-    Out << std::string(elements.size() - 3, ',');
+-    Out << "true,";
++    std::cout << std::string(elements.size() - 3, ',');
++    std::cout << "true,";
+     std::string msg = run.error_message;
+     ReplaceAll(&msg, "\"", "\"\"");
+-    Out << '"' << msg << "\"\n";
++    std::cout << '"' << msg << "\"\n";
+     return;
+   }
+ 
+@@ -138,36 +135,36 @@ void CSVReporter::PrintRunData(const Run & run) {
+ 
+   // Do not print iteration on bigO and RMS report
+   if(!run.report_big_o && !run.report_rms) {
+-    Out << run.iterations;
++    std::cout << run.iterations;
+   }
+-  Out << ",";
++  std::cout << ",";
+ 
+-  Out << real_time << ",";
+-  Out << cpu_time << ",";
++  std::cout << real_time << ",";
++  std::cout << cpu_time << ",";
+ 
+   // Do not print timeLabel on RMS report
+   if(!run.report_rms) {
+-    Out << timeLabel;
++    std::cout << timeLabel;
+   }
+-  Out << ",";
++  std::cout << ",";
+ 
+   if (run.bytes_per_second > 0.0) {
+-    Out << run.bytes_per_second;
++    std::cout << run.bytes_per_second;
+   }
+-  Out << ",";
++  std::cout << ",";
+   if (run.items_per_second > 0.0) {
+-    Out << run.items_per_second;
++    std::cout << run.items_per_second;
+   }
+-  Out << ",";
++  std::cout << ",";
+   if (!run.report_label.empty()) {
+     // Field with embedded double-quote characters must be doubled and the field
+     // delimited with double-quotes.
+     std::string label = run.report_label;
+     ReplaceAll(&label, "\"", "\"\"");
+-    Out << "\"" << label << "\"";
++    std::cout << "\"" << label << "\"";
+   }
+-  Out << ",,"; // for error_occurred and error_message
+-  Out << '\n';
++  std::cout << ",,"; // for error_occurred and error_message
++  std::cout << '\n';
+ }
+ 
+ }  // end namespace benchmark
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index d3effe1..cab527c 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -53,7 +53,7 @@ int64_t RoundDouble(double v) {
+ } // end namespace
+ 
+ bool JSONReporter::ReportContext(const Context& context) {
+-  std::ostream& out = GetOutputStream();
++  std::ostream& out = std::cout;
+ 
+   out << "{\n";
+   std::string inner_indent(2, ' ');
+@@ -92,7 +92,7 @@ void JSONReporter::ReportRuns(std::vector<Run> const& reports) {
+     return;
+   }
+   std::string indent(4, ' ');
+-  std::ostream& out = GetOutputStream();
++  std::ostream& out = std::cout;
+   if (!first_report_) {
+     out << ",\n";
+   }
+@@ -128,7 +128,7 @@ void JSONReporter::ReportComplexity(const std::vector<Run> & complexity_reports)
+   }
+ 
+   std::string indent(4, ' ');
+-  std::ostream& out = GetOutputStream();
++  std::ostream& out = std::cout;
+   if (!first_report_) {
+     out << ",\n";
+   }
+@@ -148,7 +148,7 @@ void JSONReporter::ReportComplexity(const std::vector<Run> & complexity_reports)
+ 
+ void JSONReporter::Finalize() {
+     // Close the list of benchmarks and the top level object.
+-    GetOutputStream() << "\n  ]\n}\n";
++    std::cout << "\n  ]\n}\n";
+ }
+ 
+ void JSONReporter::PrintRunData(Run const& run) {
+@@ -164,7 +164,7 @@ void JSONReporter::PrintRunData(Run const& run) {
+     }
+ 
+     std::string indent(6, ' ');
+-    std::ostream& out = GetOutputStream();
++    std::ostream& out = std::cout;
+     out << indent
+         << FormatKV("name", run.benchmark_name)
+         << ",\n";
+diff --git a/src/reporter.cc b/src/reporter.cc
+index 5b303f7..d0a80e6 100644
+--- a/src/reporter.cc
++++ b/src/reporter.cc
+@@ -16,8 +16,6 @@
+ #include "complexity.h"
+ 
+ #include <cstdlib>
+-
+-#include <iostream>
+ #include <vector>
+ #include <tuple>
+ 
+@@ -26,11 +24,6 @@
+ 
+ namespace benchmark {
+ 
+-BenchmarkReporter::BenchmarkReporter()
+-    : output_stream_(&std::cout), error_stream_(&std::cerr)
+-{
+-}
+-
+ void BenchmarkReporter::ComputeStats(
+     const std::vector<Run>& reports,
+     Run* mean_data, Run* stddev_data) {
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index aeb720a..247c630 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -48,8 +48,6 @@ add_test(fixture_test fixture_test --benchmark_min_time=0.01)
+ compile_benchmark_test(map_test)
+ add_test(map_test map_test --benchmark_min_time=0.01)
+ 
+-compile_benchmark_test(reporter_output_test)
+-add_test(reporter_output_test reporter_output_test --benchmark_min_time=0.01)
+ 
+ check_cxx_compiler_flag(-std=c++03 BENCHMARK_HAS_CXX03_FLAG)
+ if (BENCHMARK_HAS_CXX03_FLAG)
+diff --git a/test/reporter_output_test.cc b/test/reporter_output_test.cc
+deleted file mode 100644
+index acfbf68..0000000
+--- a/test/reporter_output_test.cc
++++ /dev/null
+@@ -1,264 +0,0 @@
+-
+-#undef NDEBUG
+-#include "benchmark/benchmark.h"
+-#include "../src/check.h" // NOTE: check.h is for internal use only!
+-#include "../src/re.h" // NOTE: re.h is for internal use only
+-#include <cassert>
+-#include <cstring>
+-#include <iostream>
+-#include <sstream>
+-#include <vector>
+-#include <utility>
+-
+-namespace {
+-
+-// ========================================================================= //
+-// -------------------------- Testing Case --------------------------------- //
+-// ========================================================================= //
+-
+-enum MatchRules {
+-  MR_Default, // Skip non-matching lines until a match is found.
+-  MR_Next    // Match must occur on the next line.
+-};
+-
+-struct TestCase {
+-  std::string regex;
+-  int match_rule;
+-
+-  TestCase(std::string re, int rule = MR_Default) : regex(re), match_rule(rule) {}
+-
+-  void Check(std::stringstream& remaining_output) const {
+-    benchmark::Regex r;
+-    std::string err_str;
+-    r.Init(regex, &err_str);
+-    CHECK(err_str.empty()) << "Could not construct regex \"" << regex << "\""
+-                           << " got Error: " << err_str;
+-
+-    std::string line;
+-    while (remaining_output.eof() == false) {
+-        CHECK(remaining_output.good());
+-        std::getline(remaining_output, line);
+-        if (r.Match(line)) return;
+-        CHECK(match_rule != MR_Next) << "Expected line \"" << line
+-                                     << "\" to match regex \"" << regex << "\"";
+-    }
+-
+-    CHECK(remaining_output.eof() == false)
+-        << "End of output reached before match for regex \"" << regex
+-        << "\" was found";
+-  }
+-};
+-
+-std::vector<TestCase> ConsoleOutputTests;
+-std::vector<TestCase> JSONOutputTests;
+-std::vector<TestCase> CSVOutputTests;
+-
+-std::vector<TestCase> ConsoleErrorTests;
+-std::vector<TestCase> JSONErrorTests;
+-std::vector<TestCase> CSVErrorTests;
+-
+-// ========================================================================= //
+-// -------------------------- Test Helpers --------------------------------- //
+-// ========================================================================= //
+-
+-class TestReporter : public benchmark::BenchmarkReporter {
+-public:
+-  TestReporter(std::vector<benchmark::BenchmarkReporter*> reps)
+-      : reporters_(reps)  {}
+-
+-  virtual bool ReportContext(const Context& context) {
+-    bool last_ret = false;
+-    bool first = true;
+-    for (auto rep : reporters_) {
+-      bool new_ret = rep->ReportContext(context);
+-      CHECK(first || new_ret == last_ret)
+-          << "Reports return different values for ReportContext";
+-      first = false;
+-      last_ret = new_ret;
+-    }
+-    return last_ret;
+-  }
+-
+-  virtual void ReportRuns(const std::vector<Run>& report) {
+-    for (auto rep : reporters_)
+-      rep->ReportRuns(report);
+-  }
+-
+-  virtual void ReportComplexity(const std::vector<Run>& complexity_reports) {
+-    for (auto rep : reporters_)
+-    rep->ReportComplexity(complexity_reports);
+-  }
+-
+-  virtual void Finalize() {
+-      for (auto rep : reporters_)
+-        rep->Finalize();
+-  }
+-
+-private:
+-  std::vector<benchmark::BenchmarkReporter*> reporters_;
+-};
+-
+-
+-#define CONCAT2(x, y) x##y
+-#define CONCAT(x, y) CONCAT2(x, y)
+-
+-#define ADD_CASES(...) \
+-    int CONCAT(dummy, __LINE__) = AddCases(__VA_ARGS__)
+-
+-int AddCases(std::vector<TestCase>* out, std::initializer_list<TestCase> const& v) {
+-  for (auto const& TC : v)
+-    out->push_back(TC);
+-  return 0;
+-}
+-
+-template <class First>
+-std::string join(First f) { return f; }
+-
+-template <class First, class ...Args>
+-std::string join(First f, Args&&... args) {
+-    return std::string(std::move(f)) + "[ ]+" + join(std::forward<Args>(args)...);
+-}
+-
+-std::string dec_re = "[0-9]+\\.[0-9]+";
+-
+-}  // end namespace
+-
+-// ========================================================================= //
+-// ---------------------- Testing Prologue Output -------------------------- //
+-// ========================================================================= //
+-
+-ADD_CASES(&ConsoleOutputTests, {
+-    {join("^Benchmark", "Time", "CPU", "Iterations$"), MR_Next},
+-    {"^[-]+$", MR_Next}
+-});
+-ADD_CASES(&CSVOutputTests, {
+-  {"name,iterations,real_time,cpu_time,time_unit,bytes_per_second,items_per_second,"
+-    "label,error_occurred,error_message"}
+-});
+-
+-// ========================================================================= //
+-// ------------------------ Testing Basic Output --------------------------- //
+-// ========================================================================= //
+-
+-void BM_basic(benchmark::State& state) {
+-  while (state.KeepRunning()) {}
+-}
+-BENCHMARK(BM_basic);
+-
+-ADD_CASES(&ConsoleOutputTests, {
+-    {"^BM_basic[ ]+[0-9]{1,5} ns[ ]+[0-9]{1,5} ns[ ]+[0-9]+$"}
+-});
+-ADD_CASES(&JSONOutputTests, {
+-    {"\"name\": \"BM_basic\",$"},
+-    {"\"iterations\": [0-9]+,$", MR_Next},
+-    {"\"real_time\": [0-9],$", MR_Next},
+-    {"\"cpu_time\": [0-9],$", MR_Next},
+-    {"\"time_unit\": \"ns\"$", MR_Next},
+-    {"}", MR_Next}
+-});
+-ADD_CASES(&CSVOutputTests, {
+-    {"^\"BM_basic\",[0-9]+," + dec_re + "," + dec_re + ",ns,,,,,$"}
+-});
+-
+-// ========================================================================= //
+-// ------------------------ Testing Error Output --------------------------- //
+-// ========================================================================= //
+-
+-void BM_error(benchmark::State& state) {
+-    state.SkipWithError("message");
+-    while(state.KeepRunning()) {}
+-}
+-BENCHMARK(BM_error);
+-ADD_CASES(&ConsoleOutputTests, {
+-    {"^BM_error[ ]+ERROR OCCURRED: 'message'$"}
+-});
+-ADD_CASES(&JSONOutputTests, {
+-    {"\"name\": \"BM_error\",$"},
+-    {"\"error_occurred\": true,$", MR_Next},
+-    {"\"error_message\": \"message\",$", MR_Next}
+-});
+-
+-ADD_CASES(&CSVOutputTests, {
+-    {"^\"BM_error\",,,,,,,,true,\"message\"$"}
+-});
+-
+-
+-// ========================================================================= //
+-// ----------------------- Testing Complexity Output ----------------------- //
+-// ========================================================================= //
+-
+-void BM_Complexity_O1(benchmark::State& state) {
+-  while (state.KeepRunning()) {
+-  }
+-  state.SetComplexityN(state.range_x());
+-}
+-BENCHMARK(BM_Complexity_O1)->Range(1, 1<<18)->Complexity(benchmark::o1);
+-
+-std::string bigOStr = "[0-9]+\\.[0-9]+ \\* [0-9]+";
+-
+-ADD_CASES(&ConsoleOutputTests, {
+-   {join("^BM_Complexity_O1_BigO", bigOStr, bigOStr) + "[ ]*$"},
+-   {join("^BM_Complexity_O1_RMS", "[0-9]+ %", "[0-9]+ %") + "[ ]*$"}
+-});
+-
+-
+-// ========================================================================= //
+-// --------------------------- TEST CASES END ------------------------------ //
+-// ========================================================================= //
+-
+-
+-int main(int argc, char* argv[]) {
+-  // Add --color_print=false to argv since we don't want to match color codes.
+-  char new_arg[64];
+-  char* new_argv[64];
+-  std::copy(argv, argv + argc, new_argv);
+-  new_argv[argc++] = std::strcpy(new_arg, "--color_print=false");
+-  benchmark::Initialize(&argc, new_argv);
+-
+-  benchmark::ConsoleReporter CR;
+-  benchmark::JSONReporter JR;
+-  benchmark::CSVReporter CSVR;
+-  struct ReporterTest {
+-    const char* name;
+-    std::vector<TestCase>& output_cases;
+-    std::vector<TestCase>& error_cases;
+-    benchmark::BenchmarkReporter& reporter;
+-    std::stringstream out_stream;
+-    std::stringstream err_stream;
+-
+-    ReporterTest(const char* n,
+-                 std::vector<TestCase>& out_tc,
+-                 std::vector<TestCase>& err_tc,
+-                 benchmark::BenchmarkReporter& br)
+-        : name(n), output_cases(out_tc), error_cases(err_tc), reporter(br) {
+-        reporter.SetOutputStream(&out_stream);
+-        reporter.SetErrorStream(&err_stream);
+-    }
+-  } TestCases[] = {
+-      {"ConsoleReporter", ConsoleOutputTests, ConsoleErrorTests, CR},
+-      {"JSONReporter", JSONOutputTests, JSONErrorTests, JR},
+-      {"CSVReporter", CSVOutputTests, CSVErrorTests, CSVR}
+-  };
+-
+-  // Create the test reporter and run the benchmarks.
+-  std::cout << "Running benchmarks...\n";
+-  TestReporter test_rep({&CR, &JR, &CSVR});
+-  benchmark::RunSpecifiedBenchmarks(&test_rep);
+-
+-  for (auto& rep_test : TestCases) {
+-      std::string msg = std::string("\nTesting ") + rep_test.name + " Output\n";
+-      std::string banner(msg.size() - 1, '-');
+-      std::cout << banner << msg << banner << "\n";
+-
+-      std::cerr << rep_test.err_stream.str();
+-      std::cout << rep_test.out_stream.str();
+-
+-      for (const auto& TC : rep_test.error_cases)
+-        TC.Check(rep_test.err_stream);
+-      for (const auto& TC : rep_test.output_cases)
+-        TC.Check(rep_test.out_stream);
+-
+-      std::cout << "\n";
+-  }
+-  return 0;
+-}

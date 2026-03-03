@@ -1,0 +1,183 @@
+diff --git a/include/simdjson/document.h b/include/simdjson/document.h
+index f54ffd2a..d1491e48 100644
+--- a/include/simdjson/document.h
++++ b/include/simdjson/document.h
+@@ -1110,7 +1110,6 @@ private:
+  /** The result of a JSON navigation that may fail. */
+ class document::element_result : public simdjson_result<document::element> {
+ public:
+-  really_inline element_result() noexcept;
+   really_inline element_result(element value) noexcept;
+   really_inline element_result(error_code error) noexcept;
+ 
+@@ -1147,7 +1146,6 @@ public:
+ /** The result of a JSON conversion that may fail. */
+ class document::array_result : public simdjson_result<document::array> {
+ public:
+-  really_inline array_result() noexcept;
+   really_inline array_result(array value) noexcept;
+   really_inline array_result(error_code error) noexcept;
+ 
+@@ -1165,7 +1163,6 @@ public:
+ /** The result of a JSON conversion that may fail. */
+ class document::object_result : public simdjson_result<document::object> {
+ public:
+-  really_inline object_result() noexcept;
+   really_inline object_result(object value) noexcept;
+   really_inline object_result(error_code error) noexcept;
+ 
+diff --git a/include/simdjson/error.h b/include/simdjson/error.h
+index 56a3cb80..b8a047e9 100644
+--- a/include/simdjson/error.h
++++ b/include/simdjson/error.h
+@@ -118,11 +118,6 @@ struct simdjson_result : public std::pair<T, error_code> {
+ 
+ #endif // SIMDJSON_EXCEPTIONS
+ 
+-  /**
+-   * Create a new empty result with error = UNINITIALIZED.
+-   */
+-  simdjson_result() noexcept : simdjson_result(UNINITIALIZED) {}
+-
+   /**
+    * Create a new error result.
+    */
+@@ -185,11 +180,6 @@ struct simdjson_move_result : std::pair<T, error_code> {
+ 
+ #endif
+ 
+-  /**
+-   * Create a new empty result with error = UNINITIALIZED.
+-   */
+-  simdjson_move_result() noexcept : simdjson_move_result(UNINITIALIZED) {}
+-
+   /**
+    * Create a new error result.
+    */
+diff --git a/include/simdjson/inline/document.h b/include/simdjson/inline/document.h
+index d5b45424..b56080e7 100644
+--- a/include/simdjson/inline/document.h
++++ b/include/simdjson/inline/document.h
+@@ -16,7 +16,6 @@ namespace simdjson {
+ //
+ // element_result inline implementation
+ //
+-really_inline document::element_result::element_result() noexcept : simdjson_result<element>() {}
+ really_inline document::element_result::element_result(element value) noexcept : simdjson_result<element>(value) {}
+ really_inline document::element_result::element_result(error_code error) noexcept : simdjson_result<element>(error) {}
+ inline simdjson_result<bool> document::element_result::is_null() const noexcept {
+@@ -112,7 +111,6 @@ inline document::element_result::operator document::object() const noexcept(fals
+ //
+ // array_result inline implementation
+ //
+-really_inline document::array_result::array_result() noexcept : simdjson_result<array>() {}
+ really_inline document::array_result::array_result(array value) noexcept : simdjson_result<array>(value) {}
+ really_inline document::array_result::array_result(error_code error) noexcept : simdjson_result<array>(error) {}
+ 
+@@ -148,7 +146,6 @@ inline document::element_result document::array_result::at(size_t index) const n
+ //
+ // object_result inline implementation
+ //
+-really_inline document::object_result::object_result() noexcept : simdjson_result<object>() {}
+ really_inline document::object_result::object_result(object value) noexcept : simdjson_result<object>(value) {}
+ really_inline document::object_result::object_result(error_code error) noexcept : simdjson_result<object>(error) {}
+ 
+@@ -808,38 +805,53 @@ inline document::element_result document::object::operator[](const char *json_po
+   return (*this)[std::string_view(json_pointer)];
+ }
+ inline document::element_result document::object::at(std::string_view json_pointer) const noexcept {
+-  size_t slash = json_pointer.find('/');
+-  std::string_view key = json_pointer.substr(0, slash);
+-
+-  // Grab the child with the given key
+-  document::element_result child;
+-
+-  // If there is an escape character in the key, unescape it and then get the child.
+-  size_t escape = key.find('~');
+-  if (escape != std::string_view::npos) {
+-    // Unescape the key
+-    std::string unescaped(key);
+-    do {
+-      switch (unescaped[escape+1]) {
+-        case '0':
+-          unescaped.replace(escape, 2, "~");
+-          break;
+-        case '1':
+-          unescaped.replace(escape, 2, "/");
+-          break;
+-        default:
+-          RETURN_ERROR(INVALID_JSON_POINTER, "Unexpected ~ escape character in JSON pointer");
++  // Unescape the key
++  std::string unescaped;
++  unescaped.reserve(json_pointer.length());
++  size_t i;
++  for (i = 0; i < json_pointer.length() && json_pointer[i] != '/'; i++) {
++    switch (json_pointer[i]) {
++      // Handle ~ escaping: ~0 = ~, ~1 = /
++      case '~': {
++        i++;
++        // ~ at end of string is invalid
++        if (i >= json_pointer.length()) { RETURN_ERROR(INVALID_JSON_POINTER, "~ at end of string in JSON pointer"); }
++        switch (json_pointer[i]) {
++          case '0':
++            unescaped.push_back('~');
++            break;
++          case '1':
++            unescaped.push_back('/');
++            break;
++          default:
++            RETURN_ERROR(INVALID_JSON_POINTER, "Unexpected ~ escape character in JSON pointer");
++        }
++        break;
+       }
+-      escape = unescaped.find('~', escape+1);
+-    } while (escape != std::string::npos);
+-    child = at_key(unescaped);
+-  } else {
+-    child = at_key(key);
++      // TODO backslash doesn't appear to be a thing in JSON pointer
++      case '\\': {
++        i++;
++        // backslash at end of string is invalid
++        if (i >= json_pointer.length()) { RETURN_ERROR(INVALID_JSON_POINTER, "~ at end of string in JSON pointer"); }
++        // Check for invalid escape characters
++        if (json_pointer[i] != '\\' && json_pointer[i] != '"' && json_pointer[i] > 0x1F) {
++          RETURN_ERROR(INVALID_JSON_POINTER, "Invalid backslash escape in JSON pointer");
++        }
++        unescaped.push_back(json_pointer[i]);
++        break;
++      }
++      default:
++        unescaped.push_back(json_pointer[i]);
++        break;
++    }
+   }
+ 
++  // Grab the child with the given key
++  auto child = at_key(unescaped);
++
+   // If there is a /, we have to recurse and look up more of the path
+-  if (slash != std::string_view::npos) {
+-    child = child.at(json_pointer.substr(slash+1));
++  if (i < json_pointer.length()) {
++    child = child.at(json_pointer.substr(i+1));
+   }
+ 
+   return child;
+diff --git a/tests/pointercheck.cpp b/tests/pointercheck.cpp
+index 9b91ae88..5f8b9d13 100644
+--- a/tests/pointercheck.cpp
++++ b/tests/pointercheck.cpp
+@@ -60,9 +60,9 @@ bool json_pointer_failure_test(const char *json_pointer, error_code expected_fai
+ 
+ int main() {
+   if (
+-    json_pointer_success_test("/~1~001abc/1/\\\" 0/0", "value0") &&
+-    json_pointer_success_test("/~1~001abc/1/\\\" 0/1", "value1") &&
+-    json_pointer_failure_test("/~1~001abc/1/\\\" 0/2", INDEX_OUT_OF_BOUNDS) && // index actually out of bounds
++    json_pointer_success_test(R"(/~1~001abc/1/\\\" 0/0)", "value0") &&
++    json_pointer_success_test(R"(/~1~001abc/1/\\\" 0/1)", "value1") &&
++    json_pointer_failure_test(R"(/~1~001abc/1/\\\" 0/2)", INDEX_OUT_OF_BOUNDS) && // index actually out of bounds
+     json_pointer_success_test("/arr") && // get array
+     json_pointer_failure_test("/arr/0", INDEX_OUT_OF_BOUNDS) && // array index 0 out of bounds on empty array
+     json_pointer_success_test("/~1~001abc") && // get object

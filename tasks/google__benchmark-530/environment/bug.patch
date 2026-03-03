@@ -1,0 +1,920 @@
+diff --git a/.gitignore b/.gitignore
+index 050e469..aca5f93 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -6,7 +6,6 @@
+ *.dylib
+ *.cmake
+ !/cmake/*.cmake
+-!/test/AssemblyTests.cmake
+ *~
+ *.pyc
+ __pycache__
+diff --git a/.travis.yml b/.travis.yml
+index 09c058c..137cc98 100644
+--- a/.travis.yml
++++ b/.travis.yml
+@@ -34,7 +34,6 @@ matrix:
+       env:
+         - INSTALL_GCC6_FROM_PPA=1
+         - COMPILER=g++-6 C_COMPILER=gcc-6  BUILD_TYPE=Debug
+-        - ENABLE_SANITIZER=1
+         - EXTRA_FLAGS="-fno-omit-frame-pointer -g -O2 -fsanitize=undefined,address -fuse-ld=gold"
+     - compiler: clang
+       env: COMPILER=clang++ C_COMPILER=clang BUILD_TYPE=Debug
+@@ -92,7 +91,6 @@ matrix:
+       env:
+         - COMPILER=clang++-3.8 C_COMPILER=clang-3.8 BUILD_TYPE=Debug
+         - LIBCXX_BUILD=1 LIBCXX_SANITIZER="Undefined;Address"
+-        - ENABLE_SANITIZER=1
+         - EXTRA_FLAGS="-stdlib=libc++ -g -O2 -fno-omit-frame-pointer -fsanitize=undefined,address -fno-sanitize-recover=all"
+         - UBSAN_OPTIONS=print_stacktrace=1
+     # Clang w/ libc++ and MSAN
+@@ -104,7 +102,6 @@ matrix:
+       env:
+         - COMPILER=clang++-3.8 C_COMPILER=clang-3.8 BUILD_TYPE=Debug
+         - LIBCXX_BUILD=1 LIBCXX_SANITIZER=MemoryWithOrigins
+-        - ENABLE_SANITIZER=1
+         - EXTRA_FLAGS="-stdlib=libc++ -g -O2 -fno-omit-frame-pointer -fsanitize=memory -fsanitize-memory-track-origins"
+     # Clang w/ libc++ and MSAN
+     - compiler: clang
+@@ -115,8 +112,8 @@ matrix:
+       env:
+         - COMPILER=clang++-3.8 C_COMPILER=clang-3.8 BUILD_TYPE=RelWithDebInfo
+         - LIBCXX_BUILD=1 LIBCXX_SANITIZER=Thread
+-        - ENABLE_SANITIZER=1
+         - EXTRA_FLAGS="-stdlib=libc++ -g -O2 -fno-omit-frame-pointer -fsanitize=thread -fno-sanitize-recover=all"
++
+     - os: osx
+       osx_image: xcode8.3
+       compiler: clang
+@@ -134,20 +131,15 @@ matrix:
+         - COMPILER=g++-7 C_COMPILER=gcc-7  BUILD_TYPE=Debug
+ 
+ before_script:
++  - if [ -z "$BUILD_32_BITS" ]; then
++      export BUILD_32_BITS=OFF && echo disabling 32 bit build;
++    fi
+   - if [ -n "${LIBCXX_BUILD}" ]; then
+       source .travis-libcxx-setup.sh;
+     fi
+-  - if [ -n "${ENABLE_SANITIZER}" ]; then
+-      export EXTRA_OPTIONS="-DBENCHMARK_ENABLE_ASSEMBLY_TESTS=OFF";
+-    else
+-      export EXTRA_OPTIONS="";
+-    fi
+   - mkdir -p build && cd build
+ 
+ before_install:
+-  - if [ -z "$BUILD_32_BITS" ]; then
+-      export BUILD_32_BITS=OFF && echo disabling 32 bit build;
+-    fi
+   - if [ -n "${INSTALL_GCC6_FROM_PPA}" ]; then
+       sudo add-apt-repository -y "ppa:ubuntu-toolchain-r/test";
+       sudo apt-get update --option Acquire::Retries=100 --option Acquire::http::Timeout="60";
+@@ -155,11 +147,7 @@ before_install:
+ 
+ install:
+   - if [ -n "${INSTALL_GCC6_FROM_PPA}" ]; then
+-      sudo -E apt-get -yq --no-install-suggests --no-install-recommends install g++-6;
+-    fi
+-  - if [ "${TRAVIS_OS_NAME}" == "linux" -a "${BUILD_32_BITS}" == "OFF" ]; then
+-      sudo -E apt-get -y --no-install-suggests --no-install-recommends install llvm-3.9-tools;
+-      sudo cp /usr/lib/llvm-3.9/bin/FileCheck /usr/local/bin/;
++      sudo -E apt-get -yq --no-install-suggests --no-install-recommends --force-yes install g++-6;
+     fi
+   - if [ "${BUILD_TYPE}" == "Coverage" -a "${TRAVIS_OS_NAME}" == "linux" ]; then
+       PATH=~/.local/bin:${PATH};
+@@ -183,7 +171,7 @@ install:
+     fi
+ 
+ script:
+-  - cmake -DCMAKE_C_COMPILER=${C_COMPILER} -DCMAKE_CXX_COMPILER=${COMPILER} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DCMAKE_CXX_FLAGS="${EXTRA_FLAGS}" -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON -DBENCHMARK_BUILD_32_BITS=${BUILD_32_BITS} ${EXTRA_OPTIONS} ..
++  - cmake -DCMAKE_C_COMPILER=${C_COMPILER} -DCMAKE_CXX_COMPILER=${COMPILER} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DCMAKE_CXX_FLAGS="${EXTRA_FLAGS}" -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON -DBENCHMARK_BUILD_32_BITS=${BUILD_32_BITS} ..
+   - make
+   - ctest -C ${BUILD_TYPE} --output-on-failure
+   - bazel test -c dbg --define google_benchmark.have_regex=posix --announce_rc --verbose_failures --test_output=errors --keep_going //test/...
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4c10793..aa08267 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -27,48 +27,10 @@ option(BENCHMARK_DOWNLOAD_DEPENDENCIES "Allow the downloading and in-tree buildi
+ # in cases where it is not possible to build or find a valid version of gtest.
+ option(BENCHMARK_ENABLE_GTEST_TESTS "Enable building the unit tests which depend on gtest" ON)
+ 
+-set(ENABLE_ASSEMBLY_TESTS_DEFAULT OFF)
+-function(should_enable_assembly_tests)
+-  if(CMAKE_BUILD_TYPE)
+-    string(TOLOWER ${CMAKE_BUILD_TYPE} CMAKE_BUILD_TYPE_LOWER)
+-    if (${CMAKE_BUILD_TYPE_LOWER} MATCHES "coverage")
+-      # FIXME: The --coverage flag needs to be removed when building assembly
+-      # tests for this to work.
+-      return()
+-    endif()
+-  endif()
+-  if (MSVC)
+-    return()
+-  elseif(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
+-    return()
+-  elseif(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+-    # FIXME: Make these work on 32 bit builds
+-    return()
+-  elseif(BENCHMARK_BUILD_32_BITS)
+-     # FIXME: Make these work on 32 bit builds
+-    return()
+-  endif()
+-  find_program(LLVM_FILECHECK_EXE FileCheck)
+-  if (LLVM_FILECHECK_EXE)
+-    set(LLVM_FILECHECK_EXE "${LLVM_FILECHECK_EXE}" CACHE PATH "llvm filecheck" FORCE)
+-    message(STATUS "LLVM FileCheck Found: ${LLVM_FILECHECK_EXE}")
+-  else()
+-    message(STATUS "Failed to find LLVM FileCheck")
+-    return()
+-  endif()
+-  set(ENABLE_ASSEMBLY_TESTS_DEFAULT ON PARENT_SCOPE)
+-endfunction()
+-should_enable_assembly_tests()
+-
+-# This option disables the building and running of the assembly verification tests
+-option(BENCHMARK_ENABLE_ASSEMBLY_TESTS "Enable building and running the assembly tests"
+-    ${ENABLE_ASSEMBLY_TESTS_DEFAULT})
+-
+ # Make sure we can import out CMake functions
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules")
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+ 
+-
+ # Read the git tags to determine the project version
+ include(GetGitVersion)
+ get_git_version(GIT_VERSION)
+diff --git a/README.md b/README.md
+index c8f8c01..167bf7a 100644
+--- a/README.md
++++ b/README.md
+@@ -14,8 +14,6 @@ IRC channel: https://freenode.net #googlebenchmark
+ 
+ [Additional Tooling Documentation](docs/tools.md)
+ 
+-[Assembly Testing Documentation](docs/AssemblyTests.md)
+-
+ 
+ ## Building
+ 
+diff --git a/docs/AssemblyTests.md b/docs/AssemblyTests.md
+deleted file mode 100644
+index 1fbdc26..0000000
+--- a/docs/AssemblyTests.md
++++ /dev/null
+@@ -1,147 +0,0 @@
+-# Assembly Tests
+-
+-The Benchmark library provides a number of functions whose primary
+-purpose in to affect assembly generation, including `DoNotOptimize`
+-and `ClobberMemory`. In addition there are other functions,
+-such as `KeepRunning`, for which generating good assembly is paramount.
+-
+-For these functions it's important to have tests that verify the
+-correctness and quality of the implementation. This requires testing
+-the code generated by the compiler.
+-
+-This document describes how the Benchmark library tests compiler output,
+-as well as how to properly write new tests.
+-
+-
+-## Anatomy of a Test
+-
+-Writing a test has two steps:
+-
+-* Write the code you want to generate assembly for.
+-* Add `// CHECK` lines to match against the verified assembly.
+-
+-Example:
+-```c++
+-
+-// CHECK-LABEL: test_add:
+-extern "C" int test_add() {
+-    extern int ExternInt;
+-    return ExternInt + 1;
+-
+-    // CHECK: movl ExternInt(%rip), %eax
+-    // CHECK: addl %eax
+-    // CHECK: ret
+-}
+-
+-```
+-
+-#### LLVM Filecheck
+-
+-[LLVM's Filecheck](https://llvm.org/docs/CommandGuide/FileCheck.html)
+-is used to test the generated assembly against the `// CHECK` lines
+-specified in the tests source file. Please see the documentation
+-linked above for information on how to write `CHECK` directives.
+-
+-#### Tips and Tricks:
+-
+-* Tests should match the minimal amount of output required to establish
+-correctness. `CHECK` directives don't have to match on the exact next line
+-after the previous match, so tests should omit checks for unimportant
+-bits of assembly. ([`CHECK-NEXT`](https://llvm.org/docs/CommandGuide/FileCheck.html#the-check-next-directive)
+-can be used to ensure a match occurs exactly after the previous match).
+-
+-* The tests are compiled with `-O3 -g0`. So we're only testing the
+-optimized output.
+-
+-* The assembly output is further cleaned up using `tools/strip_asm.py`.
+-This removes comments, assembler directives, and unused labels before
+-the test is run.
+-
+-* The generated and stripped assembly file for a test is output under
+-`<build-directory>/test/<test-name>.s`
+-
+-* Filecheck supports using [`CHECK` prefixes](https://llvm.org/docs/CommandGuide/FileCheck.html#cmdoption-check-prefixes)
+-to specify lines that should only match in certain situations.
+-The Benchmark tests use `CHECK-CLANG` and `CHECK-GNU` for lines that
+-are only expected to match Clang or GCC's output respectively. Normal
+-`CHECK` lines match against all compilers. (Note: `CHECK-NOT` and
+-`CHECK-LABEL` are NOT prefixes. They are versions of non-prefixed
+-`CHECK` lines)
+-
+-* Use `extern "C"` to disable name mangling for specific functions. This
+-makes them easier to name in the `CHECK` lines.
+-
+-
+-## Problems Writing Portable Tests
+-
+-Writing tests which check the code generated by a compiler are
+-inherently non-portable. Different compilers and even different compiler
+-versions may generate entirely different code. The Benchmark tests
+-must tolerate this.
+-
+-LLVM Filecheck provides a number of mechanisms to help write
+-"more portable" tests; including [matching using regular expressions](https://llvm.org/docs/CommandGuide/FileCheck.html#filecheck-pattern-matching-syntax),
+-allowing the creation of [named variables](https://llvm.org/docs/CommandGuide/FileCheck.html#filecheck-variables)
+-for later matching, and [checking non-sequential matches](https://llvm.org/docs/CommandGuide/FileCheck.html#the-check-dag-directive).
+-
+-#### Capturing Variables
+-
+-For example, say GCC stores a variable in a register but Clang stores
+-it in memory. To write a test that tolerates both cases we "capture"
+-the destination of the store, and then use the captured expression
+-to write the remainder of the test.
+-
+-```c++
+-// CHECK-LABEL: test_div_no_op_into_shr:
+-extern "C" void test_div_no_op_into_shr(int value) {
+-    int divisor = 2;
+-    benchmark::DoNotOptimize(divisor); // hide the value from the optimizer
+-    return value / divisor;
+-
+-    // CHECK: movl $2, [[DEST:.*]]
+-    // CHECK: idivl [[DEST]]
+-    // CHECK: ret
+-}
+-```
+-
+-#### Using Regular Expressions to Match Differing Output
+-
+-Often tests require testing assembly lines which may subtly differ
+-between compilers or compiler versions. A common example of this
+-is matching stack frame addresses. In this case regular expressions
+-can be used to match the differing bits of output. For example:
+-
+-```c++
+-int ExternInt;
+-struct Point { int x, y, z; };
+-
+-// CHECK-LABEL: test_store_point:
+-extern "C" void test_store_point() {
+-    Point p{ExternInt, ExternInt, ExternInt};
+-    benchmark::DoNotOptimize(p);
+-
+-    // CHECK: movl ExternInt(%rip), %eax
+-    // CHECK: movl %eax, -{{[0-9]+}}(%rsp)
+-    // CHECK: movl %eax, -{{[0-9]+}}(%rsp)
+-    // CHECK: movl %eax, -{{[0-9]+}}(%rsp)
+-    // CHECK: ret
+-}
+-```
+-
+-## Current Requirements and Limitations
+-
+-The tests require Filecheck to be installed along the `PATH` of the
+-build machine. Otherwise the tests will be disabled.
+-
+-Additionally, as mentioned in the previous section, codegen tests are
+-inherently non-portable. Currently the tests are limited to:
+-
+-* x86_64 targets.
+-* Compiled with GCC or Clang
+-
+-Further work could be done, at least on a limited basis, to extend the
+-tests to other architectures and compilers (using `CHECK` prefixes).
+-
+-Furthermore, the tests fail for builds which specify additional flags
+-that modify code generation, including `--coverage` or `-fsanitize=`.
+-
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 04fbbf4..9fb1f55 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -303,20 +303,15 @@ BENCHMARK_UNUSED static int stream_init_anchor = InitializeStreams();
+ // See: https://youtu.be/nXaxk27zwlk?t=2441
+ #ifndef BENCHMARK_HAS_NO_INLINE_ASSEMBLY
+ template <class Tp>
+-inline BENCHMARK_ALWAYS_INLINE
+-void DoNotOptimize(Tp const& value) {
+-    asm volatile("" : : "r,m"(value) : "memory");
+-}
+-
+-template <class Tp>
+-inline BENCHMARK_ALWAYS_INLINE void DoNotOptimize(Tp& value) {
++inline BENCHMARK_ALWAYS_INLINE void DoNotOptimize(Tp const& value) {
++  // Clang doesn't like the 'X' constraint on `value` and certain GCC versions
++  // don't like the 'g' constraint. Attempt to placate them both.
+ #if defined(__clang__)
+-  asm volatile("" : "+r,m"(value) : : "memory");
++  asm volatile("" : : "g"(value) : "memory");
+ #else
+-  asm volatile("" : "+m,r"(value) : : "memory");
++  asm volatile("" : : "i,r,m"(value) : "memory");
+ #endif
+ }
+-
+ // Force the compiler to flush pending writes to global memory. Acts as an
+ // effective read/write barrier
+ inline BENCHMARK_ALWAYS_INLINE void ClobberMemory() {
+diff --git a/test/AssemblyTests.cmake b/test/AssemblyTests.cmake
+deleted file mode 100644
+index d8f321a..0000000
+--- a/test/AssemblyTests.cmake
++++ /dev/null
+@@ -1,45 +0,0 @@
+-
+-
+-set(ASM_TEST_FLAGS "")
+-check_cxx_compiler_flag(-O3 BENCHMARK_HAS_O3_FLAG)
+-if (BENCHMARK_HAS_O3_FLAG)
+-  list(APPEND ASM_TEST_FLAGS -O3)
+-endif()
+-
+-check_cxx_compiler_flag(-g0 BENCHMARK_HAS_G0_FLAG)
+-if (BENCHMARK_HAS_G0_FLAG)
+-  list(APPEND ASM_TEST_FLAGS -g0)
+-endif()
+-
+-check_cxx_compiler_flag(-fno-stack-protector BENCHMARK_HAS_FNO_STACK_PROTECTOR_FLAG)
+-if (BENCHMARK_HAS_FNO_STACK_PROTECTOR_FLAG)
+-  list(APPEND ASM_TEST_FLAGS -fno-stack-protector)
+-endif()
+-
+-split_list(ASM_TEST_FLAGS)
+-string(TOUPPER "${CMAKE_CXX_COMPILER_ID}" ASM_TEST_COMPILER)
+-
+-macro(add_filecheck_test name)
+-  cmake_parse_arguments(ARG "" "" "CHECK_PREFIXES" ${ARGV})
+-  add_library(${name} OBJECT ${name}.cc)
+-  set_target_properties(${name} PROPERTIES COMPILE_FLAGS "-S ${ASM_TEST_FLAGS}")
+-  set(ASM_OUTPUT_FILE "${CMAKE_CURRENT_BINARY_DIR}/${name}.s")
+-  add_custom_target(copy_${name} ALL
+-      COMMAND ${PROJECT_SOURCE_DIR}/tools/strip_asm.py
+-        $<TARGET_OBJECTS:${name}>
+-        ${ASM_OUTPUT_FILE}
+-      BYPRODUCTS ${ASM_OUTPUT_FILE})
+-  add_dependencies(copy_${name} ${name})
+-  if (NOT ARG_CHECK_PREFIXES)
+-    set(ARG_CHECK_PREFIXES "CHECK")
+-  endif()
+-  foreach(prefix ${ARG_CHECK_PREFIXES})
+-    add_test(NAME run_${name}_${prefix}
+-        COMMAND
+-          ${LLVM_FILECHECK_EXE} ${name}.cc
+-          --input-file=${ASM_OUTPUT_FILE}
+-          --check-prefixes=CHECK,CHECK-${ASM_TEST_COMPILER}
+-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+-  endforeach()
+-endmacro()
+-
+diff --git a/test/BUILD b/test/BUILD
+index 54d9580..9e5d493 100644
+--- a/test/BUILD
++++ b/test/BUILD
+@@ -44,7 +44,4 @@ cc_library(
+     ] + (
+         ["@com_google_googletest//:gtest_main"] if (test_src in NEEDS_GTEST_MAIN) else []
+     ),
+-# FIXME: Add support for assembly tests to bazel.
+-# See Issue #556
+-# https://github.com/google/benchmark/issues/556
+-) for test_src in glob(["*_test.cc"], exclude = ["*_assembly_test.cc"])]
++) for test_src in glob(["*_test.cc"])]
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 7c6366f..ad1bd93 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -22,12 +22,6 @@ if( NOT uppercase_CMAKE_BUILD_TYPE STREQUAL "DEBUG" )
+   endforeach()
+ endif()
+ 
+-check_cxx_compiler_flag(-O3 BENCHMARK_HAS_O3_FLAG)
+-set(BENCHMARK_O3_FLAG "")
+-if (BENCHMARK_HAS_O3_FLAG)
+-  set(BENCHMARK_O3_FLAG "-O3")
+-endif()
+-
+ # NOTE: These flags must be added after find_package(Threads REQUIRED) otherwise
+ # they will break the configuration check.
+ if (DEFINED BENCHMARK_CXX_LINKER_FLAGS)
+@@ -165,25 +159,6 @@ if (BENCHMARK_ENABLE_GTEST_TESTS)
+   add_gtest(statistics_test)
+ endif(BENCHMARK_ENABLE_GTEST_TESTS)
+ 
+-###############################################################################
+-# Assembly Unit Tests
+-###############################################################################
+-
+-if (BENCHMARK_ENABLE_ASSEMBLY_TESTS)
+-  if (NOT LLVM_FILECHECK_EXE)
+-    message(FATAL_ERROR "LLVM FileCheck is required when including this file")
+-  endif()
+-  include(AssemblyTests.cmake)
+-  add_filecheck_test(donotoptimize_assembly_test)
+-  add_filecheck_test(state_assembly_test)
+-  add_filecheck_test(clobber_memory_assembly_test)
+-endif()
+-
+-
+-
+-###############################################################################
+-# Code Coverage Configuration
+-###############################################################################
+ 
+ # Add the coverage command(s)
+ if(CMAKE_BUILD_TYPE)
+diff --git a/test/clobber_memory_assembly_test.cc b/test/clobber_memory_assembly_test.cc
+deleted file mode 100644
+index f41911a..0000000
+--- a/test/clobber_memory_assembly_test.cc
++++ /dev/null
+@@ -1,64 +0,0 @@
+-#include <benchmark/benchmark.h>
+-
+-#ifdef __clang__
+-#pragma clang diagnostic ignored "-Wreturn-type"
+-#endif
+-
+-extern "C" {
+-
+-extern int ExternInt;
+-extern int ExternInt2;
+-extern int ExternInt3;
+-
+-}
+-
+-// CHECK-LABEL: test_basic:
+-extern "C" void test_basic() {
+-  int x;
+-  benchmark::DoNotOptimize(&x);
+-  x = 101;
+-  benchmark::ClobberMemory();
+-  // CHECK: leaq [[DEST:[^,]+]], %rax
+-  // CHECK: movl $101, [[DEST]]
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_redundant_store:
+-extern "C" void test_redundant_store() {
+-  ExternInt = 3;
+-  benchmark::ClobberMemory();
+-  ExternInt = 51;
+-  // CHECK-DAG: ExternInt
+-  // CHECK-DAG: movl $3
+-  // CHECK: movl $51
+-}
+-
+-// CHECK-LABEL: test_redundant_read:
+-extern "C" void test_redundant_read() {
+-  int x;
+-  benchmark::DoNotOptimize(&x);
+-  x = ExternInt;
+-  benchmark::ClobberMemory();
+-  x = ExternInt2;
+-  // CHECK: leaq [[DEST:[^,]+]], %rax
+-  // CHECK: ExternInt(%rip)
+-  // CHECK: movl %eax, [[DEST]]
+-  // CHECK-NOT: ExternInt2
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_redundant_read2:
+-extern "C" void test_redundant_read2() {
+-  int x;
+-  benchmark::DoNotOptimize(&x);
+-  x = ExternInt;
+-  benchmark::ClobberMemory();
+-  x = ExternInt2;
+-  benchmark::ClobberMemory();
+-  // CHECK: leaq [[DEST:[^,]+]], %rax
+-  // CHECK: ExternInt(%rip)
+-  // CHECK: movl %eax, [[DEST]]
+-  // CHECK: ExternInt2(%rip)
+-  // CHECK: movl %eax, [[DEST]]
+-  // CHECK: ret
+-}
+diff --git a/test/donotoptimize_assembly_test.cc b/test/donotoptimize_assembly_test.cc
+deleted file mode 100644
+index d4b0bab..0000000
+--- a/test/donotoptimize_assembly_test.cc
++++ /dev/null
+@@ -1,163 +0,0 @@
+-#include <benchmark/benchmark.h>
+-
+-#ifdef __clang__
+-#pragma clang diagnostic ignored "-Wreturn-type"
+-#endif
+-
+-extern "C" {
+-
+-extern int ExternInt;
+-extern int ExternInt2;
+-extern int ExternInt3;
+-
+-inline int Add42(int x) { return x + 42; }
+-
+-struct NotTriviallyCopyable {
+-  NotTriviallyCopyable();
+-  explicit NotTriviallyCopyable(int x) : value(x) {}
+-  NotTriviallyCopyable(NotTriviallyCopyable const&);
+-  int value;
+-};
+-
+-struct Large {
+-  int value;
+-  int data[2];
+-};
+-
+-}
+-// CHECK-LABEL: test_with_rvalue:
+-extern "C" void test_with_rvalue() {
+-  benchmark::DoNotOptimize(Add42(0));
+-  // CHECK: movl $42, %eax
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_with_large_rvalue:
+-extern "C" void test_with_large_rvalue() {
+-  benchmark::DoNotOptimize(Large{ExternInt, {ExternInt, ExternInt}});
+-  // CHECK: ExternInt(%rip)
+-  // CHECK: movl %eax, -{{[0-9]+}}(%[[REG:[a-z]+]]
+-  // CHECK: movl %eax, -{{[0-9]+}}(%[[REG]])
+-  // CHECK: movl %eax, -{{[0-9]+}}(%[[REG]])
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_with_non_trivial_rvalue:
+-extern "C" void test_with_non_trivial_rvalue() {
+-  benchmark::DoNotOptimize(NotTriviallyCopyable(ExternInt));
+-  // CHECK: mov{{l|q}} ExternInt(%rip)
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_with_lvalue:
+-extern "C" void test_with_lvalue() {
+-  int x = 101;
+-  benchmark::DoNotOptimize(x);
+-  // CHECK-GNU: movl $101, %eax
+-  // CHECK-CLANG: movl $101, -{{[0-9]+}}(%[[REG:[a-z]+]])
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_with_large_lvalue:
+-extern "C" void test_with_large_lvalue() {
+-  Large L{ExternInt, {ExternInt, ExternInt}};
+-  benchmark::DoNotOptimize(L);
+-  // CHECK: ExternInt(%rip)
+-  // CHECK: movl %eax, -{{[0-9]+}}(%[[REG:[a-z]+]])
+-  // CHECK: movl %eax, -{{[0-9]+}}(%[[REG]])
+-  // CHECK: movl %eax, -{{[0-9]+}}(%[[REG]])
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_with_non_trivial_lvalue:
+-extern "C" void test_with_non_trivial_lvalue() {
+-  NotTriviallyCopyable NTC(ExternInt);
+-  benchmark::DoNotOptimize(NTC);
+-  // CHECK: ExternInt(%rip)
+-  // CHECK: movl %eax, -{{[0-9]+}}(%[[REG:[a-z]+]])
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_with_const_lvalue:
+-extern "C" void test_with_const_lvalue() {
+-  const int x = 123;
+-  benchmark::DoNotOptimize(x);
+-  // CHECK: movl $123, %eax
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_with_large_const_lvalue:
+-extern "C" void test_with_large_const_lvalue() {
+-  const Large L{ExternInt, {ExternInt, ExternInt}};
+-  benchmark::DoNotOptimize(L);
+-  // CHECK: ExternInt(%rip)
+-  // CHECK: movl %eax, -{{[0-9]+}}(%[[REG:[a-z]+]])
+-  // CHECK: movl %eax, -{{[0-9]+}}(%[[REG]])
+-  // CHECK: movl %eax, -{{[0-9]+}}(%[[REG]])
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_with_non_trivial_const_lvalue:
+-extern "C" void test_with_non_trivial_const_lvalue() {
+-  const NotTriviallyCopyable Obj(ExternInt);
+-  benchmark::DoNotOptimize(Obj);
+-  // CHECK: mov{{q|l}} ExternInt(%rip)
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_div_by_two:
+-extern "C" int test_div_by_two(int input) {
+-  int divisor = 2;
+-  benchmark::DoNotOptimize(divisor);
+-  return input / divisor;
+-  // CHECK: movl $2, [[DEST:.*]]
+-  // CHECK: idivl [[DEST]]
+-  // CHECK: ret
+-}
+-
+-// CHECK-LABEL: test_inc_integer:
+-extern "C" int test_inc_integer() {
+-  int x = 0;
+-  for (int i=0; i < 5; ++i)
+-    benchmark::DoNotOptimize(++x);
+-  // CHECK: movl $1, [[DEST:.*]]
+-  // CHECK: {{(addl \$1,|incl)}} [[DEST]]
+-  // CHECK: {{(addl \$1,|incl)}} [[DEST]]
+-  // CHECK: {{(addl \$1,|incl)}} [[DEST]]
+-  // CHECK: {{(addl \$1,|incl)}} [[DEST]]
+-  // CHECK-CLANG: movl [[DEST]], %eax
+-  // CHECK: ret
+-  return x;
+-}
+-
+-// CHECK-LABEL: test_pointer_rvalue
+-extern "C" void test_pointer_rvalue() {
+-  // CHECK: movl $42, [[DEST:.*]]
+-  // CHECK: leaq [[DEST]], %rax
+-  // CHECK-CLANG: movq %rax, -{{[0-9]+}}(%[[REG:[a-z]+]])
+-  // CHECK: ret
+-  int x = 42;
+-  benchmark::DoNotOptimize(&x);
+-}
+-
+-// CHECK-LABEL: test_pointer_const_lvalue:
+-extern "C" void test_pointer_const_lvalue() {
+-  // CHECK: movl $42, [[DEST:.*]]
+-  // CHECK: leaq [[DEST]], %rax
+-  // CHECK-CLANG: movq %rax, -{{[0-9]+}}(%[[REG:[a-z]+]])
+-  // CHECK: ret
+-  int x = 42;
+-  int * const xp = &x;
+-  benchmark::DoNotOptimize(xp);
+-}
+-
+-// CHECK-LABEL: test_pointer_lvalue:
+-extern "C" void test_pointer_lvalue() {
+-  // CHECK: movl $42, [[DEST:.*]]
+-  // CHECK: leaq [[DEST]], %rax
+-  // CHECK-CLANG: movq %rax, -{{[0-9]+}}(%[[REG:[a-z+]+]])
+-  // CHECK: ret
+-  int x = 42;
+-  int *xp = &x;
+-  benchmark::DoNotOptimize(xp);
+-}
+diff --git a/test/state_assembly_test.cc b/test/state_assembly_test.cc
+deleted file mode 100644
+index e2c5c86..0000000
+--- a/test/state_assembly_test.cc
++++ /dev/null
+@@ -1,66 +0,0 @@
+-#include <benchmark/benchmark.h>
+-
+-#ifdef __clang__
+-#pragma clang diagnostic ignored "-Wreturn-type"
+-#endif
+-
+-extern "C" {
+-  extern int ExternInt;
+-  benchmark::State& GetState();
+-  void Fn();
+-}
+-
+-using benchmark::State;
+-
+-// CHECK-LABEL: test_for_auto_loop:
+-extern "C" int test_for_auto_loop() {
+-  State& S = GetState();
+-  int x = 42;
+-  // CHECK: 	[[CALL:call(q)*]]	_ZN9benchmark5State16StartKeepRunningEv
+-  // CHECK-NEXT: testq %rbx, %rbx
+-  // CHECK-NEXT: je [[LOOP_END:.*]]
+-
+-  for (auto _ : S) {
+-    // CHECK: .L[[LOOP_HEAD:[a-zA-Z0-9_]+]]:
+-    // CHECK-GNU-NEXT: subq $1, %rbx
+-    // CHECK-CLANG-NEXT: {{(addq \$1,|incq)}} %rax
+-    // CHECK-NEXT: jne .L[[LOOP_HEAD]]
+-    benchmark::DoNotOptimize(x);
+-  }
+-  // CHECK: [[LOOP_END]]:
+-  // CHECK: [[CALL]]	_ZN9benchmark5State17FinishKeepRunningEv
+-
+-  // CHECK: movl $101, %eax
+-  // CHECK: ret
+-  return 101;
+-}
+-
+-// CHECK-LABEL: test_while_loop:
+-extern "C" int test_while_loop() {
+-  State& S = GetState();
+-  int x = 42;
+-
+-  // CHECK: j{{(e|mp)}} .L[[LOOP_HEADER:[a-zA-Z0-9_]+]]
+-  // CHECK-NEXT: .L[[LOOP_BODY:[a-zA-Z0-9_]+]]:
+-  while (S.KeepRunning()) {
+-    // CHECK-GNU-NEXT: subq $1, %[[IREG:[a-z]+]]
+-    // CHECK-CLANG-NEXT: {{(addq \$-1,|decq)}} %[[IREG:[a-z]+]]
+-    // CHECK: movq %[[IREG]], [[DEST:.*]]
+-    benchmark::DoNotOptimize(x);
+-  }
+-  // CHECK-DAG: movq [[DEST]], %[[IREG]]
+-  // CHECK-DAG: testq %[[IREG]], %[[IREG]]
+-  // CHECK-DAG: jne .L[[LOOP_BODY]]
+-  // CHECK-DAG: .L[[LOOP_HEADER]]:
+-
+-  // CHECK: cmpb $0
+-  // CHECK-NEXT: jne .L[[LOOP_END:[a-zA-Z0-9_]+]]
+-  // CHECK: [[CALL:call(q)*]] _ZN9benchmark5State16StartKeepRunningEv
+-
+-  // CHECK: .L[[LOOP_END]]:
+-  // CHECK: [[CALL]] _ZN9benchmark5State17FinishKeepRunningEv
+-
+-  // CHECK: movl $101, %eax
+-  // CHECK: ret
+-  return 101;
+-}
+diff --git a/tools/strip_asm.py b/tools/strip_asm.py
+deleted file mode 100755
+index 9030550..0000000
+--- a/tools/strip_asm.py
++++ /dev/null
+@@ -1,151 +0,0 @@
+-#!/usr/bin/env python
+-
+-"""
+-strip_asm.py - Cleanup ASM output for the specified file
+-"""
+-
+-from argparse import ArgumentParser
+-import sys
+-import os
+-import re
+-
+-def find_used_labels(asm):
+-    found = set()
+-    label_re = re.compile("\s*j[a-z]+\s+\.L([a-zA-Z0-9][a-zA-Z0-9_]*)")
+-    for l in asm.splitlines():
+-        m = label_re.match(l)
+-        if m:
+-            found.add('.L%s' % m.group(1))
+-    return found
+-
+-
+-def normalize_labels(asm):
+-    decls = set()
+-    label_decl = re.compile("^[.]{0,1}L([a-zA-Z0-9][a-zA-Z0-9_]*)(?=:)")
+-    for l in asm.splitlines():
+-        m = label_decl.match(l)
+-        if m:
+-            decls.add(m.group(0))
+-    if len(decls) == 0:
+-        return asm
+-    needs_dot = next(iter(decls))[0] != '.'
+-    if not needs_dot:
+-        return asm
+-    for ld in decls:
+-        asm = re.sub("(^|\s+)" + ld + "(?=:|\s)", '\\1.' + ld, asm)
+-    return asm
+-
+-
+-def transform_labels(asm):
+-    asm = normalize_labels(asm)
+-    used_decls = find_used_labels(asm)
+-    new_asm = ''
+-    label_decl = re.compile("^\.L([a-zA-Z0-9][a-zA-Z0-9_]*)(?=:)")
+-    for l in asm.splitlines():
+-        m = label_decl.match(l)
+-        if not m or m.group(0) in used_decls:
+-            new_asm += l
+-            new_asm += '\n'
+-    return new_asm
+-
+-
+-def is_identifier(tk):
+-    if len(tk) == 0:
+-        return False
+-    first = tk[0]
+-    if not first.isalpha() and first != '_':
+-        return False
+-    for i in range(1, len(tk)):
+-        c = tk[i]
+-        if not c.isalnum() and c != '_':
+-            return False
+-    return True
+-
+-def process_identifiers(l):
+-    """
+-    process_identifiers - process all identifiers and modify them to have
+-    consistent names across all platforms; specifically across ELF and MachO.
+-    For example, MachO inserts an additional understore at the beginning of
+-    names. This function removes that.
+-    """
+-    parts = re.split(r'([a-zA-Z0-9_]+)', l)
+-    new_line = ''
+-    for tk in parts:
+-        if is_identifier(tk):
+-            if tk.startswith('__Z'):
+-                tk = tk[1:]
+-            elif tk.startswith('_') and len(tk) > 1 and \
+-                    tk[1].isalpha() and tk[1] != 'Z':
+-                tk = tk[1:]
+-        new_line += tk
+-    return new_line
+-
+-
+-def process_asm(asm):
+-    """
+-    Strip the ASM of unwanted directives and lines
+-    """
+-    new_contents = ''
+-    asm = transform_labels(asm)
+-
+-    # TODO: Add more things we want to remove
+-    discard_regexes = [
+-        re.compile("\s+\..*$"), # directive
+-        re.compile("\s*#(NO_APP|APP)$"), #inline ASM
+-        re.compile("\s*#.*$"), # comment line
+-        re.compile("\s*\.globa?l\s*([.a-zA-Z_][a-zA-Z0-9$_.]*)"), #global directive
+-        re.compile("\s*\.(string|asciz|ascii|[1248]?byte|short|word|long|quad|value|zero)"),
+-    ]
+-    keep_regexes = [
+-
+-    ]
+-    fn_label_def = re.compile("^[a-zA-Z_][a-zA-Z0-9_.]*:")
+-    for l in asm.splitlines():
+-        # Remove Mach-O attribute
+-        l = l.replace('@GOTPCREL', '')
+-        add_line = True
+-        for reg in discard_regexes:
+-            if reg.match(l) is not None:
+-                add_line = False
+-                break
+-        for reg in keep_regexes:
+-            if reg.match(l) is not None:
+-                add_line = True
+-                break
+-        if add_line:
+-            if fn_label_def.match(l) and len(new_contents) != 0:
+-                new_contents += '\n'
+-            l = process_identifiers(l)
+-            new_contents += l
+-            new_contents += '\n'
+-    return new_contents
+-
+-def main():
+-    parser = ArgumentParser(
+-        description='generate a stripped assembly file')
+-    parser.add_argument(
+-        'input', metavar='input', type=str, nargs=1,
+-        help='An input assembly file')
+-    parser.add_argument(
+-        'out', metavar='output', type=str, nargs=1,
+-        help='The output file')
+-    args, unknown_args = parser.parse_known_args()
+-    input = args.input[0]
+-    output = args.out[0]
+-    if not os.path.isfile(input):
+-        print(("ERROR: input file '%s' does not exist") % input)
+-        sys.exit(1)
+-    contents = None
+-    with open(input, 'r') as f:
+-        contents = f.read()
+-    new_contents = process_asm(contents)
+-    with open(output, 'w') as f:
+-        f.write(new_contents)
+-
+-
+-if __name__ == '__main__':
+-    main()
+-
+-# vim: tabstop=4 expandtab shiftwidth=4 softtabstop=4
+-# kate: tab-width: 4; replace-tabs on; indent-width 4; tab-indents: off;
+-# kate: indent-mode python; remove-trailing-spaces modified;

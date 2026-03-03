@@ -1,0 +1,461 @@
+diff --git a/Makefile b/Makefile
+index ba04d691..223064ca 100644
+--- a/Makefile
++++ b/Makefile
+@@ -57,8 +57,8 @@ endif # ifeq ($(DEBUG),1)
+ endif # ifeq ($(SANITIZE),1)
+ endif # ifeq ($(MEMSANITIZE),1)
+ 
+-MAINEXECUTABLES=parse minify json2json jsonstats statisticalmodel
+-TESTEXECUTABLES=jsoncheck numberparsingcheck stringparsingcheck
++MAINEXECUTABLES=parse minify json2json jsonstats statisticalmodel jsonpointer
++TESTEXECUTABLES=jsoncheck numberparsingcheck stringparsingcheck pointercheck
+ COMPARISONEXECUTABLES=minifiercompetition parsingcompetition parseandstatcompetition distinctuseridcompetition allparserscheckfile allparsingcompetition
+ SUPPLEMENTARYEXECUTABLES=parse_noutf8validation parse_nonumberparsing parse_nostringparsing
+ 
+@@ -91,20 +91,22 @@ benchmark:
+ 	bash ./scripts/parser.sh
+ 	bash ./scripts/parseandstat.sh
+ 
+-test: jsoncheck numberparsingcheck stringparsingcheck basictests allparserscheckfile minify json2json
++test: jsoncheck numberparsingcheck stringparsingcheck basictests allparserscheckfile minify json2json pointercheck
+ 	./basictests
+ 	./numberparsingcheck
+ 	./stringparsingcheck
+ 	./jsoncheck
++	./pointercheck
+ 	./scripts/testjson2json.sh
+ 	./scripts/issue150.sh
+ 	@echo "It looks like the code is good!"
+ 
+-quiettest: jsoncheck numberparsingcheck stringparsingcheck basictests allparserscheckfile minify json2json
++quiettest: jsoncheck numberparsingcheck stringparsingcheck basictests allparserscheckfile minify json2json pointercheck
+ 	./basictests
+ 	./numberparsingcheck
+ 	./stringparsingcheck
+ 	./jsoncheck
++	./pointercheck
+ 	./scripts/testjson2json.sh
+ 	./scripts/issue150.sh
+ 
+@@ -149,6 +151,8 @@ numberparsingcheck:tests/numberparsingcheck.cpp $(HEADERS) $(LIBFILES)
+ stringparsingcheck:tests/stringparsingcheck.cpp $(HEADERS) $(LIBFILES)
+ 	$(CXX) $(CXXFLAGS) -o stringparsingcheck tests/stringparsingcheck.cpp  src/jsonioutil.cpp src/jsonparser.cpp src/simdjson.cpp src/stage1_find_marks.cpp  src/parsedjson.cpp      -I. $(LIBFLAGS) -DJSON_TEST_STRINGS
+ 
++pointercheck:tests/pointercheck.cpp $(HEADERS) $(LIBFILES)
++	$(CXX) $(CXXFLAGS) -o pointercheck tests/pointercheck.cpp  src/jsonioutil.cpp src/jsonparser.cpp src/simdjson.cpp src/stage1_find_marks.cpp  src/parsedjson.cpp src/parsedjsoniterator.cpp -I. $(LIBFLAGS)
+ 
+ minifiercompetition: benchmark/minifiercompetition.cpp $(HEADERS) submodules $(MINIFIERHEADERS) $(LIBFILES) $(MINIFIERLIBFILES)
+ 	$(CXX) $(CXXFLAGS) -o minifiercompetition $(LIBFILES) $(MINIFIERLIBFILES) benchmark/minifiercompetition.cpp -I. $(LIBFLAGS) $(COREDEPSINCLUDE)
+@@ -159,6 +163,9 @@ minify: tools/minify.cpp $(HEADERS) $(MINIFIERHEADERS) $(LIBFILES) $(MINIFIERLIB
+ json2json: tools/json2json.cpp $(HEADERS) $(LIBFILES)
+ 	$(CXX) $(CXXFLAGS) -o json2json $ tools/json2json.cpp $(LIBFILES) -I.
+ 
++jsonpointer: tools/jsonpointer.cpp $(HEADERS) $(LIBFILES)
++	$(CXX) $(CXXFLAGS) -o jsonpointer $ tools/jsonpointer.cpp $(LIBFILES) -I.
++
+ jsonstats: tools/jsonstats.cpp $(HEADERS) $(LIBFILES)
+ 	$(CXX) $(CXXFLAGS) -o jsonstats $ tools/jsonstats.cpp $(LIBFILES) -I.
+ 
+diff --git a/README.md b/README.md
+index e83e6d7b..f4190795 100644
+--- a/README.md
++++ b/README.md
+@@ -67,7 +67,7 @@ Under Windows, we build some tools using the windows/dirent_portable.h file (whi
+ 
+ ## Code usage and example
+ 
+-The main API involves populating a `ParsedJson` object which hosts a fully navigable document-object-model (DOM) view of the JSON document. The main function is `json_parse` which takes a string containing the JSON document as well as a reference to pre-allocated `ParsedJson` object (which can be reused multiple time). Once you have populated the `ParsedJson` object you can navigate through the DOM with an iterator (e.g., created by `ParsedJson::iterator pjh(pj)`, see 'Navigating the parsed document').
++The main API involves populating a `ParsedJson` object which hosts a fully navigable document-object-model (DOM) view of the JSON document. The DOM can be accessed using [JSON Pointer](https://tools.ietf.org/html/rfc6901) paths, for example. The main function is `json_parse` which takes a string containing the JSON document as well as a reference to pre-allocated `ParsedJson` object (which can be reused multiple time). Once you have populated the `ParsedJson` object you can navigate through the DOM with an iterator (e.g., created by `ParsedJson::iterator pjh(pj)`, see 'Navigating the parsed document').
+ 
+ ```C
+ #include "simdjson/jsonparser.h"
+@@ -313,6 +313,7 @@ If you find the version of `simdjson` shipped with `vcpkg` is out-of-date, feel
+ - `json2json mydoc.json` parses the document, constructs a model and then dumps back the result to standard output.
+ - `json2json -d mydoc.json` parses the document, constructs a model and then dumps model (as a tape) to standard output. The tape format is described in the accompanying file `tape.md`.
+ - `minify mydoc.json` minifies the JSON document, outputting the result to standard output. Minifying means to remove the unneeded white space characters.
++- `jsonpointer mydoc.json <jsonpath> <jsonpath> ... <jsonpath>` parses the document, constructs a model and then processes a series of [JSON Pointer paths](https://tools.ietf.org/html/rfc6901). The result is itself a JSON document.
+ 
+ ## Scope
+ 
+@@ -347,6 +348,20 @@ The parser works in two stages:
+ - Stage 1. (Find marks) Identifies quickly structure elements, strings, and so forth. We validate UTF-8 encoding at that stage.
+ - Stage 2. (Structure building) Involves constructing a "tree" of sort (materialized as a tape) to navigate through the data. Strings and numbers are parsed at this stage.
+ 
++## JSON Pointer
++
++We can navigate the parsed JSON using JSON Pointers as per the [RFC6901 standard](https://tools.ietf.org/html/rfc6901).
++
++You can build a tool (jsonpointer) to parse a JSON document and then issue an array of JSON Pointer queries:
++
++```
++make jsonpointer 
++ ./jsonpointer jsonexamples/small/demo.json /Image/Width /Image/Height /Image/IDs/2
++ ./jsonpointer jsonexamples/twitter.json /statuses/0/id /statuses/1/id /statuses/2/id /statuses/3/id /statuses/4/id /statuses/5/id
++```
++
++In C++, given a `ParsedJson`, we can move to a node with the `move_to` method, passing a `std::string` representing the JSON Pointer query.
++
+ ## Navigating the parsed document
+ 
+ Here is a code sample to dump back the parsed JSON to a string:
+diff --git a/include/simdjson/parsedjson.h b/include/simdjson/parsedjson.h
+index 4662d653..a3ee5cf6 100644
+--- a/include/simdjson/parsedjson.h
++++ b/include/simdjson/parsedjson.h
+@@ -231,6 +231,47 @@ public:
+     // this is equivalent but much faster than calling "next()".
+     inline void move_to_value();
+ 
++    // when at [, go one level deep, and advance to the given index.
++    // if successful, we are left pointing at the value,
++    // if not, we are still pointing at the array ([)
++    inline bool move_to_index(uint32_t index);
++
++    // Moves the iterator to the value correspoding to the json pointer.
++    // Always search from the root of the document.
++    // if successful, we are left pointing at the value,
++    // if not, we are still pointing the same value we were pointing before the call.
++    // The json pointer follows the rfc6901 standard's syntax: https://tools.ietf.org/html/rfc6901
++    // However, the standard says "If a referenced member name is not unique in an object,
++    // the member that is referenced is undefined, and evaluation fails".
++    // Here we just return the first corresponding value.
++    // The length parameter is the length of the jsonpointer string ('pointer').
++    bool move_to(const char * pointer, uint32_t length);
++
++    // Moves the iterator to the value correspoding to the json pointer.
++    // Always search from the root of the document.
++    // if successful, we are left pointing at the value,
++    // if not, we are still pointing the same value we were pointing before the call.
++    // The json pointer implementation follows the rfc6901 standard's syntax: https://tools.ietf.org/html/rfc6901
++    // However, the standard says "If a referenced member name is not unique in an object,
++    // the member that is referenced is undefined, and evaluation fails".
++    // Here we just return the first corresponding value.
++    inline bool move_to(const std::string & pointer) {
++      return move_to(pointer.c_str(), pointer.length());
++    }
++
++
++
++  private:
++
++    // Almost the same as move_to(), except it searchs from the current position.
++    // The pointer's syntax is identical, though that case is not handled by the rfc6901 standard.
++    // The '/' is still required at the beginning.
++    // However, contrary to move_to(), the URI Fragment Identifier Representation is not supported here.
++    // Also, in case of failure, we are left pointing at the closest value it could reach.
++    // For these reasons it is private. It exists because it is used by move_to().
++    bool relative_move_to(const char * pointer, uint32_t length);
++  public:
++
+     // throughout return true if we can do the navigation, false
+     // otherwise
+ 
+@@ -264,6 +305,10 @@ public:
+     // a scope is a series of nodes at the same level
+     inline void to_start_scope();
+ 
++    inline void rewind() {
++      while(up());
++    }
++
+     // void to_end_scope();              // move us to
+     // the start of our current scope; always succeeds
+ 
+@@ -419,8 +464,24 @@ bool ParsedJson::iterator::move_to_key(const char * key, uint32_t length) {
+     return false;
+ }
+ 
++bool ParsedJson::iterator::move_to_index(uint32_t index) {
++    assert(is_array());
++    if (down()) {
++      uint32_t i = 0;
++      for (; i < index; i++) {
++        if (!next()) {
++          break;
++        }
++      }
++      if (i == index) {
++        return true;
++      }
++      assert(up());
++    }
++    return false;
++}
+ 
+- bool ParsedJson::iterator::prev() {
++bool ParsedJson::iterator::prev() {
+     if(location - 1 < depthindex[depth].start_of_scope) {
+       return false;
+     }
+diff --git a/jsonexamples/twitter.json b/jsonexamples/twitter.json
+index 137fb516..71d19665 100644
+Binary files a/jsonexamples/twitter.json and b/jsonexamples/twitter.json differ
+diff --git a/src/parsedjsoniterator.cpp b/src/parsedjsoniterator.cpp
+index c92a1ce4..ad808ab3 100644
+--- a/src/parsedjsoniterator.cpp
++++ b/src/parsedjsoniterator.cpp
+@@ -93,4 +93,172 @@ bool ParsedJson::iterator::print(std::ostream &os, bool escape_strings) const {
+     }
+     return true;
+ }
++
++bool ParsedJson::iterator::move_to(const char * pointer, uint32_t length) {
++    char* new_pointer = nullptr;
++    if (pointer[0] == '#') {
++      // Converting fragment representation to string representation
++      new_pointer = new char[length];
++      uint32_t new_length = 0;
++      for (uint32_t i = 1; i < length; i++) {
++        if (pointer[i] == '%' && pointer[i+1] == 'x') {
++          try {
++            int fragment = std::stoi(std::string(&pointer[i+2], 2), nullptr, 16);
++            if (fragment == '\\' || fragment == '"' || (fragment <= 0x1F)) {
++              // escaping the character
++              new_pointer[new_length] = '\\';
++              new_length++;
++            }
++            new_pointer[new_length] = fragment;
++            i += 3;
++          }
++          catch(std::invalid_argument& e) {
++            delete[] new_pointer;
++            return false; // the fragment is invalid
++          }
++        }
++        else {
++          new_pointer[new_length] = pointer[i];
++        }
++        new_length++;
++      }
++      length = new_length;
++      pointer = new_pointer;
++    }
++    
++    // saving the current state
++    size_t depth_s = depth;
++    size_t location_s = location;
++    uint8_t current_type_s = current_type;
++    uint64_t current_val_s = current_val;
++    scopeindex_t *depthindex_s = depthindex;
++    
++    rewind(); // The json pointer is used from the root of the document.
++
++    bool found = relative_move_to(pointer, length);
++    delete[] new_pointer;
++
++    if (!found) {
++      // since the pointer has found nothing, we get back to the original position.
++      depth = depth_s;
++      location = location_s;
++      current_type = current_type_s;
++      current_val = current_val_s;
++      depthindex = depthindex_s;
++    }
++
++    return found;
++}
++
++bool ParsedJson::iterator::relative_move_to(const char * pointer, uint32_t length) {
++    if (length == 0) {
++      // returns the whole document
++      return true;
++    }
++
++    if (pointer[0] != '/') {
++      // '/' must be the first character
++      return false;
++    }
++
++    // finding the key in an object or the index in an array
++    std::string key_or_index;
++    uint32_t offset = 1;
++
++    // checking for the "-" case
++    if (is_array() && pointer[1] == '-') {
++      if (length != 2) {
++        // the pointer must be exactly "/-"
++        // there can't be anything more after '-' as an index
++        return false;
++      }
++      key_or_index = '-';
++      offset = length; // will skip the loop coming right after
++    }
++
++    // We either transform the first reference token to a valid json key
++    // or we make sure it is a valid index in an array.
++    for (; offset < length ; offset++) {
++      if (pointer[offset] == '/') {
++        // beginning of the next key or index
++        break;
++      }
++      if (is_array() && (pointer[offset] < '0' || pointer[offset] > '9')) {
++        // the index of an array must be an integer
++        // we also make sure std::stoi won't discard whitespaces later
++        return false;
++      }
++      if (pointer[offset] == '~') {
++        // "~1" represents "/"
++        if (pointer[offset+1] == '1') {
++          key_or_index += '/';
++          offset++;
++          continue;
++        }
++        // "~0" represents "~"
++        if (pointer[offset+1] == '0') {
++          key_or_index += '~';
++          offset++;
++          continue;
++        }
++      }
++      if (pointer[offset] == '\\') {
++        if (pointer[offset+1] == '\\' || pointer[offset+1] == '"' || (pointer[offset+1] <= 0x1F)) {
++          key_or_index += pointer[offset+1];
++          offset++;
++          continue;
++        }
++        return false; // invalid escaped character
++      }
++      if (pointer[offset] == '\"') {
++        // unescaped quote character. this is an invalid case.
++        // lets do nothing and assume most pointers will be valid.
++        // it won't find any corresponding json key anyway.
++        // return false;
++      }
++      key_or_index += pointer[offset];
++    }
++
++    bool found = false;
++    if (is_object()) {
++      if (move_to_key(key_or_index.c_str(), key_or_index.length())) {
++        found = relative_move_to(pointer+offset, length-offset);
++      }
++    }
++    else if(is_array()) {
++      if (key_or_index == "-") { // handling "-" case first
++        if (down()) {
++          while(next()); // moving to the end of the array
++          // moving to the nonexistent value right after...
++          size_t npos; 
++          if ((current_type == '[') || (current_type == '{')) {
++            // we need to jump
++            npos = ( current_val & JSONVALUEMASK);
++          } else {
++            npos = location + ((current_type == 'd' || current_type == 'l') ? 2 : 1);
++          }
++          location = npos;
++          current_val = pj.tape[npos];
++          current_type = (current_val >> 56);
++          return true; // how could it fail ?
++        }
++      } else { // regular numeric index
++        // The index can't have a leading '0'
++        if (key_or_index[0] == '0' && key_or_index.length() > 1) {
++          return false;
++        }
++        // it cannot be empty
++        if (key_or_index.length() == 0) {
++          return false;
++        }
++        // we already checked the index contains only valid digits
++        uint32_t index = std::stoi(key_or_index);
++        if (move_to_index(index)) {
++          found = relative_move_to(pointer+offset, length-offset);
++        }
++      }
++    }
++
++    return found;
++}
+ }
+diff --git a/tools/jsonpointer.cpp b/tools/jsonpointer.cpp
+new file mode 100644
+index 00000000..954d840c
+--- /dev/null
++++ b/tools/jsonpointer.cpp
+@@ -0,0 +1,85 @@
++#include <iostream>
++#include "simdjson/jsonioutil.h"
++#include "simdjson/jsonparser.h"
++
++
++void compute_dump(simdjson::ParsedJson::iterator &pjh) {
++  if (pjh.is_object()) {
++    std::cout << "{";
++    if (pjh.down()) {
++      pjh.print(std::cout); // must be a string
++      std::cout << ":";
++      pjh.next();
++      compute_dump(pjh); // let us recurse
++      while (pjh.next()) {
++        std::cout << ",";
++        pjh.print(std::cout);
++        std::cout << ":";
++        pjh.next();
++        compute_dump(pjh); // let us recurse
++      }
++      pjh.up();
++    }
++    std::cout << "}";
++  } else if (pjh.is_array()) {
++    std::cout << "[";
++    if (pjh.down()) {
++      compute_dump(pjh); // let us recurse
++      while (pjh.next()) {
++        std::cout << ",";
++        compute_dump(pjh); // let us recurse
++      }
++      pjh.up();
++    }
++    std::cout << "]";
++  } else {
++    pjh.print(std::cout); // just print the lone value
++  }
++}
++
++int main(int argc, char *argv[]) {
++  if (argc < 3) {
++    std::cerr << "Usage: " << argv[0] << " <jsonfile> <jsonpath>" << std::endl;
++    std::cerr << "Follows the rfc6901 standard's syntax: https://tools.ietf.org/html/rfc6901" << std::endl;
++    std::cerr << " Example: " << argv[0] << " jsonexamples/small/demo.json /Image/Width /Image/Height /Image/IDs/2 " << std::endl;
++    std::cerr << "Multiple <jsonpath> can be issued in the same command, but at least one is needed." << std::endl;
++    exit(1);
++  }
++  const char *filename = argv[1];
++  simdjson::padded_string p;
++  try {
++    simdjson::get_corpus(filename).swap(p);
++  } catch (const std::exception &e) { // caught by reference to base
++    std::cout << "Could not load the file " << filename << std::endl;
++    return EXIT_FAILURE;
++  }
++  simdjson::ParsedJson pj;
++  bool allocok = pj.allocateCapacity(p.size(), 1024);
++  if (!allocok) {
++    std::cerr << "failed to allocate memory" << std::endl;
++    return EXIT_FAILURE;
++  }
++  int res = simdjson::json_parse(p, pj); // do the parsing, return false on error
++  if (res) {
++    std::cerr << " Parsing failed with error " << simdjson::errorMsg(res) << std::endl;
++    return EXIT_FAILURE;
++  }
++  std::cout << "[" << std::endl;
++  for(int idx = 2; idx < argc; idx++) {
++      const char * jsonpath = argv[idx];
++      simdjson::ParsedJson::iterator it(pj);
++      if(it.move_to(std::string(jsonpath))) {
++          std::cout << "{\"jsonpath\": \"" << jsonpath << "\"," <<  std::endl;
++          std::cout << "\"value\":";
++          compute_dump(it);
++          std::cout << "}" << std::endl;
++      } else {
++          std::cout << "null" << std::endl;
++      }
++      if(idx + 1 < argc) {
++          std::cout << "," << std::endl;
++      }
++  }
++  std::cout << "]" << std::endl;
++  return EXIT_SUCCESS;
++}

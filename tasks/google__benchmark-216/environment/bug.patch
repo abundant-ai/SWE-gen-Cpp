@@ -1,0 +1,190 @@
+diff --git a/include/benchmark/benchmark_api.h b/include/benchmark/benchmark_api.h
+index 4367265..2ded481 100644
+--- a/include/benchmark/benchmark_api.h
++++ b/include/benchmark/benchmark_api.h
+@@ -235,25 +235,22 @@ enum TimeUnit {
+ // benchmark to use.
+ class State {
+ public:
+-  State(size_t max_iters, bool has_x, int x, bool has_y, int y,
+-        int thread_i, int n_threads);
++  State(size_t max_iters, bool has_x, int x, bool has_y, int y, int thread_i, int n_threads);
+ 
+   // Returns true iff the benchmark should continue through another iteration.
+   // NOTE: A benchmark may not return from the test until KeepRunning() has
+   // returned false.
+   bool KeepRunning() {
+     if (BENCHMARK_BUILTIN_EXPECT(!started_, false)) {
+-        assert(!finished_);
+-        started_ = true;
+         ResumeTiming();
++        started_ = true;
+     }
+     bool const res = total_iterations_++ < max_iterations;
+     if (BENCHMARK_BUILTIN_EXPECT(!res, false)) {
+-        assert(started_ && !finished_);
++        assert(started_);
+         PauseTiming();
+         // Total iterations now is one greater than max iterations. Fix this.
+         total_iterations_ = max_iterations;
+-        finished_ = true;
+     }
+     return res;
+   }
+@@ -374,7 +371,6 @@ public:
+ 
+ private:
+   bool started_;
+-  bool finished_;
+   size_t total_iterations_;
+ 
+   bool has_range_x_;
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 8237a45..3d12d28 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -815,7 +815,7 @@ void RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+ 
+ State::State(size_t max_iters, bool has_x, int x, bool has_y, int y,
+              int thread_i, int n_threads)
+-    : started_(false), finished_(false), total_iterations_(0),
++    : started_(false), total_iterations_(0),
+       has_range_x_(has_x), range_x_(x),
+       has_range_y_(has_y), range_y_(y),
+       bytes_processed_(0), items_processed_(0),
+@@ -830,13 +830,11 @@ State::State(size_t max_iters, bool has_x, int x, bool has_y, int y,
+ void State::PauseTiming() {
+   // Add in time accumulated so far
+   CHECK(running_benchmark);
+-  CHECK(started_ && !finished_);
+   timer_manager->StopTimer();
+ }
+ 
+ void State::ResumeTiming() {
+   CHECK(running_benchmark);
+-  CHECK(started_ && !finished_);
+   timer_manager->StartTimer();
+ }
+ 
+diff --git a/src/check.h b/src/check.h
+index cb49c49..d2c1fda 100644
+--- a/src/check.h
++++ b/src/check.h
+@@ -10,18 +10,6 @@
+ namespace benchmark {
+ namespace internal {
+ 
+-typedef void(AbortHandlerT)();
+-
+-inline AbortHandlerT*& GetAbortHandler() {
+-    static AbortHandlerT* handler = &std::abort;
+-    return handler;
+-}
+-
+-BENCHMARK_NORETURN inline void CallAbortHandler() {
+-    GetAbortHandler()();
+-    std::abort(); // fallback to enforce noreturn
+-}
+-
+ // CheckHandler is the class constructed by failing CHECK macros. CheckHandler
+ // will log information about the failures and abort when it is destructed.
+ class CheckHandler {
+@@ -37,13 +25,13 @@ public:
+     return log_;
+   }
+ 
+-  BENCHMARK_NORETURN ~CheckHandler() noexcept(false) {
++  BENCHMARK_NORETURN ~CheckHandler() {
+       log_ << std::endl;
+-      CallAbortHandler();
++      std::abort();
+   }
+ 
+-  CheckHandler & operator=(const CheckHandler&) = delete;
+-  CheckHandler(const CheckHandler&) = delete;
++  CheckHandler & operator=(const CheckHandler&) = delete;
++  CheckHandler(const CheckHandler&) = delete;
+   CheckHandler() = delete;
+ private:
+   std::ostream& log_;
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index e83cd1a..a10a53a 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -36,9 +36,6 @@ add_test(options_benchmarks options_test --benchmark_min_time=0.01)
+ compile_benchmark_test(basic_test)
+ add_test(basic_benchmark basic_test --benchmark_min_time=0.01)
+ 
+-compile_benchmark_test(diagnostics_test)
+-add_test(diagnostics_test diagnostics_test --benchmark_min_time=0.01)
+-
+ compile_benchmark_test(fixture_test)
+ add_test(fixture_test fixture_test --benchmark_min_time=0.01)
+ 
+diff --git a/test/diagnostics_test.cc b/test/diagnostics_test.cc
+deleted file mode 100644
+index 60fa3b1..0000000
+--- a/test/diagnostics_test.cc
++++ /dev/null
+@@ -1,61 +0,0 @@
+-// Testing:
+-//   State::PauseTiming()
+-//   State::ResumeTiming()
+-// Test that CHECK's within these function diagnose when they are called
+-// outside of the KeepRunning() loop.
+-//
+-// NOTE: Users should NOT include or use src/check.h. This is only done in
+-// order to test library internals.
+-
+-#include "benchmark/benchmark_api.h"
+-#include "../src/check.h"
+-#include <stdexcept>
+-#include <cstdlib>
+-
+-#if defined(__GNUC__) && !defined(__EXCEPTIONS)
+-#define TEST_HAS_NO_EXCEPTIONS
+-#endif
+-
+-void TestHandler() {
+-#ifndef TEST_HAS_NO_EXCEPTIONS
+-  throw std::logic_error("");
+-#else
+-  std::abort();
+-#endif
+-}
+-
+-void try_invalid_pause_resume(benchmark::State& state) {
+-#if !defined(NDEBUG) && !defined(TEST_HAS_NO_EXCEPTIONS)
+-  try {
+-    state.PauseTiming();
+-    std::abort();
+-  } catch (std::logic_error const&) {}
+-  try {
+-    state.ResumeTiming();
+-    std::abort();
+-  } catch (std::logic_error const&) {}
+-#else
+-  (void)state; // avoid unused warning
+-#endif
+-}
+-
+-void BM_diagnostic_test(benchmark::State& state) {
+-  static bool called_once = false;
+-
+-  if (called_once == false) try_invalid_pause_resume(state);
+-
+-  while (state.KeepRunning()) {
+-    benchmark::DoNotOptimize(state.iterations());
+-  }
+-
+-  if (called_once == false) try_invalid_pause_resume(state);
+-
+-  called_once = true;
+-}
+-BENCHMARK(BM_diagnostic_test);
+-
+-int main(int argc, char** argv) {
+-  benchmark::internal::GetAbortHandler() = &TestHandler;
+-  benchmark::Initialize(&argc, argv);
+-  benchmark::RunSpecifiedBenchmarks();
+-}

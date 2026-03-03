@@ -1,0 +1,9 @@
+The JSON number-to-floating-point conversion is not rounding correctly for some decimal inputs, producing results that are farther than 1 ULP from the correctly rounded IEEE-754 double. For example, parsing the JSON number string `-65.619720000000029` currently yields the double value `-65.619720000000044` even though standard parsers (and `strtod`) produce `-65.619720000000029` when printed with enough precision.
+
+Fix the double parsing logic used by simdjson so that converting valid JSON numbers to `double` is correctly rounded with an error bounded to within 1 ULP of the reference result (treat `strtod` as the reference for these checks). The change must apply broadly, not just to the example input: for a wide set of decimal inputs (including long mantissas, many fractional digits, and values near the 2^53 boundary), the produced `double` should match the reference within 1 ULP.
+
+The parser should continue to:
+- Reject invalid JSON numbers (e.g., leading zeros like `013` when not exactly `0`, malformed exponents like `0e+-1`, and non-decimal forms like `0x14`) rather than silently interpreting them as numbers.
+- Correctly parse integers into 64-bit signed values when the input is an integer within range, and parse non-integer numeric forms as floating-point.
+
+A practical way to validate the fix is to compare simdjson’s parsed `double` to `strtod` on the same byte sequence and ensure their ULP distance is at most 1, while also ensuring that simdjson does not mistakenly accept invalid numeric strings that `strtod` would partially parse (e.g., prefixes that aren’t valid JSON numbers).

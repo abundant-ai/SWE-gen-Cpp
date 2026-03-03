@@ -1,0 +1,280 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 364135f..b07073f 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -1159,7 +1159,6 @@ struct CPUInfo {
+     std::string type;
+     int level;
+     int size;
+-    int num_sharing;
+   };
+ 
+   int num_cpus;
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index b5ae302..93a5bc8 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -87,27 +87,6 @@ bool JSONReporter::ReportContext(const Context& context) {
+   out << indent << FormatKV("cpu_scaling_enabled", info.scaling_enabled)
+       << ",\n";
+ 
+-  out << indent << "\"caches\": [\n";
+-  indent = std::string(6, ' ');
+-  std::string cache_indent(8, ' ');
+-  for (size_t i = 0; i < info.caches.size(); ++i) {
+-    auto& CI = info.caches[i];
+-    out << indent << "{\n";
+-    out << cache_indent << FormatKV("type", CI.type) << ",\n";
+-    out << cache_indent << FormatKV("level", static_cast<int64_t>(CI.level))
+-        << ",\n";
+-    out << cache_indent
+-        << FormatKV("size", static_cast<int64_t>(CI.size) * 1000u) << ",\n";
+-    out << cache_indent
+-        << FormatKV("num_sharing", static_cast<int64_t>(CI.num_sharing))
+-        << "\n";
+-    out << indent << "}";
+-    if (i != info.caches.size() - 1) out << ",";
+-    out << "\n";
+-  }
+-  indent = std::string(4, ' ');
+-  out << indent << "],\n";
+-
+ #if defined(NDEBUG)
+   const char build_type[] = "release";
+ #else
+diff --git a/src/reporter.cc b/src/reporter.cc
+index 5d2fa05..c37ad94 100644
+--- a/src/reporter.cc
++++ b/src/reporter.cc
+@@ -45,10 +45,7 @@ void BenchmarkReporter::PrintBasicContext(std::ostream *out,
+     Out << "CPU Caches:\n";
+     for (auto &CInfo : info.caches) {
+       Out << "  L" << CInfo.level << " " << CInfo.type << " "
+-          << (CInfo.size / 1000) << "K";
+-      if (CInfo.num_sharing != 0)
+-        Out << " (x" << (info.num_cpus / CInfo.num_sharing) << ")";
+-      Out << "\n";
++          << (CInfo.size / 1000) << "K\n";
+     }
+   }
+ 
+diff --git a/src/sysinfo.cc b/src/sysinfo.cc
+index 41e36a1..8fea183 100644
+--- a/src/sysinfo.cc
++++ b/src/sysinfo.cc
+@@ -32,10 +32,7 @@
+ #endif
+ 
+ #include <algorithm>
+-#include <array>
+-#include <bitset>
+ #include <cerrno>
+-#include <climits>
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -126,15 +123,6 @@ struct ValueUnion {
+       return Buff->uint64_value;
+     BENCHMARK_UNREACHABLE();
+   }
+-
+-  template <class T, int N>
+-  std::array<T, N> GetAsArray() {
+-    const int ArrSize = sizeof(T) * N;
+-    CHECK_LE(ArrSize, Size);
+-    std::array<T, N> Arr;
+-    std::memcpy(Arr.data(), data(), ArrSize);
+-    return Arr;
+-  }
+ };
+ 
+ #ifdef __GNUC__
+@@ -170,14 +158,6 @@ bool GetSysctl(std::string const& Name, Tp* Out) {
+   *Out = static_cast<Tp>(Buff.GetAsUnsigned());
+   return true;
+ }
+-
+-template <class Tp, size_t N>
+-bool GetSysctl(std::string const& Name, std::array<Tp, N>* Out) {
+-  auto Buff = GetSysctlImp(Name);
+-  if (!Buff) return false;
+-  *Out = Buff.GetAsArray<Tp, N>();
+-  return true;
+-};
+ #endif
+ 
+ template <class ArgT>
+@@ -206,25 +186,6 @@ bool CpuScalingEnabled(int num_cpus) {
+   return false;
+ }
+ 
+-int CountSetBitsInCPUMap(std::string Val) {
+-  auto CountBits = [](std::string Part) {
+-    using CPUMask = std::bitset<sizeof(std::uintptr_t) * CHAR_BIT>;
+-    Part = "0x" + Part;
+-    CPUMask Mask(std::stoul(Part, nullptr, 16));
+-    return static_cast<int>(Mask.count());
+-  };
+-  size_t Pos;
+-  int total = 0;
+-  while ((Pos = Val.find(',')) != std::string::npos) {
+-    total += CountBits(Val.substr(0, Pos));
+-    Val = Val.substr(Pos + 1);
+-  }
+-  if (!Val.empty()) {
+-    total += CountBits(Val);
+-  }
+-  return total;
+-}
+-
+ BENCHMARK_MAYBE_UNUSED
+ std::vector<CPUInfo::CacheInfo> GetCacheSizesFromKVFS() {
+   std::vector<CPUInfo::CacheInfo> res;
+@@ -253,10 +214,6 @@ std::vector<CPUInfo::CacheInfo> GetCacheSizesFromKVFS() {
+       PrintErrorAndDie("Failed to read from file ", FPath, "type");
+     if (!ReadFromFile(StrCat(FPath, "level"), &info.level))
+       PrintErrorAndDie("Failed to read from file ", FPath, "level");
+-    std::string map_str;
+-    if (!ReadFromFile(StrCat(FPath, "shared_cpu_map"), &map_str))
+-      PrintErrorAndDie("Failed to read from file ", FPath, "shared_cpu_map");
+-    info.num_sharing = CountSetBitsInCPUMap(map_str);
+     res.push_back(info);
+   }
+ 
+@@ -266,18 +223,14 @@ std::vector<CPUInfo::CacheInfo> GetCacheSizesFromKVFS() {
+ #ifdef BENCHMARK_OS_MACOSX
+ std::vector<CPUInfo::CacheInfo> GetCacheSizesMacOSX() {
+   std::vector<CPUInfo::CacheInfo> res;
+-  std::array<uint64_t, 4> CacheCounts{{0, 0, 0, 0}};
+-  GetSysctl("hw.cacheconfig", &CacheCounts);
+-
+   struct {
+     std::string name;
+     std::string type;
+     int level;
+-    size_t num_sharing;
+-  } Cases[] = {{"hw.l1dcachesize", "Data", 1, CacheCounts[1]},
+-               {"hw.l1icachesize", "Instruction", 1, CacheCounts[1]},
+-               {"hw.l2cachesize", "Unified", 2, CacheCounts[2]},
+-               {"hw.l3cachesize", "Unified", 3, CacheCounts[3]}};
++  } Cases[] = {{"hw.l1dcachesize", "Data", 1},
++               {"hw.l1icachesize", "Instruction", 1},
++               {"hw.l2cachesize", "Unified", 2},
++               {"hw.l3cachesize", "Unified", 3}};
+   for (auto& C : Cases) {
+     int val;
+     if (!GetSysctl(C.name, &val)) continue;
+@@ -285,67 +238,15 @@ std::vector<CPUInfo::CacheInfo> GetCacheSizesMacOSX() {
+     info.type = C.type;
+     info.level = C.level;
+     info.size = val;
+-    info.num_sharing = static_cast<int>(C.num_sharing);
+     res.push_back(std::move(info));
+   }
+   return res;
+ }
+-#elif defined(BENCHMARK_OS_WINDOWS)
+-std::vector<CPUInfo::CacheInfo> GetCacheSizesWindows() {
+-  std::vector<CPUInfo::CacheInfo> res;
+-  DWORD buffer_size = 0;
+-  using PInfo = SYSTEM_LOGICAL_PROCESSOR_INFORMATION;
+-  using CInfo = CACHE_DESCRIPTOR;
+-
+-  using UPtr = std::unique_ptr<PInfo, decltype(&std::free)>;
+-  GetLogicalProcessorInformation(nullptr, &buffer_size);
+-  UPtr buff((PInfo*)malloc(buffer_size), &std::free);
+-  if (!GetLogicalProcessorInformation(buff.get(), &buffer_size))
+-    PrintErrorAndDie("Failed during call to GetLogicalProcessorInformation: ",
+-                     GetLastError());
+-
+-  PInfo* it = buff.get();
+-  PInfo* end = buff.get() + (buffer_size / sizeof(PInfo));
+-
+-  for (; it != end; ++it) {
+-    if (it->Relationship != RelationCache) continue;
+-    using BitSet = std::bitset<sizeof(ULONG_PTR) * CHAR_BIT>;
+-    BitSet B(it->ProcessorMask);
+-    // To prevent duplicates, only consider caches where CPU 0 is specified
+-    if (!B.test(0)) continue;
+-    CInfo* Cache = &it->Cache;
+-    CPUInfo::CacheInfo C;
+-    C.num_sharing = B.count();
+-    C.level = Cache->Level;
+-    C.size = Cache->Size;
+-    switch (Cache->Type) {
+-      case CacheUnified:
+-        C.type = "Unified";
+-        break;
+-      case CacheInstruction:
+-        C.type = "Instruction";
+-        break;
+-      case CacheData:
+-        C.type = "Data";
+-        break;
+-      case CacheTrace:
+-        C.type = "Trace";
+-        break;
+-      default:
+-        C.type = "Unknown";
+-        break;
+-    }
+-    res.push_back(C);
+-  }
+-  return res;
+-}
+ #endif
+ 
+ std::vector<CPUInfo::CacheInfo> GetCacheSizes() {
+ #ifdef BENCHMARK_OS_MACOSX
+   return GetCacheSizesMacOSX();
+-#elif defined(BENCHMARK_OS_WINDOWS)
+-  return GetCacheSizesWindows();
+ #else
+   return GetCacheSizesFromKVFS();
+ #endif
+diff --git a/test/reporter_output_test.cc b/test/reporter_output_test.cc
+index 1620b31..eac8806 100644
+--- a/test/reporter_output_test.cc
++++ b/test/reporter_output_test.cc
+@@ -13,41 +13,6 @@ ADD_CASES(TC_ConsoleOut,
+           {{"^[-]+$", MR_Next},
+            {"^Benchmark %s Time %s CPU %s Iterations$", MR_Next},
+            {"^[-]+$", MR_Next}});
+-static int AddContextCases() {
+-  AddCases(TC_ConsoleErr,
+-           {
+-               {"%int[-/]%int[-/]%int %int:%int:%int$", MR_Default},
+-               {"Run on \\(%int X %float MHz CPU s\\)", MR_Next},
+-           });
+-  AddCases(TC_JSONOut, {{"^\\{", MR_Default},
+-                        {"\"context\":", MR_Next},
+-                        {"\"date\": \"", MR_Next},
+-                        {"\"num_cpus\": %int,$", MR_Next},
+-                        {"\"mhz_per_cpu\": %float,$", MR_Next},
+-                        {"\"cpu_scaling_enabled\": ", MR_Next},
+-                        {"\"caches\": \\[$", MR_Next}});
+-  auto const& Caches = benchmark::CPUInfo::Get().caches;
+-  if (!Caches.empty()) {
+-    AddCases(TC_ConsoleErr, {{"CPU Caches:$", MR_Next}});
+-  }
+-  for (size_t I = 0; I < Caches.size(); ++I) {
+-    std::string num_caches_str =
+-        Caches[I].num_sharing != 0 ? " \\(x%int\\)$" : "$";
+-    AddCases(
+-        TC_ConsoleErr,
+-        {{"L%int (Data|Instruction|Unified) %intK" + num_caches_str, MR_Next}});
+-    AddCases(TC_JSONOut, {{"\\{$", MR_Next},
+-                          {"\"type\": \"", MR_Next},
+-                          {"\"level\": %int,$", MR_Next},
+-                          {"\"size\": %int,$", MR_Next},
+-                          {"\"num_sharing\": %int$", MR_Next},
+-                          {"}[,]{0,1}$", MR_Next}});
+-  }
+-
+-  AddCases(TC_JSONOut, {{"],$"}});
+-  return 0;
+-}
+-int dummy_register = AddContextCases();
+ ADD_CASES(TC_CSVOut, {{"%csv_header"}});
+ 
+ // ========================================================================= //

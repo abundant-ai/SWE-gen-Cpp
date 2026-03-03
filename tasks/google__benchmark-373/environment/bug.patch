@@ -1,0 +1,182 @@
+diff --git a/include/benchmark/benchmark_api.h b/include/benchmark/benchmark_api.h
+index 1e853e2..8cde61b 100644
+--- a/include/benchmark/benchmark_api.h
++++ b/include/benchmark/benchmark_api.h
+@@ -577,17 +577,9 @@ class Benchmark {
+ 
+   // Set the minimum amount of time to use when running this benchmark. This
+   // option overrides the `benchmark_min_time` flag.
+-  // REQUIRES: `t > 0` and `Iterations` has not been called on this benchmark.
++  // REQUIRES: `t > 0`
+   Benchmark* MinTime(double t);
+ 
+-  // Specify the amount of iterations that should be run by this benchmark.
+-  // REQUIRES: 'n > 0' and `MinTime` has not been called on this benchmark.
+-  //
+-  // NOTE: This function should only be used when *exact* iteration control is
+-  //   needed and never to control or limit how long a benchmark runs, where
+-  // `--benchmark_min_time=N` or `MinTime(...)` should be used instead.
+-  Benchmark* Iterations(size_t n);
+-
+   // Specify the amount of times to repeat this benchmark. This option overrides
+   // the `benchmark_repetitions` flag.
+   // REQUIRES: `n > 0`
+@@ -676,7 +668,6 @@ class Benchmark {
+   TimeUnit time_unit_;
+   int range_multiplier_;
+   double min_time_;
+-  size_t iterations_;
+   int repetitions_;
+   bool use_real_time_;
+   bool use_manual_time_;
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 4adb97a..a93a83d 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -285,8 +285,7 @@ std::vector<BenchmarkReporter::Run> RunBenchmark(
+     std::vector<BenchmarkReporter::Run>* complexity_reports) {
+   std::vector<BenchmarkReporter::Run> reports;  // return value
+ 
+-  const bool has_explicit_iteration_count = b.iterations != 0;
+-  size_t iters = has_explicit_iteration_count ? b.iterations : 1;
++  size_t iters = 1;
+   std::unique_ptr<internal::ThreadManager> manager;
+   std::vector<std::thread> pool(b.threads - 1);
+   const int repeats =
+@@ -334,8 +333,7 @@ std::vector<BenchmarkReporter::Run> RunBenchmark(
+           !IsZero(b.min_time) ? b.min_time : FLAGS_benchmark_min_time;
+       // If this was the first run, was elapsed time or cpu time large enough?
+       // If this is not the first run, go with the current value of iter.
+-      if ((i > 0) || has_explicit_iteration_count || results.has_error_ ||
+-          (iters >= kMaxIterations) ||
++      if ((i > 0) || results.has_error_ || (iters >= kMaxIterations) ||
+           (seconds >= min_time) || (results.real_time_used >= 5 * min_time)) {
+         BenchmarkReporter::Run report =
+             CreateRunReport(b, results, iters, seconds);
+diff --git a/src/benchmark_api_internal.h b/src/benchmark_api_internal.h
+index 828ed12..978fc0a 100644
+--- a/src/benchmark_api_internal.h
++++ b/src/benchmark_api_internal.h
+@@ -28,7 +28,6 @@ struct Benchmark::Instance {
+   bool last_benchmark_instance;
+   int repetitions;
+   double min_time;
+-  size_t iterations;
+   int threads;  // Number of concurrent threads to us
+ };
+ 
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index fe37320..cf78bbf 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -143,7 +143,6 @@ bool BenchmarkFamilies::FindBenchmarks(
+         instance.time_unit = family->time_unit_;
+         instance.range_multiplier = family->range_multiplier_;
+         instance.min_time = family->min_time_;
+-        instance.iterations = family->iterations_;
+         instance.repetitions = family->repetitions_;
+         instance.use_real_time = family->use_real_time_;
+         instance.use_manual_time = family->use_manual_time_;
+@@ -168,13 +167,12 @@ bool BenchmarkFamilies::FindBenchmarks(
+           ++arg_i;
+         }
+ 
+-        if (!IsZero(family->min_time_))
++        if (!IsZero(family->min_time_)) {
+           instance.name += StringPrintF("/min_time:%0.3f", family->min_time_);
+-        if (family->iterations_ != 0)
+-          instance.name += StringPrintF("/iterations:%d", family->iterations_);
+-        if (family->repetitions_ != 0)
++        }
++        if (family->repetitions_ != 0) {
+           instance.name += StringPrintF("/repeats:%d", family->repetitions_);
+-
++        }
+         if (family->use_manual_time_) {
+           instance.name += "/manual_time";
+         } else if (family->use_real_time_) {
+@@ -221,7 +219,6 @@ Benchmark::Benchmark(const char* name)
+       time_unit_(kNanosecond),
+       range_multiplier_(kRangeMultiplier),
+       min_time_(0),
+-      iterations_(0),
+       repetitions_(0),
+       use_real_time_(false),
+       use_manual_time_(false),
+@@ -347,22 +344,6 @@ Benchmark* Benchmark::RangeMultiplier(int multiplier) {
+   return this;
+ }
+ 
+-
+-Benchmark* Benchmark::MinTime(double t) {
+-  CHECK(t > 0.0);
+-  CHECK(iterations_ == 0);
+-  min_time_ = t;
+-  return this;
+-}
+-
+-
+-Benchmark* Benchmark::Iterations(size_t n) {
+-  CHECK(n > 0);
+-  CHECK(IsZero(min_time_));
+-  iterations_ = n;
+-  return this;
+-}
+-
+ Benchmark* Benchmark::Repetitions(int n) {
+   CHECK(n > 0);
+   repetitions_ = n;
+@@ -374,6 +355,12 @@ Benchmark* Benchmark::ReportAggregatesOnly(bool value) {
+   return this;
+ }
+ 
++Benchmark* Benchmark::MinTime(double t) {
++  CHECK(t > 0.0);
++  min_time_ = t;
++  return this;
++}
++
+ Benchmark* Benchmark::UseRealTime() {
+   CHECK(!use_manual_time_)
+       << "Cannot set UseRealTime and UseManualTime simultaneously.";
+diff --git a/test/options_test.cc b/test/options_test.cc
+index bbbed28..bedb1cc 100644
+--- a/test/options_test.cc
++++ b/test/options_test.cc
+@@ -1,12 +1,8 @@
+ #include "benchmark/benchmark_api.h"
++
+ #include <chrono>
+ #include <thread>
+ 
+-#if defined(NDEBUG)
+-#undef NDEBUG
+-#endif
+-#include <cassert>
+-
+ void BM_basic(benchmark::State& state) {
+   while (state.KeepRunning()) {
+   }
+@@ -44,22 +40,4 @@ void CustomArgs(benchmark::internal::Benchmark* b) {
+ 
+ BENCHMARK(BM_basic)->Apply(CustomArgs);
+ 
+-void BM_explicit_iteration_count(benchmark::State& st) {
+-  // Test that benchmarks specified with an explicit iteration count are
+-  // only run once.
+-  static bool invoked_before = false;
+-  assert(!invoked_before);
+-  invoked_before = true;
+-
+-  // Test that the requested iteration count is respected.
+-  assert(st.max_iterations == 42);
+-  size_t actual_iterations = 0;
+-  while (st.KeepRunning())
+-    ++actual_iterations;
+-  assert(st.iterations() == st.max_iterations);
+-  assert(st.iterations() == 42);
+-
+-}
+-BENCHMARK(BM_explicit_iteration_count)->Iterations(42);
+-
+ BENCHMARK_MAIN()

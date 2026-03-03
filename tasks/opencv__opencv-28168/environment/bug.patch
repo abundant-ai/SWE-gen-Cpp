@@ -1,0 +1,316 @@
+diff --git a/modules/photo/src/hdr_common.cpp b/modules/photo/src/hdr_common.cpp
+index b2f2def688..70b24322b1 100644
+--- a/modules/photo/src/hdr_common.cpp
++++ b/modules/photo/src/hdr_common.cpp
+@@ -59,17 +59,16 @@ void checkImageDimensions(const std::vector<Mat>& images)
+     }
+ }
+ 
+-Mat triangleWeights(int length)
++Mat triangleWeights()
+ {
+     // hat function
+-    CV_Assert(length >= 2);
+-    Mat w(length, 1, CV_32F);
+-    int half   = length / 2;
+-    int maxVal = length - 1;
++    Mat w(LDR_SIZE, 1, CV_32F);
++    int half   = LDR_SIZE / 2;
++    int maxVal = LDR_SIZE - 1;
+     float epsilon = 1e-6f;
+     w.at<float>(0) = epsilon;
+-    w.at<float>(length - 1) = epsilon;
+-    for (int i = 1; i < length - 1; i++){
++    w.at<float>(LDR_SIZE-1) = epsilon;
++    for (int i = 1; i < LDR_SIZE-1; i++){
+         w.at<float>(i) = (i < half)
+             ? static_cast<float>(i)
+             : static_cast<float>(maxVal - i);
+@@ -77,16 +76,15 @@ Mat triangleWeights(int length)
+     return w;
+ }
+ 
+-Mat RobertsonWeights(int length)
++Mat RobertsonWeights()
+ {
+-    CV_Assert(length >= 1);
+-    Mat weight(length, 1, CV_32FC3);
+-    float q = (length - 1) / 4.0f;
++    Mat weight(LDR_SIZE, 1, CV_32FC3);
++    float q = (LDR_SIZE - 1) / 4.0f;
+     float e4 = exp(4.f);
+     float scale = e4/(e4 - 1.f);
+     float shift = 1 / (1.f - e4);
+ 
+-    for(int i = 0; i < length; i++) {
++    for(int i = 0; i < LDR_SIZE; i++) {
+         float value = i / q - 2.0f;
+         value = scale*exp(-value * value) + shift;
+         weight.at<Vec3f>(i) = Vec3f::all(value);
+@@ -106,28 +104,11 @@ void mapLuminance(Mat src, Mat dst, Mat lum, Mat new_lum, float saturation)
+     merge(channels, dst);
+ }
+ 
+-Mat linearResponse(int channels, int length)
++Mat linearResponse(int channels)
+ {
+-    CV_Assert(length >= 1);
+-    Mat response = Mat(length, 1, CV_MAKETYPE(CV_32F, channels));
+-
+-    if (channels == 1)
+-    {
+-        for (int i = 0; i < length; i++)
+-        {
+-            response.at<float>(i) = static_cast<float>(i);
+-        }
+-    }
+-    else if (channels == 3)
+-    {
+-        for (int i = 0; i < length; i++)
+-        {
+-            response.at<Vec3f>(i) = Vec3f::all(static_cast<float>(i));
+-        }
+-    }
+-    else
+-    {
+-        CV_Error(Error::StsBadArg, "Unsupported number of channels in linearResponse");
++    Mat response = Mat(LDR_SIZE, 1, CV_MAKETYPE(CV_32F, channels));
++    for(int i = 0; i < LDR_SIZE; i++) {
++        response.at<Vec3f>(i) = Vec3f::all(static_cast<float>(i));
+     }
+     return response;
+ }
+diff --git a/modules/photo/src/hdr_common.hpp b/modules/photo/src/hdr_common.hpp
+index cb96068bd9..b9846fd7e9 100644
+--- a/modules/photo/src/hdr_common.hpp
++++ b/modules/photo/src/hdr_common.hpp
+@@ -50,13 +50,13 @@ namespace cv
+ 
+ void checkImageDimensions(const std::vector<Mat>& images);
+ 
+-Mat triangleWeights(int length = LDR_SIZE);
++Mat triangleWeights();
+ 
+ void mapLuminance(Mat src, Mat dst, Mat lum, Mat new_lum, float saturation);
+ 
+-Mat RobertsonWeights(int length = LDR_SIZE);
++Mat RobertsonWeights();
+ 
+-Mat linearResponse(int channels, int length = LDR_SIZE);
++Mat linearResponse(int channels);
+ }
+ 
+ #endif
+diff --git a/modules/photo/src/merge.cpp b/modules/photo/src/merge.cpp
+index 2f7868b4bd..0707d27e9f 100644
+--- a/modules/photo/src/merge.cpp
++++ b/modules/photo/src/merge.cpp
+@@ -66,46 +66,25 @@ public:
+ 
+         CV_Assert(images.size() == times.total());
+         checkImageDimensions(images);
+-        int depth = images[0].depth();
+-        CV_Assert(depth == CV_8U || depth == CV_16U || depth == CV_32F);
++        CV_Assert(images[0].depth() == CV_8U);
+ 
+         int channels = images[0].channels();
+         Size size = images[0].size();
+         int CV_32FCC = CV_MAKETYPE(CV_32F, channels);
+ 
+-        const bool use16bitLUT = (depth == CV_16U || depth == CV_32F);
+-        const int lutLength = use16bitLUT ? 65536 : LDR_SIZE;
+-
+-        std::vector<Mat> lutImages(images.size());
+-        if (depth == CV_8U || depth == CV_16U)
+-        {
+-            lutImages = images;
+-        }
+-        else
+-        {
+-            const double scale = static_cast<double>(lutLength - 1);
+-            for (size_t i = 0; i < images.size(); ++i)
+-            {
+-                Mat clipped;
+-                cv::max(images[i], 0.0, clipped);
+-                cv::min(clipped, 1.0, clipped);
+-                clipped.convertTo(lutImages[i], CV_16U, scale);
+-            }
+-        }
+-
+         dst.create(images[0].size(), CV_32FCC);
+         Mat result = dst.getMat();
+ 
+         Mat response = input_response.getMat();
+ 
+         if(response.empty()) {
+-            response = linearResponse(channels, lutLength);
++            response = linearResponse(channels);
+             response.at<Vec3f>(0) = response.at<Vec3f>(1);
+         }
+ 
+         Mat log_response;
+         log(response, log_response);
+-        CV_Assert(log_response.rows == lutLength && log_response.cols == 1 &&
++        CV_Assert(log_response.rows == LDR_SIZE && log_response.cols == 1 &&
+                   log_response.channels() == channels);
+ 
+         Mat exp_values(times.clone());
+@@ -116,23 +95,19 @@ public:
+         split(result, result_split);
+         Mat weight_sum = Mat::zeros(size, CV_32F);
+ 
+-        Mat weights_lut = use16bitLUT
+-            ? triangleWeights(lutLength)
+-            : weights;
+-
+         for(size_t i = 0; i < images.size(); i++) {
+             std::vector<Mat> splitted;
+-            split(lutImages[i], splitted);
++            split(images[i], splitted);
+ 
+             Mat w = Mat::zeros(size, CV_32F);
+             for(int c = 0; c < channels; c++) {
+-                LUT(splitted[c], weights_lut, splitted[c]);
++                LUT(splitted[c], weights, splitted[c]);
+                 w += splitted[c];
+             }
+             w /= channels;
+ 
+             Mat response_img;
+-            LUT(lutImages[i], log_response, response_img);
++            LUT(images[i], log_response, response_img);
+             split(response_img, splitted);
+             for(int c = 0; c < channels; c++) {
+                 result_split[c] += w.mul(splitted[c] - exp_values.at<float>((int)i));
+@@ -353,52 +328,28 @@ public:
+ 
+         CV_Assert(images.size() == times.total());
+         checkImageDimensions(images);
+-        int depth = images[0].depth();
+-        CV_Assert(depth == CV_8U || depth == CV_16U || depth == CV_32F);
++        CV_Assert(images[0].depth() == CV_8U);
+ 
+         int channels = images[0].channels();
+         int CV_32FCC = CV_MAKETYPE(CV_32F, channels);
+ 
+-        const bool use16bitLUT = (depth == CV_16U || depth == CV_32F);
+-        const int lutLength = use16bitLUT ? 65536 : LDR_SIZE;
+-
+-        // Build LUT index images (see MergeDebevecImpl for details).
+-        std::vector<Mat> lutImages(images.size());
+-        if (depth == CV_8U || depth == CV_16U)
+-        {
+-            lutImages = images;
+-        }
+-        else // CV_32F
+-        {
+-            const double scale = static_cast<double>(lutLength - 1);
+-            for (size_t i = 0; i < images.size(); ++i)
+-            {
+-                images[i].convertTo(lutImages[i], CV_16U, scale);
+-            }
+-        }
+-
+         dst.create(images[0].size(), CV_32FCC);
+         Mat result = dst.getMat();
+ 
+         Mat response = input_response.getMat();
+         if(response.empty()) {
+-            float middle = static_cast<float>(lutLength) / 2.0f;
+-            response = linearResponse(channels, lutLength) / middle;
++            float middle = static_cast<float>(LDR_SIZE) / 2.0f;
++            response = linearResponse(channels) / middle;
+         }
+-        CV_Assert(response.rows == lutLength && response.cols == 1 &&
++        CV_Assert(response.rows == LDR_SIZE && response.cols == 1 &&
+                   response.channels() == channels);
+ 
+         result = Mat::zeros(images[0].size(), CV_32FCC);
+         Mat wsum = Mat::zeros(images[0].size(), CV_32FCC);
+-
+-        Mat weight_lut = use16bitLUT
+-            ? RobertsonWeights(lutLength)
+-            : weight;
+-
+         for(size_t i = 0; i < images.size(); i++) {
+             Mat im, w;
+-            LUT(lutImages[i], weight_lut, w);
+-            LUT(lutImages[i], response, im);
++            LUT(images[i], weight, w);
++            LUT(images[i], response, im);
+ 
+             result += times.at<float>((int)i) * w.mul(im);
+             wsum += times.at<float>((int)i) * times.at<float>((int)i) * w;
+diff --git a/modules/photo/test/test_hdr.cpp b/modules/photo/test/test_hdr.cpp
+index 9922a01fff..264a7d7257 100644
+--- a/modules/photo/test/test_hdr.cpp
++++ b/modules/photo/test/test_hdr.cpp
+@@ -209,68 +209,6 @@ TEST(Photo_MergeRobertson, regression)
+     checkEqual(expected, result, eps, "MergeRobertson");
+ }
+ 
+-TEST(Photo_MergeDebevec, regression_depth_consistency)
+-{
+-    string test_path = string(cvtest::TS::ptr()->get_data_path()) + "hdr/";
+-
+-    vector<Mat> images8;
+-    vector<float> times;
+-    loadExposureSeq(test_path + "exposures/", images8, times);
+-
+-    vector<Mat> images16(images8.size()), images32(images8.size());
+-    for (size_t i = 0; i < images8.size(); ++i)
+-    {
+-        images8[i].convertTo(images16[i], CV_16UC3, 257.0);
+-        images8[i].convertTo(images32[i], CV_32FC3, 1.0 / 255.0);
+-    }
+-
+-    Ptr<MergeDebevec> merge = createMergeDebevec();
+-    Ptr<Tonemap> map = createTonemap();
+-
+-    Mat hdr8, hdr16, hdr32;
+-    merge->process(images8,  hdr8,  times);
+-    merge->process(images16, hdr16, times);
+-    merge->process(images32, hdr32, times);
+-
+-    map->process(hdr8,  hdr8);
+-    map->process(hdr16, hdr16);
+-    map->process(hdr32, hdr32);
+-
+-    checkEqual(hdr8, hdr16, 2e-2f, "Debevec realdata 16U vs 8U");
+-    checkEqual(hdr8, hdr32, 2e-2f, "Debevec realdata 32F vs 8U");
+-}
+-
+-TEST(Photo_MergeRobertson, regression_depth_consistency)
+-{
+-    string test_path = string(cvtest::TS::ptr()->get_data_path()) + "hdr/";
+-
+-    vector<Mat> images8;
+-    vector<float> times;
+-    loadExposureSeq(test_path + "exposures/", images8, times);
+-
+-    vector<Mat> images16(images8.size()), images32(images8.size());
+-    for (size_t i = 0; i < images8.size(); ++i)
+-    {
+-        images8[i].convertTo(images16[i], CV_16UC3, 257.0);
+-        images8[i].convertTo(images32[i], CV_32FC3, 1.0 / 255.0);
+-    }
+-
+-    Ptr<MergeRobertson> merge = createMergeRobertson();
+-    Ptr<Tonemap> map = createTonemap();
+-
+-    Mat hdr8, hdr16, hdr32;
+-    merge->process(images8,  hdr8,  times);
+-    merge->process(images16, hdr16, times);
+-    merge->process(images32, hdr32, times);
+-
+-    map->process(hdr8,  hdr8);
+-    map->process(hdr16, hdr16);
+-    map->process(hdr32, hdr32);
+-
+-    checkEqual(hdr8, hdr16, 3e-2f, "Robertson realdata 16U vs 8U");
+-    checkEqual(hdr8, hdr32, 3e-2f, "Robertson realdata 32F vs 8U");
+-}
+-
+ TEST(Photo_CalibrateDebevec, regression)
+ {
+     string test_path = string(cvtest::TS::ptr()->get_data_path()) + "hdr/";

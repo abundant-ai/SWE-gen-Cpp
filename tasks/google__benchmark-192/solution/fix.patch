@@ -1,0 +1,371 @@
+diff --git a/CONTRIBUTORS b/CONTRIBUTORS
+index ed55bcf..2bbe19e 100644
+--- a/CONTRIBUTORS
++++ b/CONTRIBUTORS
+@@ -32,6 +32,7 @@ Evgeny Safronov <division494@gmail.com>
+ Felix Homann <linuxaudio@showlabor.de>
+ JianXiong Zhou <zhoujianxiong2@gmail.com>
+ Kaito Udagawa <umireon@gmail.com>
++Kai Wolf <kai.wolf@gmail.com>
+ Lei Xu <eddyxu@gmail.com>
+ Matt Clarkson <mattyclarkson@gmail.com>
+ Oleksandr Sochka <sasha.sochka@gmail.com>
+diff --git a/README.md b/README.md
+index 7d2cc17..2ccfd50 100644
+--- a/README.md
++++ b/README.md
+@@ -190,6 +190,15 @@ static void BM_test(benchmark::State& state) {
+ }
+ ```
+ 
++### Set time unit manually
++If a benchmark runs a few milliseconds it may be hard to visually compare the
++measured times, since the output data is given in nanoseconds per default. In
++order to manually set the time unit, you can specify it manually:
++
++```c++
++BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
++```
++
+ ## Controlling number of iterations
+ In all cases, the number of iterations for which the benchmark is run is
+ governed by the amount of time the benchmark takes. Concretely, the number of
+diff --git a/include/benchmark/benchmark_api.h b/include/benchmark/benchmark_api.h
+index 8247be3..726e35d 100644
+--- a/include/benchmark/benchmark_api.h
++++ b/include/benchmark/benchmark_api.h
+@@ -137,6 +137,13 @@ static void BM_MultiThreaded(benchmark::State& state) {
+   }
+ }
+ BENCHMARK(BM_MultiThreaded)->Threads(4);
++
++
++If a benchmark runs a few milliseconds it may be hard to visually compare the
++measured times, since the output data is given in nanoseconds per default. In
++order to manually set the time unit, you can specify it manually:
++
++BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ */
+ 
+ #ifndef BENCHMARK_BENCHMARK_API_H_
+@@ -216,6 +223,13 @@ inline BENCHMARK_ALWAYS_INLINE void DoNotOptimize(Tp const& value) {
+ }
+ #endif
+ 
++// TimeUnit is passed to a benchmark in order to specify the order of magnitude
++// for the measured time.
++enum TimeUnit {
++  kNanosecond,
++  kMicrosecond,
++  kMillisecond
++};
+ 
+ // State is passed to a running Benchmark and contains state for the
+ // benchmark to use.
+@@ -390,6 +404,9 @@ public:
+   // REQUIRES: The function passed to the constructor must accept an arg1.
+   Benchmark* Arg(int x);
+ 
++  // Run this benchmark with the given time unit for the generated output report
++  Benchmark* Unit(TimeUnit unit);
++
+   // Run this benchmark once for a number of values picked from the
+   // range [start..limit].  (start and limit are always picked.)
+   // REQUIRES: The function passed to the constructor must accept an arg1.
+@@ -534,6 +551,7 @@ protected:
+ // Old-style macros
+ #define BENCHMARK_WITH_ARG(n, a) BENCHMARK(n)->Arg((a))
+ #define BENCHMARK_WITH_ARG2(n, a1, a2) BENCHMARK(n)->ArgPair((a1), (a2))
++#define BENCHMARK_WITH_UNIT(n, t) BENCHMARK(n)->Unit((t))
+ #define BENCHMARK_RANGE(n, lo, hi) BENCHMARK(n)->Range((lo), (hi))
+ #define BENCHMARK_RANGE2(n, l1, h1, l2, h2) \
+   BENCHMARK(n)->RangePair((l1), (h1), (l2), (h2))
+diff --git a/include/benchmark/reporter.h b/include/benchmark/reporter.h
+index d23ab65..aaf5fbf 100644
+--- a/include/benchmark/reporter.h
++++ b/include/benchmark/reporter.h
+@@ -22,6 +22,8 @@
+ 
+ namespace benchmark {
+ 
++typedef std::pair<const char*,double> TimeUnitMultiplier;
++
+ // Interface for custom benchmark result printers.
+ // By default, benchmark reports are printed to stdout. However an application
+ // can control the destination of the reports by calling
+@@ -41,6 +43,7 @@ class BenchmarkReporter {
+   struct Run {
+     Run() :
+       iterations(1),
++      time_unit(kNanosecond),
+       real_accumulated_time(0),
+       cpu_accumulated_time(0),
+       bytes_per_second(0),
+@@ -50,6 +53,7 @@ class BenchmarkReporter {
+     std::string benchmark_name;
+     std::string report_label;  // Empty if not set by benchmark.
+     int64_t iterations;
++    TimeUnit time_unit;
+     double real_accumulated_time;
+     double cpu_accumulated_time;
+ 
+@@ -81,7 +85,8 @@ class BenchmarkReporter {
+ 
+   virtual ~BenchmarkReporter();
+ protected:
+-    static void ComputeStats(std::vector<Run> const& reports, Run* mean, Run* stddev);
++  static void ComputeStats(std::vector<Run> const& reports, Run* mean, Run* stddev);
++  static TimeUnitMultiplier GetTimeUnitAndMultiplier(TimeUnit unit);
+ };
+ 
+ // Simple reporter that outputs benchmark data to the console. This is the
+@@ -90,7 +95,8 @@ class ConsoleReporter : public BenchmarkReporter {
+  public:
+   virtual bool ReportContext(const Context& context);
+   virtual void ReportRuns(const std::vector<Run>& reports);
+-protected:
++
++ protected:
+   virtual void PrintRunData(const Run& report);
+ 
+   size_t name_field_width_;
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 08b180e..cb55f96 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -261,6 +261,7 @@ struct Benchmark::Instance {
+   int            arg1;
+   bool           has_arg2;
+   int            arg2;
++  TimeUnit       time_unit;
+   bool           use_real_time;
+   double         min_time;
+   int            threads;    // Number of concurrent threads to use
+@@ -294,6 +295,7 @@ public:
+   ~BenchmarkImp();
+ 
+   void Arg(int x);
++  void Unit(TimeUnit unit);
+   void Range(int start, int limit);
+   void DenseRange(int start, int limit);
+   void ArgPair(int start, int limit);
+@@ -313,6 +315,7 @@ private:
+   std::string name_;
+   int arg_count_;
+   std::vector< std::pair<int, int> > args_;  // Args for all benchmark runs
++  TimeUnit time_unit_;
+   double min_time_;
+   bool use_real_time_;
+   std::vector<int> thread_counts_;
+@@ -372,6 +375,7 @@ bool BenchmarkFamilies::FindBenchmarks(
+         instance.arg1 = args.first;
+         instance.has_arg2 = family->arg_count_ == 2;
+         instance.arg2 = args.second;
++        instance.time_unit = family->time_unit_;
+         instance.min_time = family->min_time_;
+         instance.use_real_time = family->use_real_time_;
+         instance.threads = num_threads;
+@@ -406,7 +410,7 @@ bool BenchmarkFamilies::FindBenchmarks(
+ }
+ 
+ BenchmarkImp::BenchmarkImp(const char* name)
+-    : name_(name), arg_count_(-1),
++    : name_(name), arg_count_(-1), time_unit_(kNanosecond),
+       min_time_(0.0), use_real_time_(false) {
+ }
+ 
+@@ -419,6 +423,10 @@ void BenchmarkImp::Arg(int x) {
+   args_.emplace_back(x, -1);
+ }
+ 
++void BenchmarkImp::Unit(TimeUnit unit) {
++  time_unit_ = unit;
++}
++
+ void BenchmarkImp::Range(int start, int limit) {
+   CHECK(arg_count_ == -1 || arg_count_ == 1);
+   arg_count_ = 1;
+@@ -531,6 +539,11 @@ Benchmark* Benchmark::Arg(int x) {
+   return this;
+ }
+ 
++Benchmark* Benchmark::Unit(TimeUnit unit) {
++  imp_->Unit(unit);
++  return this;
++}
++
+ Benchmark* Benchmark::Range(int start, int limit) {
+   imp_->Range(start, limit);
+   return this;
+@@ -699,6 +712,7 @@ void RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+         report.report_label = label;
+         // Report the total iterations across all threads.
+         report.iterations = static_cast<int64_t>(iters) * b.threads;
++        report.time_unit = b.time_unit;
+         report.real_accumulated_time = real_accumulated_time;
+         report.cpu_accumulated_time = cpu_accumulated_time;
+         report.bytes_per_second = bytes_per_second;
+@@ -891,6 +905,7 @@ void ParseCommandLineFlags(int* argc, char** argv) {
+       PrintUsageAndExit();
+     }
+   }
++
+   if (FLAGS_benchmark_format != "tabular" &&
+       FLAGS_benchmark_format != "json" &&
+       FLAGS_benchmark_format != "csv") {
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index 092936d..375e861 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -18,6 +18,7 @@
+ #include <cstdio>
+ #include <iostream>
+ #include <string>
++#include <tuple>
+ #include <vector>
+ 
+ #include "check.h"
+@@ -46,9 +47,9 @@ bool ConsoleReporter::ReportContext(const Context& context) {
+                "affected.\n";
+ #endif
+ 
+-  int output_width = fprintf(stdout, "%-*s %10s %10s %10s\n",
++  int output_width = fprintf(stdout, "%-*s %13s %13s %10s\n",
+                              static_cast<int>(name_field_width_), "Benchmark",
+-                             "Time(ns)", "CPU(ns)", "Iterations");
++                             "Time", "CPU", "Iterations");
+   std::cout << std::string(output_width - 1, '-') << "\n";
+ 
+   return true;
+@@ -92,19 +93,26 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+                    " items/s");
+   }
+ 
+-  double const multiplier = 1e9; // nano second multiplier
++  double multiplier;
++  const char* timeLabel;
++  std::tie(timeLabel, multiplier) = GetTimeUnitAndMultiplier(result.time_unit);
++
+   ColorPrintf(COLOR_GREEN, "%-*s ",
+               name_field_width_, result.benchmark_name.c_str());
+   if (result.iterations == 0) {
+-    ColorPrintf(COLOR_YELLOW, "%10.0f %10.0f ",
++    ColorPrintf(COLOR_YELLOW, "%10.0f %s %10.0f %s ",
+                 result.real_accumulated_time * multiplier,
+-                result.cpu_accumulated_time * multiplier);
++                timeLabel,
++                result.cpu_accumulated_time * multiplier,
++                timeLabel);
+   } else {
+-    ColorPrintf(COLOR_YELLOW, "%10.0f %10.0f ",
++    ColorPrintf(COLOR_YELLOW, "%10.0f %s %10.0f %s ",
+                 (result.real_accumulated_time * multiplier) /
+                     (static_cast<double>(result.iterations)),
++                timeLabel,
+                 (result.cpu_accumulated_time * multiplier) /
+-                    (static_cast<double>(result.iterations)));
++                    (static_cast<double>(result.iterations)),
++                timeLabel);
+   }
+   ColorPrintf(COLOR_CYAN, "%10lld", result.iterations);
+   ColorPrintf(COLOR_DEFAULT, "%*s %*s %s\n",
+diff --git a/src/csv_reporter.cc b/src/csv_reporter.cc
+index d78a9df..3f67d1d 100644
+--- a/src/csv_reporter.cc
++++ b/src/csv_reporter.cc
+@@ -17,6 +17,7 @@
+ #include <cstdint>
+ #include <iostream>
+ #include <string>
++#include <tuple>
+ #include <vector>
+ 
+ #include "string_util.h"
+@@ -42,7 +43,7 @@ bool CSVReporter::ReportContext(const Context& context) {
+   std::cerr << "***WARNING*** Library was built as DEBUG. Timings may be "
+                "affected.\n";
+ #endif
+-  std::cout << "name,iterations,real_time,cpu_time,bytes_per_second,"
++  std::cout << "name,iterations,real_time,cpu_time,time_unit,bytes_per_second,"
+                "items_per_second,label\n";
+   return true;
+ }
+@@ -66,7 +67,10 @@ void CSVReporter::ReportRuns(std::vector<Run> const& reports) {
+ }
+ 
+ void CSVReporter::PrintRunData(Run const& run) {
+-  double const multiplier = 1e9;  // nano second multiplier
++  double multiplier;
++  const char* timeLabel;
++  std::tie(timeLabel, multiplier) = GetTimeUnitAndMultiplier(run.time_unit);
++
+   double cpu_time = run.cpu_accumulated_time * multiplier;
+   double real_time = run.real_accumulated_time * multiplier;
+   if (run.iterations != 0) {
+@@ -83,6 +87,7 @@ void CSVReporter::PrintRunData(Run const& run) {
+   std::cout << run.iterations << ",";
+   std::cout << real_time << ",";
+   std::cout << cpu_time << ",";
++  std::cout << timeLabel << ",";
+ 
+   if (run.bytes_per_second > 0.0) {
+     std::cout << run.bytes_per_second;
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index def50ac..7ed141f 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -17,6 +17,7 @@
+ #include <cstdint>
+ #include <iostream>
+ #include <string>
++#include <tuple>
+ #include <vector>
+ 
+ #include "string_util.h"
+@@ -120,7 +121,10 @@ void JSONReporter::Finalize() {
+ }
+ 
+ void JSONReporter::PrintRunData(Run const& run) {
+-    double const multiplier = 1e9; // nano second multiplier
++    double multiplier;
++    const char* timeLabel;
++    std::tie(timeLabel, multiplier) = GetTimeUnitAndMultiplier(run.time_unit);
++
+     double cpu_time = run.cpu_accumulated_time * multiplier;
+     double real_time = run.real_accumulated_time * multiplier;
+     if (run.iterations != 0) {
+@@ -140,7 +144,10 @@ void JSONReporter::PrintRunData(Run const& run) {
+         << FormatKV("real_time", RoundDouble(real_time))
+         << ",\n";
+     out << indent
+-        << FormatKV("cpu_time", RoundDouble(cpu_time));
++        << FormatKV("cpu_time", RoundDouble(cpu_time))
++        << ",\n";
++    out << indent
++        << FormatKV("time_unit", timeLabel);
+     if (run.bytes_per_second > 0.0) {
+         out << ",\n" << indent
+             << FormatKV("bytes_per_second", RoundDouble(run.bytes_per_second));
+diff --git a/src/reporter.cc b/src/reporter.cc
+index 4b47e3d..036546e 100644
+--- a/src/reporter.cc
++++ b/src/reporter.cc
+@@ -77,6 +77,18 @@ void BenchmarkReporter::ComputeStats(
+   stddev_data->items_per_second = items_per_second_stat.StdDev();
+ }
+ 
++TimeUnitMultiplier BenchmarkReporter::GetTimeUnitAndMultiplier(TimeUnit unit) {
++  switch (unit) {
++    case kMillisecond:
++      return std::make_pair("ms", 1e3);
++    case kMicrosecond:
++      return std::make_pair("us", 1e6);
++    case kNanosecond:
++    default:
++      return std::make_pair("ns", 1e9);
++  }
++}
++
+ void BenchmarkReporter::Finalize() {
+ }
+ 

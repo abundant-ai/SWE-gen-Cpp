@@ -1,0 +1,518 @@
+diff --git a/README.md b/README.md
+index b03d222..66706eb 100644
+--- a/README.md
++++ b/README.md
+@@ -139,7 +139,7 @@ calculated automatically.
+ 
+ ```c++
+ BENCHMARK(BM_StringCompare)
+-    ->RangeMultiplier(2)->Range(1<<10, 1<<18)->Complexity(benchmark::oAuto);
++    ->RangeMultiplier(2)->Range(1<<10, 1<<18)->Complexity();
+ ```
+ 
+ ### Templated benchmarks
+diff --git a/include/benchmark/benchmark_api.h b/include/benchmark/benchmark_api.h
+index 2fe8753..29d0f6b 100644
+--- a/include/benchmark/benchmark_api.h
++++ b/include/benchmark/benchmark_api.h
+@@ -154,7 +154,6 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ #include <stdint.h>
+ 
+ #include "macros.h"
+-#include "complexity.h"
+ 
+ namespace benchmark {
+ class BenchmarkReporter;
+@@ -239,6 +238,20 @@ enum TimeUnit {
+   kMillisecond
+ };
+ 
++// BigO is passed to a benchmark in order to specify the asymptotic computational 
++// complexity for the benchmark. In case oAuto is selected, complexity will be 
++// calculated automatically to the best fit.
++enum BigO {
++  oNone,
++  o1,
++  oN,
++  oNSquared,
++  oNCubed,
++  oLogN,
++  oNLogN,
++  oAuto
++};
++
+ // State is passed to a running Benchmark and contains state for the
+ // benchmark to use.
+ class State {
+@@ -501,7 +514,7 @@ public:
+ 
+   // Set the asymptotic computational complexity for the benchmark. If called
+   // the asymptotic computational complexity will be shown on the output. 
+-  Benchmark* Complexity(BigO complexity);
++  Benchmark* Complexity(BigO complexity = benchmark::oAuto);
+ 
+   // Support for running multiple copies of the same benchmark concurrently
+   // in multiple threads.  This may be useful when measuring the scaling
+diff --git a/include/benchmark/complexity.h b/include/benchmark/complexity.h
+deleted file mode 100644
+index 93b26de..0000000
+--- a/include/benchmark/complexity.h
++++ /dev/null
+@@ -1,42 +0,0 @@
+-#ifndef COMPLEXITY_H_
+-#define COMPLEXITY_H_
+-
+-#include <string>
+-
+-namespace benchmark {
+-
+-// BigO is passed to a benchmark in order to specify the asymptotic computational 
+-// complexity for the benchmark. In case oAuto is selected, complexity will be 
+-// calculated automatically to the best fit.
+-enum BigO {
+-  oNone,
+-  o1,
+-  oN,
+-  oNSquared,
+-  oNCubed,
+-  oLogN,
+-  oNLogN,
+-  oAuto
+-};
+-
+-inline std::string GetBigO(BigO complexity) {
+-  switch (complexity) {
+-    case oN:
+-      return "* N";
+-    case oNSquared:
+-      return "* N**2";
+-    case oNCubed:
+-      return "* N**3";
+-    case oLogN:
+-      return "* lgN";
+-    case oNLogN:
+-      return "* NlgN";
+-    case o1:
+-      return "* 1";
+-    default:
+-      return "";
+-  }
+-}
+-
+-} // end namespace benchmark
+-#endif // COMPLEXITY_H_
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index a681b35..6dab64b 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -5,7 +5,7 @@ include_directories(${PROJECT_SOURCE_DIR}/src)
+ set(SOURCE_FILES "benchmark.cc" "colorprint.cc" "commandlineflags.cc"
+                  "console_reporter.cc" "csv_reporter.cc" "json_reporter.cc"
+                  "log.cc" "reporter.cc" "sleep.cc" "string_util.cc"
+-                 "sysinfo.cc" "walltime.cc" "minimal_leastsq.cc")
++                 "sysinfo.cc" "walltime.cc" "complexity.cc")
+ # Determine the correct regular expression engine to use
+ if(HAVE_STD_REGEX)
+   set(RE_FILES "re_std.cc")
+diff --git a/src/complexity.cc b/src/complexity.cc
+new file mode 100644
+index 0000000..1f6fee0
+--- /dev/null
++++ b/src/complexity.cc
+@@ -0,0 +1,164 @@
++// Copyright 2016 Ismael Jimenez Martinez. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Source project : https://github.com/ismaelJimenez/cpp.leastsq
++// Adapted to be used with google benchmark
++
++#include "benchmark/benchmark_api.h"
++
++#include "complexity.h"
++#include "check.h"
++#include <math.h>
++#include <functional>
++
++namespace benchmark {
++  
++// Internal function to calculate the different scalability forms
++std::function<double(int)> FittingCurve(BigO complexity) {
++  switch (complexity) {
++    case oN:
++      return [](int n) {return n; };
++    case oNSquared:
++      return [](int n) {return n*n; };
++    case oNCubed:
++      return [](int n) {return n*n*n; };
++    case oLogN:
++      return [](int n) {return log2(n); };
++    case oNLogN:
++      return [](int n) {return n * log2(n); };
++    case o1:
++    default:
++      return [](int) {return 1; };
++  }
++}
++
++// Function to return an string for the calculated complexity
++std::string GetBigOString(BigO complexity) {
++  switch (complexity) {
++    case oN:
++      return "* N";
++    case oNSquared:
++      return "* N**2";
++    case oNCubed:
++      return "* N**3";
++    case oLogN:
++      return "* lgN";
++    case oNLogN:
++      return "* NlgN";
++    case o1:
++      return "* 1";
++    default:
++      return "";
++  }
++}
++
++// Find the coefficient for the high-order term in the running time, by 
++// minimizing the sum of squares of relative error, for the fitting curve 
++// given by the lambda expresion.
++//   - n             : Vector containing the size of the benchmark tests.
++//   - time          : Vector containing the times for the benchmark tests.
++//   - fitting_curve : lambda expresion (e.g. [](int n) {return n; };).
++
++// For a deeper explanation on the algorithm logic, look the README file at
++// http://github.com/ismaelJimenez/Minimal-Cpp-Least-Squared-Fit
++
++// This interface is currently not used from the oustide, but it has been 
++// provided for future upgrades. If in the future it is not needed to support 
++// Cxx03, then all the calculations could be upgraded to use lambdas because 
++// they are more powerful and provide a cleaner inferface than enumerators, 
++// but complete implementation with lambdas will not work for Cxx03 
++// (e.g. lack of std::function).
++// In case lambdas are implemented, the interface would be like :
++//   -> Complexity([](int n) {return n;};)
++// and any arbitrary and valid  equation would be allowed, but the option to 
++// calculate the best fit to the most common scalability curves will still 
++// be kept.
++
++LeastSq CalculateLeastSq(const std::vector<int>& n, 
++                         const std::vector<double>& time, 
++                         std::function<double(int)> fitting_curve) {
++  double sigma_gn = 0.0;
++  double sigma_gn_squared = 0.0;
++  double sigma_time = 0.0;
++  double sigma_time_gn = 0.0;
++
++  // Calculate least square fitting parameter
++  for (size_t i = 0; i < n.size(); ++i) {
++    double gn_i = fitting_curve(n[i]);
++    sigma_gn += gn_i;
++    sigma_gn_squared += gn_i * gn_i;
++    sigma_time += time[i];
++    sigma_time_gn += time[i] * gn_i;
++  }
++
++  LeastSq result;
++
++  // Calculate complexity.
++  result.coef = sigma_time_gn / sigma_gn_squared;
++
++  // Calculate RMS
++  double rms = 0.0;
++  for (size_t i = 0; i < n.size(); ++i) {
++    double fit = result.coef * fitting_curve(n[i]);
++    rms += pow((time[i] - fit), 2);
++  }
++
++  // Normalized RMS by the mean of the observed values
++  double mean = sigma_time / n.size();
++  result.rms = sqrt(rms / n.size()) / mean;
++
++  return result;
++}
++
++// Find the coefficient for the high-order term in the running time, by
++// minimizing the sum of squares of relative error.
++//   - n          : Vector containing the size of the benchmark tests.
++//   - time       : Vector containing the times for the benchmark tests.
++//   - complexity : If different than oAuto, the fitting curve will stick to
++//                  this one. If it is oAuto, it will be calculated the best
++//                  fitting curve.
++LeastSq MinimalLeastSq(const std::vector<int>& n,
++                       const std::vector<double>& time,
++                       const BigO complexity) {
++  CHECK_EQ(n.size(), time.size());
++  CHECK_GE(n.size(), 2);  // Do not compute fitting curve is less than two benchmark runs are given
++  CHECK_NE(complexity, oNone);
++
++  LeastSq best_fit;
++
++  if(complexity == oAuto) {
++    std::vector<BigO> fit_curves = {
++      oLogN, oN, oNLogN, oNSquared, oNCubed };
++
++    // Take o1 as default best fitting curve
++    best_fit = CalculateLeastSq(n, time, FittingCurve(o1));
++    best_fit.complexity = o1;
++
++    // Compute all possible fitting curves and stick to the best one
++    for (const auto& fit : fit_curves) {
++      LeastSq current_fit = CalculateLeastSq(n, time, FittingCurve(fit));
++      if (current_fit.rms < best_fit.rms) {
++        best_fit = current_fit;
++        best_fit.complexity = fit;
++      }
++    }
++  } else {
++    best_fit = CalculateLeastSq(n, time, FittingCurve(complexity));
++    best_fit.complexity = complexity;
++  }
++
++  return best_fit;
++}
++
++}  // end namespace benchmark
+diff --git a/src/complexity.h b/src/complexity.h
+new file mode 100644
+index 0000000..dd68362
+--- /dev/null
++++ b/src/complexity.h
+@@ -0,0 +1,58 @@
++// Copyright 2016 Ismael Jimenez Martinez. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Source project : https://github.com/ismaelJimenez/cpp.leastsq
++// Adapted to be used with google benchmark
++
++#ifndef COMPLEXITY_H_
++#define COMPLEXITY_H_
++
++#include <string>
++#include <vector>
++
++#include "benchmark/benchmark_api.h"
++
++namespace benchmark {
++
++// This data structure will contain the result returned by MinimalLeastSq
++//   - coef        : Estimated coeficient for the high-order term as
++//                   interpolated from data.
++//   - rms         : Normalized Root Mean Squared Error.
++//   - complexity  : Scalability form (e.g. oN, oNLogN). In case a scalability
++//                   form has been provided to MinimalLeastSq this will return
++//                   the same value. In case BigO::oAuto has been selected, this
++//                   parameter will return the best fitting curve detected.
++
++struct LeastSq {
++  LeastSq() :
++    coef(0.0),
++    rms(0.0),
++    complexity(oNone) {}
++
++  double coef;
++  double rms;
++  BigO complexity;
++};
++
++// Function to return an string for the calculated complexity
++std::string GetBigOString(BigO complexity);
++
++// Find the coefficient for the high-order term in the running time, by
++// minimizing the sum of squares of relative error.
++LeastSq MinimalLeastSq(const std::vector<int>& n,
++                       const std::vector<double>& time,
++                       const BigO complexity = oAuto);
++
++} // end namespace benchmark
++#endif // COMPLEXITY_H_
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index 41c00b9..62df4c7 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -13,6 +13,7 @@
+ // limitations under the License.
+ 
+ #include "benchmark/reporter.h"
++#include "complexity.h"
+ 
+ #include <cstdint>
+ #include <cstdio>
+@@ -117,7 +118,7 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+               name_field_width_, result.benchmark_name.c_str());
+ 
+   if(result.report_big_o) {
+-    std::string big_o = result.report_big_o ? GetBigO(result.complexity) : "";
++    std::string big_o = result.report_big_o ? GetBigOString(result.complexity) : "";
+     ColorPrintf(COLOR_YELLOW, "%10.4f %s %10.4f %s ",
+                 result.real_accumulated_time * multiplier,
+                 big_o.c_str(),
+diff --git a/src/minimal_leastsq.cc b/src/minimal_leastsq.cc
+deleted file mode 100644
+index 2a73887..0000000
+--- a/src/minimal_leastsq.cc
++++ /dev/null
+@@ -1,128 +0,0 @@
+-// Copyright 2016 Ismael Jimenez Martinez. All rights reserved.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Source project : https://github.com/ismaelJimenez/cpp.leastsq
+-// Adapted to be used with google benchmark
+-
+-#include "minimal_leastsq.h"
+-#include "check.h"
+-#include <math.h>
+-
+-// Internal function to calculate the different scalability forms
+-double FittingCurve(double n, benchmark::BigO complexity) {
+-  switch (complexity) {
+-    case benchmark::oN:
+-      return n;
+-    case benchmark::oNSquared:
+-      return pow(n, 2);
+-    case benchmark::oNCubed:
+-      return pow(n, 3);
+-    case benchmark::oLogN:
+-      return log2(n);
+-    case benchmark::oNLogN:
+-      return n * log2(n);
+-    case benchmark::o1:
+-    default:
+-      return 1;
+-  }
+-}
+-
+-// Internal function to find the coefficient for the high-order term in the
+-// running time, by minimizing the sum of squares of relative error.
+-//   - n          : Vector containing the size of the benchmark tests.
+-//   - time       : Vector containing the times for the benchmark tests.
+-//   - complexity : Fitting curve.
+-// For a deeper explanation on the algorithm logic, look the README file at
+-// http://github.com/ismaelJimenez/Minimal-Cpp-Least-Squared-Fit
+-
+-LeastSq CalculateLeastSq(const std::vector<int>& n,
+-                         const std::vector<double>& time,
+-                         const benchmark::BigO complexity) {
+-  CHECK_NE(complexity, benchmark::oAuto);
+-
+-  double sigma_gn = 0;
+-  double sigma_gn_squared = 0;
+-  double sigma_time = 0;
+-  double sigma_time_gn = 0;
+-
+-  // Calculate least square fitting parameter
+-  for (size_t i = 0; i < n.size(); ++i) {
+-    double gn_i = FittingCurve(n[i], complexity);
+-    sigma_gn += gn_i;
+-    sigma_gn_squared += gn_i * gn_i;
+-    sigma_time += time[i];
+-    sigma_time_gn += time[i] * gn_i;
+-  }
+-
+-  LeastSq result;
+-  result.complexity = complexity;
+-
+-  // Calculate complexity.
+-  // o1 is treated as an special case
+-  if (complexity != benchmark::o1) {
+-    result.coef = sigma_time_gn / sigma_gn_squared;
+-  } else {
+-    result.coef = sigma_time / n.size();
+-  }
+-
+-  // Calculate RMS
+-  double rms = 0;
+-  for (size_t i = 0; i < n.size(); ++i) {
+-    double fit = result.coef * FittingCurve(n[i], complexity);
+-    rms += pow((time[i] - fit), 2);
+-  }
+-
+-  double mean = sigma_time / n.size();
+-
+-  // Normalized RMS by the mean of the observed values
+-  result.rms = sqrt(rms / n.size()) / mean;
+-
+-  return result;
+-}
+-
+-// Find the coefficient for the high-order term in the running time, by
+-// minimizing the sum of squares of relative error.
+-//   - n          : Vector containing the size of the benchmark tests.
+-//   - time       : Vector containing the times for the benchmark tests.
+-//   - complexity : If different than oAuto, the fitting curve will stick to
+-//                  this one. If it is oAuto, it will be calculated the best
+-//                  fitting curve.
+-LeastSq MinimalLeastSq(const std::vector<int>& n,
+-                       const std::vector<double>& time,
+-                       const benchmark::BigO complexity) {
+-  CHECK_EQ(n.size(), time.size());
+-  CHECK_GE(n.size(), 2);  // Do not compute fitting curve is less than two benchmark runs are given
+-  CHECK_NE(complexity, benchmark::oNone);
+-
+-  if(complexity == benchmark::oAuto) {
+-    std::vector<benchmark::BigO> fit_curves = {
+-      benchmark::oLogN, benchmark::oN, benchmark::oNLogN, benchmark::oNSquared,
+-      benchmark::oNCubed };
+-
+-    // Take o1 as default best fitting curve
+-    LeastSq best_fit = CalculateLeastSq(n, time, benchmark::o1);
+-
+-    // Compute all possible fitting curves and stick to the best one
+-    for (const auto& fit : fit_curves) {
+-      LeastSq current_fit = CalculateLeastSq(n, time, fit);
+-      if (current_fit.rms < best_fit.rms) {
+-        best_fit = current_fit;
+-      }
+-    }
+-
+-    return best_fit;
+-  }
+-
+-  return CalculateLeastSq(n, time, complexity);
+-}
+diff --git a/src/reporter.cc b/src/reporter.cc
+index 2830fa1..aa1e69a 100644
+--- a/src/reporter.cc
++++ b/src/reporter.cc
+@@ -13,7 +13,7 @@
+ // limitations under the License.
+ 
+ #include "benchmark/reporter.h"
+-#include "minimal_leastsq.h"
++#include "complexity.h"
+ 
+ #include <cstdlib>
+ #include <vector>

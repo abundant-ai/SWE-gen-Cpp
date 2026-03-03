@@ -1,0 +1,530 @@
+diff --git a/include/simdjson/common_defs.h b/include/simdjson/common_defs.h
+index ddb5e9c4..ddacf8c1 100644
+--- a/include/simdjson/common_defs.h
++++ b/include/simdjson/common_defs.h
+@@ -73,8 +73,12 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
+ #define unlikely(x) x
+ #endif
+ 
++#define SIMDJSON_PUSH_DISABLE_WARNINGS __pragma(warning( push ))
++#define SIMDJSON_DISABLE_VS_WARNING(WARNING_NUMBER) __pragma(warning( disable : WARNING_NUMBER ))
++#define SIMDJSON_DISABLE_DEPRECATED_WARNING SIMDJSON_DISABLE_VS_WARNING(4996)
++#define SIMDJSON_POP_DISABLE_WARNINGS __pragma(warning( pop ))
+ 
+-#else
++#else // MSC_VER
+ 
+ 
+ #define really_inline inline __attribute__((always_inline, unused))
+@@ -90,6 +94,12 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
+ #define unlikely(x) __builtin_expect(!!(x), 0)
+ #endif
+ 
++#define SIMDJSON_PUSH_DISABLE_WARNINGS _Pragma("GCC diagnostic push")
++#define SIMDJSON_PRAGMA(P) _Pragma(#P)
++#define SIMDJSON_DISABLE_GCC_WARNING(WARNING) SIMDJSON_PRAGMA(GCC diagnostic ignored #WARNING)
++#define SIMDJSON_DISABLE_DEPRECATED_WARNING SIMDJSON_DISABLE_GCC_WARNING(-Wdeprecated-declarations)
++#define SIMDJSON_POP_DISABLE_WARNINGS _Pragma("GCC diagnostic pop")
++
+ #endif // MSC_VER
+ 
+ #endif // SIMDJSON_COMMON_DEFS_H
+diff --git a/include/simdjson/document.h b/include/simdjson/document.h
+index 23575ce5..89220237 100644
+--- a/include/simdjson/document.h
++++ b/include/simdjson/document.h
+@@ -256,6 +256,11 @@ public:
+    */
+   inline array_result as_array() const noexcept;
+ 
++  /**
++   * Get the root element of this document.
++   */
++  inline element_result root() const noexcept;
++
+   /**
+    * Get the value associated with the given JSON pointer.
+    *
+@@ -413,6 +418,11 @@ public:
+   really_inline bool is_number() const noexcept;
+   /** Whether this is a JSON integer (e.g. 1 or -1, but *not* 1.0 or 1e2) */
+   really_inline bool is_integer() const noexcept;
++  /** Whether this is a JSON integer in [9223372036854775808, 18446744073709551616)
++   * that is, a value too large for a signed 64-bit integer, but that still fits
++   * in a 64-bit word. Note that is_integer() is true when is_unsigned_integer()
++   * is true.*/
++  really_inline bool is_unsigned_integer() const noexcept;
+   /** Whether this is a JSON number but not an integer */
+   really_inline bool is_float() const noexcept;
+   /** Whether this is a JSON string (e.g. "abc") */
+@@ -889,17 +899,33 @@ public:
+   /**
+    * Get the value associated with the given key.
+    *
+-   * Note: The key will be matched against **unescaped** JSON:
+-   *
+-   *   document::parser parser;
+-   *   parser.parse(R"({ "a\n": 1 })")["a\n"].as_uint64_t().value == 1
+-   *   parser.parse(R"({ "a\n": 1 })")["a\\n"].as_uint64_t().error == NO_SUCH_FIELD
++   * Note: The key will be matched against **unescaped** JSON.
+    *
+    * @return The value associated with this field, or:
+    *         - NO_SUCH_FIELD if the field does not exist in the object
+    */
+   inline element_result at_key(const char *s) const noexcept;
+ 
++  /**
++   * Get the value associated with the given key, the provided key is
++   * considered to have length characters.
++   *
++   * Note: The key will be matched against **unescaped** JSON.
++   *
++   * @return The value associated with this field, or:
++   *         - NO_SUCH_FIELD if the field does not exist in the object
++   */
++  inline element_result at_key(const char *s, size_t length) const noexcept;
++  /**
++   * Get the value associated with the given key in a case-insensitive manner.
++   *
++   * Note: The key will be matched against **unescaped** JSON.
++   *
++   * @return The value associated with this field, or:
++   *         - NO_SUCH_FIELD if the field does not exist in the object
++   */
++  inline element_result at_key_case_insensitive(const char *s) const noexcept;
++
+ private:
+   really_inline object(const document *_doc, size_t _json_index) noexcept;
+   friend class document::element;
+@@ -926,7 +952,7 @@ private:
+ class document::element_result : public simdjson_result<document::element> {
+ public:
+   really_inline element_result() noexcept;
+-  really_inline element_result(element value) noexcept;
++  really_inline element_result(element &&value) noexcept;
+   really_inline element_result(error_code error) noexcept;
+ 
+   /** Whether this is a JSON `null` */
+diff --git a/include/simdjson/error.h b/include/simdjson/error.h
+index 3f9f9ac7..97099efe 100644
+--- a/include/simdjson/error.h
++++ b/include/simdjson/error.h
+@@ -85,12 +85,12 @@ struct simdjson_result : public std::pair<T, error_code> {
+   /**
+    * Move the value and the error to the provided variables.
+    */
+-  void tie(T& t, error_code & e) {
++  void tie(T& t, error_code & e) && noexcept {
+     // on the clang compiler that comes with current macOS (Apple clang version 11.0.0),
+     // tie(width, error) = size["w"].as_uint64_t();
+     // fails with "error: no viable overloaded '='""
+-    t = std::move(this->first);
+-    e = std::move(this->second);
++    t = std::forward<simdjson_result<T>>(*this).first;
++    e = this->second;
+   }
+ 
+   /**
+@@ -105,76 +105,19 @@ struct simdjson_result : public std::pair<T, error_code> {
+    *
+    * @throw simdjson_error if there was an error.
+    */
+-  T get() noexcept(false) {
++  T& get() noexcept(false) {
+     if (error()) { throw simdjson_error(error()); }
+     return this->first;
+   };
+ 
+-  /**
+-   * Cast to the value (will throw on error).
+-   *
+-   * @throw simdjson_error if there was an error.
+-   */
+-  operator T() noexcept(false) { return get(); }
+-
+-#endif // SIMDJSON_EXCEPTIONS
+-
+-  /**
+-   * Create a new empty result with error = UNINITIALIZED.
+-   */
+-  simdjson_result() noexcept : simdjson_result(UNINITIALIZED) {}
+-
+-  /**
+-   * Create a new error result.
+-   */
+-  simdjson_result(error_code _error) noexcept : std::pair<T, error_code>({}, _error) {}
+-
+-  /**
+-   * Create a new successful result.
+-   */
+-  simdjson_result(T _value) noexcept : std::pair<T, error_code>(_value, SUCCESS) {}
+-
+-  /**
+-   * Create a new result with both things (use if you don't want to branch when creating the result).
+-   */
+-  simdjson_result(T value, error_code error) noexcept : std::pair<T, error_code>(value, error) {}
+-};
+-
+-/**
+- * The result of a simd operation that could fail.
+- *
+- * This class is for values that must be *moved*, like padded_string and document.
+- *
+- * Gives the option of reading error codes, or throwing an exception by casting to the desired result.
+- */
+-template<typename T>
+-struct simdjson_move_result : std::pair<T, error_code> {
+-  /**
+-   * Move the value and the error to the provided variables.
+-   */
+-  void tie(T& t, error_code & e) {
+-    // on the clang compiler that comes with current macOS (Apple clang version 11.0.0),
+-    // std::tie(this->json, error) = padded_string::load(filename);
+-    // fails with "benchmark/benchmarker.h:266:33: error: no viable overloaded '='""
+-    t = std::move(this->first);
+-    e = std::move(this->second);
+-  }
+-
+-  /**
+-   * The error.
+-   */
+-  error_code error() const { return this->second; }
+-
+-#if SIMDJSON_EXCEPTIONS
+-
+   /**
+    * The value of the function.
+    *
+    * @throw simdjson_error if there was an error.
+    */
+-  T move() noexcept(false) {
++  T&& take() && {
+     if (error()) { throw simdjson_error(error()); }
+-    return std::move(this->first);
++    return std::forward<T>(this->first);
+   };
+ 
+   /**
+@@ -182,29 +125,31 @@ struct simdjson_move_result : std::pair<T, error_code> {
+    *
+    * @throw simdjson_error if there was an error.
+    */
+-  operator T() noexcept(false) { return move(); }
++  operator T&&() && {
++    return std::forward<simdjson_result<T>>(*this).take();
++  }
+ 
+-#endif
++#endif // SIMDJSON_EXCEPTIONS
+ 
+   /**
+    * Create a new empty result with error = UNINITIALIZED.
+    */
+-  simdjson_move_result() noexcept : simdjson_move_result(UNINITIALIZED) {}
++  simdjson_result() noexcept : simdjson_result(UNINITIALIZED) {}
+ 
+   /**
+    * Create a new error result.
+    */
+-  simdjson_move_result(error_code error) noexcept : std::pair<T, error_code>(T(), error) {}
++  simdjson_result(error_code error) noexcept : std::pair<T, error_code>(T{}, error) {}
+ 
+   /**
+    * Create a new successful result.
+    */
+-  simdjson_move_result(T value) noexcept : std::pair<T, error_code>(std::move(value), SUCCESS) {}
++  simdjson_result(T &&value) noexcept : std::pair<T, error_code>(std::forward<T>(value), SUCCESS) {}
+ 
+   /**
+    * Create a new result with both things (use if you don't want to branch when creating the result).
+    */
+-  simdjson_move_result(T value, error_code error) noexcept : std::pair<T, error_code>(std::move(value), error) {}
++  simdjson_result(T &&value, error_code error) noexcept : std::pair<T, error_code>(std::forward<T>(value), error) {}
+ };
+ 
+ /**
+diff --git a/include/simdjson/inline/document.h b/include/simdjson/inline/document.h
+index bd1b0fc4..36997b6f 100644
+--- a/include/simdjson/inline/document.h
++++ b/include/simdjson/inline/document.h
+@@ -17,7 +17,7 @@ namespace simdjson {
+ // element_result inline implementation
+ //
+ really_inline document::element_result::element_result() noexcept : simdjson_result<element>() {}
+-really_inline document::element_result::element_result(element value) noexcept : simdjson_result<element>(value) {}
++really_inline document::element_result::element_result(element &&value) noexcept : simdjson_result<element>((element&&)value) {}
+ really_inline document::element_result::element_result(error_code error) noexcept : simdjson_result<element>(error) {}
+ inline simdjson_result<bool> document::element_result::is_null() const noexcept {
+   if (error()) { return error(); }
+@@ -113,7 +113,7 @@ inline document::element_result::operator document::object() const noexcept(fals
+ // array_result inline implementation
+ //
+ really_inline document::array_result::array_result() noexcept : simdjson_result<array>() {}
+-really_inline document::array_result::array_result(array value) noexcept : simdjson_result<array>(value) {}
++really_inline document::array_result::array_result(array value) noexcept : simdjson_result<array>((array&&)value) {}
+ really_inline document::array_result::array_result(error_code error) noexcept : simdjson_result<array>(error) {}
+ 
+ #if SIMDJSON_EXCEPTIONS
+@@ -149,7 +149,7 @@ inline document::element_result document::array_result::at(size_t index) const n
+ // object_result inline implementation
+ //
+ really_inline document::object_result::object_result() noexcept : simdjson_result<object>() {}
+-really_inline document::object_result::object_result(object value) noexcept : simdjson_result<object>(value) {}
++really_inline document::object_result::object_result(object value) noexcept : simdjson_result<object>((object&&)value) {}
+ really_inline document::object_result::object_result(error_code error) noexcept : simdjson_result<object>(error) {}
+ 
+ inline document::element_result document::object_result::operator[](std::string_view json_pointer) const noexcept {
+@@ -359,12 +359,14 @@ inline bool document::dump_raw_tape(std::ostream &os) const noexcept {
+ inline document::doc_result::doc_result(document &doc, error_code error) noexcept : simdjson_result<document&>(doc, error) { }
+ 
+ inline document::array_result document::doc_result::as_array() const noexcept {
+-  if (error()) { return error(); }
+-  return first.root().as_array();
++  return root().as_array();
+ }
+ inline document::object_result document::doc_result::as_object() const noexcept {
++  return root().as_object();
++}
++inline document::element_result document::doc_result::root() const noexcept {
+   if (error()) { return error(); }
+-  return first.root().as_object();
++  return first.root();
+ }
+ 
+ inline document::element_result document::doc_result::operator[](std::string_view key) const noexcept {
+@@ -783,6 +785,16 @@ inline document::element_result document::object::at(std::string_view json_point
+ 
+   return child;
+ }
++inline document::element_result document::object::at_key(const char *key, size_t length) const noexcept {
++  iterator end_field = end();
++  for (iterator field = begin(); field != end_field; ++field) {
++    std::string_view v{field.key()};
++    if ((v.size() == length) && (!memcmp(v.data(), key, length))) {
++      return field.value();
++    }
++  }
++  return NO_SUCH_FIELD;
++}
+ inline document::element_result document::object::at_key(std::string_view key) const noexcept {
+   iterator end_field = end();
+   for (iterator field = begin(); field != end_field; ++field) {
+@@ -801,7 +813,18 @@ inline document::element_result document::object::at_key(const char *key) const
+   }
+   return NO_SUCH_FIELD;
+ }
+-
++// In case you wonder why we need this, please see
++// https://github.com/simdjson/simdjson/issues/323
++// People do seek keys in a case-insensitive manner.
++inline document::element_result document::object::at_key_case_insensitive(const char *key) const noexcept {
++  iterator end_field = end();
++  for (iterator field = begin(); field != end_field; ++field) {
++    if (!simdjson_strcasecmp(key, field.key_c_str())) {
++      return field.value();
++    }
++  }
++  return NO_SUCH_FIELD;
++}
+ //
+ // document::object::iterator inline implementation
+ //
+@@ -859,6 +882,9 @@ really_inline bool document::element::is_float() const noexcept {
+ really_inline bool document::element::is_integer() const noexcept {
+   return type() == internal::tape_type::UINT64 || type() == internal::tape_type::INT64;
+ }
++really_inline bool document::element::is_unsigned_integer() const noexcept {
++  return type() == internal::tape_type::UINT64;
++}
+ really_inline bool document::element::is_string() const noexcept {
+   return type() == internal::tape_type::STRING;
+ }
+@@ -951,7 +977,7 @@ inline simdjson_result<double> document::element::as_double() const noexcept {
+       if (result < 0) {
+         return NUMBER_OUT_OF_RANGE;
+       }
+-      return result;
++      return double(result);
+     }
+     case internal::tape_type::DOUBLE:
+       return next_tape_value<double>();
+diff --git a/include/simdjson/inline/padded_string.h b/include/simdjson/inline/padded_string.h
+index 96227f7e..8caed20a 100644
+--- a/include/simdjson/inline/padded_string.h
++++ b/include/simdjson/inline/padded_string.h
+@@ -98,7 +98,9 @@ inline const char *padded_string::data() const noexcept { return data_ptr; }
+ 
+ inline char *padded_string::data() noexcept { return data_ptr; }
+ 
+-inline simdjson_move_result<padded_string> padded_string::load(const std::string &filename) noexcept {
++inline padded_string::operator std::string_view() const { return std::string_view(data(), length()); }
++
++inline simdjson_result<padded_string> padded_string::load(const std::string &filename) noexcept {
+   // Open the file
+   std::FILE *fp = std::fopen(filename.c_str(), "rb");
+   if (fp == nullptr) {
+@@ -131,7 +133,7 @@ inline simdjson_move_result<padded_string> padded_string::load(const std::string
+     return IO_ERROR;
+   }
+ 
+-  return std::move(s);
++  return s;
+ }
+ 
+ } // namespace simdjson
+diff --git a/include/simdjson/padded_string.h b/include/simdjson/padded_string.h
+index e409248f..8872460c 100644
+--- a/include/simdjson/padded_string.h
++++ b/include/simdjson/padded_string.h
+@@ -89,12 +89,17 @@ struct padded_string final {
+    **/
+   char *data() noexcept;
+ 
++  /**
++   * Create a std::string_view with the same content.
++   */
++  operator std::string_view() const;
++
+   /**
+    * Load this padded string from a file.
+    *
+    * @param path the path to the file.
+    **/
+-  inline static simdjson_move_result<padded_string> load(const std::string &path) noexcept;
++  inline static simdjson_result<padded_string> load(const std::string &path) noexcept;
+ 
+ private:
+   padded_string &operator=(const padded_string &o) = delete;
+diff --git a/scripts/testjson2json.sh b/scripts/testjson2json.sh
+index 0e35c3fa..085a991a 100755
+--- a/scripts/testjson2json.sh
++++ b/scripts/testjson2json.sh
+@@ -2,10 +2,8 @@
+ 
+ TMPDIR1=$(mktemp -d -t simdjsonXXXXXXXX)
+ TMPDIR2=$(mktemp -d -t simdjsonXXXXXXXX)
+-TMPDIR3=$(mktemp -d -t simdjsonXXXXXXXX)
+-TMPDIR4=$(mktemp -d -t simdjsonXXXXXXXX)
+ trap "exit 1"         HUP INT PIPE QUIT TERM
+-trap "rm -rf $TMPDIR1 $TMPDIR2 $TMPDIR3 $TMPDIR4" EXIT
++trap "rm -rf $TMPDIR1 $TMPDIR2" EXIT
+ 
+ function founderror() {
+   echo "code is wrong"
+@@ -16,33 +14,19 @@ make minify json2json
+ for i in `cd jsonexamples && ls -1 *.json`; do
+   echo $i
+   ./json2json jsonexamples/$i > $TMPDIR1/$i
+-  ./json2json -a jsonexamples/$i > $TMPDIR3/$i
+   ./json2json $TMPDIR1/$i > $TMPDIR2/$i
+-  ./json2json -a $TMPDIR3/$i > $TMPDIR4/$i
+   cmp $TMPDIR1/$i $TMPDIR2/$i
+   retVal=$?
+   if [ $retVal -ne 0 ]; then
+     founderror
+   fi
+-  cmp $TMPDIR3/$i $TMPDIR4/$i
+-  retVal=$?
+-  if [ $retVal -ne 0 ]; then
+-    founderror
+-  fi
+   ./minify $TMPDIR1/$i > $TMPDIR1/minify$i
+   ./minify $TMPDIR2/$i > $TMPDIR2/minify$i
+-  ./minify $TMPDIR3/$i > $TMPDIR3/minify$i
+-  ./minify $TMPDIR4/$i > $TMPDIR4/minify$i
+   cmp $TMPDIR1/minify$i $TMPDIR2/minify$i
+   retVal=$?
+   if [ $retVal -ne 0 ]; then
+     founderror
+   fi
+-  cmp $TMPDIR3/minify$i $TMPDIR4/minify$i
+-  retVal=$?
+-  if [ $retVal -ne 0 ]; then
+-    founderror
+-  fi
+   ./json2json $TMPDIR1/minify$i > $TMPDIR2/bisminify$i
+   cmp $TMPDIR1/$i $TMPDIR2/bisminify$i
+   retVal=$?
+@@ -54,37 +38,22 @@ done
+ for i in `cd jsonchecker && ls -1 pass*.json`; do
+   echo $i
+   ./json2json jsonchecker/$i > $TMPDIR1/$i
+-  ./json2json -a jsonchecker/$i > $TMPDIR3/$i
+   ./json2json $TMPDIR1/$i > $TMPDIR2/$i
+-  ./json2json -a $TMPDIR3/$i > $TMPDIR4/$i
+   cmp $TMPDIR1/$i $TMPDIR2/$i
+   retVal=$?
+   if [ $retVal -ne 0 ]; then
+     echo "reg failure"
+     founderror
+   fi
+-  cmp $TMPDIR3/$i $TMPDIR4/$i
+-  retVal=$?
+-  if [ $retVal -ne 0 ]; then
+-    echo "-a failure"
+-    founderror
+-  fi
++
+   ./minify $TMPDIR1/$i > $TMPDIR1/minify$i
+   ./minify $TMPDIR2/$i > $TMPDIR2/minify$i
+-  ./minify $TMPDIR3/$i > $TMPDIR3/minify$i
+-  ./minify $TMPDIR4/$i > $TMPDIR4/minify$i
+   cmp $TMPDIR1/minify$i $TMPDIR2/minify$i
+   retVal=$?
+   if [ $retVal -ne 0 ]; then
+     echo "reg failure, step 2"
+     founderror
+   fi
+-  cmp $TMPDIR3/minify$i $TMPDIR4/minify$i
+-  retVal=$?
+-  if [ $retVal -ne 0 ]; then
+-    echo "-a failure, step 2"
+-    founderror
+-  fi
+   ./json2json $TMPDIR1/minify$i > $TMPDIR2/bisminify$i
+   cmp $TMPDIR1/$i $TMPDIR2/bisminify$i
+   retVal=$?
+diff --git a/tools/jsonpointer.cpp b/tools/jsonpointer.cpp
+index 021d9f5c..b690b680 100644
+--- a/tools/jsonpointer.cpp
++++ b/tools/jsonpointer.cpp
+@@ -1,39 +1,6 @@
+ #include "simdjson.h"
+ #include <iostream>
+ 
+-void compute_dump(simdjson::ParsedJson::Iterator &pjh) {
+-  if (pjh.is_object()) {
+-    std::cout << "{";
+-    if (pjh.down()) {
+-      pjh.print(std::cout); // must be a string
+-      std::cout << ":";
+-      pjh.next();
+-      compute_dump(pjh); // let us recurse
+-      while (pjh.next()) {
+-        std::cout << ",";
+-        pjh.print(std::cout);
+-        std::cout << ":";
+-        pjh.next();
+-        compute_dump(pjh); // let us recurse
+-      }
+-      pjh.up();
+-    }
+-    std::cout << "}";
+-  } else if (pjh.is_array()) {
+-    std::cout << "[";
+-    if (pjh.down()) {
+-      compute_dump(pjh); // let us recurse
+-      while (pjh.next()) {
+-        std::cout << ",";
+-        compute_dump(pjh); // let us recurse
+-      }
+-      pjh.up();
+-    }
+-    std::cout << "]";
+-  } else {
+-    pjh.print(std::cout); // just print the lone value
+-  }
+-}
+ 
+ int main(int argc, char *argv[]) {
+   if (argc < 3) {

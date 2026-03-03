@@ -1,7 +1,7 @@
 # SWE-gen-C++ (work in progress) 
 
 <p align="center">
-  <a href="https://github.com/abundant-ai/SWE-gen-JS">
+  <a href="https://github.com/abundant-ai/SWE-gen-Cpp">
     <img src="assets/swegen-cpp-banner.jpg" style="height: 20em" alt="SWE-gen C++ banner" />
   </a>
 </p>

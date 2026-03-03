@@ -1,0 +1,792 @@
+diff --git a/README.md b/README.md
+index 5be5153..e30052d 100644
+--- a/README.md
++++ b/README.md
+@@ -142,6 +142,14 @@ BENCHMARK(BM_StringCompare)
+     ->RangeMultiplier(2)->Range(1<<10, 1<<18)->Complexity();
+ ```
+ 
++The following code will specify asymptotic complexity with a lambda function,
++that might be used to customize high-order term calculation.
++
++```c++
++BENCHMARK(BM_StringCompare)->RangeMultiplier(2)
++    ->Range(1<<10, 1<<18)->Complexity([](int n)->double{return n; });
++```
++
+ ### Templated benchmarks
+ Templated benchmarks work the same way: This example produces and consumes
+ messages of size `sizeof(v)` `range_x` times. It also outputs throughput in the
+diff --git a/include/benchmark/benchmark_api.h b/include/benchmark/benchmark_api.h
+index e705d75..f38dc97 100644
+--- a/include/benchmark/benchmark_api.h
++++ b/include/benchmark/benchmark_api.h
+@@ -247,9 +247,14 @@ enum BigO {
+   oNCubed,
+   oLogN,
+   oNLogN,
+-  oAuto
++  oAuto,
++  oLambda
+ };
+ 
++// BigOFunc is passed to a benchmark in order to specify the asymptotic 
++// computational complexity for the benchmark.
++typedef double(BigOFunc)(int);
++
+ // State is passed to a running Benchmark and contains state for the
+ // benchmark to use.
+ class State {
+@@ -257,24 +262,24 @@ public:
+   State(size_t max_iters, bool has_x, int x, bool has_y, int y,
+         int thread_i, int n_threads);
+ 
+-  // Returns true iff the benchmark should continue through another iteration.
++  // Returns true if the benchmark should continue through another iteration.
+   // NOTE: A benchmark may not return from the test until KeepRunning() has
+   // returned false.
+   bool KeepRunning() {
+     if (BENCHMARK_BUILTIN_EXPECT(!started_, false)) {
+-        assert(!finished_);
+-        started_ = true;
+-        ResumeTiming();
++      assert(!finished_);
++      started_ = true;
++      ResumeTiming();
+     }
+     bool const res = total_iterations_++ < max_iterations;
+     if (BENCHMARK_BUILTIN_EXPECT(!res, false)) {
+-        assert(started_ && (!finished_ || error_occurred_));
+-        if (!error_occurred_) {
+-            PauseTiming();
+-        }
+-        // Total iterations now is one greater than max iterations. Fix this.
+-        total_iterations_ = max_iterations;
+-        finished_ = true;
++      assert(started_ && (!finished_ || error_occurred_));
++      if (!error_occurred_) {
++        PauseTiming();
++      }
++      // Total iterations now is one greater than max iterations. Fix this.
++      total_iterations_ = max_iterations;
++      finished_ = true;
+     }
+     return res;
+   }
+@@ -358,7 +363,7 @@ public:
+   // family benchmark, then current benchmark will be part of the computation and complexity_n will
+   // represent the length of N.
+   BENCHMARK_ALWAYS_INLINE
+-  void SetComplexityN(size_t complexity_n) {
++  void SetComplexityN(int complexity_n) {
+     complexity_n_ = complexity_n;
+   }
+ 
+@@ -439,7 +444,7 @@ private:
+   size_t bytes_processed_;
+   size_t items_processed_;
+ 
+-  size_t complexity_n_;
++  int complexity_n_;
+ 
+ public:
+   // FIXME: Make this private somehow.
+@@ -538,6 +543,10 @@ public:
+   // the asymptotic computational complexity will be shown on the output. 
+   Benchmark* Complexity(BigO complexity = benchmark::oAuto);
+ 
++  // Set the asymptotic computational complexity for the benchmark. If called
++  // the asymptotic computational complexity will be shown on the output.
++  Benchmark* Complexity(BigOFunc* complexity);
++
+   // Support for running multiple copies of the same benchmark concurrently
+   // in multiple threads.  This may be useful when measuring the scaling
+   // of some piece of code.
+diff --git a/include/benchmark/reporter.h b/include/benchmark/reporter.h
+index 0262754..22c97a0 100644
+--- a/include/benchmark/reporter.h
++++ b/include/benchmark/reporter.h
+@@ -20,7 +20,7 @@
+ #include <utility>
+ #include <vector>
+ 
+-#include "benchmark_api.h" // For forward declaration of BenchmarkReporter
++#include "benchmark_api.h"  // For forward declaration of BenchmarkReporter
+ 
+ namespace benchmark {
+ 
+@@ -85,7 +85,8 @@ class BenchmarkReporter {
+     double max_heapbytes_used;
+ 
+     // Keep track of arguments to compute asymptotic complexity
+-    BigO   complexity;
++    BigO complexity;
++    BigOFunc* complexity_lambda;
+     int complexity_n;
+ 
+     // Inform print function whether the current run is a complexity report
+@@ -147,7 +148,7 @@ class BenchmarkReporter {
+   // REQUIRES: 'out' is non-null.
+   static void PrintBasicContext(std::ostream* out, Context const& context);
+ 
+-private:
++ private:
+   std::ostream* output_stream_;
+   std::ostream* error_stream_;
+ };
+@@ -159,31 +160,31 @@ class ConsoleReporter : public BenchmarkReporter {
+   virtual bool ReportContext(const Context& context);
+   virtual void ReportRuns(const std::vector<Run>& reports);
+ 
+-protected:
++ protected:
+   virtual void PrintRunData(const Run& report);
+ 
+   size_t name_field_width_;
+ };
+ 
+ class JSONReporter : public BenchmarkReporter {
+-public:
++ public:
+   JSONReporter() : first_report_(true) {}
+   virtual bool ReportContext(const Context& context);
+   virtual void ReportRuns(const std::vector<Run>& reports);
+   virtual void Finalize();
+ 
+-private:
++ private:
+   void PrintRunData(const Run& report);
+ 
+   bool first_report_;
+ };
+ 
+ class CSVReporter : public BenchmarkReporter {
+-public:
++ public:
+   virtual bool ReportContext(const Context& context);
+   virtual void ReportRuns(const std::vector<Run>& reports);
+ 
+-private:
++ private:
+   void PrintRunData(const Run& report);
+ };
+ 
+@@ -200,7 +201,7 @@ inline const char* GetTimeUnitString(TimeUnit unit) {
+ }
+ 
+ inline double GetTimeUnitMultiplier(TimeUnit unit) {
+-    switch (unit) {
++  switch (unit) {
+     case kMillisecond:
+       return 1e3;
+     case kMicrosecond:
+@@ -211,5 +212,5 @@ inline double GetTimeUnitMultiplier(TimeUnit unit) {
+   }
+ }
+ 
+-} // end namespace benchmark
+-#endif // BENCHMARK_REPORTER_H_
++}  // end namespace benchmark
++#endif  // BENCHMARK_REPORTER_H_
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index d86705e..c56faa9 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -124,7 +124,7 @@ struct ThreadStats {
+     ThreadStats() : bytes_processed(0), items_processed(0), complexity_n(0) {}
+     int64_t bytes_processed;
+     int64_t items_processed;
+-    int     complexity_n;
++    size_t  complexity_n;
+ };
+ 
+ // Timer management class
+@@ -281,7 +281,7 @@ class TimerManager {
+       };
+       phase_condition_.wait(ml.native_handle(), cb);
+       if (phase_number_ > phase_number_cp)
+-          return false;
++        return false;
+       // else (running_threads_ == entered_) and we are the last thread.
+     }
+     // Last thread has reached the barrier
+@@ -311,6 +311,7 @@ struct Benchmark::Instance {
+   bool           use_real_time;
+   bool           use_manual_time;
+   BigO           complexity;
++  BigOFunc*      complexity_lambda;
+   bool           last_benchmark_instance;
+   int            repetitions;
+   double         min_time;
+@@ -356,6 +357,7 @@ public:
+   void UseRealTime();
+   void UseManualTime();
+   void Complexity(BigO complexity);
++  void ComplexityLambda(BigOFunc* complexity);
+   void Threads(int t);
+   void ThreadRange(int min_threads, int max_threads);
+   void ThreadPerCpu();
+@@ -376,6 +378,7 @@ private:
+   bool use_real_time_;
+   bool use_manual_time_;
+   BigO complexity_;
++  BigOFunc* complexity_lambda_;
+   std::vector<int> thread_counts_;
+ 
+   BenchmarkImp& operator=(BenchmarkImp const&);
+@@ -440,6 +443,7 @@ bool BenchmarkFamilies::FindBenchmarks(
+         instance.use_real_time = family->use_real_time_;
+         instance.use_manual_time = family->use_manual_time_;
+         instance.complexity = family->complexity_;
++        instance.complexity_lambda = family->complexity_lambda_;
+         instance.threads = num_threads;
+         instance.multithreaded = !(family->thread_counts_.empty());
+ 
+@@ -567,6 +571,10 @@ void BenchmarkImp::Complexity(BigO complexity){
+   complexity_ = complexity;
+ }
+ 
++void BenchmarkImp::ComplexityLambda(BigOFunc* complexity) {
++  complexity_lambda_ = complexity;
++}
++
+ void BenchmarkImp::Threads(int t) {
+   CHECK_GT(t, 0);
+   thread_counts_.push_back(t);
+@@ -691,6 +699,12 @@ Benchmark* Benchmark::Complexity(BigO complexity) {
+   return this;
+ }
+ 
++Benchmark* Benchmark::Complexity(BigOFunc* complexity) {
++  imp_->Complexity(oLambda);
++  imp_->ComplexityLambda(complexity);
++  return this;
++}
++
+ Benchmark* Benchmark::Threads(int t) {
+   imp_->Threads(t);
+   return this;
+@@ -849,6 +863,7 @@ void RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+           report.items_per_second = items_per_second;
+           report.complexity_n = total.complexity_n;
+           report.complexity = b.complexity;
++          report.complexity_lambda = b.complexity_lambda;
+           if(report.complexity != oNone)
+             complexity_reports.push_back(report);
+         }
+@@ -878,7 +893,7 @@ void RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+   }
+   std::vector<BenchmarkReporter::Run> additional_run_stats = ComputeStats(reports);
+   reports.insert(reports.end(), additional_run_stats.begin(),
+-                    additional_run_stats.end());
++                 additional_run_stats.end());
+ 
+   if((b.complexity != oNone) && b.last_benchmark_instance) {
+     additional_run_stats = ComputeBigO(complexity_reports);
+diff --git a/src/complexity.cc b/src/complexity.cc
+index 3e42f5d..24f1cf4 100644
+--- a/src/complexity.cc
++++ b/src/complexity.cc
+@@ -17,31 +17,30 @@
+ 
+ #include "benchmark/benchmark_api.h"
+ 
+-#include "complexity.h"
++#include <algorithm>
++#include <cmath>
+ #include "check.h"
++#include "complexity.h"
+ #include "stat.h"
+-#include <cmath>
+-#include <algorithm>
+-#include <functional>
+ 
+ namespace benchmark {
+-  
++
+ // Internal function to calculate the different scalability forms
+-std::function<double(int)> FittingCurve(BigO complexity) {
++BigOFunc* FittingCurve(BigO complexity) {
+   switch (complexity) {
+     case oN:
+-      return [](int n) {return n; };
++      return [](int n) -> double { return n; };
+     case oNSquared:
+-      return [](int n) {return n*n; };
++      return [](int n) -> double { return n * n; };
+     case oNCubed:
+-      return [](int n) {return n*n*n; };
++      return [](int n) -> double { return n * n * n; };
+     case oLogN:
+-      return [](int n) {return log2(n); };
++      return [](int n) { return log2(n); };
+     case oNLogN:
+-      return [](int n) {return n * log2(n); };
++      return [](int n) { return n * log2(n); };
+     case o1:
+     default:
+-      return [](int) {return 1; };
++      return [](int) { return 1.0; };
+   }
+ }
+ 
+@@ -49,24 +48,24 @@ std::function<double(int)> FittingCurve(BigO complexity) {
+ std::string GetBigOString(BigO complexity) {
+   switch (complexity) {
+     case oN:
+-      return "* N";
++      return "N";
+     case oNSquared:
+-      return "* N**2";
++      return "N^2";
+     case oNCubed:
+-      return "* N**3";
++      return "N^3";
+     case oLogN:
+-      return "* lgN";
++      return "lgN";
+     case oNLogN:
+-      return "* NlgN";
++      return "NlgN";
+     case o1:
+-      return "* 1";
++      return "(1)";
+     default:
+-      return "";
++      return "f(N)";
+   }
+ }
+ 
+-// Find the coefficient for the high-order term in the running time, by 
+-// minimizing the sum of squares of relative error, for the fitting curve 
++// Find the coefficient for the high-order term in the running time, by
++// minimizing the sum of squares of relative error, for the fitting curve
+ // given by the lambda expresion.
+ //   - n             : Vector containing the size of the benchmark tests.
+ //   - time          : Vector containing the times for the benchmark tests.
+@@ -75,21 +74,9 @@ std::string GetBigOString(BigO complexity) {
+ // For a deeper explanation on the algorithm logic, look the README file at
+ // http://github.com/ismaelJimenez/Minimal-Cpp-Least-Squared-Fit
+ 
+-// This interface is currently not used from the oustide, but it has been 
+-// provided for future upgrades. If in the future it is not needed to support 
+-// Cxx03, then all the calculations could be upgraded to use lambdas because 
+-// they are more powerful and provide a cleaner inferface than enumerators, 
+-// but complete implementation with lambdas will not work for Cxx03 
+-// (e.g. lack of std::function).
+-// In case lambdas are implemented, the interface would be like :
+-//   -> Complexity([](int n) {return n;};)
+-// and any arbitrary and valid  equation would be allowed, but the option to 
+-// calculate the best fit to the most common scalability curves will still 
+-// be kept.
+-
+-LeastSq CalculateLeastSq(const std::vector<int>& n, 
+-                         const std::vector<double>& time, 
+-                         std::function<double(int)> fitting_curve) {
++LeastSq MinimalLeastSq(const std::vector<int>& n,
++                       const std::vector<double>& time,
++                       BigOFunc* fitting_curve) {
+   double sigma_gn = 0.0;
+   double sigma_gn_squared = 0.0;
+   double sigma_time = 0.0;
+@@ -105,6 +92,7 @@ LeastSq CalculateLeastSq(const std::vector<int>& n,
+   }
+ 
+   LeastSq result;
++  result.complexity = oLambda;
+ 
+   // Calculate complexity.
+   result.coef = sigma_time_gn / sigma_gn_squared;
+@@ -134,29 +122,29 @@ LeastSq MinimalLeastSq(const std::vector<int>& n,
+                        const std::vector<double>& time,
+                        const BigO complexity) {
+   CHECK_EQ(n.size(), time.size());
+-  CHECK_GE(n.size(), 2);  // Do not compute fitting curve is less than two benchmark runs are given
++  CHECK_GE(n.size(), 2);  // Do not compute fitting curve is less than two
++                          // benchmark runs are given
+   CHECK_NE(complexity, oNone);
+ 
+   LeastSq best_fit;
+ 
+-  if(complexity == oAuto) {
+-    std::vector<BigO> fit_curves = {
+-      oLogN, oN, oNLogN, oNSquared, oNCubed };
++  if (complexity == oAuto) {
++    std::vector<BigO> fit_curves = {oLogN, oN, oNLogN, oNSquared, oNCubed};
+ 
+     // Take o1 as default best fitting curve
+-    best_fit = CalculateLeastSq(n, time, FittingCurve(o1));
++    best_fit = MinimalLeastSq(n, time, FittingCurve(o1));
+     best_fit.complexity = o1;
+ 
+     // Compute all possible fitting curves and stick to the best one
+     for (const auto& fit : fit_curves) {
+-      LeastSq current_fit = CalculateLeastSq(n, time, FittingCurve(fit));
++      LeastSq current_fit = MinimalLeastSq(n, time, FittingCurve(fit));
+       if (current_fit.rms < best_fit.rms) {
+         best_fit = current_fit;
+         best_fit.complexity = fit;
+       }
+     }
+   } else {
+-    best_fit = CalculateLeastSq(n, time, FittingCurve(complexity));
++    best_fit = MinimalLeastSq(n, time, FittingCurve(complexity));
+     best_fit.complexity = complexity;
+   }
+ 
+@@ -164,14 +152,13 @@ LeastSq MinimalLeastSq(const std::vector<int>& n,
+ }
+ 
+ std::vector<BenchmarkReporter::Run> ComputeStats(
+-    const std::vector<BenchmarkReporter::Run>& reports)
+-{
++    const std::vector<BenchmarkReporter::Run>& reports) {
+   typedef BenchmarkReporter::Run Run;
+   std::vector<Run> results;
+ 
+-  auto error_count = std::count_if(
+-      reports.begin(), reports.end(),
+-      [](Run const& run) {return run.error_occurred;});
++  auto error_count =
++      std::count_if(reports.begin(), reports.end(),
++                    [](Run const& run) { return run.error_occurred; });
+ 
+   if (reports.size() - error_count < 2) {
+     // We don't report aggregated data if there was a single run.
+@@ -190,12 +177,11 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+   for (Run const& run : reports) {
+     CHECK_EQ(reports[0].benchmark_name, run.benchmark_name);
+     CHECK_EQ(run_iterations, run.iterations);
+-    if (run.error_occurred)
+-      continue;
++    if (run.error_occurred) continue;
+     real_accumulated_time_stat +=
+-        Stat1_d(run.real_accumulated_time/run.iterations, run.iterations);
++        Stat1_d(run.real_accumulated_time / run.iterations, run.iterations);
+     cpu_accumulated_time_stat +=
+-        Stat1_d(run.cpu_accumulated_time/run.iterations, run.iterations);
++        Stat1_d(run.cpu_accumulated_time / run.iterations, run.iterations);
+     items_per_second_stat += Stat1_d(run.items_per_second, run.iterations);
+     bytes_per_second_stat += Stat1_d(run.bytes_per_second, run.iterations);
+   }
+@@ -204,10 +190,10 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+   Run mean_data;
+   mean_data.benchmark_name = reports[0].benchmark_name + "_mean";
+   mean_data.iterations = run_iterations;
+-  mean_data.real_accumulated_time = real_accumulated_time_stat.Mean() *
+-                                     run_iterations;
+-  mean_data.cpu_accumulated_time = cpu_accumulated_time_stat.Mean() *
+-                                    run_iterations;
++  mean_data.real_accumulated_time =
++      real_accumulated_time_stat.Mean() * run_iterations;
++  mean_data.cpu_accumulated_time =
++      cpu_accumulated_time_stat.Mean() * run_iterations;
+   mean_data.bytes_per_second = bytes_per_second_stat.Mean();
+   mean_data.items_per_second = items_per_second_stat.Mean();
+ 
+@@ -224,10 +210,8 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+   stddev_data.benchmark_name = reports[0].benchmark_name + "_stddev";
+   stddev_data.report_label = mean_data.report_label;
+   stddev_data.iterations = 0;
+-  stddev_data.real_accumulated_time =
+-      real_accumulated_time_stat.StdDev();
+-  stddev_data.cpu_accumulated_time =
+-      cpu_accumulated_time_stat.StdDev();
++  stddev_data.real_accumulated_time = real_accumulated_time_stat.StdDev();
++  stddev_data.cpu_accumulated_time = cpu_accumulated_time_stat.StdDev();
+   stddev_data.bytes_per_second = bytes_per_second_stat.StdDev();
+   stddev_data.items_per_second = items_per_second_stat.StdDev();
+ 
+@@ -237,8 +221,7 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+ }
+ 
+ std::vector<BenchmarkReporter::Run> ComputeBigO(
+-    const std::vector<BenchmarkReporter::Run>& reports)
+-{
++    const std::vector<BenchmarkReporter::Run>& reports) {
+   typedef BenchmarkReporter::Run Run;
+   std::vector<Run> results;
+ 
+@@ -252,19 +235,22 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+   // Populate the accumulators.
+   for (const Run& run : reports) {
+     n.push_back(run.complexity_n);
+-    real_time.push_back(run.real_accumulated_time/run.iterations);
+-    cpu_time.push_back(run.cpu_accumulated_time/run.iterations);
++    real_time.push_back(run.real_accumulated_time / run.iterations);
++    cpu_time.push_back(run.cpu_accumulated_time / run.iterations);
+   }
+ 
+-  LeastSq result_cpu = MinimalLeastSq(n, cpu_time, reports[0].complexity);
++  LeastSq result_cpu;
++  LeastSq result_real;
+ 
+-  // result_cpu.complexity is passed as parameter to result_real because in case
+-  // reports[0].complexity is oAuto, the noise on the measured data could make
+-  // the best fit function of Cpu and Real differ. In order to solve this, we
+-  // take the best fitting function for the Cpu, and apply it to Real data.
+-  LeastSq result_real = MinimalLeastSq(n, real_time, result_cpu.complexity);
+-
+-  std::string benchmark_name = reports[0].benchmark_name.substr(0, reports[0].benchmark_name.find('/'));
++  if (reports[0].complexity == oLambda) {
++    result_cpu = MinimalLeastSq(n, cpu_time, reports[0].complexity_lambda);
++    result_real = MinimalLeastSq(n, real_time, reports[0].complexity_lambda);
++  } else {
++    result_cpu = MinimalLeastSq(n, cpu_time, reports[0].complexity);
++    result_real = MinimalLeastSq(n, real_time, result_cpu.complexity);
++  }
++  std::string benchmark_name =
++      reports[0].benchmark_name.substr(0, reports[0].benchmark_name.find('/'));
+ 
+   // Get the data from the accumulator to BenchmarkReporter::Run's.
+   Run big_o;
+diff --git a/src/complexity.h b/src/complexity.h
+index be095a9..85cc125 100644
+--- a/src/complexity.h
++++ b/src/complexity.h
+@@ -60,11 +60,5 @@ struct LeastSq {
+ // Function to return an string for the calculated complexity
+ std::string GetBigOString(BigO complexity);
+ 
+-// Find the coefficient for the high-order term in the running time, by
+-// minimizing the sum of squares of relative error.
+-LeastSq MinimalLeastSq(const std::vector<int>& n,
+-                       const std::vector<double>& time,
+-                       const BigO complexity = oAuto);
+-
+ } // end namespace benchmark
+ #endif // COMPLEXITY_H_
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index 9b20ac8..080c324 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -15,9 +15,9 @@
+ #include "benchmark/reporter.h"
+ #include "complexity.h"
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <cstdio>
+-#include <algorithm>
+ #include <iostream>
+ #include <string>
+ #include <tuple>
+@@ -62,8 +62,8 @@ void ConsoleReporter::ReportRuns(const std::vector<Run>& reports) {
+ void ConsoleReporter::PrintRunData(const Run& result) {
+   auto& Out = GetOutputStream();
+ 
+-  auto name_color = (result.report_big_o || result.report_rms)
+-      ? COLOR_BLUE : COLOR_GREEN;
++  auto name_color =
++      (result.report_big_o || result.report_rms) ? COLOR_BLUE : COLOR_GREEN;
+   ColorPrintf(Out, name_color, "%-*s ", name_field_width_,
+               result.benchmark_name.c_str());
+ 
+@@ -84,25 +84,25 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+   if (result.items_per_second > 0) {
+     items = StrCat(" ", HumanReadableNumber(result.items_per_second),
+                    " items/s");
+-  }
++ }
+ 
+   const double real_time = result.GetAdjustedRealTime();
+   const double cpu_time = result.GetAdjustedCPUTime();
+ 
+-  if(result.report_big_o) {
+-    std::string big_o = result.report_big_o ? GetBigOString(result.complexity) : "";
+-    ColorPrintf(Out, COLOR_YELLOW, "%10.4f %s %10.4f %s ",
+-                real_time, big_o.c_str(), cpu_time, big_o.c_str());
+-  } else if(result.report_rms) {
+-    ColorPrintf(Out, COLOR_YELLOW, "%10.0f %% %10.0f %% ",
+-                real_time * 100, cpu_time * 100);
++  if (result.report_big_o) {
++    std::string big_o = GetBigOString(result.complexity);
++    ColorPrintf(Out, COLOR_YELLOW, "%10.2f %s %10.2f %s ", real_time,
++                big_o.c_str(), cpu_time, big_o.c_str());
++  } else if (result.report_rms) {
++    ColorPrintf(Out, COLOR_YELLOW, "%10.0f %% %10.0f %% ", real_time * 100,
++                cpu_time * 100);
+   } else {
+     const char* timeLabel = GetTimeUnitString(result.time_unit);
+-    ColorPrintf(Out, COLOR_YELLOW, "%10.0f %s %10.0f %s ",
+-                real_time, timeLabel, cpu_time, timeLabel);
++    ColorPrintf(Out, COLOR_YELLOW, "%10.0f %s %10.0f %s ", real_time, timeLabel,
++                cpu_time, timeLabel);
+   }
+ 
+-  if(!result.report_big_o && !result.report_rms) {
++  if (!result.report_big_o && !result.report_rms) {
+     ColorPrintf(Out, COLOR_CYAN, "%10lld", result.iterations);
+   }
+ 
+diff --git a/src/csv_reporter.cc b/src/csv_reporter.cc
+index 5c18c9e..7bc7ef3 100644
+--- a/src/csv_reporter.cc
++++ b/src/csv_reporter.cc
+@@ -13,9 +13,10 @@
+ // limitations under the License.
+ 
+ #include "benchmark/reporter.h"
++#include "complexity.h"
+ 
+-#include <cstdint>
+ #include <algorithm>
++#include <cstdint>
+ #include <iostream>
+ #include <string>
+ #include <tuple>
+@@ -79,7 +80,7 @@ void CSVReporter::PrintRunData(const Run & run) {
+   }
+ 
+   // Do not print iteration on bigO and RMS report
+-  if(!run.report_big_o && !run.report_rms) {
++  if (!run.report_big_o && !run.report_rms) {
+     Out << run.iterations;
+   }
+   Out << ",";
+@@ -87,8 +88,10 @@ void CSVReporter::PrintRunData(const Run & run) {
+   Out << run.GetAdjustedRealTime() << ",";
+   Out << run.GetAdjustedCPUTime() << ",";
+ 
+-  // Do not print timeLabel on RMS report
+-  if(!run.report_rms) {
++  // Do not print timeLabel on bigO and RMS report
++  if (run.report_big_o) {
++    Out << GetBigOString(run.complexity);
++  } else if (!run.report_rms) {
+     Out << GetTimeUnitString(run.time_unit);
+   }
+   Out << ",";
+@@ -108,7 +111,7 @@ void CSVReporter::PrintRunData(const Run & run) {
+     ReplaceAll(&label, "\"", "\"\"");
+     Out << "\"" << label << "\"";
+   }
+-  Out << ",,"; // for error_occurred and error_message
++  Out << ",,";  // for error_occurred and error_message
+   Out << '\n';
+ }
+ 
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index 8ec18e0..485d305 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -13,9 +13,10 @@
+ // limitations under the License.
+ 
+ #include "benchmark/reporter.h"
++#include "complexity.h"
+ 
+-#include <cstdint>
+ #include <algorithm>
++#include <cstdint>
+ #include <iostream>
+ #include <string>
+ #include <tuple>
+@@ -99,24 +100,24 @@ void JSONReporter::ReportRuns(std::vector<Run> const& reports) {
+   first_report_ = false;
+ 
+   for (auto it = reports.begin(); it != reports.end(); ++it) {
+-     out << indent << "{\n";
+-     PrintRunData(*it);
+-     out << indent << '}';
+-     auto it_cp = it;
+-     if (++it_cp != reports.end()) {
+-         out << ",\n";
+-     }
++    out << indent << "{\n";
++    PrintRunData(*it);
++    out << indent << '}';
++    auto it_cp = it;
++    if (++it_cp != reports.end()) {
++      out << ",\n";
++    }
+   }
+ }
+ 
+ void JSONReporter::Finalize() {
+-    // Close the list of benchmarks and the top level object.
+-    GetOutputStream() << "\n  ]\n}\n";
++  // Close the list of benchmarks and the top level object.
++  GetOutputStream() << "\n  ]\n}\n";
+ }
+ 
+ void JSONReporter::PrintRunData(Run const& run) {
+-    std::string indent(6, ' ');
+-    std::ostream& out = GetOutputStream();
++  std::string indent(6, ' ');
++  std::ostream& out = GetOutputStream();
+     out << indent
+         << FormatKV("name", run.benchmark_name)
+         << ",\n";
+@@ -128,33 +129,50 @@ void JSONReporter::PrintRunData(Run const& run) {
+             << FormatKV("error_message", run.error_message)
+             << ",\n";
+     }
+-    if(!run.report_big_o && !run.report_rms) {
++  if (!run.report_big_o && !run.report_rms) {
+         out << indent
+             << FormatKV("iterations", run.iterations)
+             << ",\n";
+-    }
++        out << indent
++            << FormatKV("real_time", RoundDouble(run.GetAdjustedRealTime()))
++            << ",\n";
++        out << indent
++            << FormatKV("cpu_time", RoundDouble(run.GetAdjustedCPUTime()));
++        out << ",\n" << indent
++            << FormatKV("time_unit", GetTimeUnitString(run.time_unit));
++  } else if (run.report_big_o) {
+     out << indent
+-        << FormatKV("real_time", RoundDouble(run.GetAdjustedRealTime()))
++        << FormatKV("cpu_coefficient", RoundDouble(run.GetAdjustedCPUTime()))
+         << ",\n";
+     out << indent
+-        << FormatKV("cpu_time", RoundDouble(run.GetAdjustedCPUTime()));
+-    if(!run.report_rms) {
+-        out << ",\n" << indent
++        << FormatKV("real_coefficient", RoundDouble(run.GetAdjustedRealTime()))
++        << ",\n";
++    out << indent
++            << FormatKV("big_o", GetBigOString(run.complexity))
++            << ",\n";
++        out << indent
+             << FormatKV("time_unit", GetTimeUnitString(run.time_unit));
+-    }
+-    if (run.bytes_per_second > 0.0) {
+-        out << ",\n" << indent
+-            << FormatKV("bytes_per_second", RoundDouble(run.bytes_per_second));
+-    }
+-    if (run.items_per_second > 0.0) {
+-        out << ",\n" << indent
+-            << FormatKV("items_per_second", RoundDouble(run.items_per_second));
+-    }
+-    if (!run.report_label.empty()) {
+-        out << ",\n" << indent
+-            << FormatKV("label", run.report_label);
+-    }
+-    out << '\n';
++    } else if(run.report_rms) {
++        out << indent
++            << FormatKV("rms", RoundDouble(run.GetAdjustedCPUTime()*100))
++            << '%';
++  }
++  if (run.bytes_per_second > 0.0) {
++    out << ",\n"
++        << indent
++        << FormatKV("bytes_per_second", RoundDouble(run.bytes_per_second));
++  }
++  if (run.items_per_second > 0.0) {
++    out << ",\n"
++        << indent
++        << FormatKV("items_per_second", RoundDouble(run.items_per_second));
++  }
++  if (!run.report_label.empty()) {
++    out << ",\n"
++        << indent
++        << FormatKV("label", run.report_label);
++  }
++  out << '\n';
+ }
+ 
+-} // end namespace benchmark
++}  // end namespace benchmark

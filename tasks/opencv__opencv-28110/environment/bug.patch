@@ -1,0 +1,329 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index 4b4b119bc4..f48cc645b5 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -95,17 +95,6 @@ CV__DNN_INLINE_NS_BEGIN
+         static Ptr<ConstantOfShapeLayer> create(const LayerParams &params);
+     };
+ 
+-    class CV_EXPORTS RandomNormalLikeLayer : public Layer
+-    {
+-    public:
+-        static Ptr<Layer> create(const LayerParams& params);
+-
+-        float mean;
+-        float scale;
+-        bool has_seed;
+-        float seed;
+-    };
+-
+     //! LSTM recurrent layer
+     class CV_EXPORTS LSTMLayer : public Layer
+     {
+diff --git a/modules/dnn/src/init.cpp b/modules/dnn/src/init.cpp
+index 617e1cc934..963900846f 100644
+--- a/modules/dnn/src/init.cpp
++++ b/modules/dnn/src/init.cpp
+@@ -88,7 +88,6 @@ void initializeLayerFactory()
+     CV_DNN_REGISTER_LAYER_CLASS(Concat,         ConcatLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Concat2,        Concat2Layer);
+     CV_DNN_REGISTER_LAYER_CLASS(ConstantOfShape, ConstantOfShapeLayer);
+-    CV_DNN_REGISTER_LAYER_CLASS(RandomNormalLike, RandomNormalLikeLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(CropAndResize,  CropAndResizeLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(DequantizeLinear, DequantizeLinearLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Expand2,        Expand2Layer);
+diff --git a/modules/dnn/src/layers/layers_common.hpp b/modules/dnn/src/layers/layers_common.hpp
+index be7df00dbe..39938035c2 100644
+--- a/modules/dnn/src/layers/layers_common.hpp
++++ b/modules/dnn/src/layers/layers_common.hpp
+@@ -108,48 +108,6 @@ void reshapeAndCopyFirst(InputArrayOfArrays inputs,
+                          OutputArrayOfArrays outputs,
+                          const MatShape& shape);
+ 
+-enum OnnxDataType
+-{
+-    ONNX_UNDEFINED  = 0,
+-    ONNX_FLOAT      = 1,   // float
+-    ONNX_UINT8      = 2,   // uint8_t
+-    ONNX_INT8       = 3,   // int8_t
+-    ONNX_UINT16     = 4,   // uint16_t
+-    ONNX_INT16      = 5,   // int16_t
+-    ONNX_INT32      = 6,   // int32_t
+-    ONNX_INT64      = 7,   // int64_t
+-    ONNX_STRING     = 8,   // string
+-    ONNX_BOOL       = 9,   // bool
+-    ONNX_FLOAT16    = 10,
+-    ONNX_DOUBLE     = 11,
+-    ONNX_UINT32     = 12,
+-    ONNX_UINT64     = 13,
+-    ONNX_BFLOAT16   = 14
+-};
+-
+-inline int onnxDataTypeToCV(OnnxDataType dt)
+-{
+-    switch (dt)
+-    {
+-    case ONNX_UINT8:      return CV_8U;
+-    case ONNX_INT8:       return CV_8S;
+-    case ONNX_UINT16:     return CV_16U;
+-    case ONNX_INT16:      return CV_16S;
+-    case ONNX_UINT32:     return CV_32U;
+-    case ONNX_INT32:      return CV_32S;
+-    case ONNX_UINT64:     return CV_64U;
+-    case ONNX_INT64:      return CV_64S;
+-    case ONNX_FLOAT:      return CV_32F;
+-    case ONNX_DOUBLE:     return CV_64F;
+-    case ONNX_FLOAT16:    return CV_16F;
+-    case ONNX_BFLOAT16:   return CV_16BF;
+-    case ONNX_BOOL:       return CV_Bool;
+-    default:
+-        // Fallback to default ONNX FLOAT if value is unknown.
+-        return CV_32F;
+-    }
+-}
+-
+ }
+ }
+ 
+diff --git a/modules/dnn/src/layers/randomnormallike_layer.cpp b/modules/dnn/src/layers/randomnormallike_layer.cpp
+deleted file mode 100644
+index ff3b0791e4..0000000000
+--- a/modules/dnn/src/layers/randomnormallike_layer.cpp
++++ /dev/null
+@@ -1,151 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-// Copyright (C) 2025, BigVision LLC, all rights reserved.
+-// Third party copyrights are property of their respective owners.
+-
+-#include "../precomp.hpp"
+-#include "layers_common.hpp"
+-#include "../net_impl.hpp"
+-#include <cmath>
+-
+-namespace cv
+-{
+-namespace dnn
+-{
+-
+-/*
+-    RandomNormalLike layer, as defined in ONNX specification:
+-    https://onnx.ai/onnx/operators/onnx__RandomNormalLike.html
+-
+-    Supported Opsets: 1-22
+-*/
+-
+-namespace
+-{
+-    void fillRandomNormal(OutputArray out, float mean, float scale,
+-                          bool has_seed, float seed)
+-    {
+-        CV_Assert(out.isMat() || out.isUMat());
+-        const Scalar mean_s = Scalar::all(mean);
+-        const Scalar scale_s = Scalar::all(scale);
+-
+-        RNG local_rng;
+-        if (has_seed)
+-        {
+-            uint64 seed_u64 = (uint64)std::llround((double)seed);
+-            if (!seed_u64)
+-                seed_u64 = 0x12345678ULL;
+-            local_rng = RNG(seed_u64);
+-        }
+-
+-        RNG& rng = has_seed ? local_rng : theRNG();
+-
+-        if (out.isMat())
+-        {
+-            Mat& m = out.getMatRef();
+-            rng.fill(m, RNG::NORMAL, mean_s, scale_s);
+-        }
+-        else
+-        {
+-            UMat& u = out.getUMatRef();
+-            rng.fill(u, RNG::NORMAL, mean_s, scale_s);
+-        }
+-    }
+-}
+-
+-class RandomNormalLikeLayerImpl CV_FINAL : public RandomNormalLikeLayer
+-{
+-public:
+-    RandomNormalLikeLayerImpl(const LayerParams& params)
+-    {
+-        setParamsFrom(params);
+-
+-        mean = params.get<float>("mean", 0.f);
+-        scale = params.get<float>("scale", 1.f);
+-        int dt = params.get<int>("output_dtype", -1);
+-        outputType = dt >= 0 ? onnxDataTypeToCV(static_cast<OnnxDataType>(dt)) : -1;
+-        has_seed = params.has("seed");
+-        seed = has_seed ? params.get<float>("seed") : 0.f;
+-
+-        CV_Assert(scale >= 0.f);
+-    }
+-
+-    virtual bool supportBackend(int backendId) CV_OVERRIDE
+-    {
+-        return backendId == DNN_BACKEND_OPENCV;
+-    }
+-
+-    virtual bool dynamicOutputShapes() const CV_OVERRIDE
+-    {
+-        return false;
+-    }
+-
+-    bool getMemoryShapes(const std::vector<MatShape>& inputs,
+-                         const int requiredOutputs,
+-                         std::vector<MatShape>& outputs,
+-                         std::vector<MatShape>& internals) const CV_OVERRIDE
+-    {
+-        CV_Assert(inputs.size() == (size_t)1);
+-        CV_Assert(requiredOutputs == 1);
+-        outputs.assign(1, inputs[0]);
+-        internals.clear();
+-        return true;
+-    }
+-
+-    void getTypes(const std::vector<MatType>& inputs,
+-                  const int requiredOutputs,
+-                  const int requiredInternals,
+-                  std::vector<MatType>& outputs,
+-                  std::vector<MatType>& internals) const CV_OVERRIDE
+-    {
+-        CV_Assert(inputs.size() == (size_t)1);
+-        int outType = outputType >= 0 ? outputType : inputs[0];
+-        outputs.assign(1, outType);
+-        CV_Assert(requiredInternals == 0);
+-        internals.clear();
+-    }
+-
+-    void forward(InputArrayOfArrays inputs_arr,
+-                 OutputArrayOfArrays outputs_arr,
+-                 OutputArrayOfArrays) CV_OVERRIDE
+-    {
+-        CV_TRACE_FUNCTION();
+-        CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+-
+-        Size size = inputs_arr.size();
+-        int ninputs = size.area();
+-        CV_Assert(ninputs == 1);
+-
+-        Mat inp = inputs_arr.getMat(0);
+-        MatShape outShape = inp.shape();
+-
+-        int outType = outputType >= 0 ? outputType : inp.type();
+-
+-        auto kind = outputs_arr.kind();
+-        if (kind == _InputArray::STD_VECTOR_MAT) {
+-            std::vector<Mat>& outs = outputs_arr.getMatVecRef();
+-            outs.resize(1);
+-            outs[0].fit(outShape, outType);
+-            fillRandomNormal(outs[0], mean, scale, has_seed, seed);
+-        } else if (kind == _InputArray::STD_VECTOR_UMAT) {
+-            std::vector<UMat>& outs = outputs_arr.getUMatVecRef();
+-            outs.resize(1);
+-            outs[0].fit(outShape, outType);
+-            fillRandomNormal(outs[0], mean, scale, has_seed, seed);
+-        } else {
+-            CV_Error(Error::StsNotImplemented, "");
+-        }
+-    }
+-
+-private:
+-    int outputType;
+-};
+-
+-Ptr<Layer> RandomNormalLikeLayer::create(const LayerParams& params)
+-{
+-    return makePtr<RandomNormalLikeLayerImpl>(params);
+-}
+-
+-}
+-}
+diff --git a/modules/dnn/src/onnx/onnx_importer2.cpp b/modules/dnn/src/onnx/onnx_importer2.cpp
+index aa93ee6746..84ff816f5f 100644
+--- a/modules/dnn/src/onnx/onnx_importer2.cpp
++++ b/modules/dnn/src/onnx/onnx_importer2.cpp
+@@ -247,10 +247,7 @@ protected:
+     void parseBitShift             (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseBitwise              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseBitwiseNot           (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+-    void parseRMSNormalization     (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+-    void parseRotaryEmbedding      (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+-    void parseRandomNormalLike     (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+-
++    void parseRMSNormalization     (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);    void parseRotaryEmbedding      (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     // Domain: com.microsoft
+     // URL: https://github.com/microsoft/onnxruntime/blob/master/docs/ContribOperators.md
+     void parseAttention            (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+@@ -1533,10 +1530,6 @@ void ONNXImporter2::parseGather(LayerParams& layerParams, const opencv_onnx::Nod
+ {
+     layerParams.type = "Gather2";
+     CV_CheckEQ(node_proto.input_size(), 2, "");
+-    // Diagnostics: log axis used by this Gather node (attribute may be absent -> default 0)
+-    int axis = layerParams.get<int>("axis", 0);
+-    const std::string node_name = node_proto.has_name() ? node_proto.name() : std::string();
+-    CV_LOG_WARNING(NULL, "DNN/ONNX: Gather node '" << node_name << "' axis=" << axis << ", outputs=" << (node_proto.output_size() > 0 ? node_proto.output(0) : std::string("")));
+     addLayer(layerParams, node_proto);
+ }
+ 
+@@ -2026,22 +2019,6 @@ void ONNXImporter2::parseRMSNormalization(LayerParams& layerParams, const opencv
+     addLayer(layerParams, node_proto);
+ }
+ 
+-void ONNXImporter2::parseRandomNormalLike(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+-{
+-    if (layerParams.has("dtype"))
+-    {
+-        int dt = layerParams.get<int>("dtype", -1);
+-        if (dt >= 0)
+-        {
+-            layerParams.set<int>("output_dtype", dataType2cv((opencv_onnx::TensorProto_DataType)dt));
+-        }
+-        layerParams.erase("dtype");
+-    }
+-
+-    layerParams.type = "RandomNormalLike";
+-    addLayer(layerParams, node_proto);
+-}
+-
+ // BUG: https://github.com/opencv/opencv/issues/26310
+ /*void ONNXImporter2::parseQConv(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto_)
+ {
+@@ -2729,7 +2706,6 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI()
+     dispatch["Range"] = &ONNXImporter2::parseRange;
+     dispatch["Einsum"] = &ONNXImporter2::parseEinsum;
+     dispatch["TopK"] = &ONNXImporter2::parseTopK2;
+-    dispatch["RandomNormalLike"] = &ONNXImporter2::parseRandomNormalLike;
+ 
+     std::vector<std::string> simpleLayers {
+         "Acos", "Acosh", "Asin", "Asinh", "Atan", "Atanh", "Ceil", "Celu", "Cos",
+diff --git a/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp b/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
+index 7fbf6f30fc..ca2dc71d7d 100644
+--- a/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
++++ b/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
+@@ -557,6 +557,22 @@
+ "test_roialign_aligned_false",  // Issue:: Parser: Layer does not exist (RoiAlign)
+ "test_roialign_aligned_true",  // ---- same as above ---
+ "test_roialign_mode_max",
++// "test_rotary_embedding", //type mismatch
++// "test_rotary_embedding_3d_input",
++// "test_rotary_embedding_3d_input_expanded",
++// "test_rotary_embedding_expanded",
++// "test_rotary_embedding_interleaved",
++// "test_rotary_embedding_interleaved_expanded",
++// "test_rotary_embedding_no_position_ids",
++// "test_rotary_embedding_no_position_ids_expanded",
++// "test_rotary_embedding_no_position_ids_interleaved",
++// "test_rotary_embedding_no_position_ids_interleaved_expanded",
++// "test_rotary_embedding_no_position_ids_rotary_dim",
++// "test_rotary_embedding_no_position_ids_rotary_dim_expanded",
++// "test_rotary_embedding_with_interleaved_rotary_dim",
++// "test_rotary_embedding_with_interleaved_rotary_dim_expanded",
++// "test_rotary_embedding_with_rotary_dim",
++// "test_rotary_embedding_with_rotary_dim_expanded",
+ "test_scan9_sum",  // Issue:: Parser: 'Graph' is not supported in function 'getLayerParams'
+ "test_scan_sum", // ---- same as above ---
+ "test_sequence_insert_at_back",  // Issue:: Parser:  typeProto.has_tensor_type() in function 'populateNet'

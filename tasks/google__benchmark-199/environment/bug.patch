@@ -1,0 +1,346 @@
+diff --git a/AUTHORS b/AUTHORS
+index 9da43c7..5a4b355 100644
+--- a/AUTHORS
++++ b/AUTHORS
+@@ -17,7 +17,6 @@ Evgeny Safronov <division494@gmail.com>
+ Felix Homann <linuxaudio@showlabor.de>
+ Google Inc.
+ JianXiong Zhou <zhoujianxiong2@gmail.com>
+-Jussi Knuuttila <jussi.knuuttila@gmail.com>
+ Kaito Udagawa <umireon@gmail.com>
+ Lei Xu <eddyxu@gmail.com>
+ Matt Clarkson <mattyclarkson@gmail.com>
+diff --git a/CONTRIBUTORS b/CONTRIBUTORS
+index fcc3f35..2bbe19e 100644
+--- a/CONTRIBUTORS
++++ b/CONTRIBUTORS
+@@ -31,7 +31,6 @@ Eugene Zhuk <eugene.zhuk@gmail.com>
+ Evgeny Safronov <division494@gmail.com>
+ Felix Homann <linuxaudio@showlabor.de>
+ JianXiong Zhou <zhoujianxiong2@gmail.com>
+-Jussi Knuuttila <jussi.knuuttila@gmail.com>
+ Kaito Udagawa <umireon@gmail.com>
+ Kai Wolf <kai.wolf@gmail.com>
+ Lei Xu <eddyxu@gmail.com>
+diff --git a/README.md b/README.md
+index 051b301..2ccfd50 100644
+--- a/README.md
++++ b/README.md
+@@ -175,45 +175,6 @@ BENCHMARK(BM_test)->Range(8, 8<<10)->UseRealTime();
+ 
+ Without `UseRealTime`, CPU time is used by default.
+ 
+-
+-## Manual timing
+-For benchmarking something for which neither CPU time nor real-time are
+-correct or accurate enough, completely manual timing is supported using
+-the `UseManualTime` function. 
+-
+-When `UseManualTime` is used, the benchmarked code must call
+-`SetIterationTime` once per iteration of the `KeepRunning` loop to
+-report the manually measured time.
+-
+-An example use case for this is benchmarking GPU execution (e.g. OpenCL
+-or CUDA kernels, OpenGL or Vulkan or Direct3D draw calls), which cannot
+-be accurately measured using CPU time or real-time. Instead, they can be
+-measured accurately using a dedicated API, and these measurement results
+-can be reported back with `SetIterationTime`.
+-
+-```c++
+-static void BM_ManualTiming(benchmark::State& state) {
+-  int microseconds = state.range_x();
+-  std::chrono::duration<double, std::micro> sleep_duration {
+-    static_cast<double>(microseconds)
+-  };
+-
+-  while (state.KeepRunning()) {
+-    auto start = std::chrono::high_resolution_clock::now();
+-    // Simulate some useful workload with a sleep
+-    std::this_thread::sleep_for(sleep_duration);
+-    auto end   = std::chrono::high_resolution_clock::now();
+-
+-    auto elapsed_seconds =
+-      std::chrono::duration_cast<std::chrono::duration<double>>(
+-        end - start);
+-
+-    state.SetIterationTime(elapsed_seconds.count());
+-  }
+-}
+-BENCHMARK(BM_ManualTiming)->Range(1, 1<<17)->UseManualTime();
+-```
+-
+ ### Preventing optimisation
+ To prevent a value or expression from being optimized away by the compiler
+ the `benchmark::DoNotOptimize(...)` function can be used.
+diff --git a/include/benchmark/benchmark_api.h b/include/benchmark/benchmark_api.h
+index ef7eca5..726e35d 100644
+--- a/include/benchmark/benchmark_api.h
++++ b/include/benchmark/benchmark_api.h
+@@ -283,17 +283,6 @@ public:
+   // within each benchmark iteration, if possible.
+   void ResumeTiming();
+ 
+-  // REQUIRES: called exactly once per iteration of the KeepRunning loop.
+-  // Set the manually measured time for this benchmark iteration, which
+-  // is used instead of automatically measured time if UseManualTime() was
+-  // specified.
+-  //
+-  // For threaded benchmarks the SetIterationTime() function acts
+-  // like a barrier.  I.e., the ith call by a particular thread to this
+-  // function will block until all threads have made their ith call.
+-  // The time will be set by the last thread to call this function.
+-  void SetIterationTime(double seconds);
+-
+   // Set the number of bytes processed by the current benchmark
+   // execution.  This routine is typically called once at the end of a
+   // throughput oriented benchmark.  If this routine is called with a
+@@ -455,13 +444,6 @@ public:
+   // called, the cpu time used by the benchmark will be used.
+   Benchmark* UseRealTime();
+ 
+-  // If a benchmark must measure time manually (e.g. if GPU execution time is being
+-  // measured), call this method. If called, each benchmark iteration should call
+-  // SetIterationTime(seconds) to report the measured time, which will be used
+-  // to control how many iterations are run, and in the printing of items/second
+-  // or MB/second values.
+-  Benchmark* UseManualTime();
+-
+   // Support for running multiple copies of the same benchmark concurrently
+   // in multiple threads.  This may be useful when measuring the scaling
+   // of some piece of code.
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 1a836eb..35b5e2d 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -130,7 +130,6 @@ class TimerManager {
+         running_(false),
+         real_time_used_(0),
+         cpu_time_used_(0),
+-        manual_time_used_(0),
+         num_finalized_(0),
+         phase_number_(0),
+         entered_(0) {
+@@ -170,21 +169,6 @@ class TimerManager {
+     }
+   }
+ 
+-  // Called by each thread
+-  void SetIterationTime(double seconds) EXCLUDES(lock_) {
+-    bool last_thread = false;
+-    {
+-      MutexLock ml(lock_);
+-      last_thread = Barrier(ml);
+-      if (last_thread) {
+-        manual_time_used_ += seconds;
+-      }
+-    }
+-    if (last_thread) {
+-      phase_condition_.notify_all();
+-    }
+-  }
+-
+   // Called by each thread
+   void Finalize() EXCLUDES(lock_) {
+     MutexLock l(lock_);
+@@ -210,13 +194,6 @@ class TimerManager {
+     return cpu_time_used_;
+   }
+ 
+-  // REQUIRES: timer is not running
+-  double manual_time_used() EXCLUDES(lock_) {
+-    MutexLock l(lock_);
+-    CHECK(!running_);
+-    return manual_time_used_;
+-  }
+-
+  private:
+   Mutex lock_;
+   Condition phase_condition_;
+@@ -230,8 +207,6 @@ class TimerManager {
+   // Accumulated time so far (does not contain current slice if running_)
+   double real_time_used_;
+   double cpu_time_used_;
+-  // Manually set iteration time. User sets this with SetIterationTime(seconds).
+-  double manual_time_used_;
+ 
+   // How many threads have called Finalize()
+   int num_finalized_;
+@@ -288,7 +263,6 @@ struct Benchmark::Instance {
+   int            arg2;
+   TimeUnit       time_unit;
+   bool           use_real_time;
+-  bool           use_manual_time;
+   double         min_time;
+   int            threads;    // Number of concurrent threads to use
+   bool           multithreaded;  // Is benchmark multi-threaded?
+@@ -328,7 +302,6 @@ public:
+   void RangePair(int lo1, int hi1, int lo2, int hi2);
+   void MinTime(double n);
+   void UseRealTime();
+-  void UseManualTime();
+   void Threads(int t);
+   void ThreadRange(int min_threads, int max_threads);
+   void ThreadPerCpu();
+@@ -345,7 +318,6 @@ private:
+   TimeUnit time_unit_;
+   double min_time_;
+   bool use_real_time_;
+-  bool use_manual_time_;
+   std::vector<int> thread_counts_;
+ 
+   BenchmarkImp& operator=(BenchmarkImp const&);
+@@ -406,7 +378,6 @@ bool BenchmarkFamilies::FindBenchmarks(
+         instance.time_unit = family->time_unit_;
+         instance.min_time = family->min_time_;
+         instance.use_real_time = family->use_real_time_;
+-        instance.use_manual_time = family->use_manual_time_;
+         instance.threads = num_threads;
+         instance.multithreaded = !(family->thread_counts_.empty());
+ 
+@@ -420,9 +391,7 @@ bool BenchmarkFamilies::FindBenchmarks(
+         if (!IsZero(family->min_time_)) {
+           instance.name +=  StringPrintF("/min_time:%0.3f",  family->min_time_);
+         }
+-        if (family->use_manual_time_) {
+-          instance.name +=  "/manual_time";
+-        } else if (family->use_real_time_) {
++        if (family->use_real_time_) {
+           instance.name +=  "/real_time";
+         }
+ 
+@@ -442,8 +411,7 @@ bool BenchmarkFamilies::FindBenchmarks(
+ 
+ BenchmarkImp::BenchmarkImp(const char* name)
+     : name_(name), arg_count_(-1), time_unit_(kNanosecond),
+-      min_time_(0.0), use_real_time_(false),
+-      use_manual_time_(false) {
++      min_time_(0.0), use_real_time_(false) {
+ }
+ 
+ BenchmarkImp::~BenchmarkImp() {
+@@ -506,15 +474,9 @@ void BenchmarkImp::MinTime(double t) {
+ }
+ 
+ void BenchmarkImp::UseRealTime() {
+-  CHECK(!use_manual_time_) << "Cannot set UseRealTime and UseManualTime simultaneously.";
+   use_real_time_ = true;
+ }
+ 
+-void BenchmarkImp::UseManualTime() {
+-  CHECK(!use_real_time_) << "Cannot set UseRealTime and UseManualTime simultaneously.";
+-  use_manual_time_ = true;
+-}
+-
+ void BenchmarkImp::Threads(int t) {
+   CHECK_GT(t, 0);
+   thread_counts_.push_back(t);
+@@ -617,11 +579,6 @@ Benchmark* Benchmark::UseRealTime() {
+   return this;
+ }
+ 
+-Benchmark* Benchmark::UseManualTime() {
+-  imp_->UseManualTime();
+-  return this;
+-}
+-
+ Benchmark* Benchmark::Threads(int t) {
+   imp_->Threads(t);
+   return this;
+@@ -703,7 +660,7 @@ void RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+             thread.join();
+         }
+         for (std::size_t ti = 0; ti < pool.size(); ++ti) {
+-            pool[ti] = std::thread(&RunInThread, &b, iters, static_cast<int>(ti), &total);
++            pool[ti] = std::thread(&RunInThread, &b, iters, ti, &total);
+         }
+       } else {
+         // Run directly in this thread
+@@ -714,7 +671,6 @@ void RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+ 
+       const double cpu_accumulated_time = timer_manager->cpu_time_used();
+       const double real_accumulated_time = timer_manager->real_time_used();
+-      const double manual_accumulated_time = timer_manager->manual_time_used();
+       timer_manager.reset();
+ 
+       VLOG(2) << "Ran in " << cpu_accumulated_time << "/"
+@@ -722,9 +678,7 @@ void RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+ 
+       // Base decisions off of real time if requested by this benchmark.
+       double seconds = cpu_accumulated_time;
+-      if (b.use_manual_time) {
+-          seconds = manual_accumulated_time;
+-      } else if (b.use_real_time) {
++      if (b.use_real_time) {
+           seconds = real_accumulated_time;
+       }
+ 
+@@ -759,11 +713,7 @@ void RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+         // Report the total iterations across all threads.
+         report.iterations = static_cast<int64_t>(iters) * b.threads;
+         report.time_unit = b.time_unit;
+-        if (b.use_manual_time) {
+-          report.real_accumulated_time = manual_accumulated_time;
+-        } else {
+-          report.real_accumulated_time = real_accumulated_time;
+-        }
++        report.real_accumulated_time = real_accumulated_time;
+         report.cpu_accumulated_time = cpu_accumulated_time;
+         report.bytes_per_second = bytes_per_second;
+         report.items_per_second = items_per_second;
+@@ -824,12 +774,6 @@ void State::ResumeTiming() {
+   timer_manager->StartTimer();
+ }
+ 
+-void State::SetIterationTime(double seconds)
+-{
+-  CHECK(running_benchmark);
+-  timer_manager->SetIterationTime(seconds);
+-}
+-
+ void State::SetLabel(const char* label) {
+   CHECK(running_benchmark);
+   MutexLock l(GetBenchmarkLock());
+diff --git a/test/benchmark_test.cc b/test/benchmark_test.cc
+index fa99559..97abb68 100644
+--- a/test/benchmark_test.cc
++++ b/test/benchmark_test.cc
+@@ -14,8 +14,6 @@
+ #include <sstream>
+ #include <string>
+ #include <vector>
+-#include <chrono>
+-#include <thread>
+ 
+ #if defined(__GNUC__)
+ # define BENCHMARK_NOINLINE __attribute__((noinline))
+@@ -176,30 +174,5 @@ static void BM_ParallelMemset(benchmark::State& state) {
+ }
+ BENCHMARK(BM_ParallelMemset)->Arg(10 << 20)->ThreadRange(1, 4);
+ 
+-static void BM_ManualTiming(benchmark::State& state) {
+-  size_t slept_for = 0;
+-  int microseconds = state.range_x();
+-  std::chrono::duration<double, std::micro> sleep_duration {
+-    static_cast<double>(microseconds)
+-  };
+-
+-  while (state.KeepRunning()) {
+-    auto start   = std::chrono::high_resolution_clock::now();
+-    // Simulate some useful workload with a sleep
+-    std::this_thread::sleep_for(sleep_duration);
+-    auto end     = std::chrono::high_resolution_clock::now();
+-
+-    auto elapsed =
+-      std::chrono::duration_cast<std::chrono::duration<double>>(
+-        end - start);
+-
+-    state.SetIterationTime(elapsed.count());
+-    slept_for += microseconds;
+-  }
+-  state.SetItemsProcessed(slept_for);
+-}
+-BENCHMARK(BM_ManualTiming)->Range(1, 1 << 14)->UseRealTime();
+-BENCHMARK(BM_ManualTiming)->Range(1, 1 << 14)->UseManualTime();
+-
+ BENCHMARK_MAIN()
+ 

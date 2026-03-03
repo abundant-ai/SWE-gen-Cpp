@@ -1,0 +1,97 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a1251e7..1ef8300 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,6 +12,7 @@ endforeach()
+ 
+ option(BENCHMARK_ENABLE_TESTING "Enable testing of the benchmark library." ON)
+ option(BENCHMARK_ENABLE_LTO "Enable link time optimisation of the benchmark library." OFF)
++option(BENCHMARK_USE_LIBCXX "Build and test using libc++ as the standard library." OFF)
+ # Make sure we can import out CMake functions
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+ 
+@@ -78,8 +79,10 @@ else()
+   add_cxx_compiler_flag(-pedantic-errors)
+   add_cxx_compiler_flag(-Wshorten-64-to-32)
+   add_cxx_compiler_flag(-Wfloat-equal)
+-  add_cxx_compiler_flag(-Wzero-as-null-pointer-constant)
+   add_cxx_compiler_flag(-fstrict-aliasing)
++  if (NOT BENCHMARK_USE_LIBCXX)
++    add_cxx_compiler_flag(-Wzero-as-null-pointer-constant)
++  endif()
+   if (HAVE_CXX_FLAG_FSTRICT_ALIASING)
+     add_cxx_compiler_flag(-Wstrict-aliasing)
+   endif()
+@@ -126,6 +129,24 @@ else()
+   add_cxx_compiler_flag(--coverage COVERAGE)
+ endif()
+ 
++if (BENCHMARK_USE_LIBCXX)
++  if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
++    add_cxx_compiler_flag(-stdlib=libc++)
++  elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" OR
++          "${CMAKE_CXX_COMPILER_ID}" STREQUAL "Intel")
++    add_cxx_compiler_flag(-nostdinc++)
++    message("libc++ header path must be manually specified using CMAKE_CXX_FLAGS")
++    # Adding -nodefaultlibs directly to CMAKE_<TYPE>_LINKER_FLAGS will break
++    # configuration checks such as 'find_package(Threads)'
++    list(APPEND BENCHMARK_CXX_LINKER_FLAGS -nodefaultlibs)
++    # -lc++ cannot be added directly to CMAKE_<TYPE>_LINKER_FLAGS because
++    # linker flags appear before all linker inputs and -lc++ must appear after.
++    list(APPEND BENCHMARK_CXX_LIBRARIES c++)
++  else()
++    message(FATAL "-DBENCHMARK_USE_LIBCXX:BOOL=ON is not supported for compiler")
++  endif()
++endif(BENCHMARK_USE_LIBCXX)
++
+ # C++ feature checks
+ cxx_feature_check(STD_REGEX)
+ cxx_feature_check(GNU_POSIX_REGEX)
+diff --git a/cmake/CXXFeatureCheck.cmake b/cmake/CXXFeatureCheck.cmake
+index 3059024..b106f32 100644
+--- a/cmake/CXXFeatureCheck.cmake
++++ b/cmake/CXXFeatureCheck.cmake
+@@ -26,7 +26,9 @@ function(cxx_feature_check FILE)
+   endif()
+   message("-- Performing Test ${FEATURE}")
+   try_run(RUN_${FEATURE} COMPILE_${FEATURE}
+-          ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/${FILE}.cpp)
++          ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/${FILE}.cpp
++          CMAKE_FLAGS ${BENCHMARK_CXX_LINKER_FLAGS}
++          LINK_LIBRARIES ${BENCHMARK_CXX_LIBRARIES})
+   if(RUN_${FEATURE} EQUAL 0)
+     message("-- Performing Test ${FEATURE} -- success")
+     set(HAVE_${VAR} 1 CACHE INTERNAL "Feature test for ${FILE}" PARENT_SCOPE)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 6dab64b..a65723b 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1,6 +1,11 @@
+ # Allow the source files to find headers in src/
+ include_directories(${PROJECT_SOURCE_DIR}/src)
+ 
++if (DEFINED BENCHMARK_CXX_LINKER_FLAGS)
++  list(APPEND CMAKE_SHARED_LINKER_FLAGS ${BENCHMARK_CXX_LINKER_FLAGS})
++  list(APPEND CMAKE_MODULE_LINKER_FLAGS ${BENCHMARK_CXX_LINKER_FLAGS})
++endif()
++
+ # Define the source files
+ set(SOURCE_FILES "benchmark.cc" "colorprint.cc" "commandlineflags.cc"
+                  "console_reporter.cc" "csv_reporter.cc" "json_reporter.cc"
+@@ -19,7 +24,6 @@ endif()
+ 
+ add_library(benchmark ${SOURCE_FILES} ${RE_FILES})
+ 
+-
+ set_target_properties(benchmark PROPERTIES
+   OUTPUT_NAME "benchmark"
+   VERSION ${GENERIC_LIB_VERSION}
+@@ -27,7 +31,7 @@ set_target_properties(benchmark PROPERTIES
+ )
+ 
+ # Link threads.
+-target_link_libraries(benchmark ${CMAKE_THREAD_LIBS_INIT})
++target_link_libraries(benchmark  ${BENCHMARK_CXX_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+ 
+ # We need extra libraries on Windows
+ if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")

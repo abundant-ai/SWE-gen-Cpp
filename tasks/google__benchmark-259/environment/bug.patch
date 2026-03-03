@@ -1,0 +1,325 @@
+diff --git a/README.md b/README.md
+index 9df94a3..95326bd 100644
+--- a/README.md
++++ b/README.md
+@@ -206,34 +206,6 @@ BENCHMARK_CAPTURE(BM_takes_args, int_string_test, 42, std::string("abc"));
+ Note that elements of `...args` may refer to global variables. Users should
+ avoid modifying global state inside of a benchmark.
+ 
+-## Using RegisterBenchmark(name, fn, args...)
+-
+-The `RegisterBenchmark(name, func, args...)` function provides an alternative
+-way to create and register benchmarks.
+-`RegisterBenchmark(name, func, args...)` creates, registers, and returns a
+-pointer to a new benchmark with the specified `name` that invokes
+-`func(st, args...)` where `st` is a `benchmark::State` object.
+-
+-Unlike the `BENCHMARK` registration macros, which can only be used at the global
+-scope, the `RegisterBenchmark` can be called anywhere. This allows for
+-benchmark tests to be registered programmatically.
+-
+-Additionally `RegisterBenchmark` allows any callable object to be registered
+-as a benchmark. Including capturing lambdas and function objects. This
+-allows the creation
+-
+-For Example:
+-```c++
+-auto BM_test = [](benchmark::State& st, auto Inputs) { /* ... */ };
+-
+-int main(int argc, char** argv) {
+-  for (auto& test_input : { /* ... */ })
+-      benchmark::RegisterBenchmark(test_input.name(), BM_test, test_input);
+-  benchmark::Initialize(&argc, argv);
+-  benchmark::RunSpecifiedBenchmarks();
+-}
+-```
+-
+ ### Multithreaded benchmarks
+ In a multithreaded test (benchmark invoked by multiple threads simultaneously),
+ it is guaranteed that none of the threads will start until all have called
+diff --git a/include/benchmark/benchmark_api.h b/include/benchmark/benchmark_api.h
+index 5961c9b..4bcf35a 100644
+--- a/include/benchmark/benchmark_api.h
++++ b/include/benchmark/benchmark_api.h
+@@ -155,11 +155,6 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ 
+ #include "macros.h"
+ 
+-#if defined(BENCHMARK_HAS_CXX11)
+-#include <type_traits>
+-#include <utility>
+-#endif
+-
+ namespace benchmark {
+ class BenchmarkReporter;
+ 
+@@ -597,20 +592,6 @@ private:
+   Benchmark& operator=(Benchmark const&);
+ };
+ 
+-} // namespace internal
+-
+-// Create and register a benchmark with the specified 'name' that invokes
+-// the specified functor 'fn'.
+-//
+-// RETURNS: A pointer to the registered benchmark.
+-internal::Benchmark* RegisterBenchmark(const char* name, internal::Function* fn);
+-
+-#if defined(BENCHMARK_HAS_CXX11)
+-template <class Lambda>
+-internal::Benchmark* RegisterBenchmark(const char* name, Lambda&& fn);
+-#endif
+-
+-namespace internal {
+ // The class used to hold all Benchmarks created from static function.
+ // (ie those created using the BENCHMARK(...) macros.
+ class FunctionBenchmark : public Benchmark {
+@@ -624,55 +605,8 @@ private:
+     Function* func_;
+ };
+ 
+-#ifdef BENCHMARK_HAS_CXX11
+-template <class Lambda>
+-class LambdaBenchmark : public Benchmark {
+-public:
+-    virtual void Run(State& st) { lambda_(st); }
+-
+-private:
+-  template <class OLambda>
+-  LambdaBenchmark(const char* name, OLambda&& lam)
+-      : Benchmark(name), lambda_(std::forward<OLambda>(lam)) {}
+-
+-  LambdaBenchmark(LambdaBenchmark const&) = delete;
+-
+-private:
+-  template <class Lam>
+-  friend Benchmark* ::benchmark::RegisterBenchmark(const char*, Lam&&);
+-
+-  Lambda lambda_;
+-};
+-#endif
+-
+ }  // end namespace internal
+ 
+-inline internal::Benchmark*
+-RegisterBenchmark(const char* name, internal::Function* fn) {
+-    return internal::RegisterBenchmarkInternal(
+-        ::new internal::FunctionBenchmark(name, fn));
+-}
+-
+-#ifdef BENCHMARK_HAS_CXX11
+-template <class Lambda>
+-internal::Benchmark* RegisterBenchmark(const char* name, Lambda&& fn) {
+-    using BenchType = internal::LambdaBenchmark<typename std::decay<Lambda>::type>;
+-    return internal::RegisterBenchmarkInternal(
+-        ::new BenchType(name, std::forward<Lambda>(fn)));
+-}
+-
+-#if !defined(BENCHMARK_GCC_VERSION) || BENCHMARK_GCC_VERSION >= 409
+-template <class Lambda, class ...Args>
+-internal::Benchmark* RegisterBenchmark(const char* name, Lambda&& fn,
+-                                       Args&&... args) {
+-    return benchmark::RegisterBenchmark(name,
+-        [=](benchmark::State& st) { fn(st, args...); });
+-}
+-#else
+-#define BENCHMARK_HAS_NO_VARIADIC_REGISTER_BENCHMARK
+-#endif
+-#endif // BENCHMARK_HAS_CXX11
+-
+ // The base class for all fixture tests.
+ class Fixture: public internal::Benchmark {
+ public:
+diff --git a/include/benchmark/macros.h b/include/benchmark/macros.h
+index 5892ac4..09d13c1 100644
+--- a/include/benchmark/macros.h
++++ b/include/benchmark/macros.h
+@@ -14,11 +14,7 @@
+ #ifndef BENCHMARK_MACROS_H_
+ #define BENCHMARK_MACROS_H_
+ 
+-#if __cplusplus >= 201103L
+-#define BENCHMARK_HAS_CXX11
+-#endif
+-
+-#ifndef BENCHMARK_HAS_CXX11
++#if __cplusplus < 201103L
+ # define BENCHMARK_DISALLOW_COPY_AND_ASSIGN(TypeName)  \
+     TypeName(const TypeName&);                         \
+     TypeName& operator=(const TypeName&)
+@@ -57,8 +53,4 @@
+ # define BENCHMARK_BUILTIN_EXPECT(x, y) x
+ #endif
+ 
+-#if defined(__GNUC__) && !defined(__clang__)
+-#define BENCHMARK_GCC_VERSION (__GNUC__ * 100 + __GNUC_MINOR__)
+-#endif
+-
+ #endif  // BENCHMARK_MACROS_H_
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 3b8f7c9..aeb720a 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -45,9 +45,6 @@ add_test(donotoptimize_test donotoptimize_test --benchmark_min_time=0.01)
+ compile_benchmark_test(fixture_test)
+ add_test(fixture_test fixture_test --benchmark_min_time=0.01)
+ 
+-compile_benchmark_test(register_benchmark_test)
+-add_test(register_benchmark_test register_benchmark_test --benchmark_min_time=0.01)
+-
+ compile_benchmark_test(map_test)
+ add_test(map_test map_test --benchmark_min_time=0.01)
+ 
+diff --git a/test/register_benchmark_test.cc b/test/register_benchmark_test.cc
+deleted file mode 100644
+index f11c5ea..0000000
+--- a/test/register_benchmark_test.cc
++++ /dev/null
+@@ -1,147 +0,0 @@
+-
+-#undef NDEBUG
+-#include "benchmark/benchmark.h"
+-#include "../src/check.h" // NOTE: check.h is for internal use only!
+-#include <cassert>
+-#include <vector>
+-
+-namespace {
+-
+-class TestReporter : public benchmark::ConsoleReporter {
+-public:
+-  virtual void ReportRuns(const std::vector<Run>& report) {
+-    all_runs_.insert(all_runs_.end(), begin(report), end(report));
+-    ConsoleReporter::ReportRuns(report);
+-  }
+-
+-  std::vector<Run> all_runs_;
+-};
+-
+-struct TestCase {
+-  std::string name;
+-  const char* label;
+-  TestCase(const char* xname) : name(xname), label(nullptr) {}
+-  TestCase(const char* xname, const char* xlabel)
+-    : name(xname), label(xlabel) {}
+-
+-  typedef benchmark::BenchmarkReporter::Run Run;
+-
+-  void CheckRun(Run const& run) const {
+-    CHECK(name == run.benchmark_name) << "expected " << name
+-                                      << " got " << run.benchmark_name;
+-    if (label) {
+-      CHECK(run.report_label == label) << "expected " << label
+-                                       << " got " << run.report_label;
+-    } else {
+-      CHECK(run.report_label == "");
+-    }
+-  }
+-};
+-
+-std::vector<TestCase> ExpectedResults;
+-
+-int AddCases(std::initializer_list<TestCase> const& v) {
+-  for (auto N : v) {
+-    ExpectedResults.push_back(N);
+-  }
+-  return 0;
+-}
+-
+-#define CONCAT(x, y) CONCAT2(x, y)
+-#define CONCAT2(x, y) x##y
+-#define ADD_CASES(...) \
+-int CONCAT(dummy, __LINE__) = AddCases({__VA_ARGS__})
+-
+-}  // end namespace
+-
+-typedef benchmark::internal::Benchmark* ReturnVal;
+-
+-//----------------------------------------------------------------------------//
+-// Test RegisterBenchmark with no additional arguments
+-//----------------------------------------------------------------------------//
+-void BM_function(benchmark::State& state) { while (state.KeepRunning()) {} }
+-BENCHMARK(BM_function);
+-ReturnVal dummy = benchmark::RegisterBenchmark(
+-    "BM_function_manual_registration",
+-     BM_function);
+-ADD_CASES({"BM_function"}, {"BM_function_manual_registration"});
+-
+-//----------------------------------------------------------------------------//
+-// Test RegisterBenchmark with additional arguments
+-// Note: GCC <= 4.8 do not support this form of RegisterBenchmark because they
+-//       reject the variadic pack expansion of lambda captures.
+-//----------------------------------------------------------------------------//
+-#ifndef BENCHMARK_HAS_NO_VARIADIC_REGISTER_BENCHMARK
+-
+-void BM_extra_args(benchmark::State& st, const char* label) {
+-  while (st.KeepRunning()) {}
+-  st.SetLabel(label);
+-}
+-int RegisterFromFunction() {
+-  std::pair<const char*, const char*> cases[] = {
+-      {"test1", "One"},
+-      {"test2", "Two"},
+-      {"test3", "Three"}
+-  };
+-  for (auto& c : cases)
+-    benchmark::RegisterBenchmark(c.first, &BM_extra_args, c.second);
+-  return 0;
+-}
+-int dummy2 = RegisterFromFunction();
+-ADD_CASES(
+-  {"test1", "One"},
+-  {"test2", "Two"},
+-  {"test3", "Three"}
+-);
+-
+-#endif // BENCHMARK_HAS_NO_VARIADIC_REGISTER_BENCHMARK
+-
+-//----------------------------------------------------------------------------//
+-// Test RegisterBenchmark with different callable types
+-//----------------------------------------------------------------------------//
+-
+-struct CustomFixture {
+-  void operator()(benchmark::State& st) {
+-    while (st.KeepRunning()) {}
+-  }
+-};
+-
+-void TestRegistrationAtRuntime() {
+-  {
+-    CustomFixture fx;
+-    benchmark::RegisterBenchmark("custom_fixture", fx);
+-    AddCases({"custom_fixture"});
+-  }
+-#ifndef BENCHMARK_HAS_NO_VARIADIC_REGISTER_BENCHMARK
+-  {
+-    int x = 42;
+-    auto capturing_lam = [=](benchmark::State& st) {
+-      while (st.KeepRunning()) {}
+-      st.SetLabel(std::to_string(x));
+-    };
+-    benchmark::RegisterBenchmark("lambda_benchmark", capturing_lam);
+-    AddCases({{"lambda_benchmark", "42"}});
+-  }
+-#endif
+-}
+-
+-int main(int argc, char* argv[]) {
+-  TestRegistrationAtRuntime();
+-
+-  benchmark::Initialize(&argc, argv);
+-
+-  TestReporter test_reporter;
+-  benchmark::RunSpecifiedBenchmarks(&test_reporter);
+-
+-  typedef benchmark::BenchmarkReporter::Run Run;
+-  auto EB = ExpectedResults.begin();
+-
+-  for (Run const& run : test_reporter.all_runs_) {
+-    assert(EB != ExpectedResults.end());
+-    EB->CheckRun(run);
+-    ++EB;
+-  }
+-  assert(EB == ExpectedResults.end());
+-
+-  return 0;
+-}

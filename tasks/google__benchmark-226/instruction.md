@@ -1,0 +1,13 @@
+Benchmark reporters currently duplicate logic for computing derived run entries (mean, standard deviation, RMS) and complexity-related output. This leads to inconsistent behavior across reporters and makes custom reporters harder to maintain because each reporter has to reimplement the same calculations and per-iteration time conversions.
+
+Update the reporting pipeline so that derived run results are computed once outside of the concrete reporters and then passed into reporters through the existing reporting hook. Specifically:
+
+When a benchmark produces multiple real runs, the framework should precompute additional synthetic runs representing the aggregate statistics (at least mean and standard deviation, and where applicable RMS) and include them in the vector passed to `BenchmarkReporter::ReportRuns(const std::vector<Run>&)` alongside the original runs, so reporters only need to format/emit the `Run` objects they receive.
+
+Complexity reporting should also be emitted via `ReportRuns(...)` rather than using a separate reporter hook. The separate `ReportComplexity(...)` interface should no longer be required for correct complexity output; instead, the complexity results should be represented as additional `BenchmarkReporter::Run` entries (for example, entries that correspond to the complexity estimate and its big-O fit), and those entries must appear in the report stream in a way that existing reporters can output them consistently.
+
+To prevent reporters from doing their own unit conversions, add helpers on `BenchmarkReporter::Run` named `GetAdjustedCPUTime()` and `GetAdjustedRealTime()` that return per-iteration time in the correct unit (taking into account the run’s time unit and iteration count). Reporters should be able to use these helpers instead of manually dividing by iterations or converting units; the helpers must return correct values for both CPU time and real time runs.
+
+Also provide a shared default implementation for printing the “basic context” via a static helper `BenchmarkReporter::PrintBasicContext(...)` so multiple reporters can use the same formatting and avoid duplicating context-print logic.
+
+Expected behavior: console, JSON, and CSV reporters should continue to produce equivalent content for benchmark results, but without each reporter independently recomputing aggregates/complexity/time conversions. Complexity information must still be present in outputs when complexity is enabled, and aggregate statistic lines must appear correctly and consistently across reporters. Any custom reporter that only overrides `ReportRuns(...)` should be able to receive all necessary derived results (including complexity) through the `Run` vector without needing a dedicated complexity callback.

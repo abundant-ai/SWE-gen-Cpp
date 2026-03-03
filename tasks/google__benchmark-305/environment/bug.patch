@@ -1,0 +1,158 @@
+diff --git a/include/benchmark/benchmark_api.h b/include/benchmark/benchmark_api.h
+index 8292f14..39edcff 100644
+--- a/include/benchmark/benchmark_api.h
++++ b/include/benchmark/benchmark_api.h
+@@ -510,13 +510,6 @@ class Benchmark {
+   // REQUIRES: The function passed to the constructor must accept arg1, arg2 ...
+   Benchmark* Ranges(const std::vector<std::pair<int, int> >& ranges);
+ 
+-  // Equivalent to ArgNames({name})
+-  Benchmark* ArgName(const std::string& name);
+-
+-  // Set the argument names to display in the benchmark name. If not called,
+-  // only argument values will be shown.
+-  Benchmark* ArgNames(const std::vector<std::string>& names);
+-
+   // Equivalent to Ranges({{lo1, hi1}, {lo2, hi2}}).
+   // NOTE: This is a legacy C++03 interface provided for compatibility only.
+   //   New code should use 'Ranges'.
+@@ -533,7 +526,8 @@ class Benchmark {
+   Benchmark* Apply(void (*func)(Benchmark* benchmark));
+ 
+   // Set the range multiplier for non-dense range. If not called, the range
+-  // multiplier kRangeMultiplier will be used.
++  // multiplier
++  // kRangeMultiplier will be used.
+   Benchmark* RangeMultiplier(int multiplier);
+ 
+   // Set the minimum amount of time to use when running this benchmark. This
+@@ -624,7 +618,6 @@ class Benchmark {
+ 
+   std::string name_;
+   ReportMode report_mode_;
+-  std::vector<std::string> arg_names_;   // Args for all benchmark runs
+   std::vector<std::vector<int> > args_;  // Args for all benchmark runs
+   TimeUnit time_unit_;
+   int range_multiplier_;
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index 4e580d8..2657d4a 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -151,20 +151,8 @@ bool BenchmarkFamilies::FindBenchmarks(
+         instance.threads = num_threads;
+ 
+         // Add arguments to instance name
+-        size_t arg_i = 0;
+         for (auto const& arg : args) {
+-          instance.name += "/";
+-
+-          if (arg_i < family->arg_names_.size()) {
+-            const auto& arg_name = family->arg_names_[arg_i];
+-            if (!arg_name.empty()) {
+-              instance.name +=
+-                  StringPrintF("%s:", family->arg_names_[arg_i].c_str());
+-            }
+-          }
+-
+           AppendHumanReadable(arg, &instance.name);
+-          ++arg_i;
+         }
+ 
+         if (!IsZero(family->min_time_)) {
+@@ -305,18 +293,6 @@ Benchmark* Benchmark::Ranges(const std::vector<std::pair<int, int>>& ranges) {
+   return this;
+ }
+ 
+-Benchmark* Benchmark::ArgName(const std::string& name) {
+-  CHECK(ArgsCnt() == -1 || ArgsCnt() == 1);
+-  arg_names_ = {name};
+-  return this;
+-}
+-
+-Benchmark* Benchmark::ArgNames(const std::vector<std::string>& names) {
+-  CHECK(ArgsCnt() == -1 || ArgsCnt() == static_cast<int>(names.size()));
+-  arg_names_ = names;
+-  return this;
+-}
+-
+ Benchmark* Benchmark::DenseRange(int start, int limit, int step) {
+   CHECK(ArgsCnt() == -1 || ArgsCnt() == 1);
+   CHECK_GE(start, 0);
+@@ -422,11 +398,7 @@ Benchmark* Benchmark::ThreadPerCpu() {
+ void Benchmark::SetName(const char* name) { name_ = name; }
+ 
+ int Benchmark::ArgsCnt() const {
+-  if (args_.empty()) {
+-    if (arg_names_.empty()) return -1;
+-    return static_cast<int>(arg_names_.size());
+-  }
+-  return static_cast<int>(args_.front().size());
++  return args_.empty() ? -1 : static_cast<int>(args_.front().size());
+ }
+ 
+ //=============================================================================//
+diff --git a/src/string_util.cc b/src/string_util.cc
+index 4cefbfb..e073b81 100644
+--- a/src/string_util.cc
++++ b/src/string_util.cc
+@@ -107,7 +107,7 @@ std::string ToBinaryStringFullySpecified(double value, double threshold,
+ void AppendHumanReadable(int n, std::string* str) {
+   std::stringstream ss;
+   // Round down to the nearest SI prefix.
+-  ss << ToBinaryStringFullySpecified(n, 1.0, 0);
++  ss << "/" << ToBinaryStringFullySpecified(n, 1.0, 0);
+   *str += ss.str();
+ }
+ 
+diff --git a/test/reporter_output_test.cc b/test/reporter_output_test.cc
+index cd6fa7c..59a0a39 100644
+--- a/test/reporter_output_test.cc
++++ b/test/reporter_output_test.cc
+@@ -51,47 +51,6 @@ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_error\",$"},
+ 
+ ADD_CASES(TC_CSVOut, {{"^\"BM_error\",,,,,,,,true,\"message\"$"}});
+ 
+-// ========================================================================= //
+-// ------------------------ Testing No Arg Name Output -----------------------
+-// //
+-// ========================================================================= //
+-
+-void BM_no_arg_name(benchmark::State& state) {
+-  while (state.KeepRunning()) {
+-  }
+-}
+-BENCHMARK(BM_no_arg_name)->Arg(3);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_no_arg_name/3 %console_report$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_no_arg_name/3\",$"}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_no_arg_name/3\",%csv_report$"}});
+-
+-// ========================================================================= //
+-// ------------------------ Testing Arg Name Output ----------------------- //
+-// ========================================================================= //
+-
+-void BM_arg_name(benchmark::State& state) {
+-  while (state.KeepRunning()) {
+-  }
+-}
+-BENCHMARK(BM_arg_name)->ArgName("first")->Arg(3);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_arg_name/first:3 %console_report$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_arg_name/first:3\",$"}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_arg_name/first:3\",%csv_report$"}});
+-
+-// ========================================================================= //
+-// ------------------------ Testing Arg Names Output ----------------------- //
+-// ========================================================================= //
+-
+-void BM_arg_names(benchmark::State& state) {
+-  while (state.KeepRunning()) {
+-  }
+-}
+-BENCHMARK(BM_arg_names)->Args({2, 5, 4})->ArgNames({"first", "", "third"});
+-ADD_CASES(TC_ConsoleOut,
+-          {{"^BM_arg_names/first:2/5/third:4 %console_report$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_arg_names/first:2/5/third:4\",$"}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_arg_names/first:2/5/third:4\",%csv_report$"}});
+-
+ // ========================================================================= //
+ // ----------------------- Testing Complexity Output ----------------------- //
+ // ========================================================================= //

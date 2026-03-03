@@ -1,0 +1,177 @@
+diff --git a/README.md b/README.md
+index 043f019..a721074 100644
+--- a/README.md
++++ b/README.md
+@@ -194,58 +194,6 @@ Three macros are provided for adding benchmark templates.
+ #define BENCHMARK_TEMPLATE2(func, arg1, arg2)
+ ```
+ 
+-### A Faster KeepRunning loop
+-
+-In C++11 mode, a ranged-based for loop should be used in preference to
+-the `KeepRunning` loop for running the benchmarks. For example:
+-
+-```c++
+-static void BM_Faste(benchmark::State &st) {
+-  for (auto _ : state) {
+-    FastOperation();
+-  }
+-}
+-```
+-
+-The reason the ranged-based for loop is faster than using `KeepRunning`, is
+-because `KeepRunning` requires a memory load and store of the iteration count
+-ever iteration, whereas the ranged-for variant is able to keep the iteration count
+-in a register.
+-
+-For example, an empty inner loop of using the ranged-based for method looks like:
+-
+-```asm
+-# Loop Init
+-  mov rbx, qword ptr [r14 + 104]
+-  call benchmark::State::StartKeepRunning()
+-  test rbx, rbx
+-  je .LoopEnd
+-.LoopHeader: # =>This Inner Loop Header: Depth=1
+-  add rbx, -1
+-  jne .LoopHeader
+-.LoopEnd:
+-```
+-
+-Compared to an empty `KeepRunning` loop, which looks like:
+-
+-```asm
+-.LoopHeader: # in Loop: Header=BB0_3 Depth=1
+-  cmp byte ptr [rbx], 1
+-  jne .LoopInit
+-.LoopBody: # =>This Inner Loop Header: Depth=1
+-  mov rax, qword ptr [rbx + 8]
+-  lea rcx, [rax + 1]
+-  mov qword ptr [rbx + 8], rcx
+-  cmp rax, qword ptr [rbx + 104]
+-  jb .LoopHeader
+-  jmp .LoopEnd
+-.LoopInit:
+-  mov rdi, rbx
+-  call benchmark::State::StartKeepRunning()
+-  jmp .LoopBody
+-.LoopEnd:
+-```
+-
+ ## Passing arbitrary arguments to a benchmark
+ In C++11 it is possible to define a benchmark that takes an arbitrary number
+ of extra arguments. The `BENCHMARK_CAPTURE(func, test_case_name, ...args)`
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 4a24778..12bc35e 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -238,6 +238,7 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ #define BENCHMARK_GCC_VERSION (__GNUC__ * 100 + __GNUC_MINOR__)
+ #endif
+ 
++
+ namespace benchmark {
+ class BenchmarkReporter;
+ 
+@@ -410,19 +411,6 @@ enum ReportMode
+ // benchmark to use.
+ class State {
+  public:
+-  struct StateIterator;
+-  friend struct StateIterator;
+-
+-  // Returns iterators used to run each iteration of a benchmark using a
+-  // C++11 ranged-based for loop. These functions should not be called directly.
+-  //
+-  // REQUIRES: The benchmark has not started running yet. Neither begin nor end
+-  // have been called previously.
+-  //
+-  // NOTE: KeepRunning may not be used after calling either of these functions.
+-  BENCHMARK_ALWAYS_INLINE StateIterator begin();
+-  BENCHMARK_ALWAYS_INLINE StateIterator end();
+-
+   // Returns true if the benchmark should continue through another iteration.
+   // NOTE: A benchmark may not return from the test until KeepRunning() has
+   // returned false.
+@@ -595,53 +583,6 @@ class State {
+   BENCHMARK_DISALLOW_COPY_AND_ASSIGN(State);
+ };
+ 
+-struct State::StateIterator {
+-  struct BENCHMARK_UNUSED Value {};
+-  typedef std::forward_iterator_tag iterator_category;
+-  typedef Value value_type;
+-  typedef Value reference;
+-  typedef Value pointer;
+-
+- private:
+-  friend class State;
+-  BENCHMARK_ALWAYS_INLINE
+-  StateIterator() : cached_(0), parent_() {}
+-
+-  BENCHMARK_ALWAYS_INLINE
+-  explicit StateIterator(State* st)
+-      : cached_(st->max_iterations), parent_(st) {}
+-
+- public:
+-  BENCHMARK_ALWAYS_INLINE
+-  Value operator*() const { return Value(); }
+-
+-  BENCHMARK_ALWAYS_INLINE
+-  StateIterator& operator++() {
+-    assert(cached_ > 0);
+-    --cached_;
+-    return *this;
+-  }
+-
+-  BENCHMARK_ALWAYS_INLINE
+-  bool operator!=(StateIterator const&) const {
+-    if (BENCHMARK_BUILTIN_EXPECT(cached_ != 0, true)) return true;
+-    parent_->FinishKeepRunning();
+-    return false;
+-  }
+-
+- private:
+-  size_t cached_;
+-  State* const parent_;
+-};
+-
+-BENCHMARK_ALWAYS_INLINE inline State::StateIterator State::begin() {
+-  return StateIterator(this);
+-}
+-BENCHMARK_ALWAYS_INLINE inline State::StateIterator State::end() {
+-  StartKeepRunning();
+-  return StateIterator();
+-}
+-
+ namespace internal {
+ 
+ typedef void(Function)(State&);
+diff --git a/test/basic_test.cc b/test/basic_test.cc
+index 462071d..bc1f96d 100644
+--- a/test/basic_test.cc
++++ b/test/basic_test.cc
+@@ -96,23 +96,4 @@ void BM_empty_stop_start(benchmark::State& state) {
+ BENCHMARK(BM_empty_stop_start);
+ BENCHMARK(BM_empty_stop_start)->ThreadPerCpu();
+ 
+-
+-void BM_KeepRunning(benchmark::State& state) {
+-  size_t iter_count = 0;
+-  while (state.KeepRunning()) {
+-    ++iter_count;
+-  }
+-  assert(iter_count == state.max_iterations);
+-}
+-BENCHMARK(BM_KeepRunning);
+-
+-void BM_RangedFor(benchmark::State& state) {
+-  size_t iter_count = 0;
+-  for (auto _ : state) {
+-    ++iter_count;
+-  }
+-  assert(iter_count == state.max_iterations);
+-}
+-BENCHMARK(BM_RangedFor);
+-
+ BENCHMARK_MAIN()

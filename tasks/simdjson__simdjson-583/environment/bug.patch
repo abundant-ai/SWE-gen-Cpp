@@ -1,0 +1,2372 @@
+diff --git a/include/simdjson/document.h b/include/simdjson/document.h
+index d5a21b64..08d8d524 100644
+--- a/include/simdjson/document.h
++++ b/include/simdjson/document.h
+@@ -1522,14 +1522,6 @@ private:
+   //
+   size_t _max_depth;
+ 
+-  //
+-  // The loaded buffer (reused each time load() is called)
+-  //
+-  std::unique_ptr<char[], decltype(&aligned_free_char)> loaded_bytes;
+-
+-  // Capacity of loaded_bytes buffer.
+-  size_t _loaded_bytes_capacity{0};
+-
+   // all nodes are stored on the doc.tape using a 64-bit word.
+   //
+   // strings, double and ints are stored as
+@@ -1551,11 +1543,6 @@ private:
+   // and auto-allocate if not.
+   inline error_code ensure_capacity(size_t desired_capacity) noexcept;
+ 
+-  //
+-  // Read the file into loaded_bytes
+-  //
+-  inline simdjson_result<size_t> read_file(const std::string &path) noexcept;
+-
+ #if SIMDJSON_EXCEPTIONS
+   // Used internally to get the document
+   inline const document &get_document() const noexcept(false);
+diff --git a/include/simdjson/document_parser.h b/include/simdjson/document_parser.h
+new file mode 100644
+index 00000000..5568a813
+--- /dev/null
++++ b/include/simdjson/document_parser.h
+@@ -0,0 +1,522 @@
++#ifndef SIMDJSON_DOCUMENT_PARSER_H
++#define SIMDJSON_DOCUMENT_PARSER_H
++
++#include "simdjson/document.h"
++#include "simdjson/common_defs.h"
++#include "simdjson/error.h"
++#include "simdjson/padded_string.h"
++#include <string>
++
++namespace simdjson {
++
++/**
++  * A persistent document parser.
++  *
++  * Use this if you intend to parse more than one document. It holds the internal memory necessary
++  * to do parsing, as well as memory for a single document that is overwritten on each parse.
++  *
++  * This class cannot be copied, only moved, to avoid unintended allocations.
++  *
++  * @note This is not thread safe: one parser cannot produce two documents at the same time!
++  */
++class document::parser {
++public:
++  /**
++  * Create a JSON parser with zero capacity. Call allocate_capacity() to initialize it.
++  */
++  parser()=default;
++  ~parser()=default;
++
++  /**
++   * Take another parser's buffers and state.
++   *
++   * @param other The parser to take. Its capacity is zeroed.
++   */
++  parser(document::parser &&other) = default;
++  parser(const document::parser &) = delete; // Disallow copying
++  /**
++   * Take another parser's buffers and state.
++   *
++   * @param other The parser to take. Its capacity is zeroed.
++   */
++  parser &operator=(document::parser &&other) = default;
++  parser &operator=(const document::parser &) = delete; // Disallow copying
++
++  /**
++   * Parse a JSON document and return a reference to it.
++   *
++   * The JSON document still lives in the parser: this is the most efficient way to parse JSON
++   * documents because it reuses the same buffers, but you *must* use the document before you
++   * destroy the parser or call parse() again.
++   *
++   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
++   * those bytes are initialized to, as long as they are allocated. If realloc_if_needed is true,
++   * it is assumed that the buffer does *not* have enough padding, and it is reallocated, enlarged
++   * and copied before parsing.
++   *
++   * @param buf The JSON to parse. Must have at least len + SIMDJSON_PADDING allocated bytes, unless
++   *            realloc_if_needed is true.
++   * @param len The length of the JSON.
++   * @param realloc_if_needed Whether to reallocate and enlarge the JSON buffer to add padding.
++   * @return the document, or an error if the JSON is invalid.
++   */
++  inline doc_ref_result parse(const uint8_t *buf, size_t len, bool realloc_if_needed = true) noexcept;
++
++  /**
++   * Parse a JSON document and return a reference to it.
++   *
++   * The JSON document still lives in the parser: this is the most efficient way to parse JSON
++   * documents because it reuses the same buffers, but you *must* use the document before you
++   * destroy the parser or call parse() again.
++   *
++   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
++   * those bytes are initialized to, as long as they are allocated. If realloc_if_needed is true,
++   * it is assumed that the buffer does *not* have enough padding, and it is reallocated, enlarged
++   * and copied before parsing.
++   *
++   * @param buf The JSON to parse. Must have at least len + SIMDJSON_PADDING allocated bytes, unless
++   *            realloc_if_needed is true.
++   * @param len The length of the JSON.
++   * @param realloc_if_needed Whether to reallocate and enlarge the JSON buffer to add padding.
++   * @return the document, or an error if the JSON is invalid.
++   */
++  really_inline doc_ref_result parse(const char *buf, size_t len, bool realloc_if_needed = true) noexcept;
++
++  /**
++   * Parse a JSON document and return a reference to it.
++   *
++   * The JSON document still lives in the parser: this is the most efficient way to parse JSON
++   * documents because it reuses the same buffers, but you *must* use the document before you
++   * destroy the parser or call parse() again.
++   *
++   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
++   * those bytes are initialized to, as long as they are allocated. If `str.capacity() - str.size()
++   * < SIMDJSON_PADDING`, the string will be copied to a string with larger capacity before parsing.
++   *
++   * @param s The JSON to parse. Must have at least len + SIMDJSON_PADDING allocated bytes, or
++   *          a new string will be created with the extra padding.
++   * @return the document, or an error if the JSON is invalid.
++   */
++  really_inline doc_ref_result parse(const std::string &s) noexcept;
++
++  /**
++   * Parse a JSON document and return a reference to it.
++   *
++   * The JSON document still lives in the parser: this is the most efficient way to parse JSON
++   * documents because it reuses the same buffers, but you *must* use the document before you
++   * destroy the parser or call parse() again.
++   *
++   * @param s The JSON to parse.
++   * @return the document, or an error if the JSON is invalid.
++   */
++  really_inline doc_ref_result parse(const padded_string &s) noexcept;
++
++  // We do not want to allow implicit conversion from C string to std::string.
++  really_inline doc_ref_result parse(const char *buf) noexcept = delete;
++
++  /**
++   * Parse a buffer containing many JSON documents.
++   *
++   *   document::parser parser;
++   *   for (const document &doc : parser.parse_many(buf, len)) {
++   *     cout << std::string(doc["title"]) << endl;
++   *   }
++   *
++   * ### Format
++   *
++   * The buffer must contain a series of one or more JSON documents, concatenated into a single
++   * buffer, separated by whitespace. It effectively parses until it has a fully valid document,
++   * then starts parsing the next document at that point. (It does this with more parallelism and
++   * lookahead than you might think, though.)
++   *
++   * documents that consist of an object or array may omit the whitespace between them, concatenating
++   * with no separator. documents that consist of a single primitive (i.e. documents that are not
++   * arrays or objects) MUST be separated with whitespace.
++   *
++   * ### Error Handling
++   *
++   * All errors are returned during iteration: if there is a global error such as memory allocation,
++   * it will be yielded as the first result. Iteration always stops after the first error.
++   *
++   * As with all other simdjson methods, non-exception error handling is readily available through
++   * the same interface, requiring you to check the error before using the document:
++   *
++   *   document::parser parser;
++   *   for (auto [doc, error] : parser.parse_many(buf, len)) {
++   *     if (error) { cerr << error << endl; exit(1); }
++   *     cout << std::string(doc["title"]) << endl;
++   *   }
++   *
++   * ### REQUIRED: Buffer Padding
++   *
++   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
++   * those bytes are initialized to, as long as they are allocated.
++   *
++   * ### Threads
++   *
++   * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
++   * hood to do some lookahead.
++   *
++   * ### Parser Capacity
++   *
++   * If the parser is unallocated, it will be auto-allocated to batch_size. If it is already
++   * allocated, it must have a capacity at least as large as batch_size.
++   *
++   * @param buf The concatenated JSON to parse. Must have at least len + SIMDJSON_PADDING allocated bytes.
++   * @param len The length of the concatenated JSON.
++   * @param batch_size The batch size to use. MUST be larger than the largest document. The sweet
++   *                   spot is cache-related: small enough to fit in cache, yet big enough to
++   *                   parse as many documents as possible in one tight loop.
++   *                   Defaults to 10MB, which has been a reasonable sweet spot in our tests.
++   * @return The stream. If there is an error, it will be returned during iteration. An empty input
++   *         will yield 0 documents rather than an EMPTY error. Errors:
++   *         - MEMALLOC if the parser is unallocated and memory allocation fails
++   *         - CAPACITY if the parser already has a capacity, and it is less than batch_size
++   *         - other json errors if parsing fails.
++   */
++  inline stream parse_many(const uint8_t *buf, size_t len, size_t batch_size = 1000000) noexcept;
++
++  /**
++   * Parse a buffer containing many JSON documents.
++   *
++   *   document::parser parser;
++   *   for (const document &doc : parser.parse_many(buf, len)) {
++   *     cout << std::string(doc["title"]) << endl;
++   *   }
++   *
++   * ### Format
++   *
++   * The buffer must contain a series of one or more JSON documents, concatenated into a single
++   * buffer, separated by whitespace. It effectively parses until it has a fully valid document,
++   * then starts parsing the next document at that point. (It does this with more parallelism and
++   * lookahead than you might think, though.)
++   *
++   * documents that consist of an object or array may omit the whitespace between them, concatenating
++   * with no separator. documents that consist of a single primitive (i.e. documents that are not
++   * arrays or objects) MUST be separated with whitespace.
++   *
++   * ### Error Handling
++   *
++   * All errors are returned during iteration: if there is a global error such as memory allocation,
++   * it will be yielded as the first result. Iteration always stops after the first error.
++   *
++   * As with all other simdjson methods, non-exception error handling is readily available through
++   * the same interface, requiring you to check the error before using the document:
++   *
++   *   document::parser parser;
++   *   for (auto [doc, error] : parser.parse_many(buf, len)) {
++   *     if (error) { cerr << error << endl; exit(1); }
++   *     cout << std::string(doc["title"]) << endl;
++   *   }
++   *
++   * ### REQUIRED: Buffer Padding
++   *
++   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
++   * those bytes are initialized to, as long as they are allocated.
++   *
++   * ### Threads
++   *
++   * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
++   * hood to do some lookahead.
++   *
++   * ### Parser Capacity
++   *
++   * If the parser is unallocated, it will be auto-allocated to batch_size. If it is already
++   * allocated, it must have a capacity at least as large as batch_size.
++   *
++   * @param buf The concatenated JSON to parse. Must have at least len + SIMDJSON_PADDING allocated bytes.
++   * @param len The length of the concatenated JSON.
++   * @param batch_size The batch size to use. MUST be larger than the largest document. The sweet
++   *                   spot is cache-related: small enough to fit in cache, yet big enough to
++   *                   parse as many documents as possible in one tight loop.
++   *                   Defaults to 10MB, which has been a reasonable sweet spot in our tests.
++   * @return The stream. If there is an error, it will be returned during iteration. An empty input
++   *         will yield 0 documents rather than an EMPTY error. Errors:
++   *         - MEMALLOC if the parser is unallocated and memory allocation fails
++   *         - CAPACITY if the parser already has a capacity, and it is less than batch_size
++   *         - other json errors if parsing fails
++   */
++  inline stream parse_many(const char *buf, size_t len, size_t batch_size = 1000000) noexcept;
++
++  /**
++   * Parse a buffer containing many JSON documents.
++   *
++   *   document::parser parser;
++   *   for (const document &doc : parser.parse_many(buf, len)) {
++   *     cout << std::string(doc["title"]) << endl;
++   *   }
++   *
++   * ### Format
++   *
++   * The buffer must contain a series of one or more JSON documents, concatenated into a single
++   * buffer, separated by whitespace. It effectively parses until it has a fully valid document,
++   * then starts parsing the next document at that point. (It does this with more parallelism and
++   * lookahead than you might think, though.)
++   *
++   * documents that consist of an object or array may omit the whitespace between them, concatenating
++   * with no separator. documents that consist of a single primitive (i.e. documents that are not
++   * arrays or objects) MUST be separated with whitespace.
++   *
++   * ### Error Handling
++   *
++   * All errors are returned during iteration: if there is a global error such as memory allocation,
++   * it will be yielded as the first result. Iteration always stops after the first error.
++   *
++   * As with all other simdjson methods, non-exception error handling is readily available through
++   * the same interface, requiring you to check the error before using the document:
++   *
++   *   document::parser parser;
++   *   for (auto [doc, error] : parser.parse_many(buf, len)) {
++   *     if (error) { cerr << error << endl; exit(1); }
++   *     cout << std::string(doc["title"]) << endl;
++   *   }
++   *
++   * ### REQUIRED: Buffer Padding
++   *
++   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
++   * those bytes are initialized to, as long as they are allocated.
++   *
++   * ### Threads
++   *
++   * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
++   * hood to do some lookahead.
++   *
++   * ### Parser Capacity
++   *
++   * If the parser is unallocated, it will be auto-allocated to batch_size. If it is already
++   * allocated, it must have a capacity at least as large as batch_size.
++   *
++   * @param s The concatenated JSON to parse. Must have at least len + SIMDJSON_PADDING allocated bytes.
++   * @param batch_size The batch size to use. MUST be larger than the largest document. The sweet
++   *                   spot is cache-related: small enough to fit in cache, yet big enough to
++   *                   parse as many documents as possible in one tight loop.
++   *                   Defaults to 10MB, which has been a reasonable sweet spot in our tests.
++   * @return he stream. If there is an error, it will be returned during iteration. An empty input
++   *         will yield 0 documents rather than an EMPTY error. Errors:
++   *         - MEMALLOC if the parser is unallocated and memory allocation fails
++   *         - CAPACITY if the parser already has a capacity, and it is less than batch_size
++   *         - other json errors if parsing fails
++   */
++  inline stream parse_many(const std::string &s, size_t batch_size = 1000000) noexcept;
++
++  /**
++   * Parse a buffer containing many JSON documents.
++   *
++   *   document::parser parser;
++   *   for (const document &doc : parser.parse_many(buf, len)) {
++   *     cout << std::string(doc["title"]) << endl;
++   *   }
++   *
++   * ### Format
++   *
++   * The buffer must contain a series of one or more JSON documents, concatenated into a single
++   * buffer, separated by whitespace. It effectively parses until it has a fully valid document,
++   * then starts parsing the next document at that point. (It does this with more parallelism and
++   * lookahead than you might think, though.)
++   *
++   * documents that consist of an object or array may omit the whitespace between them, concatenating
++   * with no separator. documents that consist of a single primitive (i.e. documents that are not
++   * arrays or objects) MUST be separated with whitespace.
++   *
++   * ### Error Handling
++   *
++   * All errors are returned during iteration: if there is a global error such as memory allocation,
++   * it will be yielded as the first result. Iteration always stops after the first error.
++   *
++   * As with all other simdjson methods, non-exception error handling is readily available through
++   * the same interface, requiring you to check the error before using the document:
++   *
++   *   document::parser parser;
++   *   for (auto [doc, error] : parser.parse_many(buf, len)) {
++   *     if (error) { cerr << error << endl; exit(1); }
++   *     cout << std::string(doc["title"]) << endl;
++   *   }
++   *
++   * ### REQUIRED: Buffer Padding
++   *
++   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
++   * those bytes are initialized to, as long as they are allocated.
++   *
++   * ### Threads
++   *
++   * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
++   * hood to do some lookahead.
++   *
++   * ### Parser Capacity
++   *
++   * If the parser is unallocated, it will be auto-allocated to batch_size. If it is already
++   * allocated, it must have a capacity at least as large as batch_size.
++   *
++   * @param s The concatenated JSON to parse.
++   * @param batch_size The batch size to use. MUST be larger than the largest document. The sweet
++   *                   spot is cache-related: small enough to fit in cache, yet big enough to
++   *                   parse as many documents as possible in one tight loop.
++   *                   Defaults to 10MB, which has been a reasonable sweet spot in our tests.
++   * @return he stream. If there is an error, it will be returned during iteration. An empty input
++   *         will yield 0 documents rather than an EMPTY error. Errors:
++   *         - MEMALLOC if the parser is unallocated and memory allocation fails
++   *         - CAPACITY if the parser already has a capacity, and it is less than batch_size
++   *         - other json errors if parsing fails
++   */
++  inline stream parse_many(const padded_string &s, size_t batch_size = 1000000) noexcept;
++
++  // We do not want to allow implicit conversion from C string to std::string.
++  really_inline doc_ref_result parse_many(const char *buf, size_t batch_size = 1000000) noexcept = delete;
++
++  /**
++   * Current capacity: the largest document this parser can support without reallocating.
++   */
++  really_inline size_t capacity() const noexcept;
++
++  /**
++   * The maximum level of nested object and arrays supported by this parser.
++   */
++  really_inline size_t max_depth() const noexcept;
++
++  /**
++   * Ensure this parser has enough memory to process JSON documents up to `capacity` bytes in length
++   * and `max_depth` depth.
++   */
++  WARN_UNUSED inline bool allocate_capacity(size_t capacity, size_t max_depth = DEFAULT_MAX_DEPTH);
++
++  // type aliases for backcompat
++  using Iterator = document::iterator;
++  using InvalidJSON = simdjson_error;
++
++  // Next location to write to in the tape
++  uint32_t current_loc{0};
++
++  // structural indices passed from stage 1 to stage 2
++  uint32_t n_structural_indexes{0};
++  std::unique_ptr<uint32_t[]> structural_indexes;
++
++  // location and return address of each open { or [
++  std::unique_ptr<uint32_t[]> containing_scope_offset;
++#ifdef SIMDJSON_USE_COMPUTED_GOTO
++  std::unique_ptr<void*[]> ret_address;
++#else
++  std::unique_ptr<char[]> ret_address;
++#endif
++
++  // Next place to write a string
++  uint8_t *current_string_buf_loc;
++
++  bool valid{false};
++  error_code error{UNINITIALIZED};
++
++  // Document we're writing to
++  document doc;
++
++  //
++  // TODO these are deprecated; use the results of parse instead.
++  //
++
++  // returns true if the document parsed was valid
++  inline bool is_valid() const noexcept;
++
++  // return an error code corresponding to the last parsing attempt, see
++  // simdjson.h will return UNITIALIZED if no parsing was attempted
++  inline int get_error_code() const noexcept;
++
++  // return the string equivalent of "get_error_code"
++  inline std::string get_error_message() const noexcept;
++
++  // print the json to std::ostream (should be valid)
++  // return false if the tape is likely wrong (e.g., you did not parse a valid
++  // JSON).
++  /** @deprecated Use cout << parser.parse() */
++  inline bool print_json(std::ostream &os) const noexcept;
++  inline bool dump_raw_tape(std::ostream &os) const noexcept;
++
++  //
++  // Parser callbacks: these are internal!
++  //
++  // TODO find a way to do this without exposing the interface or crippling performance
++  //
++
++  // this should be called when parsing (right before writing the tapes)
++  inline void init_stage2() noexcept;
++  really_inline error_code on_error(error_code new_error_code) noexcept;
++  really_inline error_code on_success(error_code success_code) noexcept;
++  really_inline bool on_start_document(uint32_t depth) noexcept;
++  really_inline bool on_start_object(uint32_t depth) noexcept;
++  really_inline bool on_start_array(uint32_t depth) noexcept;
++  // TODO we're not checking this bool
++  really_inline bool on_end_document(uint32_t depth) noexcept;
++  really_inline bool on_end_object(uint32_t depth) noexcept;
++  really_inline bool on_end_array(uint32_t depth) noexcept;
++  really_inline bool on_true_atom() noexcept;
++  really_inline bool on_false_atom() noexcept;
++  really_inline bool on_null_atom() noexcept;
++  really_inline uint8_t *on_start_string() noexcept;
++  really_inline bool on_end_string(uint8_t *dst) noexcept;
++  really_inline bool on_number_s64(int64_t value) noexcept;
++  really_inline bool on_number_u64(uint64_t value) noexcept;
++  really_inline bool on_number_double(double value) noexcept;
++  //
++  // Called before a parse is initiated.
++  //
++  // - Returns CAPACITY if the document is too large
++  // - Returns MEMALLOC if we needed to allocate memory and could not
++  //
++  WARN_UNUSED inline error_code init_parse(size_t len) noexcept;
++
++private:
++  //
++  // The maximum document length this parser supports.
++  //
++  // Buffers are large enough to handle any document up to this length.
++  //
++  size_t _capacity{0};
++
++  //
++  // The maximum depth (number of nested objects and arrays) supported by this parser.
++  //
++  // Defaults to DEFAULT_MAX_DEPTH.
++  //
++  size_t _max_depth{0};
++
++  // all nodes are stored on the doc.tape using a 64-bit word.
++  //
++  // strings, double and ints are stored as
++  //  a 64-bit word with a pointer to the actual value
++  //
++  //
++  //
++  // for objects or arrays, store [ or {  at the beginning and } and ] at the
++  // end. For the openings ([ or {), we annotate them with a reference to the
++  // location on the doc.tape of the end, and for then closings (} and ]), we
++  // annotate them with a reference to the location of the opening
++  //
++  //
++
++  inline void write_tape(uint64_t val, tape_type t) noexcept;
++  inline void annotate_previous_loc(uint32_t saved_loc, uint64_t val) noexcept;
++
++  //
++  // Set the current capacity: the largest document this parser can support without reallocating.
++  //
++  // This will allocate *or deallocate* as necessary.
++  //
++  // Returns false if allocation fails.
++  //
++  inline WARN_UNUSED bool set_capacity(size_t capacity);
++
++  //
++  // Set the maximum level of nested object and arrays supported by this parser.
++  //
++  // This will allocate *or deallocate* as necessary.
++  //
++  // Returns false if allocation fails.
++  //
++  inline WARN_UNUSED bool set_max_depth(size_t max_depth);
++
++  // Used internally to get the document
++  inline const document &get_document() const noexcept(false);
++
++  template<size_t max_depth> friend class document_iterator;
++}; // class parser
++
++} // namespace simdjson
++
++#endif // SIMDJSON_DOCUMENT_PARSER_H
+\ No newline at end of file
+diff --git a/include/simdjson/inline/document.h b/include/simdjson/inline/document.h
+index f3118feb..b5821a53 100644
+--- a/include/simdjson/inline/document.h
++++ b/include/simdjson/inline/document.h
+@@ -9,7 +9,6 @@
+ #include "simdjson/padded_string.h"
+ #include "simdjson/internal/jsonformatutils.h"
+ #include <iostream>
+-#include <climits>
+ 
+ namespace simdjson {
+ 
+@@ -362,7 +361,7 @@ inline document::element_result document::doc_move_result::operator[](const char
+ // document::parser inline implementation
+ //
+ really_inline document::parser::parser(size_t max_capacity, size_t max_depth) noexcept
+-  : _max_capacity{max_capacity}, _max_depth{max_depth}, loaded_bytes(nullptr, &aligned_free_char) {
++  : _max_capacity{max_capacity}, _max_depth{max_depth} {
+ 
+ }
+ inline bool document::parser::is_valid() const noexcept { return valid; }
+@@ -388,54 +387,15 @@ inline const document &document::parser::get_document() const noexcept(false) {
+ 
+ #endif // SIMDJSON_EXCEPTIONS
+ 
+-inline simdjson_result<size_t> document::parser::read_file(const std::string &path) noexcept {
+-  // Open the file
+-  std::FILE *fp = std::fopen(path.c_str(), "rb");
+-  if (fp == nullptr) {
+-    return IO_ERROR;
+-  }
+-
+-  // Get the file size
+-  if(std::fseek(fp, 0, SEEK_END) < 0) {
+-    std::fclose(fp);
+-    return IO_ERROR;
+-  }
+-  long len = std::ftell(fp);
+-  if((len < 0) || (len == LONG_MAX)) {
+-    std::fclose(fp);
+-    return IO_ERROR;
+-  }
+-
+-  // Make sure we have enough capacity to load the file
+-  if (_loaded_bytes_capacity < size_t(len)) {
+-    loaded_bytes.reset( internal::allocate_padded_buffer(len) );
+-    if (!loaded_bytes) {
+-      std::fclose(fp);
+-      return MEMALLOC;
+-    }
+-    _loaded_bytes_capacity = len;
+-  }
+-
+-  // Read the string
+-  std::rewind(fp);
+-  size_t bytes_read = std::fread(loaded_bytes.get(), 1, len, fp);
+-  if (std::fclose(fp) != 0 || bytes_read != size_t(len)) {
+-    return IO_ERROR;
+-  }
+-
+-  return bytes_read;
+-}
+-
+ inline document::doc_result document::parser::load(const std::string &path) noexcept {
+-  auto [len, code] = read_file(path);
+-  if (code) { return doc_result(doc, code); }
+-
+-  return parse(loaded_bytes.get(), len, false);
++  auto [json, _error] = padded_string::load(path);
++  if (_error) { return doc_result(doc, _error); }
++  return parse(json);
+ }
+ 
+ inline document::stream document::parser::load_many(const std::string &path, size_t batch_size) noexcept {
+-  auto [len, code] = read_file(path);
+-  return stream(*this, (const uint8_t*)loaded_bytes.get(), len, batch_size, code);
++  auto [json, _error] = padded_string::load(path);
++  return stream(*this, reinterpret_cast<const uint8_t*>(json.data()), json.length(), batch_size, _error);
+ }
+ 
+ inline document::doc_result document::parser::parse(const uint8_t *buf, size_t len, bool realloc_if_needed) noexcept {
+@@ -520,7 +480,7 @@ inline error_code document::parser::set_capacity(size_t capacity) noexcept {
+   // Initialize stage 1 output
+   //
+   uint32_t max_structures = ROUNDUP_N(capacity, 64) + 2 + 7;
+-  structural_indexes.reset( new (std::nothrow) uint32_t[max_structures] ); // TODO realloc
++  structural_indexes.reset( new (std::nothrow) uint32_t[max_structures]); // TODO realloc
+   if (!structural_indexes) {
+     return MEMALLOC;
+   }
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index fa2c524e..49dd064b 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -19,7 +19,7 @@ add_cpp_test(parse_many_test)
+ add_cpp_test(pointercheck)
+ add_cpp_test(integer_tests)
+ 
+-target_compile_definitions(basictests PRIVATE JSON_TEST_PATH="${PROJECT_SOURCE_DIR}/jsonexamples/twitter.json" NDJSON_TEST_PATH="${PROJECT_SOURCE_DIR}/jsonexamples/amazon_cellphones.ndjson")
++target_compile_definitions(basictests PRIVATE JSON_TEST_PATH="${PROJECT_SOURCE_DIR}/jsonexamples/twitter.json")
+ target_compile_definitions(errortests PRIVATE JSON_TEST_PATH="${PROJECT_SOURCE_DIR}/jsonexamples/twitter.json")
+ 
+ ## This causes problems
+diff --git a/tests/basictests.cpp b/tests/basictests.cpp
+index 8362db8d..0e219e3a 100644
+--- a/tests/basictests.cpp
++++ b/tests/basictests.cpp
+@@ -19,69 +19,28 @@
+ #ifndef JSON_TEST_PATH
+ #define JSON_TEST_PATH "jsonexamples/twitter.json"
+ #endif
+-#ifndef NDJSON_TEST_PATH
+-#define NDJSON_TEST_PATH "jsonexamples/amazon_cellphones.ndjson"
+-#endif
+-
+-namespace number_tests {
+-
+-  // ulp distance
+-  // Marc B. Reynolds, 2016-2019
+-  // Public Domain under http://unlicense.org, see link for details.
+-  // adapted by D. Lemire
+-  inline uint64_t f64_ulp_dist(double a, double b) {
+-    uint64_t ua, ub;
+-    memcpy(&ua, &a, sizeof(ua));
+-    memcpy(&ub, &b, sizeof(ub));
+-    if ((int64_t)(ub ^ ua) >= 0)
+-      return (int64_t)(ua - ub) >= 0 ? (ua - ub) : (ub - ua);
+-    return ua + ub + 0x80000000;
+-  }
+ 
+-
+-  bool small_integers() {
+-    std::cout << __func__ << std::endl;
+-    char buf[1024];
+-    simdjson::document::parser parser;
+-    for (int m = 10; m < 20; m++) {
+-      for (int i = -1024; i < 1024; i++) {
+-        auto n = sprintf(buf, "%*d", m, i);
+-        buf[n] = '\0';
+-        fflush(NULL);
+-        auto [doc, error] = parser.parse(buf, n);
+-        if (error) {
+-          printf("Could not parse '%s': %s\n", buf, simdjson::error_message(error));
+-          return false;
+-        }
+-        simdjson::document::iterator iter(doc);
+-        if(!iter.is_number()) {
+-          printf("Root should be number\n");
+-          return false;
+-        }
+-        if(!iter.is_integer()) {
+-          printf("Root should be an integer\n");
+-          return false;
+-        }
+-        int64_t x = iter.get_integer();
+-        if(x != i) {
+-          printf("failed to parse %s. \n", buf);
+-          return false;
+-        }
+-      } 
+-    }
+-    printf("Small integers can be parsed.\n");
+-    return true;
+-  }
++// ulp distance
++// Marc B. Reynolds, 2016-2019
++// Public Domain under http://unlicense.org, see link for details.
++// adapted by D. Lemire
++inline uint64_t f64_ulp_dist(double a, double b) {
++  uint64_t ua, ub;
++  memcpy(&ua, &a, sizeof(ua));
++  memcpy(&ub, &b, sizeof(ub));
++  if ((int64_t)(ub ^ ua) >= 0)
++    return (int64_t)(ua - ub) >= 0 ? (ua - ub) : (ub - ua);
++  return ua + ub + 0x80000000;
++}
+ 
+ 
+-  bool powers_of_two() {
+-    std::cout << __func__ << std::endl;
+-    char buf[1024];
+-    simdjson::document::parser parser;
+-    int maxulp = 0;
+-    for (int i = -1075; i < 1024; ++i) {// large negative values should be zero.
+-      double expected = pow(2, i);
+-      auto n = sprintf(buf, "%.*e", std::numeric_limits<double>::max_digits10 - 1, expected);
++bool number_test_small_integers() {
++  std::cout << __func__ << std::endl;
++  char buf[1024];
++  simdjson::document::parser parser;
++  for (int m = 10; m < 20; m++) {
++    for (int i = -1024; i < 1024; i++) {
++      auto n = sprintf(buf, "%*d", m, i);
+       buf[n] = '\0';
+       fflush(NULL);
+       auto [doc, error] = parser.parse(buf, n);
+@@ -94,787 +53,514 @@ namespace number_tests {
+         printf("Root should be number\n");
+         return false;
+       }
+-      if(iter.is_integer()) {
+-        int64_t x = iter.get_integer();
+-        int power = 0;
+-        while(x > 1) {
+-          if((x % 2) != 0) {
+-              printf("failed to parse %s. \n", buf);
+-              return false;
+-          }
+-          x = x / 2;
+-          power ++;
+-        }
+-        if(power != i)  {
+-          printf("failed to parse %s. \n", buf);
+-          return false;
+-        }
+-      } else if(iter.is_unsigned_integer()) {
+-        uint64_t x = iter.get_unsigned_integer();
+-        int power = 0;
+-        while(x > 1) {
+-          if((x % 2) != 0) {
+-            printf("failed to parse %s. \n", buf);
+-            return false;
+-          }
+-          x = x / 2;
+-          power ++;
+-        }
+-        if(power != i) {
+-          printf("failed to parse %s. \n", buf);
+-          return false;
+-        }
+-      } else {
+-        double x = iter.get_double();
+-        int ulp = f64_ulp_dist(x,expected);  
+-        if(ulp > maxulp) maxulp = ulp;
+-        if(ulp > 0) {
+-          printf("failed to parse %s. ULP = %d i = %d \n", buf, ulp, i);
+-          return false;
+-        }
+-      }
+-    }
+-    printf("Powers of 2 can be parsed, maxulp = %d.\n", maxulp);
+-    return true;
+-  }
+-
+-  static const double testing_power_of_ten[] = {
+-      1e-307, 1e-306, 1e-305, 1e-304, 1e-303, 1e-302, 1e-301, 1e-300, 1e-299,
+-      1e-298, 1e-297, 1e-296, 1e-295, 1e-294, 1e-293, 1e-292, 1e-291, 1e-290,
+-      1e-289, 1e-288, 1e-287, 1e-286, 1e-285, 1e-284, 1e-283, 1e-282, 1e-281,
+-      1e-280, 1e-279, 1e-278, 1e-277, 1e-276, 1e-275, 1e-274, 1e-273, 1e-272,
+-      1e-271, 1e-270, 1e-269, 1e-268, 1e-267, 1e-266, 1e-265, 1e-264, 1e-263,
+-      1e-262, 1e-261, 1e-260, 1e-259, 1e-258, 1e-257, 1e-256, 1e-255, 1e-254,
+-      1e-253, 1e-252, 1e-251, 1e-250, 1e-249, 1e-248, 1e-247, 1e-246, 1e-245,
+-      1e-244, 1e-243, 1e-242, 1e-241, 1e-240, 1e-239, 1e-238, 1e-237, 1e-236,
+-      1e-235, 1e-234, 1e-233, 1e-232, 1e-231, 1e-230, 1e-229, 1e-228, 1e-227,
+-      1e-226, 1e-225, 1e-224, 1e-223, 1e-222, 1e-221, 1e-220, 1e-219, 1e-218,
+-      1e-217, 1e-216, 1e-215, 1e-214, 1e-213, 1e-212, 1e-211, 1e-210, 1e-209,
+-      1e-208, 1e-207, 1e-206, 1e-205, 1e-204, 1e-203, 1e-202, 1e-201, 1e-200,
+-      1e-199, 1e-198, 1e-197, 1e-196, 1e-195, 1e-194, 1e-193, 1e-192, 1e-191,
+-      1e-190, 1e-189, 1e-188, 1e-187, 1e-186, 1e-185, 1e-184, 1e-183, 1e-182,
+-      1e-181, 1e-180, 1e-179, 1e-178, 1e-177, 1e-176, 1e-175, 1e-174, 1e-173,
+-      1e-172, 1e-171, 1e-170, 1e-169, 1e-168, 1e-167, 1e-166, 1e-165, 1e-164,
+-      1e-163, 1e-162, 1e-161, 1e-160, 1e-159, 1e-158, 1e-157, 1e-156, 1e-155,
+-      1e-154, 1e-153, 1e-152, 1e-151, 1e-150, 1e-149, 1e-148, 1e-147, 1e-146,
+-      1e-145, 1e-144, 1e-143, 1e-142, 1e-141, 1e-140, 1e-139, 1e-138, 1e-137,
+-      1e-136, 1e-135, 1e-134, 1e-133, 1e-132, 1e-131, 1e-130, 1e-129, 1e-128,
+-      1e-127, 1e-126, 1e-125, 1e-124, 1e-123, 1e-122, 1e-121, 1e-120, 1e-119,
+-      1e-118, 1e-117, 1e-116, 1e-115, 1e-114, 1e-113, 1e-112, 1e-111, 1e-110,
+-      1e-109, 1e-108, 1e-107, 1e-106, 1e-105, 1e-104, 1e-103, 1e-102, 1e-101,
+-      1e-100, 1e-99,  1e-98,  1e-97,  1e-96,  1e-95,  1e-94,  1e-93,  1e-92,
+-      1e-91,  1e-90,  1e-89,  1e-88,  1e-87,  1e-86,  1e-85,  1e-84,  1e-83,
+-      1e-82,  1e-81,  1e-80,  1e-79,  1e-78,  1e-77,  1e-76,  1e-75,  1e-74,
+-      1e-73,  1e-72,  1e-71,  1e-70,  1e-69,  1e-68,  1e-67,  1e-66,  1e-65,
+-      1e-64,  1e-63,  1e-62,  1e-61,  1e-60,  1e-59,  1e-58,  1e-57,  1e-56,
+-      1e-55,  1e-54,  1e-53,  1e-52,  1e-51,  1e-50,  1e-49,  1e-48,  1e-47,
+-      1e-46,  1e-45,  1e-44,  1e-43,  1e-42,  1e-41,  1e-40,  1e-39,  1e-38,
+-      1e-37,  1e-36,  1e-35,  1e-34,  1e-33,  1e-32,  1e-31,  1e-30,  1e-29,
+-      1e-28,  1e-27,  1e-26,  1e-25,  1e-24,  1e-23,  1e-22,  1e-21,  1e-20,
+-      1e-19,  1e-18,  1e-17,  1e-16,  1e-15,  1e-14,  1e-13,  1e-12,  1e-11,
+-      1e-10,  1e-9,   1e-8,   1e-7,   1e-6,   1e-5,   1e-4,   1e-3,   1e-2,
+-      1e-1,   1e0,    1e1,    1e2,    1e3,    1e4,    1e5,    1e6,    1e7,
+-      1e8,    1e9,    1e10,   1e11,   1e12,   1e13,   1e14,   1e15,   1e16,
+-      1e17,   1e18,   1e19,   1e20,   1e21,   1e22,   1e23,   1e24,   1e25,
+-      1e26,   1e27,   1e28,   1e29,   1e30,   1e31,   1e32,   1e33,   1e34,
+-      1e35,   1e36,   1e37,   1e38,   1e39,   1e40,   1e41,   1e42,   1e43,
+-      1e44,   1e45,   1e46,   1e47,   1e48,   1e49,   1e50,   1e51,   1e52,
+-      1e53,   1e54,   1e55,   1e56,   1e57,   1e58,   1e59,   1e60,   1e61,
+-      1e62,   1e63,   1e64,   1e65,   1e66,   1e67,   1e68,   1e69,   1e70,
+-      1e71,   1e72,   1e73,   1e74,   1e75,   1e76,   1e77,   1e78,   1e79,
+-      1e80,   1e81,   1e82,   1e83,   1e84,   1e85,   1e86,   1e87,   1e88,
+-      1e89,   1e90,   1e91,   1e92,   1e93,   1e94,   1e95,   1e96,   1e97,
+-      1e98,   1e99,   1e100,  1e101,  1e102,  1e103,  1e104,  1e105,  1e106,
+-      1e107,  1e108,  1e109,  1e110,  1e111,  1e112,  1e113,  1e114,  1e115,
+-      1e116,  1e117,  1e118,  1e119,  1e120,  1e121,  1e122,  1e123,  1e124,
+-      1e125,  1e126,  1e127,  1e128,  1e129,  1e130,  1e131,  1e132,  1e133,
+-      1e134,  1e135,  1e136,  1e137,  1e138,  1e139,  1e140,  1e141,  1e142,
+-      1e143,  1e144,  1e145,  1e146,  1e147,  1e148,  1e149,  1e150,  1e151,
+-      1e152,  1e153,  1e154,  1e155,  1e156,  1e157,  1e158,  1e159,  1e160,
+-      1e161,  1e162,  1e163,  1e164,  1e165,  1e166,  1e167,  1e168,  1e169,
+-      1e170,  1e171,  1e172,  1e173,  1e174,  1e175,  1e176,  1e177,  1e178,
+-      1e179,  1e180,  1e181,  1e182,  1e183,  1e184,  1e185,  1e186,  1e187,
+-      1e188,  1e189,  1e190,  1e191,  1e192,  1e193,  1e194,  1e195,  1e196,
+-      1e197,  1e198,  1e199,  1e200,  1e201,  1e202,  1e203,  1e204,  1e205,
+-      1e206,  1e207,  1e208,  1e209,  1e210,  1e211,  1e212,  1e213,  1e214,
+-      1e215,  1e216,  1e217,  1e218,  1e219,  1e220,  1e221,  1e222,  1e223,
+-      1e224,  1e225,  1e226,  1e227,  1e228,  1e229,  1e230,  1e231,  1e232,
+-      1e233,  1e234,  1e235,  1e236,  1e237,  1e238,  1e239,  1e240,  1e241,
+-      1e242,  1e243,  1e244,  1e245,  1e246,  1e247,  1e248,  1e249,  1e250,
+-      1e251,  1e252,  1e253,  1e254,  1e255,  1e256,  1e257,  1e258,  1e259,
+-      1e260,  1e261,  1e262,  1e263,  1e264,  1e265,  1e266,  1e267,  1e268,
+-      1e269,  1e270,  1e271,  1e272,  1e273,  1e274,  1e275,  1e276,  1e277,
+-      1e278,  1e279,  1e280,  1e281,  1e282,  1e283,  1e284,  1e285,  1e286,
+-      1e287,  1e288,  1e289,  1e290,  1e291,  1e292,  1e293,  1e294,  1e295,
+-      1e296,  1e297,  1e298,  1e299,  1e300,  1e301,  1e302,  1e303,  1e304,
+-      1e305,  1e306,  1e307,  1e308};
+-
+-
+-
+-  bool powers_of_ten() {
+-    std::cout << __func__ << std::endl;
+-    char buf[1024];
+-    simdjson::document::parser parser;
+-    for (int i = -1000000; i <= 308; ++i) {// large negative values should be zero.
+-      auto n = sprintf(buf,"1e%d", i);
+-      buf[n] = '\0';
+-      fflush(NULL);
+-      auto [doc, error] = parser.parse(buf, n);
+-      if (error) {
+-        printf("Could not parse '%s': %s\n", buf, simdjson::error_message(error));
+-        return false;
+-      }
+-      simdjson::document::iterator iter(doc);
+-      if(!iter.is_number()) {
+-        printf("Root should be number\n");
+-        return false;
+-      }
+-      if(iter.is_integer()) {
+-        int64_t x = iter.get_integer();
+-        int power = 0;
+-        while(x > 1) {
+-          if((x % 10) != 0) {
+-              printf("failed to parse %s. \n", buf);
+-              return false;
+-          }
+-          x = x / 10;
+-          power ++;
+-        }
+-        if(power != i)  {
+-          printf("failed to parse %s. \n", buf);
+-          return false;
+-        }
+-      } else if(iter.is_unsigned_integer()) {
+-        uint64_t x = iter.get_unsigned_integer();
+-        int power = 0;
+-        while(x > 1) {
+-          if((x % 10) != 0) {
+-            printf("failed to parse %s. \n", buf);
+-            return false;
+-          }
+-          x = x / 10;
+-          power ++;
+-        }
+-        if(power != i) {
+-          printf("failed to parse %s. \n", buf);
+-          return false;
+-        }
+-      } else {
+-        double x = iter.get_double();
+-        double expected = ((i >= -307) ? testing_power_of_ten[i + 307]: std::pow(10, i));
+-        int ulp = (int) f64_ulp_dist(x, expected);
+-        if(ulp > 0) {
+-          printf("failed to parse %s. \n", buf);
+-          printf("actual: %.20g expected: %.20g \n", x, expected);
+-          printf("ULP: %d \n", ulp);
+-          return false;
+-        }
+-      }
+-    }
+-    printf("Powers of 10 can be parsed.\n");
+-    return true;
+-  }
+-  bool run() {
+-    return small_integers() &&
+-           powers_of_two() &&
+-           powers_of_ten();
+-  }
+-}
+-
+-namespace document_tests {
+-  // adversarial example that once triggred overruns, see https://github.com/lemire/simdjson/issues/345
+-  bool bad_example() {
+-    std::cout << __func__ << std::endl;
+-    std::string badjson = "[7,7,7,7,6,7,7,7,6,7,7,6,[7,7,7,7,6,7,7,7,6,7,7,6,7,7,7,7,7,7,6";
+-    simdjson::document::parser parser = simdjson::build_parsed_json(badjson);
+-    if(parser.is_valid()) {
+-      printf("This json should not be valid %s.\n", badjson.c_str());
+-      return false;
+-    }
+-    return true;
+-  }
+-  // returns true if successful
+-  bool stable_test() {
+-    std::cout << __func__ << std::endl;
+-    std::string json = "{"
+-          "\"Image\":{"
+-              "\"Width\":800,"
+-              "\"Height\":600,"
+-              "\"Title\":\"View from 15th Floor\","
+-              "\"Thumbnail\":{"
+-              "\"Url\":\"http://www.example.com/image/481989943\","
+-              "\"Height\":125,"
+-              "\"Width\":100"
+-              "},"
+-              "\"Animated\":false,"
+-              "\"IDs\":[116,943.3,234,38793]"
+-            "}"
+-        "}";
+-    simdjson::document::parser parser = simdjson::build_parsed_json(json);
+-    std::ostringstream myStream;
+-    if( ! parser.print_json(myStream) ) {
+-      std::cout << "cannot print it out? " << std::endl;
+-      return false;
+-    }
+-    std::string newjson = myStream.str();
+-    if(json != newjson) {
+-      std::cout << "serialized json differs!" << std::endl;
+-      std::cout << json << std::endl;
+-      std::cout << newjson << std::endl;
+-    }
+-    return newjson == json;
+-  }
+-  // returns true if successful
+-  bool skyprophet_test() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    const size_t n_records = 100000;
+-    std::vector<std::string> data;
+-    char buf[1024];
+-    for (size_t i = 0; i < n_records; ++i) {
+-      auto n = sprintf(buf,
+-                      "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
+-                      "\"school\": {\"id\": %zu, \"name\": \"school%zu\"}}",
+-                      i, i, (i % 2) ? "male" : "female", i % 10, i % 10);
+-      data.emplace_back(std::string(buf, n));
+-    }
+-    for (size_t i = 0; i < n_records; ++i) {
+-      auto n = sprintf(buf, "{\"counter\": %f, \"array\": [%s]}", i * 3.1416,
+-                      (i % 2) ? "true" : "false");
+-      data.emplace_back(std::string(buf, n));
+-    }
+-    for (size_t i = 0; i < n_records; ++i) {
+-      auto n = sprintf(buf, "{\"number\": %e}", i * 10000.31321321);
+-      data.emplace_back(std::string(buf, n));
+-    }
+-    data.emplace_back(std::string("true"));
+-    data.emplace_back(std::string("false"));
+-    data.emplace_back(std::string("null"));
+-    data.emplace_back(std::string("0.1"));
+-    size_t maxsize = 0;
+-    for (auto &s : data) {
+-      if (maxsize < s.size())
+-        maxsize = s.size();
+-    }
+-    simdjson::document::parser parser;
+-    size_t counter = 0;
+-    for (auto &rec : data) {
+-      if ((counter % 10000) == 0) {
+-        printf(".");
+-        fflush(NULL);
+-      }
+-      counter++;
+-      auto ok1 = json_parse(rec.c_str(), rec.length(), parser);
+-      if (ok1 != 0 || !parser.is_valid()) {
+-        printf("Something is wrong in skyprophet_test: %s.\n", rec.c_str());
++      if(!iter.is_integer()) {
++        printf("Root should be an integer\n");
+         return false;
+       }
+-      auto ok2 = json_parse(rec, parser);
+-      if (ok2 != 0 || !parser.is_valid()) {
+-        printf("Something is wrong in skyprophet_test: %s.\n", rec.c_str());
++      int64_t x = iter.get_integer();
++      if(x != i) {
++        printf("failed to parse %s. \n", buf);
+         return false;
+       }
+-    }
+-    printf("\n");
+-    return true;
+-  }
+-  bool lots_of_brackets() {
+-    std::string input;
+-    for(size_t i = 0; i < 200; i++) {
+-      input += "[";
+-    }
+-    for(size_t i = 0; i < 200; i++) {
+-      input += "]";
+-    }
+-    auto [doc, error] = simdjson::document::parse(input);
+-    if (error) { std::cerr << "Error: " << simdjson::error_message(error) << std::endl; return false; }
+-    return true;
+-  }
+-  bool run() {
+-    return bad_example() &&
+-           stable_test() &&
+-           skyprophet_test() &&
+-           lots_of_brackets();
++    } 
+   }
++  printf("Small integers can be parsed.\n");
++  return true;
+ }
+ 
+-namespace document_stream_tests {
+ 
+-  static simdjson::document::stream parse_many_stream_return(simdjson::document::parser &parser, simdjson::padded_string &str) {
+-    return parser.parse_many(str);
+-  }
+-  // this is a compilation test
+-  UNUSED static void parse_many_stream_assign() {
+-      simdjson::document::parser parser;
+-      simdjson::padded_string str("{}",2);
+-      simdjson::document::stream s1 = parse_many_stream_return(parser, str);
+-  }
+-
+-  static bool parse_json_message_issue467(char const* message, std::size_t len, size_t expectedcount) {
+-    simdjson::document::parser parser;
+-    size_t count = 0;
+-    simdjson::padded_string str(message,len);
+-    for (auto [doc, error] : parser.parse_many(str, len)) {
+-      if (error) {
+-          std::cerr << "Failed with simdjson error= " << error << std::endl;
+-          return false;
+-      }
+-      count++;
+-    }
+-    if(count != expectedcount) {
+-        std::cerr << "bad count" << std::endl;
+-        return false;
+-    }
+-    return true;
+-  }
+-
+-  bool json_issue467() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    const char * single_message = "{\"error\":[],\"result\":{\"token\":\"xxx\"}}";
+-    const char* two_messages = "{\"error\":[],\"result\":{\"token\":\"xxx\"}}{\"error\":[],\"result\":{\"token\":\"xxx\"}}";
+-
+-    if(!parse_json_message_issue467(single_message, strlen(single_message),1)) {
++bool number_test_powers_of_two() {
++  std::cout << __func__ << std::endl;
++  char buf[1024];
++  simdjson::document::parser parser;
++  int maxulp = 0;
++  for (int i = -1075; i < 1024; ++i) {// large negative values should be zero.
++    double expected = pow(2, i);
++    auto n = sprintf(buf, "%.*e", std::numeric_limits<double>::max_digits10 - 1, expected);
++    buf[n] = '\0';
++    fflush(NULL);
++    auto [doc, error] = parser.parse(buf, n);
++    if (error) {
++      printf("Could not parse '%s': %s\n", buf, simdjson::error_message(error));
+       return false;
+     }
+-    if(!parse_json_message_issue467(two_messages, strlen(two_messages),2)) {
++    simdjson::document::iterator iter(doc);
++    if(!iter.is_number()) {
++      printf("Root should be number\n");
+       return false;
+     }
+-    return true;
+-  }
+-
+-  // returns true if successful
+-  bool JsonStream_utf8_test() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    fflush(NULL);
+-    const size_t n_records = 10000;
+-    std::string data;
+-    char buf[1024];
+-    for (size_t i = 0; i < n_records; ++i) {
+-      auto n = sprintf(buf,
+-                      "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
+-                      "\"été\": {\"id\": %zu, \"name\": \"éventail%zu\"}}",
+-                      i, i, (i % 2) ? "⺃" : "⺕", i % 10, i % 10);
+-      data += std::string(buf, n);
+-    }
+-    const size_t batch_size = 1000;
+-    printf(".");
+-    fflush(NULL);
+-    simdjson::padded_string str(data);
+-    simdjson::JsonStream<simdjson::padded_string> js{str, batch_size};
+-    int parse_res = simdjson::SUCCESS_AND_HAS_MORE;
+-    size_t count = 0;
+-    simdjson::document::parser parser;
+-    while (parse_res == simdjson::SUCCESS_AND_HAS_MORE) {
+-      parse_res = js.json_parse(parser);
+-      if (parse_res != simdjson::SUCCESS && parse_res != simdjson::SUCCESS_AND_HAS_MORE) {
+-        break;
+-      }
+-      simdjson::document::iterator iter(parser.doc);
+-      if(!iter.is_object()) {
+-        printf("Root should be object\n");
+-        return false;
+-      }
+-      if(!iter.down()) {
+-        printf("Root should not be emtpy\n");
+-        return false;
++    if(iter.is_integer()) {
++      int64_t x = iter.get_integer();
++      int power = 0;
++      while(x > 1) {
++         if((x % 2) != 0) {
++            printf("failed to parse %s. \n", buf);
++            return false;
++         }
++         x = x / 2;
++         power ++;
+       }
+-      if(!iter.is_string()) {
+-        printf("Object should start with string key\n");
+-        return false;
++      if(power != i)  {
++         printf("failed to parse %s. \n", buf);
++         return false;
+       }
+-      if(strcmp(iter.get_string(),"id")!=0) {
+-        printf("There should a single key, id.\n");
+-        return false;
++    } else if(iter.is_unsigned_integer()) {
++      uint64_t x = iter.get_unsigned_integer();
++      int power = 0;
++      while(x > 1) {
++         if((x % 2) != 0) {
++           printf("failed to parse %s. \n", buf);
++           return false;
++         }
++         x = x / 2;
++         power ++;
+       }
+-      iter.move_to_value();
+-      if(!iter.is_integer()) {
+-        printf("Value of image should be integer\n");
+-        return false;
++      if(power != i) {
++         printf("failed to parse %s. \n", buf);
++         return false;
+       }
+-      int64_t keyid = iter.get_integer();
+-      if(keyid != (int64_t)count) {
+-        printf("key does not match %d, expected %d\n",(int) keyid, (int) count);
+-        return false;
++    } else {
++      double x = iter.get_double();
++      int ulp = f64_ulp_dist(x,expected);  
++      if(ulp > maxulp) maxulp = ulp;
++      if(ulp > 0) {
++         printf("failed to parse %s. ULP = %d i = %d \n", buf, ulp, i);
++         return false;
+       }
+-      count++;
+-    }
+-    if(count != n_records) {
+-      printf("Something is wrong in JsonStream_utf8_test at window size = %zu.\n", batch_size);
+-      return false;
+     }
+-    printf("ok\n");
+-    return true;
+   }
++  printf("Powers of 2 can be parsed, maxulp = %d.\n", maxulp);
++  return true;
++}
+ 
+-  // returns true if successful
+-  bool JsonStream_test() {
+-    std::cout << "Running " << __func__ << std::endl;
++static const double testing_power_of_ten[] = {
++    1e-307, 1e-306, 1e-305, 1e-304, 1e-303, 1e-302, 1e-301, 1e-300, 1e-299,
++    1e-298, 1e-297, 1e-296, 1e-295, 1e-294, 1e-293, 1e-292, 1e-291, 1e-290,
++    1e-289, 1e-288, 1e-287, 1e-286, 1e-285, 1e-284, 1e-283, 1e-282, 1e-281,
++    1e-280, 1e-279, 1e-278, 1e-277, 1e-276, 1e-275, 1e-274, 1e-273, 1e-272,
++    1e-271, 1e-270, 1e-269, 1e-268, 1e-267, 1e-266, 1e-265, 1e-264, 1e-263,
++    1e-262, 1e-261, 1e-260, 1e-259, 1e-258, 1e-257, 1e-256, 1e-255, 1e-254,
++    1e-253, 1e-252, 1e-251, 1e-250, 1e-249, 1e-248, 1e-247, 1e-246, 1e-245,
++    1e-244, 1e-243, 1e-242, 1e-241, 1e-240, 1e-239, 1e-238, 1e-237, 1e-236,
++    1e-235, 1e-234, 1e-233, 1e-232, 1e-231, 1e-230, 1e-229, 1e-228, 1e-227,
++    1e-226, 1e-225, 1e-224, 1e-223, 1e-222, 1e-221, 1e-220, 1e-219, 1e-218,
++    1e-217, 1e-216, 1e-215, 1e-214, 1e-213, 1e-212, 1e-211, 1e-210, 1e-209,
++    1e-208, 1e-207, 1e-206, 1e-205, 1e-204, 1e-203, 1e-202, 1e-201, 1e-200,
++    1e-199, 1e-198, 1e-197, 1e-196, 1e-195, 1e-194, 1e-193, 1e-192, 1e-191,
++    1e-190, 1e-189, 1e-188, 1e-187, 1e-186, 1e-185, 1e-184, 1e-183, 1e-182,
++    1e-181, 1e-180, 1e-179, 1e-178, 1e-177, 1e-176, 1e-175, 1e-174, 1e-173,
++    1e-172, 1e-171, 1e-170, 1e-169, 1e-168, 1e-167, 1e-166, 1e-165, 1e-164,
++    1e-163, 1e-162, 1e-161, 1e-160, 1e-159, 1e-158, 1e-157, 1e-156, 1e-155,
++    1e-154, 1e-153, 1e-152, 1e-151, 1e-150, 1e-149, 1e-148, 1e-147, 1e-146,
++    1e-145, 1e-144, 1e-143, 1e-142, 1e-141, 1e-140, 1e-139, 1e-138, 1e-137,
++    1e-136, 1e-135, 1e-134, 1e-133, 1e-132, 1e-131, 1e-130, 1e-129, 1e-128,
++    1e-127, 1e-126, 1e-125, 1e-124, 1e-123, 1e-122, 1e-121, 1e-120, 1e-119,
++    1e-118, 1e-117, 1e-116, 1e-115, 1e-114, 1e-113, 1e-112, 1e-111, 1e-110,
++    1e-109, 1e-108, 1e-107, 1e-106, 1e-105, 1e-104, 1e-103, 1e-102, 1e-101,
++    1e-100, 1e-99,  1e-98,  1e-97,  1e-96,  1e-95,  1e-94,  1e-93,  1e-92,
++    1e-91,  1e-90,  1e-89,  1e-88,  1e-87,  1e-86,  1e-85,  1e-84,  1e-83,
++    1e-82,  1e-81,  1e-80,  1e-79,  1e-78,  1e-77,  1e-76,  1e-75,  1e-74,
++    1e-73,  1e-72,  1e-71,  1e-70,  1e-69,  1e-68,  1e-67,  1e-66,  1e-65,
++    1e-64,  1e-63,  1e-62,  1e-61,  1e-60,  1e-59,  1e-58,  1e-57,  1e-56,
++    1e-55,  1e-54,  1e-53,  1e-52,  1e-51,  1e-50,  1e-49,  1e-48,  1e-47,
++    1e-46,  1e-45,  1e-44,  1e-43,  1e-42,  1e-41,  1e-40,  1e-39,  1e-38,
++    1e-37,  1e-36,  1e-35,  1e-34,  1e-33,  1e-32,  1e-31,  1e-30,  1e-29,
++    1e-28,  1e-27,  1e-26,  1e-25,  1e-24,  1e-23,  1e-22,  1e-21,  1e-20,
++    1e-19,  1e-18,  1e-17,  1e-16,  1e-15,  1e-14,  1e-13,  1e-12,  1e-11,
++    1e-10,  1e-9,   1e-8,   1e-7,   1e-6,   1e-5,   1e-4,   1e-3,   1e-2,
++    1e-1,   1e0,    1e1,    1e2,    1e3,    1e4,    1e5,    1e6,    1e7,
++    1e8,    1e9,    1e10,   1e11,   1e12,   1e13,   1e14,   1e15,   1e16,
++    1e17,   1e18,   1e19,   1e20,   1e21,   1e22,   1e23,   1e24,   1e25,
++    1e26,   1e27,   1e28,   1e29,   1e30,   1e31,   1e32,   1e33,   1e34,
++    1e35,   1e36,   1e37,   1e38,   1e39,   1e40,   1e41,   1e42,   1e43,
++    1e44,   1e45,   1e46,   1e47,   1e48,   1e49,   1e50,   1e51,   1e52,
++    1e53,   1e54,   1e55,   1e56,   1e57,   1e58,   1e59,   1e60,   1e61,
++    1e62,   1e63,   1e64,   1e65,   1e66,   1e67,   1e68,   1e69,   1e70,
++    1e71,   1e72,   1e73,   1e74,   1e75,   1e76,   1e77,   1e78,   1e79,
++    1e80,   1e81,   1e82,   1e83,   1e84,   1e85,   1e86,   1e87,   1e88,
++    1e89,   1e90,   1e91,   1e92,   1e93,   1e94,   1e95,   1e96,   1e97,
++    1e98,   1e99,   1e100,  1e101,  1e102,  1e103,  1e104,  1e105,  1e106,
++    1e107,  1e108,  1e109,  1e110,  1e111,  1e112,  1e113,  1e114,  1e115,
++    1e116,  1e117,  1e118,  1e119,  1e120,  1e121,  1e122,  1e123,  1e124,
++    1e125,  1e126,  1e127,  1e128,  1e129,  1e130,  1e131,  1e132,  1e133,
++    1e134,  1e135,  1e136,  1e137,  1e138,  1e139,  1e140,  1e141,  1e142,
++    1e143,  1e144,  1e145,  1e146,  1e147,  1e148,  1e149,  1e150,  1e151,
++    1e152,  1e153,  1e154,  1e155,  1e156,  1e157,  1e158,  1e159,  1e160,
++    1e161,  1e162,  1e163,  1e164,  1e165,  1e166,  1e167,  1e168,  1e169,
++    1e170,  1e171,  1e172,  1e173,  1e174,  1e175,  1e176,  1e177,  1e178,
++    1e179,  1e180,  1e181,  1e182,  1e183,  1e184,  1e185,  1e186,  1e187,
++    1e188,  1e189,  1e190,  1e191,  1e192,  1e193,  1e194,  1e195,  1e196,
++    1e197,  1e198,  1e199,  1e200,  1e201,  1e202,  1e203,  1e204,  1e205,
++    1e206,  1e207,  1e208,  1e209,  1e210,  1e211,  1e212,  1e213,  1e214,
++    1e215,  1e216,  1e217,  1e218,  1e219,  1e220,  1e221,  1e222,  1e223,
++    1e224,  1e225,  1e226,  1e227,  1e228,  1e229,  1e230,  1e231,  1e232,
++    1e233,  1e234,  1e235,  1e236,  1e237,  1e238,  1e239,  1e240,  1e241,
++    1e242,  1e243,  1e244,  1e245,  1e246,  1e247,  1e248,  1e249,  1e250,
++    1e251,  1e252,  1e253,  1e254,  1e255,  1e256,  1e257,  1e258,  1e259,
++    1e260,  1e261,  1e262,  1e263,  1e264,  1e265,  1e266,  1e267,  1e268,
++    1e269,  1e270,  1e271,  1e272,  1e273,  1e274,  1e275,  1e276,  1e277,
++    1e278,  1e279,  1e280,  1e281,  1e282,  1e283,  1e284,  1e285,  1e286,
++    1e287,  1e288,  1e289,  1e290,  1e291,  1e292,  1e293,  1e294,  1e295,
++    1e296,  1e297,  1e298,  1e299,  1e300,  1e301,  1e302,  1e303,  1e304,
++    1e305,  1e306,  1e307,  1e308};
++
++
++
++bool number_test_powers_of_ten() {
++  std::cout << __func__ << std::endl;
++  char buf[1024];
++  simdjson::document::parser parser;
++  for (int i = -1000000; i <= 308; ++i) {// large negative values should be zero.
++    auto n = sprintf(buf,"1e%d", i);
++    buf[n] = '\0';
+     fflush(NULL);
+-    const size_t n_records = 10000;
+-    std::string data;
+-    char buf[1024];
+-    for (size_t i = 0; i < n_records; ++i) {
+-      auto n = sprintf(buf,
+-                      "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
+-                      "\"ete\": {\"id\": %zu, \"name\": \"eventail%zu\"}}",
+-                      i, i, (i % 2) ? "homme" : "femme", i % 10, i % 10);
+-      data += std::string(buf, n);
++    auto [doc, error] = parser.parse(buf, n);
++    if (error) {
++      printf("Could not parse '%s': %s\n", buf, simdjson::error_message(error));
++      return false;
+     }
+-    const size_t batch_size = 1000;
+-    printf(".");
+-    fflush(NULL);
+-    simdjson::padded_string str(data);
+-    simdjson::JsonStream<simdjson::padded_string> js{str, batch_size};
+-    int parse_res = simdjson::SUCCESS_AND_HAS_MORE;
+-    size_t count = 0;
+-    simdjson::document::parser parser;
+-    while (parse_res == simdjson::SUCCESS_AND_HAS_MORE) {
+-      parse_res = js.json_parse(parser);
+-      if (parse_res != simdjson::SUCCESS && parse_res != simdjson::SUCCESS_AND_HAS_MORE) {
+-        break;
+-      }
+-      simdjson::document::iterator iter(parser.doc);
+-      if(!iter.is_object()) {
+-        printf("Root should be object\n");
+-        return false;
+-      }
+-      if(!iter.down()) {
+-        printf("Root should not be emtpy\n");
+-        return false;
++    simdjson::document::iterator iter(doc);
++    if(!iter.is_number()) {
++      printf("Root should be number\n");
++      return false;
++    }
++    if(iter.is_integer()) {
++      int64_t x = iter.get_integer();
++      int power = 0;
++      while(x > 1) {
++         if((x % 10) != 0) {
++            printf("failed to parse %s. \n", buf);
++            return false;
++         }
++         x = x / 10;
++         power ++;
+       }
+-      if(!iter.is_string()) {
+-        printf("Object should start with string key\n");
+-        return false;
++      if(power != i)  {
++         printf("failed to parse %s. \n", buf);
++         return false;
+       }
+-      if(strcmp(iter.get_string(),"id")!=0) {
+-        printf("There should a single key, id.\n");
+-        return false;
++    } else if(iter.is_unsigned_integer()) {
++      uint64_t x = iter.get_unsigned_integer();
++      int power = 0;
++      while(x > 1) {
++         if((x % 10) != 0) {
++           printf("failed to parse %s. \n", buf);
++           return false;
++         }
++         x = x / 10;
++         power ++;
+       }
+-      iter.move_to_value();
+-      if(!iter.is_integer()) {
+-        printf("Value of image should be integer\n");
+-        return false;
++      if(power != i) {
++         printf("failed to parse %s. \n", buf);
++         return false;
+       }
+-      int64_t keyid = iter.get_integer();
+-      if(keyid != (int64_t)count) {
+-        printf("key does not match %d, expected %d\n",(int) keyid, (int) count);
+-        return false;
++    } else {
++      double x = iter.get_double();
++      double expected = ((i >= -307) ? testing_power_of_ten[i + 307]: std::pow(10, i));
++      int ulp = (int) f64_ulp_dist(x, expected);
++      if(ulp > 0) {
++         printf("failed to parse %s. \n", buf);
++         printf("actual: %.20g expected: %.20g \n", x, expected);
++         printf("ULP: %d \n", ulp);
++         return false;
+       }
+-      count++;
+     }
+-    if(count != n_records) {
+-      printf("Something is wrong in JsonStream_test at window size = %zu.\n", batch_size);
+-      return false;
+-    }
+-    printf("ok\n");
+-    return true;
+   }
++  printf("Powers of 10 can be parsed.\n");
++  return true;
++}
+ 
+-  // returns true if successful
+-  bool document_stream_test() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    fflush(NULL);
+-    const size_t n_records = 10000;
+-    std::string data;
+-    char buf[1024];
+-    for (size_t i = 0; i < n_records; ++i) {
+-      auto n = sprintf(buf,
+-                      "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
+-                      "\"ete\": {\"id\": %zu, \"name\": \"eventail%zu\"}}",
+-                      i, i, (i % 2) ? "homme" : "femme", i % 10, i % 10);
+-      data += std::string(buf, n);
+-    }
+-    for(size_t batch_size = 1000; batch_size < 2000; batch_size += (batch_size>1050?10:1)) {
+-      printf(".");
+-      fflush(NULL);
+-      simdjson::padded_string str(data);
+-      simdjson::document::parser parser;
+-      size_t count = 0;
+-      for (auto [doc, error] : parser.parse_many(str, batch_size)) {
+-        if (error) {
+-          printf("Error at on document %zd at batch size %zu: %s\n", count, batch_size, simdjson::error_message(error));
+-          return false;
+-        }
+-
+-        auto [keyid, error2] = doc["id"].as_int64_t();
+-        if (error2) {
+-          printf("Error getting id as int64 on document %zd at batch size %zu: %s\n", count, batch_size, simdjson::error_message(error2));
+-          return false;
+-        }
+-
+-        if (keyid != int64_t(count)) {
+-          printf("key does not match %" PRId64 ", expected %zd on document %zd at batch size %zu\n", keyid, count, count, batch_size);
+-          return false;
+-        }
+ 
+-        count++;
+-      }
+-      if(count != n_records) {
+-        printf("Found wrong number of documents %zd, expected %zd at batch size %zu\n", count, n_records, batch_size);
+-        return false;
+-      }
+-    }
+-    printf("ok\n");
+-    return true;
++// adversarial example that once triggred overruns, see https://github.com/lemire/simdjson/issues/345
++bool bad_example() {
++  std::cout << __func__ << std::endl;
++  std::string badjson = "[7,7,7,7,6,7,7,7,6,7,7,6,[7,7,7,7,6,7,7,7,6,7,7,6,7,7,7,7,7,7,6";
++  simdjson::document::parser parser = simdjson::build_parsed_json(badjson);
++  if(parser.is_valid()) {
++    printf("This json should not be valid %s.\n", badjson.c_str());
++    return false;
+   }
++  return true;
++}
++// returns true if successful
++bool stable_test() {
++  std::cout << __func__ << std::endl;
++  std::string json = "{"
++        "\"Image\":{"
++            "\"Width\":800,"
++            "\"Height\":600,"
++            "\"Title\":\"View from 15th Floor\","
++            "\"Thumbnail\":{"
++            "\"Url\":\"http://www.example.com/image/481989943\","
++            "\"Height\":125,"
++            "\"Width\":100"
++            "},"
++            "\"Animated\":false,"
++            "\"IDs\":[116,943.3,234,38793]"
++          "}"
++      "}";
++  simdjson::document::parser parser = simdjson::build_parsed_json(json);
++  std::ostringstream myStream;
++  if( ! parser.print_json(myStream) ) {
++    std::cout << "cannot print it out? " << std::endl;
++    return false;
++  }
++  std::string newjson = myStream.str();
++  if(json != newjson) {
++    std::cout << "serialized json differs!" << std::endl;
++    std::cout << json << std::endl;
++    std::cout << newjson << std::endl;
++  }
++  return newjson == json;
++}
+ 
+-  // returns true if successful
+-  bool document_stream_utf8_test() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    fflush(NULL);
+-    const size_t n_records = 10000;
+-    std::string data;
+-    char buf[1024];
+-    for (size_t i = 0; i < n_records; ++i) {
+-      auto n = sprintf(buf,
+-                      "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
+-                      "\"été\": {\"id\": %zu, \"name\": \"éventail%zu\"}}",
+-                      i, i, (i % 2) ? "⺃" : "⺕", i % 10, i % 10);
+-      data += std::string(buf, n);
+-    }
+-    for(size_t batch_size = 1000; batch_size < 2000; batch_size += (batch_size>1050?10:1)) {
+-      printf(".");
+-      fflush(NULL);
+-      simdjson::padded_string str(data);
+-      simdjson::document::parser parser;
+-      size_t count = 0;
+-      for (auto [doc, error] : parser.parse_many(str, batch_size)) {
+-        if (error) {
+-          printf("Error at on document %zd at batch size %zu: %s\n", count, batch_size, simdjson::error_message(error));
+-          return false;
+-        }
+-
+-        auto [keyid, error2] = doc["id"].as_int64_t();
+-        if (error2) {
+-          printf("Error getting id as int64 on document %zd at batch size %zu: %s\n", count, batch_size, simdjson::error_message(error2));
+-          return false;
+-        }
+-
+-        if (keyid != int64_t(count)) {
+-          printf("key does not match %" PRId64 ", expected %zd on document %zd at batch size %zu\n", keyid, count, count, batch_size);
+-          return false;
+-        }
++static simdjson::document::stream parse_many_stream_return(simdjson::document::parser &parser, simdjson::padded_string &str) {
++  return parser.parse_many(str);
++}
++// this is a compilation test
++UNUSED static void parse_many_stream_assign() {
++    simdjson::document::parser parser;
++    simdjson::padded_string str("{}",2);
++    simdjson::document::stream s1 = parse_many_stream_return(parser, str);
++}
+ 
+-        count++;
+-      }
+-      if(count != n_records) {
+-        printf("Found wrong number of documents %zd, expected %zd at batch size %zu\n", count, n_records, batch_size);
++static bool parse_json_message_issue467(char const* message, std::size_t len, size_t expectedcount) {
++  simdjson::document::parser parser;
++  size_t count = 0;
++  simdjson::padded_string str(message,len);
++  for (auto [doc, error] : parser.parse_many(str, len)) {
++    if (error) {
++        std::cerr << "Failed with simdjson error= " << error << std::endl;
+         return false;
+-      }
+     }
+-    printf("ok\n");
+-    return true;
++    count++;
+   }
+-
+-  bool run() {
+-    return document_stream_test() &&
+-           document_stream_utf8_test() &&
+-           JsonStream_test() &&
+-           JsonStream_utf8_test();
++  if(count != expectedcount) {
++      std::cerr << "bad count" << std::endl;
++      return false;
+   }
++  return true;
+ }
+ 
+-namespace parse_api_tests {
+-  using namespace std;
+-  using namespace simdjson;
++bool json_issue467() {
++  std::cout << "Running " << __func__ << std::endl;
++  const char * single_message = "{\"error\":[],\"result\":{\"token\":\"xxx\"}}";
++  const char* two_messages = "{\"error\":[],\"result\":{\"token\":\"xxx\"}}{\"error\":[],\"result\":{\"token\":\"xxx\"}}";
+ 
+-  const padded_string BASIC_JSON = string("[1,2,3]");
+-  const padded_string BASIC_NDJSON = string("[1,2,3]\n[4,5,6]");
+-  // const padded_string EMPTY_NDJSON = string("");
++  if(!parse_json_message_issue467(single_message, strlen(single_message),1)) {
++    return false;
++  }
++  if(!parse_json_message_issue467(two_messages, strlen(two_messages),2)) {
++    return false;
++  }
++  return true;
++}
+ 
+-  bool document_parse() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    auto [doc, error] = document::parse(BASIC_JSON);
+-    if (error) { cerr << error << endl; return false; }
+-    if (!doc.root().is_array()) { cerr << "Document did not parse as an array" << endl; return false; }
+-    return true;
++// returns true if successful
++bool navigate_test() {
++  std::cout << "Running " << __func__ << std::endl;
++  std::string json = "{"
++        "\"Image\": {"
++            "\"Width\":  800,"
++            "\"Height\": 600,"
++            "\"Title\":  \"View from 15th Floor\","
++            "\"Thumbnail\": {"
++            "    \"Url\":    \"http://www.example.com/image/481989943\","
++            "    \"Height\": 125,"
++            "    \"Width\":  100"
++            "},"
++            "\"Animated\" : false,"
++            "\"IDs\": [116, 943, 234, 38793]"
++          "}"
++      "}";
++
++  auto [doc, error] = simdjson::document::parse(json);
++  if (error) {
++    printf("Could not parse '%s': %s\n", json.data(), simdjson::error_message(error));
++    return false;
+   }
+-  bool parser_parse() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    document::parser parser;
+-    auto [doc, error] = parser.parse(BASIC_JSON);
+-    if (error) { cerr << error << endl; return false; }
+-    if (!doc.root().is_array()) { cerr << "Document did not parse as an array" << endl; return false; }
+-    return true;
++  simdjson::document::iterator iter(doc);
++  if(!iter.is_object()) {
++    printf("Root should be object\n");
++    return false;
+   }
+-  bool parser_parse_many() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    document::parser parser;
+-    int count = 0;
+-    for (auto [doc, error] : parser.parse_many(BASIC_NDJSON)) {
+-      if (error) { cerr << error << endl; return false; }
+-      if (!doc.root().is_array()) { cerr << "Document did not parse as an array" << endl; return false; }
+-      count++;
+-    }
+-    if (count != 2) { cerr << "parse_many returned " << count << " documents, expected 2" << endl; return false; }
+-    return true;
++  if(iter.move_to_key("bad key")) {
++    printf("We should not move to a non-existing key\n");
++    return false;    
+   }
+-  // bool parser_parse_many_empty() {
+-  //   std::cout << "Running " << __func__ << std::endl;
+-  //   document::parser parser;
+-  //   int count = 0;
+-  //   for (auto [doc, error] : parser.parse_many(EMPTY_NDJSON)) {
+-  //     if (error) { cerr << error << endl; return false; }
+-  //     count++;
+-  //   }
+-  //   if (count != 0) { cerr << "parse_many returned " << count << " documents, expected 0" << endl; return false; }
+-  //   return true;
+-  // }
+-
+-  bool document_load() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    auto [doc, error] = document::load(JSON_TEST_PATH);
+-    if (error) { cerr << error << endl; return false; }
+-    if (!doc.root().is_object()) { cerr << "Document did not parse as an object" << endl; return false; }
+-    return true;
++  if(!iter.is_object()) {
++    printf("We should have remained at the object.\n");
++    return false;
+   }
+-  bool parser_load() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    document::parser parser;
+-    auto [doc, error] = parser.load(JSON_TEST_PATH);
+-    if (error) { cerr << error << endl; return false; }
+-    if (!doc.root().is_object()) { cerr << "Document did not parse as an object" << endl; return false; }
+-    return true;
++  if(iter.move_to_key_insensitive("bad key")) {
++    printf("We should not move to a non-existing key\n");
++    return false;    
+   }
+-  bool parser_load_many() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    document::parser parser;
+-    int count = 0;
+-    for (auto [doc, error] : parser.load_many(NDJSON_TEST_PATH)) {
+-      if (error) { cerr << error << endl; return false; }
+-      if (!doc.root().is_array()) { cerr << "Document did not parse as an array" << endl; return false; }
+-      count++;
+-    }
+-    if (count != 793) { cerr << "Expected 793 documents, but load_many loaded " << count << " documents." << endl; return false; }
+-    return true;
++  if(!iter.is_object()) {
++    printf("We should have remained at the object.\n");
++    return false;
+   }
+-
+-#if SIMDJSON_EXCEPTIONS
+-
+-  bool document_parse_exception() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    document doc = document::parse(BASIC_JSON);
+-    if (!doc.root().is_array()) { cerr << "Document did not parse as an array" << endl; return false; }
+-    return true;
++  if(iter.move_to_key("bad key", 7)) {
++    printf("We should not move to a non-existing key\n");
++    return false;    
+   }
+-  bool parser_parse_exception() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    document::parser parser;
+-    const document& doc = parser.parse(BASIC_JSON);
+-    if (!doc.root().is_array()) { cerr << "Document did not parse as an array" << endl; return false; }
+-    return true;
++  if(!iter.is_object()) {
++    printf("We should have remained at the object.\n");
++    return false;
+   }
+-  bool parser_parse_many_exception() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    document::parser parser;
+-    int count = 0;
+-    for (const document &doc : parser.parse_many(BASIC_NDJSON)) {
+-      if (!doc.root().is_array()) { cerr << "Document did not parse as an array" << endl; return false; }
+-      count++;
+-    }
+-    if (count != 2) { cerr << "parse_many returned " << count << " documents, expected 2" << endl; return false; }
+-    return true;
++  if(!iter.down()) {
++    printf("Root should not be emtpy\n");
++    return false;
+   }
+-
+-  bool document_load_exception() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    document doc = document::load(JSON_TEST_PATH);
+-    if (!doc.root().is_object()) { cerr << "Document did not parse as an object" << endl; return false; }
+-    return true;
++  if(!iter.is_string()) {
++    printf("Object should start with string key\n");
++    return false;
+   }
+-  bool parser_load_exception() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    document::parser parser;
+-    const document &doc = parser.load(JSON_TEST_PATH);
+-    if (!doc.root().is_object()) { cerr << "Document did not parse as an object" << endl; return false; }
+-    return true;
++  if(iter.prev()) {
++    printf("We should not be able to go back from the start of the scope.\n");
++    return false;
+   }
+-  bool parser_load_many_exception() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    document::parser parser;
+-    int count = 0;
+-    for (const document &doc : parser.load_many(NDJSON_TEST_PATH)) {
+-      if (!doc.root().is_array()) { cerr << "Document did not parse as an array" << endl; return false; }
+-      count++;
+-    }
+-    if (count != 793) { cerr << "Expected 1 document, but load_many loaded " << count << " documents." << endl; return false; }
+-    return true;
++  if(strcmp(iter.get_string(),"Image")!=0) {
++    printf("There should be a single key, image.\n");
++    return false;
+   }
+-#endif
+-
+-  bool run() {
+-    return document_parse() &&
+-           parser_parse() &&
+-           parser_parse_many() &&
+-//           parser_parse_many_empty() &&
+-           document_load() &&
+-           parser_load() &&
+-           parser_load_many() &&
+-#if SIMDJSON_EXCEPTIONS
+-           document_parse_exception() &&
+-           parser_parse_exception() &&
+-           parser_parse_many_exception() &&
+-           document_load_exception() &&
+-           parser_load_exception() &&
+-           parser_load_many_exception() &&
+-#endif
+-           true;
++  iter.move_to_value();
++  if(!iter.is_object()) {
++    printf("Value of image should be object\n");
++    return false;
++  }
++  if(!iter.down()) {
++    printf("Image key should not be emtpy\n");
++    return false;
++  }
++  if(!iter.next()) {
++    printf("key should have a value\n");
++    return false;
++  }
++  if(!iter.prev()) {
++    printf("We should go back to the key.\n");
++    return false;
+   }
++  if(strcmp(iter.get_string(),"Width")!=0) {
++    printf("There should be a  key Width.\n");
++    return false;
++  }
++  if(!iter.up()) {
++    return false;
++  }
++  if(!iter.move_to_key("IDs")) {
++    printf("We should be able to move to an existing key\n");
++    return false;    
++  }
++  if(!iter.is_array()) {
++    printf("Value of IDs should be array, it is %c \n", iter.get_type());
++    return false;
++  }
++  if(iter.move_to_index(4)) {
++    printf("We should not be able to move to a non-existing index\n");
++    return false;    
++  }
++  if(!iter.is_array()) {
++    printf("We should have remained at the array\n");
++    return false;
++  }
++  return true;
+ }
+ 
+-namespace dom_api_tests {
+-  using namespace std;
+-  using namespace simdjson;
+-
+-  // returns true if successful
+-  bool document_iterator_test() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    std::string json = "{"
+-          "\"Image\": {"
+-              "\"Width\":  800,"
+-              "\"Height\": 600,"
+-              "\"Title\":  \"View from 15th Floor\","
+-              "\"Thumbnail\": {"
+-              "    \"Url\":    \"http://www.example.com/image/481989943\","
+-              "    \"Height\": 125,"
+-              "    \"Width\":  100"
+-              "},"
+-              "\"Animated\" : false,"
+-              "\"IDs\": [116, 943, 234, 38793]"
+-            "}"
+-        "}";
+-
+-    auto [doc, error] = simdjson::document::parse(json);
+-    if (error) {
+-      printf("Could not parse '%s': %s\n", json.data(), simdjson::error_message(error));
+-      return false;
++// returns true if successful
++bool JsonStream_utf8_test() {
++  std::cout << "Running " << __func__ << std::endl;
++  fflush(NULL);
++  const size_t n_records = 10000;
++  std::string data;
++  char buf[1024];
++  for (size_t i = 0; i < n_records; ++i) {
++    auto n = sprintf(buf,
++                     "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
++                     "\"été\": {\"id\": %zu, \"name\": \"éventail%zu\"}}",
++                     i, i, (i % 2) ? "⺃" : "⺕", i % 10, i % 10);
++    data += std::string(buf, n);
++  }
++  const size_t batch_size = 1000;
++  printf(".");
++  fflush(NULL);
++  simdjson::padded_string str(data);
++  simdjson::JsonStream<simdjson::padded_string> js{str, batch_size};
++  int parse_res = simdjson::SUCCESS_AND_HAS_MORE;
++  size_t count = 0;
++  simdjson::document::parser parser;
++  while (parse_res == simdjson::SUCCESS_AND_HAS_MORE) {
++    parse_res = js.json_parse(parser);
++    if (parse_res != simdjson::SUCCESS && parse_res != simdjson::SUCCESS_AND_HAS_MORE) {
++      break;
+     }
+-    simdjson::document::iterator iter(doc);
++    simdjson::document::iterator iter(parser.doc);
+     if(!iter.is_object()) {
+       printf("Root should be object\n");
+       return false;
+     }
+-    if(iter.move_to_key("bad key")) {
+-      printf("We should not move to a non-existing key\n");
+-      return false;    
++    if(!iter.down()) {
++      printf("Root should not be emtpy\n");
++      return false;
+     }
+-    if(!iter.is_object()) {
+-      printf("We should have remained at the object.\n");
++    if(!iter.is_string()) {
++      printf("Object should start with string key\n");
+       return false;
+     }
+-    if(iter.move_to_key_insensitive("bad key")) {
+-      printf("We should not move to a non-existing key\n");
+-      return false;    
++    if(strcmp(iter.get_string(),"id")!=0) {
++      printf("There should a single key, id.\n");
++      return false;
+     }
+-    if(!iter.is_object()) {
+-      printf("We should have remained at the object.\n");
++    iter.move_to_value();
++    if(!iter.is_integer()) {
++      printf("Value of image should be integer\n");
+       return false;
+     }
+-    if(iter.move_to_key("bad key", 7)) {
+-      printf("We should not move to a non-existing key\n");
+-      return false;    
++    int64_t keyid = iter.get_integer();
++    if(keyid != (int64_t)count) {
++      printf("key does not match %d, expected %d\n",(int) keyid, (int) count);
++      return false;
++    }
++    count++;
++  }
++  if(count != n_records) {
++    printf("Something is wrong in JsonStream_utf8_test at window size = %zu.\n", batch_size);
++    return false;
++  }
++  printf("ok\n");
++  return true;
++}
++
++// returns true if successful
++bool JsonStream_test() {
++  std::cout << "Running " << __func__ << std::endl;
++  fflush(NULL);
++  const size_t n_records = 10000;
++  std::string data;
++  char buf[1024];
++  for (size_t i = 0; i < n_records; ++i) {
++    auto n = sprintf(buf,
++                     "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
++                     "\"ete\": {\"id\": %zu, \"name\": \"eventail%zu\"}}",
++                     i, i, (i % 2) ? "homme" : "femme", i % 10, i % 10);
++    data += std::string(buf, n);
++  }
++  const size_t batch_size = 1000;
++  printf(".");
++  fflush(NULL);
++  simdjson::padded_string str(data);
++  simdjson::JsonStream<simdjson::padded_string> js{str, batch_size};
++  int parse_res = simdjson::SUCCESS_AND_HAS_MORE;
++  size_t count = 0;
++  simdjson::document::parser parser;
++  while (parse_res == simdjson::SUCCESS_AND_HAS_MORE) {
++    parse_res = js.json_parse(parser);
++    if (parse_res != simdjson::SUCCESS && parse_res != simdjson::SUCCESS_AND_HAS_MORE) {
++      break;
+     }
++    simdjson::document::iterator iter(parser.doc);
+     if(!iter.is_object()) {
+-      printf("We should have remained at the object.\n");
++      printf("Root should be object\n");
+       return false;
+     }
+     if(!iter.down()) {
+@@ -885,56 +571,183 @@ namespace dom_api_tests {
+       printf("Object should start with string key\n");
+       return false;
+     }
+-    if(iter.prev()) {
+-      printf("We should not be able to go back from the start of the scope.\n");
+-      return false;
+-    }
+-    if(strcmp(iter.get_string(),"Image")!=0) {
+-      printf("There should be a single key, image.\n");
++    if(strcmp(iter.get_string(),"id")!=0) {
++      printf("There should a single key, id.\n");
+       return false;
+     }
+     iter.move_to_value();
+-    if(!iter.is_object()) {
+-      printf("Value of image should be object\n");
++    if(!iter.is_integer()) {
++      printf("Value of image should be integer\n");
+       return false;
+     }
+-    if(!iter.down()) {
+-      printf("Image key should not be emtpy\n");
++    int64_t keyid = iter.get_integer();
++    if(keyid != (int64_t)count) {
++      printf("key does not match %d, expected %d\n",(int) keyid, (int) count);
+       return false;
+     }
+-    if(!iter.next()) {
+-      printf("key should have a value\n");
+-      return false;
++    count++;
++  }
++  if(count != n_records) {
++    printf("Something is wrong in JsonStream_test at window size = %zu.\n", batch_size);
++    return false;
++  }
++  printf("ok\n");
++  return true;
++}
++
++// returns true if successful
++bool document_stream_test() {
++  std::cout << "Running " << __func__ << std::endl;
++  fflush(NULL);
++  const size_t n_records = 10000;
++  std::string data;
++  char buf[1024];
++  for (size_t i = 0; i < n_records; ++i) {
++    auto n = sprintf(buf,
++                     "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
++                     "\"ete\": {\"id\": %zu, \"name\": \"eventail%zu\"}}",
++                     i, i, (i % 2) ? "homme" : "femme", i % 10, i % 10);
++    data += std::string(buf, n);
++  }
++  for(size_t batch_size = 1000; batch_size < 2000; batch_size += (batch_size>1050?10:1)) {
++    printf(".");
++    fflush(NULL);
++    simdjson::padded_string str(data);
++    simdjson::document::parser parser;
++    size_t count = 0;
++    for (auto [doc, error] : parser.parse_many(str, batch_size)) {
++      if (error) {
++        printf("Error at on document %zd at batch size %zu: %s\n", count, batch_size, simdjson::error_message(error));
++        return false;
++      }
++
++      auto [keyid, error2] = doc["id"].as_int64_t();
++      if (error2) {
++        printf("Error getting id as int64 on document %zd at batch size %zu: %s\n", count, batch_size, simdjson::error_message(error2));
++        return false;
++      }
++
++      if (keyid != int64_t(count)) {
++        printf("key does not match %" PRId64 ", expected %zd on document %zd at batch size %zu\n", keyid, count, count, batch_size);
++        return false;
++      }
++
++      count++;
+     }
+-    if(!iter.prev()) {
+-      printf("We should go back to the key.\n");
++    if(count != n_records) {
++      printf("Found wrong number of documents %zd, expected %zd at batch size %zu\n", count, n_records, batch_size);
+       return false;
+     }
+-    if(strcmp(iter.get_string(),"Width")!=0) {
+-      printf("There should be a  key Width.\n");
+-      return false;
++  }
++  printf("ok\n");
++  return true;
++}
++
++// returns true if successful
++bool document_stream_utf8_test() {
++  std::cout << "Running " << __func__ << std::endl;
++  fflush(NULL);
++  const size_t n_records = 10000;
++  std::string data;
++  char buf[1024];
++  for (size_t i = 0; i < n_records; ++i) {
++    auto n = sprintf(buf,
++                     "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
++                     "\"été\": {\"id\": %zu, \"name\": \"éventail%zu\"}}",
++                     i, i, (i % 2) ? "⺃" : "⺕", i % 10, i % 10);
++    data += std::string(buf, n);
++  }
++  for(size_t batch_size = 1000; batch_size < 2000; batch_size += (batch_size>1050?10:1)) {
++    printf(".");
++    fflush(NULL);
++    simdjson::padded_string str(data);
++    simdjson::document::parser parser;
++    size_t count = 0;
++    for (auto [doc, error] : parser.parse_many(str, batch_size)) {
++      if (error) {
++        printf("Error at on document %zd at batch size %zu: %s\n", count, batch_size, simdjson::error_message(error));
++        return false;
++      }
++
++      auto [keyid, error2] = doc["id"].as_int64_t();
++      if (error2) {
++        printf("Error getting id as int64 on document %zd at batch size %zu: %s\n", count, batch_size, simdjson::error_message(error2));
++        return false;
++      }
++
++      if (keyid != int64_t(count)) {
++        printf("key does not match %" PRId64 ", expected %zd on document %zd at batch size %zu\n", keyid, count, count, batch_size);
++        return false;
++      }
++
++      count++;
+     }
+-    if(!iter.up()) {
++    if(count != n_records) {
++      printf("Found wrong number of documents %zd, expected %zd at batch size %zu\n", count, n_records, batch_size);
+       return false;
+     }
+-    if(!iter.move_to_key("IDs")) {
+-      printf("We should be able to move to an existing key\n");
+-      return false;    
++  }
++  printf("ok\n");
++  return true;
++}
++
++// returns true if successful
++bool skyprophet_test() {
++  std::cout << "Running " << __func__ << std::endl;
++  const size_t n_records = 100000;
++  std::vector<std::string> data;
++  char buf[1024];
++  for (size_t i = 0; i < n_records; ++i) {
++    auto n = sprintf(buf,
++                     "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
++                     "\"school\": {\"id\": %zu, \"name\": \"school%zu\"}}",
++                     i, i, (i % 2) ? "male" : "female", i % 10, i % 10);
++    data.emplace_back(std::string(buf, n));
++  }
++  for (size_t i = 0; i < n_records; ++i) {
++    auto n = sprintf(buf, "{\"counter\": %f, \"array\": [%s]}", i * 3.1416,
++                     (i % 2) ? "true" : "false");
++    data.emplace_back(std::string(buf, n));
++  }
++  for (size_t i = 0; i < n_records; ++i) {
++    auto n = sprintf(buf, "{\"number\": %e}", i * 10000.31321321);
++    data.emplace_back(std::string(buf, n));
++  }
++  data.emplace_back(std::string("true"));
++  data.emplace_back(std::string("false"));
++  data.emplace_back(std::string("null"));
++  data.emplace_back(std::string("0.1"));
++  size_t maxsize = 0;
++  for (auto &s : data) {
++    if (maxsize < s.size())
++      maxsize = s.size();
++  }
++  simdjson::document::parser parser;
++  size_t counter = 0;
++  for (auto &rec : data) {
++    if ((counter % 10000) == 0) {
++      printf(".");
++      fflush(NULL);
+     }
+-    if(!iter.is_array()) {
+-      printf("Value of IDs should be array, it is %c \n", iter.get_type());
++    counter++;
++    auto ok1 = json_parse(rec.c_str(), rec.length(), parser);
++    if (ok1 != 0 || !parser.is_valid()) {
++      printf("Something is wrong in skyprophet_test: %s.\n", rec.c_str());
+       return false;
+     }
+-    if(iter.move_to_index(4)) {
+-      printf("We should not be able to move to a non-existing index\n");
+-      return false;    
+-    }
+-    if(!iter.is_array()) {
+-      printf("We should have remained at the array\n");
++    auto ok2 = json_parse(rec, parser);
++    if (ok2 != 0 || !parser.is_valid()) {
++      printf("Something is wrong in skyprophet_test: %s.\n", rec.c_str());
+       return false;
+     }
+-    return true;
+   }
++  printf("\n");
++  return true;
++}
++
++namespace dom_api {
++  using namespace std;
++  using namespace simdjson;
+ 
+   bool object_iterator() {
+     std::cout << "Running " << __func__ << std::endl;
+@@ -1079,7 +892,7 @@ namespace dom_api_tests {
+     if (doc["a"].as_uint64_t().first != 1) { cerr << "Expected uint64_t(doc[\"a\"]) to be 1, was " << doc["a"].first << endl; return false; }
+ 
+     UNUSED document::element val;
+-    // tie(val, error) = doc["d"]; fails with "no viable overloaded '='" on Apple clang version 11.0.0	    tie(val, error) = doc["d"];
++    // tie(val, error) = doc["d"]; fails with "no viable overloaded '='" on Apple clang version 11.0.0
+     doc["d"].tie(val, error);
+     if (error != simdjson::NO_SUCH_FIELD) { cerr << "Expected NO_SUCH_FIELD error for uint64_t(doc[\"d\"]), got " << error << endl; return false; }
+     return true;
+@@ -1098,7 +911,7 @@ namespace dom_api_tests {
+     if (error) { cerr << "Error: " << error << endl; return false; }
+     if (obj["obj"]["a"].as_uint64_t().first != 1) { cerr << "Expected uint64_t(doc[\"obj\"][\"a\"]) to be 1, was " << doc["obj"]["a"].first << endl; return false; }
+ 
+-    obj["obj"].as_object().tie(obj, error); //  tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0
++    obj["obj"].as_object().tie(obj, error);  //  tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0
+     if (obj["a"].as_uint64_t().first != 1) { cerr << "Expected uint64_t(obj[\"a\"]) to be 1, was " << obj["a"].first << endl; return false; }
+     if (obj["b"].as_uint64_t().first != 2) { cerr << "Expected uint64_t(obj[\"b\"]) to be 2, was " << obj["b"].first << endl; return false; }
+     if (obj["c"].as_uint64_t().first != 3) { cerr << "Expected uint64_t(obj[\"c\"]) to be 3, was " << obj["c"].first << endl; return false; }
+@@ -1108,7 +921,7 @@ namespace dom_api_tests {
+     if (obj["a"].as_uint64_t().first != 1) { cerr << "Expected uint64_t(obj[\"a\"]) to be 1, was " << obj["a"].first << endl; return false; }
+ 
+     UNUSED document::element val;
+-    doc["d"].tie(val, error); // tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0;
++    doc["d"].tie(val, error);  //  tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0
+     if (error != simdjson::NO_SUCH_FIELD) { cerr << "Expected NO_SUCH_FIELD error for uint64_t(obj[\"d\"]), got " << error << endl; return false; }
+     return true;
+   }
+@@ -1132,14 +945,14 @@ namespace dom_api_tests {
+     if (error) { cerr << "Error: " << error << endl; return false; }
+     for (auto tweet : tweets) {
+       document::object user;
+-      tweet["user"].as_object().tie(user, error); // tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0;
++      tweet["user"].as_object().tie(user, error);  //  tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0
+       if (error) { cerr << "Error: " << error << endl; return false; }
+       bool default_profile;
+-      user["default_profile"].as_bool().tie(default_profile, error); // tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0;
++      user["default_profile"].as_bool().tie(default_profile, error);  //  tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0
+       if (error) { cerr << "Error: " << error << endl; return false; }
+       if (default_profile) {
+         std::string_view screen_name;
+-        user["screen_name"].as_string().tie(screen_name, error); // tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0;
++        user["screen_name"].as_string().tie(screen_name, error);  //  tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0
+         if (error) { cerr << "Error: " << error << endl; return false; }
+         default_users.insert(screen_name);
+       }
+@@ -1160,13 +973,13 @@ namespace dom_api_tests {
+       if (!not_found) {
+         for (auto image : media) {
+           document::object sizes;
+-          image["sizes"].as_object().tie(sizes, error); // tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0;
++          image["sizes"].as_object().tie(sizes, error);  //  tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0
+           if (error) { cerr << "Error: " << error << endl; return false; }
+           for (auto [key, size] : sizes) {
+             uint64_t width, height;
+-            size["w"].as_uint64_t().tie(width, error); // tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0;
++            size["w"].as_uint64_t().tie(width, error);  //  tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0
+             if (error) { cerr << "Error: " << error << endl; return false; }
+-            size["h"].as_uint64_t().tie(height, error); // tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0;
++            size["h"].as_uint64_t().tie(height, error); //  tie(...) = fails with "no viable overloaded '='" on Apple clang version 11.0.0
+             if (error) { cerr << "Error: " << error << endl; return false; }
+             image_sizes.insert(make_pair(width, height));
+           }
+@@ -1333,9 +1146,8 @@ namespace dom_api_tests {
+ 
+ #endif
+ 
+-  bool run() {
+-    return document_iterator_test() &&
+-           object_iterator() &&
++  bool run_tests() {
++    return object_iterator() &&
+            array_iterator() &&
+            object_iterator_empty() &&
+            array_iterator_empty() &&
+@@ -1595,7 +1407,7 @@ namespace format_tests {
+   }
+ #endif // SIMDJSON_EXCEPTIONS
+ 
+-  bool run() {
++  bool run_tests() {
+     return print_document_parse() && print_minify_document_parse() &&
+            print_parser_parse() && print_minify_parser_parse() &&
+            print_element() && print_minify_element() &&
+@@ -1633,6 +1445,21 @@ bool error_messages_in_correct_order() {
+   return true;
+ }
+ 
++bool lots_of_brackets() {
++  std::string input;
++  for(size_t i = 0; i < 16; i++) {
++    input += "[";
++  }
++  for(size_t i = 0; i < 16; i++) {
++    input += "]";
++  }
++  auto [doc, error] = simdjson::document::parse(input);
++  if (error) { std::cerr << "Error: " << simdjson::error_message(error) << std::endl; return false; }
++  std::cout << doc;
++  std::cout << std::endl;
++  return true;
++}
++
+ int main(int argc, char *argv[]) {
+   std::cout << std::unitbuf;
+ #ifndef _MSC_VER
+@@ -1663,17 +1490,38 @@ int main(int argc, char *argv[]) {
+     printf("unsupported CPU\n"); 
+   }
+   std::cout << "Running basic tests." << std::endl;
+-  if (parse_api_tests::run() &&
+-      dom_api_tests::run() &&
+-      format_tests::run() &&
+-      document_tests::run() &&
+-      number_tests::run() &&
+-      document_stream_tests::run() &&
+-      error_messages_in_correct_order()
+-  ) {
+-    std::cout << "Basic tests are ok." << std::endl;
+-    return EXIT_SUCCESS;
+-  } else {
++  if(!lots_of_brackets())
+     return EXIT_FAILURE;
+-  }
++  if(!json_issue467())
++    return EXIT_FAILURE;
++  if(!number_test_small_integers())
++    return EXIT_FAILURE;
++  if(!stable_test())
++    return EXIT_FAILURE;
++  if(!bad_example())
++    return EXIT_FAILURE;
++  if(!number_test_powers_of_two())
++    return EXIT_FAILURE;
++  if(!number_test_powers_of_ten())
++    return EXIT_FAILURE;
++  if (!navigate_test())
++    return EXIT_FAILURE;
++  if (!skyprophet_test())
++    return EXIT_FAILURE;
++  if (!dom_api::run_tests())
++    return EXIT_FAILURE;
++  if (!format_tests::run_tests())
++    return EXIT_FAILURE;
++  if(!document_stream_test())
++    return EXIT_FAILURE;
++  if(!document_stream_utf8_test())
++    return EXIT_FAILURE;
++  if(!JsonStream_test())
++    return EXIT_FAILURE;
++  if(!JsonStream_utf8_test())
++    return EXIT_FAILURE;
++  if(!error_messages_in_correct_order())
++    return EXIT_FAILURE;
++  std::cout << "Basic tests are ok." << std::endl;
++  return EXIT_SUCCESS;
+ }
+diff --git a/tests/parse_many_test.cpp b/tests/parse_many_test.cpp
+index be7f9002..80f239cc 100644
+--- a/tests/parse_many_test.cpp
++++ b/tests/parse_many_test.cpp
+@@ -101,14 +101,6 @@ bool validate(const char *dirname) {
+                 printf("size of file in bytes: %zu \n", json.size());
+                 everything_fine = false;
+             }
+-            if(!error) {
+-              // issue 570, we just want to check for segfault
+-              simdjson::document::parser parser;
+-              for (const simdjson::document &doc : parser.load_many(fullpath)) {
+-                auto iter = simdjson::document::iterator(doc);
+-                //do something
+-              }
+-            }
+             free(fullpath);
+         }
+     }

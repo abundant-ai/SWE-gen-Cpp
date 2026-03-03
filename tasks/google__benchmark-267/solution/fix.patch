@@ -1,0 +1,195 @@
+diff --git a/README.md b/README.md
+index 8c495cc..a78c5b7 100644
+--- a/README.md
++++ b/README.md
+@@ -391,6 +391,13 @@ The number of runs of each benchmark is specified globally by the
+ `Repetitions` on the registered benchmark object. When a benchmark is run
+ more than once the mean and standard deviation of the runs will be reported.
+ 
++Additionally the `--benchmark_report_aggregates_only={true|false}` flag or
++`ReportAggregatesOnly(bool)` function can be used to change how repeated tests
++are reported. By default the result of each repeated run is reported. When this
++option is 'true' only the mean and standard deviation of the runs is reported.
++Calling `ReportAggregatesOnly(bool)` on a registered benchmark object overrides
++the value of the flag for that benchmark.
++
+ ## Fixtures
+ Fixture tests are created by
+ first defining a type that derives from ::benchmark::Fixture and then
+diff --git a/include/benchmark/benchmark_api.h b/include/benchmark/benchmark_api.h
+index 1a481ac..ddfcb01 100644
+--- a/include/benchmark/benchmark_api.h
++++ b/include/benchmark/benchmark_api.h
+@@ -522,6 +522,11 @@ public:
+   // REQUIRES: `n > 0`
+   Benchmark* Repetitions(int n);
+ 
++  // Specify if each repetition of the benchmark should be reported separately
++  // or if only the final statistics should be reported. If the benchmark
++  // is not repeated then the single result is always reported.
++  Benchmark* ReportAggregatesOnly(bool v = true);
++
+   // If a particular benchmark is I/O bound, runs multiple threads internally or
+   // if for some reason CPU timings are not representative, call this method. If
+   // called, the elapsed time will be used to control how many iterations are
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 515abd7..3a199e5 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -66,6 +66,11 @@ DEFINE_int32(benchmark_repetitions, 1,
+              "The number of runs of each benchmark. If greater than 1, the "
+              "mean and standard deviation of the runs will be reported.");
+ 
++DEFINE_bool(benchmark_report_aggregates_only, false,
++            "Report the result of each benchmark repetitions. When 'true' is "
++            "specified only the mean, standard deviation, and other statistics "
++            "are reported for repeated benchmarks.");
++
+ DEFINE_string(benchmark_format, "console",
+               "The format to use for console output. Valid values are "
+               "'console', 'json', or 'csv'.");
+@@ -311,10 +316,17 @@ static std::unique_ptr<TimerManager> timer_manager = nullptr;
+ 
+ namespace internal {
+ 
++enum ReportMode : unsigned {
++    RM_Unspecified, // The mode has not been manually specified
++    RM_Default,     // The mode is user-specified as default.
++    RM_ReportAggregatesOnly
++};
++
+ // Information kept per benchmark we may want to run
+ struct Benchmark::Instance {
+   std::string      name;
+   Benchmark*       benchmark;
++  ReportMode       report_mode;
+   std::vector<int> arg;
+   TimeUnit         time_unit;
+   int              range_multiplier;
+@@ -364,6 +376,7 @@ public:
+   void RangeMultiplier(int multiplier);
+   void MinTime(double n);
+   void Repetitions(int n);
++  void ReportAggregatesOnly(bool v);
+   void UseRealTime();
+   void UseManualTime();
+   void Complexity(BigO complexity);
+@@ -381,6 +394,7 @@ private:
+   friend class BenchmarkFamilies;
+ 
+   std::string name_;
++  ReportMode report_mode_;
+   std::vector< std::vector<int> > args_;  // Args for all benchmark runs
+   TimeUnit time_unit_;
+   int range_multiplier_;
+@@ -443,6 +457,7 @@ bool BenchmarkFamilies::FindBenchmarks(
+         Benchmark::Instance instance;
+         instance.name = family->name_;
+         instance.benchmark = bench_family.get();
++        instance.report_mode = family->report_mode_;
+         instance.arg = args;
+         instance.time_unit = family->time_unit_;
+         instance.range_multiplier = family->range_multiplier_;
+@@ -488,7 +503,7 @@ bool BenchmarkFamilies::FindBenchmarks(
+ }
+ 
+ BenchmarkImp::BenchmarkImp(const char* name)
+-    : name_(name), time_unit_(kNanosecond),
++    : name_(name), report_mode_(RM_Unspecified), time_unit_(kNanosecond),
+       range_multiplier_(kRangeMultiplier), min_time_(0.0), repetitions_(0),
+       use_real_time_(false), use_manual_time_(false),
+       complexity_(oNone) {
+@@ -575,6 +590,10 @@ void BenchmarkImp::Repetitions(int n) {
+   repetitions_ = n;
+ }
+ 
++void BenchmarkImp::ReportAggregatesOnly(bool value) {
++  report_mode_ = value ? RM_ReportAggregatesOnly : RM_Default;
++}
++
+ void BenchmarkImp::UseRealTime() {
+   CHECK(!use_manual_time_) << "Cannot set UseRealTime and UseManualTime simultaneously.";
+   use_real_time_ = true;
+@@ -703,6 +722,11 @@ Benchmark* Benchmark::Repetitions(int t) {
+   return this;
+ }
+ 
++Benchmark* Benchmark::ReportAggregatesOnly(bool value) {
++  imp_->ReportAggregatesOnly(value);
++  return this;
++}
++
+ Benchmark* Benchmark::MinTime(double t) {
+   imp_->MinTime(t);
+   return this;
+@@ -779,7 +803,8 @@ std::vector<BenchmarkReporter::Run>
+ RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+              std::vector<BenchmarkReporter::Run>* complexity_reports)
+   EXCLUDES(GetBenchmarkLock()) {
+-   std::vector<BenchmarkReporter::Run> reports; // return value
++  std::vector<BenchmarkReporter::Run> reports; // return value
++
+   size_t iters = 1;
+ 
+   std::vector<std::thread> pool;
+@@ -788,6 +813,10 @@ RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+ 
+   const int repeats = b.repetitions != 0 ? b.repetitions
+                                          : FLAGS_benchmark_repetitions;
++  const bool report_aggregates_only = repeats != 1 &&
++      (b.report_mode == internal::RM_Unspecified
++        ? FLAGS_benchmark_report_aggregates_only
++        : b.report_mode == internal::RM_ReportAggregatesOnly);
+   for (int i = 0; i < repeats; i++) {
+     std::string mem;
+     for (;;) {
+@@ -914,22 +943,21 @@ RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+       iters = static_cast<int>(next_iters + 0.5);
+     }
+   }
+-  std::vector<BenchmarkReporter::Run> additional_run_stats = ComputeStats(reports);
+-  reports.insert(reports.end(), additional_run_stats.begin(),
+-                 additional_run_stats.end());
+-
+-  if((b.complexity != oNone) && b.last_benchmark_instance) {
+-    additional_run_stats = ComputeBigO(*complexity_reports);
+-    reports.insert(reports.end(), additional_run_stats.begin(),
+-                   additional_run_stats.end());
+-    complexity_reports->clear();
+-  }
+-
+   if (b.multithreaded) {
+     for (std::thread& thread : pool)
+       thread.join();
+   }
++  // Calculate additional statistics
++  auto stat_reports = ComputeStats(reports);
++  if((b.complexity != oNone) && b.last_benchmark_instance) {
++    auto additional_run_stats = ComputeBigO(*complexity_reports);
++    stat_reports.insert(stat_reports.end(), additional_run_stats.begin(),
++                   additional_run_stats.end());
++    complexity_reports->clear();
++  }
+ 
++  if (report_aggregates_only) reports.clear();
++  reports.insert(reports.end(), stat_reports.begin(), stat_reports.end());
+   return reports;
+ }
+ 
+@@ -1117,6 +1145,7 @@ void PrintUsageAndExit() {
+           "          [--benchmark_filter=<regex>]\n"
+           "          [--benchmark_min_time=<min_time>]\n"
+           "          [--benchmark_repetitions=<num_repetitions>]\n"
++          "          [--benchmark_report_aggregates_only={true|false}\n"
+           "          [--benchmark_format=<console|json|csv>]\n"
+           "          [--benchmark_out=<filename>]\n"
+           "          [--benchmark_out_format=<json|console|csv>]\n"
+@@ -1137,6 +1166,8 @@ void ParseCommandLineFlags(int* argc, char** argv) {
+                         &FLAGS_benchmark_min_time) ||
+         ParseInt32Flag(argv[i], "benchmark_repetitions",
+                        &FLAGS_benchmark_repetitions) ||
++        ParseBoolFlag(argv[i], "benchmark_report_aggregates_only",
++                       &FLAGS_benchmark_report_aggregates_only) ||
+         ParseStringFlag(argv[i], "benchmark_format",
+                         &FLAGS_benchmark_format) ||
+         ParseStringFlag(argv[i], "benchmark_out",

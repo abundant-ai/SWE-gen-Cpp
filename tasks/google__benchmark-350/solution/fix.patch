@@ -1,0 +1,369 @@
+diff --git a/README.md b/README.md
+index f16a9d7..2430d93 100644
+--- a/README.md
++++ b/README.md
+@@ -491,6 +491,73 @@ When you're compiling in C++11 mode or later you can use `insert()` with
+   state.counters["Baz"] = numBazs;
+ ```
+ 
++### Counter reporting
++
++When using the console reporter, by default, user counters are are printed at
++the end after the table, the same way as ``bytes_processed`` and
++``items_processed``. This is best for cases in which there are few counters,
++or where there are only a couple of lines per benchmark. Here's an example of
++the default output:
++
++```
++------------------------------------------------------------------------------
++Benchmark                        Time           CPU Iterations UserCounters...
++------------------------------------------------------------------------------
++BM_UserCounter/threads:8      2248 ns      10277 ns      68808 Bar=16 Bat=40 Baz=24 Foo=8
++BM_UserCounter/threads:1      9797 ns       9788 ns      71523 Bar=2 Bat=5 Baz=3 Foo=1024m
++BM_UserCounter/threads:2      4924 ns       9842 ns      71036 Bar=4 Bat=10 Baz=6 Foo=2
++BM_UserCounter/threads:4      2589 ns      10284 ns      68012 Bar=8 Bat=20 Baz=12 Foo=4
++BM_UserCounter/threads:8      2212 ns      10287 ns      68040 Bar=16 Bat=40 Baz=24 Foo=8
++BM_UserCounter/threads:16     1782 ns      10278 ns      68144 Bar=32 Bat=80 Baz=48 Foo=16
++BM_UserCounter/threads:32     1291 ns      10296 ns      68256 Bar=64 Bat=160 Baz=96 Foo=32
++BM_UserCounter/threads:4      2615 ns      10307 ns      68040 Bar=8 Bat=20 Baz=12 Foo=4
++BM_Factorial                    26 ns         26 ns   26608979 40320
++BM_Factorial/real_time          26 ns         26 ns   26587936 40320
++BM_CalculatePiRange/1           16 ns         16 ns   45704255 0
++BM_CalculatePiRange/8           73 ns         73 ns    9520927 3.28374
++BM_CalculatePiRange/64         609 ns        609 ns    1140647 3.15746
++BM_CalculatePiRange/512       4900 ns       4901 ns     142696 3.14355
++```
++
++If this doesn't suit you, you can print each counter as a table column by
++passing the flag `--benchmark_counters_tabular=true` to the benchmark
++application. This is best for cases in which there are a lot of counters, or
++a lot of lines per individual benchmark. Note that this will trigger a
++reprinting of the table header any time the counter set changes between
++individual benchmarks. Here's an example of corresponding output when
++`--benchmark_counters_tabular=true` is passed:
++
++```
++---------------------------------------------------------------------------------------
++Benchmark                        Time           CPU Iterations    Bar   Bat   Baz   Foo
++---------------------------------------------------------------------------------------
++BM_UserCounter/threads:8      2198 ns       9953 ns      70688     16    40    24     8
++BM_UserCounter/threads:1      9504 ns       9504 ns      73787      2     5     3     1
++BM_UserCounter/threads:2      4775 ns       9550 ns      72606      4    10     6     2
++BM_UserCounter/threads:4      2508 ns       9951 ns      70332      8    20    12     4
++BM_UserCounter/threads:8      2055 ns       9933 ns      70344     16    40    24     8
++BM_UserCounter/threads:16     1610 ns       9946 ns      70720     32    80    48    16
++BM_UserCounter/threads:32     1192 ns       9948 ns      70496     64   160    96    32
++BM_UserCounter/threads:4      2506 ns       9949 ns      70332      8    20    12     4
++--------------------------------------------------------------
++Benchmark                        Time           CPU Iterations
++--------------------------------------------------------------
++BM_Factorial                    26 ns         26 ns   26392245 40320
++BM_Factorial/real_time          26 ns         26 ns   26494107 40320
++BM_CalculatePiRange/1           15 ns         15 ns   45571597 0
++BM_CalculatePiRange/8           74 ns         74 ns    9450212 3.28374
++BM_CalculatePiRange/64         595 ns        595 ns    1173901 3.15746
++BM_CalculatePiRange/512       4752 ns       4752 ns     147380 3.14355
++BM_CalculatePiRange/4k       37970 ns      37972 ns      18453 3.14184
++BM_CalculatePiRange/32k     303733 ns     303744 ns       2305 3.14162
++BM_CalculatePiRange/256k   2434095 ns    2434186 ns        288 3.1416
++BM_CalculatePiRange/1024k  9721140 ns    9721413 ns         71 3.14159
++BM_CalculatePi/threads:8      2255 ns       9943 ns      70936
++```
++Note above the additional header printed when the benchmark changes from
++``BM_UserCounter`` to ``BM_Factorial``. This is because ``BM_Factorial`` does
++not have the same counter set as ``BM_UserCounter``.
++
+ ## Exiting Benchmarks in Error
+ 
+ When errors caused by external influences, such as file I/O and network
+diff --git a/include/benchmark/reporter.h b/include/benchmark/reporter.h
+index 789124b..8821ebf 100644
+--- a/include/benchmark/reporter.h
++++ b/include/benchmark/reporter.h
+@@ -157,10 +157,17 @@ class BenchmarkReporter {
+ // Simple reporter that outputs benchmark data to the console. This is the
+ // default reporter used by RunSpecifiedBenchmarks().
+ class ConsoleReporter : public BenchmarkReporter {
+- public:
+-  enum OutputOptions { OO_None, OO_Color };
+-  explicit ConsoleReporter(OutputOptions color_output = OO_Color)
+-      : name_field_width_(0), color_output_(color_output == OO_Color) {}
++public:
++  enum OutputOptions {
++    OO_None = 0,
++    OO_Color = 1,
++    OO_Tabular = 2,
++    OO_ColorTabular = OO_Color|OO_Tabular,
++    OO_Defaults = OO_ColorTabular
++  };
++  explicit ConsoleReporter(OutputOptions opts_ = OO_Defaults)
++      : output_options_(opts_), name_field_width_(0),
++        prev_counters_(), printed_header_(false) {}
+ 
+   virtual bool ReportContext(const Context& context);
+   virtual void ReportRuns(const std::vector<Run>& reports);
+@@ -169,11 +176,10 @@ class ConsoleReporter : public BenchmarkReporter {
+   virtual void PrintRunData(const Run& report);
+   virtual void PrintHeader(const Run& report);
+ 
++  OutputOptions output_options_;
+   size_t name_field_width_;
++  UserCounters prev_counters_;
+   bool printed_header_;
+-
+- private:
+-  bool color_output_;
+ };
+ 
+ class JSONReporter : public BenchmarkReporter {
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 8d3f406..54b5e67 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -91,6 +91,11 @@ DEFINE_string(benchmark_color, "auto",
+               "environment variable is set to a terminal type that supports "
+               "colors.");
+ 
++DEFINE_bool(benchmark_counters_tabular, false,
++            "Whether to use tabular format when printing user counters to "
++            "the console.  Valid values: 'true'/'yes'/1, 'false'/'no'/0."
++            "Defaults to false.");
++
+ DEFINE_int32(v, 0, "The level of verbose logging to output");
+ 
+ namespace benchmark {
+@@ -522,10 +527,10 @@ void RunBenchmarks(const std::vector<Benchmark::Instance>& benchmarks,
+ }
+ 
+ std::unique_ptr<BenchmarkReporter> CreateReporter(
+-    std::string const& name, ConsoleReporter::OutputOptions allow_color) {
++    std::string const& name, ConsoleReporter::OutputOptions output_opts) {
+   typedef std::unique_ptr<BenchmarkReporter> PtrType;
+   if (name == "console") {
+-    return PtrType(new ConsoleReporter(allow_color));
++    return PtrType(new ConsoleReporter(output_opts));
+   } else if (name == "json") {
+     return PtrType(new JSONReporter);
+   } else if (name == "csv") {
+@@ -537,6 +542,30 @@ std::unique_ptr<BenchmarkReporter> CreateReporter(
+ }
+ 
+ }  // end namespace
++
++bool IsZero(double n) {
++  return std::abs(n) < std::numeric_limits<double>::epsilon();
++}
++
++ConsoleReporter::OutputOptions GetOutputOptions(bool force_no_color) {
++  int output_opts = ConsoleReporter::OO_Defaults;
++  if ((FLAGS_benchmark_color == "auto" && IsColorTerminal()) ||
++      IsTruthyFlagValue(FLAGS_benchmark_color)) {
++    output_opts |= ConsoleReporter::OO_Color;
++  } else {
++    output_opts &= ~ConsoleReporter::OO_Color;
++  }
++  if(force_no_color) {
++    output_opts &= ~ConsoleReporter::OO_Color;
++  }
++  if(FLAGS_benchmark_counters_tabular) {
++    output_opts |= ConsoleReporter::OO_Tabular;
++  } else {
++    output_opts &= ~ConsoleReporter::OO_Tabular;
++  }
++  return static_cast< ConsoleReporter::OutputOptions >(output_opts);
++}
++
+ }  // end namespace internal
+ 
+ size_t RunSpecifiedBenchmarks() {
+@@ -558,16 +587,8 @@ size_t RunSpecifiedBenchmarks(BenchmarkReporter* console_reporter,
+   std::unique_ptr<BenchmarkReporter> default_console_reporter;
+   std::unique_ptr<BenchmarkReporter> default_file_reporter;
+   if (!console_reporter) {
+-    auto output_opts = ConsoleReporter::OO_None;
+-    if (FLAGS_benchmark_color == "auto")
+-      output_opts = IsColorTerminal() ? ConsoleReporter::OO_Color
+-                                      : ConsoleReporter::OO_None;
+-    else
+-      output_opts = IsTruthyFlagValue(FLAGS_benchmark_color)
+-                        ? ConsoleReporter::OO_Color
+-                        : ConsoleReporter::OO_None;
+-    default_console_reporter =
+-        internal::CreateReporter(FLAGS_benchmark_format, output_opts);
++    default_console_reporter = internal::CreateReporter(
++          FLAGS_benchmark_format, internal::GetOutputOptions());
+     console_reporter = default_console_reporter.get();
+   }
+   auto& Out = console_reporter->GetOutputStream();
+@@ -626,6 +647,7 @@ void PrintUsageAndExit() {
+           "          [--benchmark_out=<filename>]\n"
+           "          [--benchmark_out_format=<json|console|csv>]\n"
+           "          [--benchmark_color={auto|true|false}]\n"
++          "          [--benchmark_counters_tabular={true|false}]\n"
+           "          [--v=<verbosity>]\n");
+   exit(0);
+ }
+@@ -650,6 +672,8 @@ void ParseCommandLineFlags(int* argc, char** argv) {
+         // "color_print" is the deprecated name for "benchmark_color".
+         // TODO: Remove this.
+         ParseStringFlag(argv[i], "color_print", &FLAGS_benchmark_color) ||
++        ParseBoolFlag(argv[i], "benchmark_counters_tabular",
++                        &FLAGS_benchmark_counters_tabular) ||
+         ParseInt32Flag(argv[i], "v", &FLAGS_v)) {
+       for (int j = i; j != *argc - 1; ++j) argv[j] = argv[j + 1];
+ 
+diff --git a/src/benchmark_api_internal.h b/src/benchmark_api_internal.h
+index 828ed12..c220873 100644
+--- a/src/benchmark_api_internal.h
++++ b/src/benchmark_api_internal.h
+@@ -36,13 +36,10 @@ bool FindBenchmarksInternal(const std::string& re,
+                             std::vector<Benchmark::Instance>* benchmarks,
+                             std::ostream* Err);
+ 
+-namespace {
++bool IsZero(double n);
+ 
+-bool IsZero(double n) {
+-  return std::abs(n) < std::numeric_limits<double>::epsilon();
+-}
++ConsoleReporter::OutputOptions GetOutputOptions(bool force_no_color = false);
+ 
+-}  // end namespace
+ }  // end namespace internal
+ }  // end namespace benchmark
+ 
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index e812180..7c3b7d8 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -36,15 +36,16 @@ namespace benchmark {
+ bool ConsoleReporter::ReportContext(const Context& context) {
+   name_field_width_ = context.name_field_width;
+   printed_header_ = false;
++  prev_counters_.clear();
+ 
+   PrintBasicContext(&GetErrorStream(), context);
+ 
+ #ifdef BENCHMARK_OS_WINDOWS
+-  if (color_output_ && &std::cout != &GetOutputStream()) {
++  if ((output_options_ & OO_Color) && &std::cout != &GetOutputStream()) {
+     GetErrorStream()
+         << "Color printing is only supported for stdout on windows."
+            " Disabling color printing\n";
+-    color_output_ = false;
++    output_options_ = static_cast< OutputOptions >(output_options_ & ~OO_Color);
+   }
+ #endif
+ 
+@@ -52,24 +53,39 @@ bool ConsoleReporter::ReportContext(const Context& context) {
+ }
+ 
+ void ConsoleReporter::PrintHeader(const Run& run) {
+-  std::string str =
+-      FormatString("%-*s %13s %13s %10s%s\n", static_cast<int>(name_field_width_),
+-                   "Benchmark", "Time", "CPU", "Iterations",
+-                   (run.counters.empty() ? "" : " UserCounters...")
+-          );
++  std::string str = FormatString("%-*s %13s %13s %10s", static_cast<int>(name_field_width_),
++                                 "Benchmark", "Time", "CPU", "Iterations");
++  if(!run.counters.empty()) {
++    if(output_options_ & OO_Tabular) {
++      for(auto const& c : run.counters) {
++        str += FormatString(" %10s", c.first.c_str());
++      }
++    } else {
++      str += " UserCounters...";
++    }
++  }
++  str += "\n";
+   std::string line = std::string(str.length(), '-');
+   GetOutputStream() << line << "\n" << str << line << "\n";
+ }
+ 
+ void ConsoleReporter::ReportRuns(const std::vector<Run>& reports) {
+   for (const auto& run : reports) {
+-    // print the header if none was printed yet
+-    if (!printed_header_) {
++    // print the header:
++    // --- if none was printed yet
++    bool print_header = !printed_header_;
++    // --- or if the format is tabular and this run
++    //     has different fields from the prev header
++    print_header |= (output_options_ & OO_Tabular) &&
++                    (!internal::SameNames(run.counters, prev_counters_));
++    if (print_header) {
+       printed_header_ = true;
++      prev_counters_ = run.counters;
+       PrintHeader(run);
+     }
+     // As an alternative to printing the headers like this, we could sort
+-    // the benchmarks by header and then print like that.
++    // the benchmarks by header and then print. But this would require
++    // waiting for the full results before printing, or printing twice.
+     PrintRunData(run);
+   }
+ }
+@@ -85,8 +101,8 @@ static void IgnoreColorPrint(std::ostream& out, LogColor, const char* fmt,
+ void ConsoleReporter::PrintRunData(const Run& result) {
+   typedef void(PrinterFn)(std::ostream&, LogColor, const char*, ...);
+   auto& Out = GetOutputStream();
+-  PrinterFn* printer =
+-      color_output_ ? (PrinterFn*)ColorPrintf : IgnoreColorPrint;
++  PrinterFn* printer = (output_options_ & OO_Color) ?
++                         (PrinterFn*)ColorPrintf : IgnoreColorPrint;
+   auto name_color =
+       (result.report_big_o || result.report_rms) ? COLOR_BLUE : COLOR_GREEN;
+   printer(Out, name_color, "%-*s ", name_field_width_,
+@@ -132,9 +148,18 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+   }
+ 
+   for (auto& c : result.counters) {
+-    std::string s = HumanReadableNumber(c.second.value);
+-    const char* unit = ((c.second.flags & Counter::kIsRate) ? "/s" : "");
+-    printer(Out, COLOR_DEFAULT, " %s=%s%s", c.first.c_str(), s.c_str(), unit);
++    auto const& s = HumanReadableNumber(c.second.value);
++    if (output_options_ & OO_Tabular) {
++      if (c.second.flags & Counter::kIsRate) {
++        printer(Out, COLOR_DEFAULT, " %8s/s", s.c_str());
++      } else {
++        printer(Out, COLOR_DEFAULT, " %10s", s.c_str());
++      }
++    } else {
++      const char* unit = (c.second.flags & Counter::kIsRate) ? "/s" : "";
++      printer(Out, COLOR_DEFAULT, " %s=%s%s", c.first.c_str(), s.c_str(),
++              unit);
++    }
+   }
+ 
+   if (!rate.empty()) {
+diff --git a/src/counter.cc b/src/counter.cc
+index 2e9d918..ed1aa04 100644
+--- a/src/counter.cc
++++ b/src/counter.cc
+@@ -57,7 +57,7 @@ bool SameNames(UserCounters const& l, UserCounters const& r) {
+     return false;
+   }
+   for (auto const& c : l) {
+-    if ( r.find(c.first) == r.end()) {
++    if (r.find(c.first) == r.end()) {
+       return false;
+     }
+   }
+diff --git a/src/csv_reporter.cc b/src/csv_reporter.cc
+index 6779815..b8072fd 100644
+--- a/src/csv_reporter.cc
++++ b/src/csv_reporter.cc
+@@ -137,8 +137,11 @@ void CSVReporter::PrintRunData(const Run & run) {
+   // Print user counters
+   for (const auto &ucn : user_counter_names_) {
+     auto it = run.counters.find(ucn);
+-    CHECK(it != run.counters.end());
+-    Out << "," << it->second;
++    if(it == run.counters.end()) {
++      Out << ",";
++    } else {
++      Out << "," << it->second;
++    }
+   }
+   Out << '\n';
+ }
