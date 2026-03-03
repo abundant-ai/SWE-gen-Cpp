@@ -1,0 +1,392 @@
+diff --git a/Makefile b/Makefile
+index 0a033099..97b4d882 100644
+--- a/Makefile
++++ b/Makefile
+@@ -71,8 +71,7 @@ benchmark:
+ 	bash ./scripts/parser.sh
+ 	bash ./scripts/parseandstat.sh
+ 
+-test: jsoncheck numberparsingcheck stringparsingcheck basictests
+-	./basictests
++test: jsoncheck numberparsingcheck stringparsingcheck
+ 	./numberparsingcheck
+ 	./stringparsingcheck
+ 	./jsoncheck
+@@ -82,8 +81,7 @@ test: jsoncheck numberparsingcheck stringparsingcheck basictests
+ 	@echo "It looks like the code is good!"
+ 	@tput sgr0
+ 
+-quiettest: jsoncheck numberparsingcheck stringparsingcheck basictests
+-	./basictests
++quiettest: jsoncheck numberparsingcheck stringparsingcheck
+ 	./numberparsingcheck
+ 	./stringparsingcheck
+ 	./jsoncheck
+@@ -132,10 +130,6 @@ parse_nostringparsing: benchmark/parse.cpp $(HEADERS) $(LIBFILES)
+ jsoncheck:tests/jsoncheck.cpp $(HEADERS) $(LIBFILES)
+ 	$(CXX) $(CXXFLAGS) -o jsoncheck $(LIBFILES) tests/jsoncheck.cpp -I. $(LIBFLAGS)
+ 
+-basictests:tests/basictests.cpp $(HEADERS) $(LIBFILES)
+-	$(CXX) $(CXXFLAGS) -o basictests $(LIBFILES) tests/basictests.cpp -I. $(LIBFLAGS)
+-
+-
+ numberparsingcheck:tests/numberparsingcheck.cpp $(HEADERS) $(LIBFILES)
+ 	$(CXX) $(CXXFLAGS) -o numberparsingcheck tests/numberparsingcheck.cpp  src/jsonioutil.cpp src/jsonparser.cpp src/simdjson.cpp src/stage1_find_marks.cpp  src/parsedjson.cpp       -I. $(LIBFLAGS) -DJSON_TEST_NUMBERS
+ 
+diff --git a/README.md b/README.md
+index 73d5dbb4..db191119 100644
+--- a/README.md
++++ b/README.md
+@@ -99,12 +99,22 @@ if( ! pj.isValid() ) {
+ aligned_free((void*)p.data());
+ ```
+ 
+-You can call `json_parse` and `build_parsed_json`, passing a standard `std::string` object.
++
+ 
+ 
+ ## Memory overallocation `
+ 
+-As needed, the `json_parse` and `build_parsed_json` functions copy the input data to a temporary buffer readable up to SIMDJSON_PADDING bytes beyond the end of the data. To avoid this potentially expensive copy, overallocate your own input data and then call the `json_parse` and `build_parsed_json` functions with an extra parameter value set to `false` (e.g., `build_parsed_json(p,false)` and  `parsed_json(p,pj,false)`). In such instance, no temporary copy is made. The `get_corpus` function does this automatically as well as the provide `char * allocate_padded_buffer(size_t length)` function to achieve the desired effect. 
++
++When calling `json_parse` and `build_parsed_json`, the input data should be readable up to SIMDJSON_PADDING bytes beyond the end of the data. That is, you must overallocate SIMDJSON_PADDING bytes. The `get_corpus` function does this automatically. As a caller, you are responsible for this overallocation. You can use the `char * allocate_padded_buffer(size_t length)` function to achieve the desired effect; make sure to call `free` on the buffer to release the memory. 
++
++If this manual overallocation is not convenient, you can call the parsing functions with an extra parameter value of `true` to require memory reallocation (it defaults on `reallocifneeded = true`). Automatic memory reallocation may incur a performance penalty.
++
++
++## Using `std::string`
++
++You can call `json_parse` and `build_parsed_json`, passing a standard `std::string` object. In such cases, the library may require a temporary copy and some performance loss. 
++
++*Performance tip*: replace `std::string` with manually allocated C strings if performance is important to you.
+ 
+ ## Usage: easy single-header version
+ 
+diff --git a/include/simdjson/common_defs.h b/include/simdjson/common_defs.h
+index b842b9c7..3e3e5896 100644
+--- a/include/simdjson/common_defs.h
++++ b/include/simdjson/common_defs.h
+@@ -33,8 +33,8 @@
+ #define ISALIGNED_N(ptr, n) (((uintptr_t)(ptr) & ((n)-1)) == 0)
+ 
+ #ifdef _MSC_VER
+-// Visual Studio won't allow it:
+-//#define ALLOW_SAME_PAGE_BUFFER_OVERRUN
++
++
+ #define really_inline inline
+ #define never_inline __declspec(noinline)
+ 
+@@ -50,20 +50,6 @@
+ 
+ #else
+ 
+-// The following is likely unnecessarily complex.
+-#ifdef __SANITIZE_ADDRESS__
+-#define ALLOW_SAME_PAGE_BUFFER_OVERRUN_QUALIFIER  __attribute__((no_sanitize("address")))
+-#elif defined(__has_feature)
+-#  if (__has_feature(address_sanitizer))
+-#define ALLOW_SAME_PAGE_BUFFER_OVERRUN_QUALIFIER  __attribute__((no_sanitize("address")))
+-#  endif 
+-#endif 
+-
+-// for non-Visual Studio compilers, we assume that same-page buffer overrun is fine:
+-#ifndef ALLOW_SAME_PAGE_BUFFER_OVERRUN
+-#define ALLOW_SAME_PAGE_BUFFER_OVERRUN
+-#endif 
+-
+ #define really_inline inline __attribute__((always_inline, unused))
+ #define never_inline inline __attribute__((noinline, unused))
+ 
+@@ -79,8 +65,4 @@
+ 
+ #endif  // MSC_VER
+ 
+-// if it does not apply, make it an empty macro
+-#ifndef ALLOW_SAME_PAGE_BUFFER_OVERRUN_QUALIFIER
+-#define ALLOW_SAME_PAGE_BUFFER_OVERRUN_QUALIFIER
+-#endif
+ #endif // SIMDJSON_COMMON_DEFS_H
+diff --git a/include/simdjson/jsonparser.h b/include/simdjson/jsonparser.h
+index f07fb4fb..736a6fe8 100644
+--- a/include/simdjson/jsonparser.h
++++ b/include/simdjson/jsonparser.h
+@@ -1,6 +1,6 @@
+ #ifndef SIMDJSON_JSONPARSER_H
+ #define SIMDJSON_JSONPARSER_H
+-#include <string>
++
+ #include "simdjson/common_defs.h"
+ #include "simdjson/jsonioutil.h"
+ #include "simdjson/parsedjson.h"
+@@ -8,8 +8,7 @@
+ #include "simdjson/stage2_build_tape.h"
+ #include "simdjson/simdjson.h"
+ 
+-// Parse a document found in buf. 
+-// You need to preallocate ParsedJson with a capacity of len (e.g., pj.allocateCapacity(len)).
++// Parse a document found in buf, need to preallocate ParsedJson.
+ // Return 0 on success, an error code from simdjson/simdjson.h otherwise
+ // You can also check validity by calling pj.isValid(). The same ParsedJson can be reused for other documents.
+ //
+@@ -17,12 +16,10 @@
+ // (a copy of the input string is made).
+ // The input buf should be readable up to buf + len + SIMDJSON_PADDING if reallocifneeded is false,
+ // all bytes at and after buf + len  are ignored (can be garbage).
+-// The ParsedJson object can be reused.
+ WARN_UNUSED
+ int json_parse(const uint8_t *buf, size_t len, ParsedJson &pj, bool reallocifneeded = true);
+ 
+-// Parse a document found in buf.
+-// You need to preallocate ParsedJson with a capacity of len (e.g., pj.allocateCapacity(len)).
++// Parse a document found in buf, need to preallocate ParsedJson.
+ // Return SUCCESS (an integer = 1) in case of a success. You can also check validity
+ // by calling pj.isValid(). The same ParsedJson can be reused for other documents.
+ //
+@@ -30,43 +27,25 @@ int json_parse(const uint8_t *buf, size_t len, ParsedJson &pj, bool reallocifnee
+ // (a copy of the input string is made).
+ // The input buf should be readable up to buf + len + SIMDJSON_PADDING  if reallocifneeded is false,
+ // all bytes at and after buf + len  are ignored (can be garbage).
+-// The ParsedJson object can be reused.
+ WARN_UNUSED
+ inline int json_parse(const char * buf, size_t len, ParsedJson &pj, bool reallocifneeded = true) {
+   return json_parse(reinterpret_cast<const uint8_t *>(buf), len, pj, reallocifneeded);
+ }
+ 
+-// Parse a document found in buf.
+-// You need to preallocate ParsedJson with a capacity of len (e.g., pj.allocateCapacity(len)).
++// Parse a document found in buf, need to preallocate ParsedJson.
+ // Return SUCCESS (an integer = 1) in case of a success. You can also check validity
+ // by calling pj.isValid(). The same ParsedJson can be reused for other documents.
+ //
+ // If reallocifneeded is true (default) then a temporary buffer is created when needed during processing
+ // (a copy of the input string is made).
+-// The input s should be readable up to s.data() + s.size() + SIMDJSON_PADDING  if reallocifneeded is false,
++// the input s should be readable up to s.data() + s.size() + SIMDJSON_PADDING  if reallocifneeded is false,
+ // all bytes at and after s.data()+s.size() are ignored (can be garbage).
+-// The ParsedJson object can be reused.
+ WARN_UNUSED
+ inline int json_parse(const std::string_view &s, ParsedJson &pj, bool reallocifneeded = true) {
+   return json_parse(s.data(), s.size(), pj, reallocifneeded);
+ }
+ 
+ 
+-
+-// Parse a document found in in string s.
+-// You need to preallocate ParsedJson with a capacity of len (e.g., pj.allocateCapacity(len)).
+-// Return SUCCESS (an integer = 1) in case of a success. You can also check validity
+-// by calling pj.isValid(). The same ParsedJson can be reused for other documents.
+-//
+-// A temporary buffer is created when needed during processing
+-// (a copy of the input string is made).
+-WARN_UNUSED
+-inline int json_parse(const std::string &s, ParsedJson &pj) {
+-  return json_parse(s.data(), s.length(), pj, true);
+-}
+-
+-
+-
+ // Build a ParsedJson object. You can check validity
+ // by calling pj.isValid(). This does the memory allocation needed for ParsedJson.
+ // If reallocifneeded is true (default) then a temporary buffer is created when needed during processing
+@@ -100,19 +79,4 @@ inline ParsedJson build_parsed_json(const std::string_view &s, bool reallocifnee
+   return build_parsed_json(s.data(), s.size(), reallocifneeded);
+ }
+ 
+-// Parse a document found in in string s.
+-// You need to preallocate ParsedJson with a capacity of len (e.g., pj.allocateCapacity(len)).
+-// Return SUCCESS (an integer = 1) in case of a success. You can also check validity
+-// by calling pj.isValid(). The same ParsedJson can be reused for other documents.
+-//
+-// A temporary buffer is created when needed during processing
+-// (a copy of the input string is made).
+-WARN_UNUSED
+-inline ParsedJson build_parsed_json(const std::string &s) {
+-  return build_parsed_json(s.data(), s.length(), true);
+-}
+-
+-
+-
+-
+ #endif
+diff --git a/include/simdjson/stringparsing.h b/include/simdjson/stringparsing.h
+index 950f062b..af4e2d27 100644
+--- a/include/simdjson/stringparsing.h
++++ b/include/simdjson/stringparsing.h
+@@ -76,7 +76,7 @@ really_inline bool handle_unicode_codepoint(const uint8_t **src_ptr, uint8_t **d
+ #include <arm_neon.h>
+ #endif
+ 
+-WARN_UNUSED ALLOW_SAME_PAGE_BUFFER_OVERRUN_QUALIFIER
++WARN_UNUSED
+ really_inline  bool parse_string(UNUSED const uint8_t *buf, UNUSED size_t len,
+                                 ParsedJson &pj, UNUSED const uint32_t depth, UNUSED uint32_t offset) {
+ #ifdef SIMDJSON_SKIPSTRINGPARSING // for performance analysis, it is sometimes useful to skip parsing
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index f70b3824..3b3fd7b1 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -25,7 +25,7 @@ set(SIMDJSON_SRC
+     parsedjsoniterator.cpp
+     simdjson.cpp
+     )
+-
++         
+ add_library(${SIMDJSON_LIB_NAME} ${SIMDJSON_LIB_TYPE} ${SIMDJSON_SRC})
+ 
+ target_include_directories(${SIMDJSON_LIB_NAME}
+@@ -59,9 +59,9 @@ endif()
+ 
+ if(MSVC AND (SIMDJSON_LIB_TYPE STREQUAL "SHARED"))
+   if (CMAKE_VERSION VERSION_LESS 3.4)
+-    MESSAGE( STATUS "To build  a Windows DLL using Visual Studio, you may need cmake 3.4 or better." )
++    MESSAGE( STATUS "To build  a Windows DLL using Visual Studio, you may need cmake 3.4 or better." ) 
+   endif()
+-  MESSAGE( STATUS "Building a Windows DLL using Visual Studio, exporting all symbols automatically." )
+- set_target_properties(${SIMDJSON_LIB_NAME}
++  MESSAGE( STATUS "Building a Windows DLL using Visual Studio, exporting all symbols automatically." ) 
++ set_target_properties(${SIMDJSON_LIB_NAME} 
+     PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS 1)
+ endif()
+diff --git a/src/jsonparser.cpp b/src/jsonparser.cpp
+index e8a8968a..f3b0cdde 100644
+--- a/src/jsonparser.cpp
++++ b/src/jsonparser.cpp
+@@ -15,27 +15,16 @@ int json_parse(const uint8_t *buf, size_t len, ParsedJson &pj, bool reallocifnee
+   }
+   bool reallocated = false;
+   if(reallocifneeded) {
+-#ifdef ALLOW_SAME_PAGE_BUFFER_OVERRUN
+-	  // realloc is needed if the end of the memory crosses a page
++      // realloc is needed if the end of the memory crosses a page
+ #ifdef _MSC_VER
+ 	  SYSTEM_INFO sysInfo; 
+ 	  GetSystemInfo(&sysInfo); 
+ 	  long pagesize = sysInfo.dwPageSize;
+ #else
+-    long pagesize = sysconf (_SC_PAGESIZE); 
++     long pagesize = sysconf (_SC_PAGESIZE); 
+ #endif
+-  //////////////
+-  // We want to check that buf + len - 1 and buf + len - 1 + SIMDJSON_PADDING
+-  // are in the same page.
+-  // That is, we want to check that  
+-  // (buf + len - 1) / pagesize == (buf + len - 1 + SIMDJSON_PADDING) / pagesize
+-  // That's true if (buf + len - 1) % pagesize + SIMDJSON_PADDING < pagesize.
+-  ///////////
+-	 if ( (reinterpret_cast<uintptr_t>(buf + len - 1) % pagesize ) + SIMDJSON_PADDING < static_cast<uintptr_t>(pagesize) ) {
+-#else // SIMDJSON_SAFE_SAME_PAGE_READ_OVERRUN
+-     if(true) { // if not SIMDJSON_SAFE_SAME_PAGE_READ_OVERRUN, we always reallocate
+-#endif
+-	   const uint8_t *tmpbuf  = buf;
++	 if ( (reinterpret_cast<uintptr_t>(buf + len - 1) % pagesize ) < SIMDJSON_PADDING ) {
++       const uint8_t *tmpbuf  = buf;
+        buf = (uint8_t *) allocate_padded_buffer(len);
+        if(buf == NULL) return simdjson::MEMALLOC;
+        memcpy((void*)buf,tmpbuf,len);
+diff --git a/src/stage2_build_tape.cpp b/src/stage2_build_tape.cpp
+index 6695a82c..8460224b 100644
+--- a/src/stage2_build_tape.cpp
++++ b/src/stage2_build_tape.cpp
+@@ -55,7 +55,7 @@ really_inline bool is_valid_null_atom(const uint8_t *loc) {
+  * The JSON is parsed to a tape, see the accompanying tape.md file
+  * for documentation.
+  ***********/
+-WARN_UNUSED  ALLOW_SAME_PAGE_BUFFER_OVERRUN_QUALIFIER
++WARN_UNUSED
+ int unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
+   uint32_t i = 0; // index of the structural character (0,1,2,3...)
+   uint32_t idx;   // location of the structural character in the input (buf)
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index be75702b..219f8b40 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -4,7 +4,6 @@ if(MSVC)
+   )
+ endif()
+ 
+-add_cpp_test(basictests)
+ add_cpp_test(jsoncheck)
+ 
+ add_executable(singleheader ./singleheadertest.cpp ${PROJECT_SOURCE_DIR}/singleheader/simdjson.cpp)
+diff --git a/tests/basictests.cpp b/tests/basictests.cpp
+deleted file mode 100644
+index dbea44b9..00000000
+--- a/tests/basictests.cpp
++++ /dev/null
+@@ -1,75 +0,0 @@
+-#include <cassert>
+-#include <cinttypes>
+-#include <cstdio>
+-#include <cstdlib>
+-#include <cstring>
+-#include <iostream>
+-#include <string>
+-#include <vector>
+-
+-#include "simdjson/jsonparser.h"
+-
+-// returns true if successful
+-bool skyprophet_test() {
+-  const size_t n_records = 100000;
+-  std::vector<std::string> data;
+-  char buf[1024];
+-  for (size_t i = 0; i < n_records; ++i) {
+-    auto n = sprintf(buf,
+-                     "{\"id\": %zu, \"name\": \"name%zu\", \"gender\": \"%s\", "
+-                     "\"school\": {\"id\": %zu, \"name\": \"school%zu\"}}",
+-                     i, i, (i % 2) ? "male" : "female", i % 10, i % 10);
+-    data.emplace_back(std::string(buf, n));
+-  }
+-  for (size_t i = 0; i < n_records; ++i) {
+-    auto n = sprintf(buf, "{\"counter\": %f, \"array\": [%s]}", i * 3.1416,
+-                     (i % 2) ? "true" : "false");
+-    data.emplace_back(std::string(buf, n));
+-  }
+-  for (size_t i = 0; i < n_records; ++i) {
+-    auto n = sprintf(buf, "{\"number\": %e}", i * 10000.31321321);
+-    data.emplace_back(std::string(buf, n));
+-  }
+-  data.emplace_back(std::string("true"));
+-  data.emplace_back(std::string("false"));
+-  data.emplace_back(std::string("null"));
+-  data.emplace_back(std::string("0.1"));
+-  size_t maxsize = 0;
+-  for (auto &s : data) {
+-    if (maxsize < s.size())
+-      maxsize = s.size();
+-  }
+-  ParsedJson pj;
+-  if (!pj.allocateCapacity(maxsize)) {
+-    printf("allocation failure in skyprophet_test\n");
+-    return false;
+-  }
+-  size_t counter = 0;
+-  for (auto &rec : data) {
+-    if ((counter % 10000) == 0) {
+-      printf(".");
+-      fflush(NULL);
+-    }
+-    counter++;
+-    auto ok1 = json_parse(rec.c_str(), rec.length(), pj);
+-    if (ok1 != 0 || !pj.isValid()) {
+-      printf("Something is wrong in skyprophet_test: %s.\n", rec.c_str());
+-      return false;
+-    }
+-    auto ok2 = json_parse(rec, pj);
+-    if (ok2 != 0 || !pj.isValid()) {
+-      printf("Something is wrong in skyprophet_test: %s.\n", rec.c_str());
+-      return false;
+-    }
+-  }
+-  printf("\n");
+-  return true;
+-}
+-
+-int main() {
+-  std::cout << "Running basic tests." << std::endl;
+-  if (!skyprophet_test())
+-    return EXIT_FAILURE;
+-  std::cout << "Basic tests are ok." << std::endl;
+-  return EXIT_SUCCESS;
+-}

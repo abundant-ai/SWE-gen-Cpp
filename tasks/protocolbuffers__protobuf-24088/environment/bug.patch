@@ -1,0 +1,184 @@
+diff --git a/rust/cpp.rs b/rust/cpp.rs
+index ef8873916..cd64124fc 100644
+--- a/rust/cpp.rs
++++ b/rust/cpp.rs
+@@ -1491,54 +1491,18 @@ where
+     }
+ }
+ 
+-/// Message equality definition which may have both false-negatives and false-positives in the face
+-/// of unknown fields.
+-///
+-/// This behavior is deliberately held back from being exposed as an `Eq` trait for messages. The
+-/// reason is that it is impossible to properly compare unknown fields for message equality, since
+-/// without the schema you cannot know how to interpret the wire format properly for comparison.
+-///
+-/// False negative cases (where message_eq will return false on unknown fields where it
+-/// would return true if the fields were known) are common and will occur in production: for
+-/// example, as map and repeated fields look exactly the same, map field order is unstable, the
+-/// comparison cannot know to treat it as unordered and will return false when it was the same
+-/// map but in a different order.
+-///
+-/// False positives cases (where message_eq will return true on unknown fields where it would have
+-/// return false if the fields were known) are possible but uncommon in practice. One example
+-/// of this direction can occur if two fields are defined in the same oneof and both are present on
+-/// the wire but in opposite order, without the schema these messages appear equal but with the
+-/// schema they are not-equal.
+-///
+-/// This lossy behavior in the face of unknown fields is especially problematic in the face of
+-/// extensions and other treeshaking behaviors where a given field being known or not to binary is a
+-/// spooky-action-at-a-distance behavior, which may lead to surprising changes in outcome in
+-/// equality tests based on changes made arbitrarily distant from the code performing the equality
+-/// check.
+-///
+-/// Broadly this is recommended for use in tests (where unknown field behaviors are rarely a
+-/// concern), and in limited/targeted cases where the lossy behavior in the face of unknown fields
+-/// behavior is unlikely to be a problem.
+-pub fn message_eq<T>(a: &T, b: &T) -> bool
+-where
+-    T: AsView + Debug,
+-    for<'a> View<'a, <T as AsView>::Proxied>: CppGetRawMessage,
+-{
+-    unsafe {
+-        raw_message_equals(
+-            a.as_view().get_raw_message(Private),
+-            b.as_view().get_raw_message(Private),
+-        )
+-    }
+-}
+-
+ impl<T> MatcherEq for T
+ where
+     Self: AsView + Debug,
+     for<'a> View<'a, <Self as AsView>::Proxied>: CppGetRawMessage,
+ {
+     fn matches(&self, o: &Self) -> bool {
+-        message_eq(self, o)
++        unsafe {
++            raw_message_equals(
++                self.as_view().get_raw_message(Private),
++                o.as_view().get_raw_message(Private),
++            )
++        }
+     }
+ }
+ 
+diff --git a/rust/shared.rs b/rust/shared.rs
+index e1478d4b4..ae79f0c83 100644
+--- a/rust/shared.rs
++++ b/rust/shared.rs
+@@ -14,7 +14,6 @@ use std::fmt;
+ // This problem is referred to as "perfect derive".
+ // https://smallcultfollowing.com/babysteps/blog/2022/04/12/implied-bounds-and-perfect-derive/
+ 
+-pub use crate::__internal::runtime::message_eq;
+ pub use crate::codegen_traits::{
+     create::Parse,
+     interop::{MessageMutInterop, MessageViewInterop, OwnedMessageInterop},
+diff --git a/rust/test/shared/accessors_test.rs b/rust/test/shared/accessors_test.rs
+index 4a83ae15b..4c4f2afa7 100644
+--- a/rust/test/shared/accessors_test.rs
++++ b/rust/test/shared/accessors_test.rs
+@@ -15,7 +15,7 @@ use protos::*;
+ use googletest::prelude::*;
+ use protobuf::prelude::*;
+ 
+-use protobuf::{message_eq, Optional, ProtoBytes, ProtoStr, ProtoString};
++use protobuf::{Optional, ProtoBytes, ProtoStr, ProtoString};
+ use std::borrow::Cow;
+ use std::ffi::OsString;
+ use std::rc::Rc;
+@@ -950,22 +950,3 @@ fn test_submsg_clear() {
+     // ...but it does clear the submsg's value:
+     assert_that!(m.optional_nested_message().bb(), eq(0));
+ }
+-
+-#[gtest]
+-fn test_message_eq() {
+-    let mut m = TestAllTypes::new();
+-    let mut sub = m.optional_nested_message_mut();
+-    sub.set_bb(7);
+-
+-    assert_that!(message_eq(&m, &m), eq(true));
+-
+-    let mut m2 = TestAllTypes::new();
+-    assert_that!(message_eq(&m, &m2), eq(false));
+-
+-    let _ = m2.optional_nested_message_mut();
+-    assert_that!(message_eq(&m, &m2), eq(false));
+-
+-    let mut sub2 = m2.optional_nested_message_mut();
+-    sub2.set_bb(7);
+-    assert_that!(message_eq(&m, &m2), eq(true));
+-}
+diff --git a/rust/upb.rs b/rust/upb.rs
+index de166315e..21a322bd9 100644
+--- a/rust/upb.rs
++++ b/rust/upb.rs
+@@ -1110,50 +1110,6 @@ where
+     }
+ }
+ 
+-/// Message equality definition which may have both false-negatives and false-positives in the face
+-/// of unknown fields.
+-///
+-/// This behavior is deliberately held back from being exposed as an `Eq` trait for messages. The
+-/// reason is that it is impossible to properly compare unknown fields for message equality, since
+-/// without the schema you cannot know how to interpret the wire format properly for comparison.
+-///
+-/// False negative cases (where message_eq will return false on unknown fields where it
+-/// would return true if the fields were known) are common and will occur in production: for
+-/// example, as map and repeated fields look exactly the same, map field order is unstable, the
+-/// comparison cannot know to treat it as unordered and will return false when it was the same
+-/// map but in a different order.
+-///
+-/// False positives cases (where message_eq will return true on unknown fields where it would have
+-/// return false if the fields were known) are possible but uncommon in practice. One example
+-/// of this direction can occur if two fields are defined in the same oneof and both are present on
+-/// the wire but in opposite order, without the schema these messages appear equal but with the
+-/// schema they are not-equal.
+-///
+-/// This lossy behavior in the face of unknown fields is especially problematic in the face of
+-/// extensions and other treeshaking behaviors where a given field being known or not to binary is a
+-/// spooky-action-at-a-distance behavior, which may lead to surprising changes in outcome in
+-/// equality tests based on changes made arbitrarily distant from the code performing the equality
+-/// check.
+-///
+-/// Broadly this is recommended for use in tests (where unknown field behaviors are rarely a
+-/// concern), and in limited/targeted cases where the lossy behavior in the face of unknown fields
+-/// behavior is unlikely to be a problem.
+-pub fn message_eq<T>(a: &T, b: &T) -> bool
+-where
+-    T: AsView + Debug,
+-    <T as AsView>::Proxied: AssociatedMiniTable,
+-    for<'a> View<'a, <T as AsView>::Proxied>: UpbGetMessagePtr,
+-{
+-    unsafe {
+-        upb_Message_IsEqual(
+-            a.as_view().get_ptr(Private).raw(),
+-            b.as_view().get_ptr(Private).raw(),
+-            <T as AsView>::Proxied::mini_table(),
+-            0,
+-        )
+-    }
+-}
+-
+ impl<T> MatcherEq for T
+ where
+     Self: AsView + Debug,
+@@ -1161,7 +1117,14 @@ where
+     for<'a> View<'a, <Self as AsView>::Proxied>: UpbGetMessagePtr,
+ {
+     fn matches(&self, o: &Self) -> bool {
+-        message_eq(self, o)
++        unsafe {
++            upb_Message_IsEqual(
++                self.as_view().get_ptr(Private).raw(),
++                o.as_view().get_ptr(Private).raw(),
++                <Self as AsView>::Proxied::mini_table(),
++                0,
++            )
++        }
+     }
+ }
+ 

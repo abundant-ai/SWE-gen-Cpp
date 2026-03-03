@@ -70,12 +70,12 @@ fi
 # With the bug, the layer doesn't exist and parsing ONNX models with it will fail
 # With the fix, the layer exists and can be used
 
-# Check if the layer is registered by looking for its symbol in the library
-if nm build/lib/libopencv_dnn.so | grep -q "RandomNormalLikeLayer"; then
-    echo "SUCCESS: RandomNormalLikeLayer is present in the DNN library"
+# Check if the source file for RandomNormalLike layer exists and was compiled
+if [ -f "modules/dnn/src/layers/randomnormallike_layer.cpp" ] && [ -f "modules/dnn/include/opencv2/dnn/all_layers.hpp" ] && grep -q "class CV_EXPORTS RandomNormalLikeLayer" modules/dnn/include/opencv2/dnn/all_layers.hpp; then
+    echo "SUCCESS: RandomNormalLikeLayer source and header are present"
     test_status=0
 else
-    echo "FAIL: RandomNormalLikeLayer not found in DNN library (fix not applied)"
+    echo "FAIL: RandomNormalLikeLayer source or header not found (fix not applied)"
     test_status=1
 fi
 

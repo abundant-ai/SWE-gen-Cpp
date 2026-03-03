@@ -1,0 +1,126 @@
+diff --git a/modules/imgproc/src/convhull.cpp b/modules/imgproc/src/convhull.cpp
+index ed7b5a4a52..f16618ccb6 100644
+--- a/modules/imgproc/src/convhull.cpp
++++ b/modules/imgproc/src/convhull.cpp
+@@ -76,16 +76,12 @@ static int Sklansky_( Point_<_Tp>** array, int start, int end, int* stack, int n
+ 
+         if( CV_SIGN( by ) != nsign )
+         {
+-            Vec<_Tp, 2> a(array[pcur]->x - array[pprev]->x, cury - array[pprev]->y);
+-            Vec<_Tp, 2> b(array[pnext]->x - array[pcur]->x, by);
+-            if (std::is_floating_point<_Tp>::value)
+-            {
+-                a = normalize(a);
+-                b = normalize(b);
+-            }
+-            _DotTp convexity = (_DotTp)a[1]*b[0] - (_DotTp)a[0]*b[1]; // if >0 then convex angle
++            _Tp ax = array[pcur]->x - array[pprev]->x;
++            _Tp bx = array[pnext]->x - array[pcur]->x;
++            _Tp ay = cury - array[pprev]->y;
++            _DotTp convexity = (_DotTp)ay*bx - (_DotTp)ax*by; // if >0 then convex angle
+ 
+-            if( CV_SIGN( convexity ) == sign2 && (a[0] != 0 || a[1] != 0) )
++            if( CV_SIGN( convexity ) == sign2 && (ax != 0 || ay != 0) )
+             {
+                 pprev = pcur;
+                 pcur = pnext;
+diff --git a/modules/imgproc/src/rotcalipers.cpp b/modules/imgproc/src/rotcalipers.cpp
+index 923013b762..3bec592c9b 100644
+--- a/modules/imgproc/src/rotcalipers.cpp
++++ b/modules/imgproc/src/rotcalipers.cpp
+@@ -64,7 +64,6 @@ enum { CALIPERS_MAXHEIGHT=0, CALIPERS_MINAREARECT=1, CALIPERS_MAXDIST=2 };
+  //    Parameters:
+  //      points      - convex hull vertices ( any orientation )
+  //      n           - number of vertices
+- //      orientation - -1 for clockwise vertices order, 1 for CCW. 0 if unknown.
+  //      mode        - concrete application of algorithm
+  //                    can be  CV_CALIPERS_MAXDIST   or
+  //                            CV_CALIPERS_MINAREARECT
+@@ -116,7 +115,7 @@ static bool firstVecIsRight(const cv::Point2f& vec1, const cv::Point2f &vec2)
+ }
+ 
+ /* we will use usual cartesian coordinates */
+-static void rotatingCalipers( const Point2f* points, int n, float orientation, int mode, float* out )
++static void rotatingCalipers( const Point2f* points, int n, int mode, float* out )
+ {
+     float minarea = FLT_MAX;
+     float max_dist = 0;
+@@ -133,6 +132,7 @@ static void rotatingCalipers( const Point2f* points, int n, float orientation, i
+      (a,b) (-b,a) (-a,-b) (b, -a)
+      */
+     /* this is a first base vector (a,b) initialized by (1,0) */
++    float orientation = 0;
+     float base_a;
+     float base_b = 0;
+ 
+@@ -171,7 +171,6 @@ static void rotatingCalipers( const Point2f* points, int n, float orientation, i
+     }
+ 
+     // find convex hull orientation
+-    if (orientation == 0.f)
+     {
+         double ax = vect[n-1].x;
+         double ay = vect[n-1].y;
+@@ -366,8 +365,7 @@ cv::RotatedRect cv::minAreaRect( InputArray _points )
+     Point2f out[3];
+     RotatedRect box;
+ 
+-    static const bool clockwise = false;
+-    convexHull(_points, hull, clockwise, true);
++    convexHull(_points, hull, false, true);
+ 
+     if( hull.depth() != CV_32F )
+     {
+@@ -381,7 +379,7 @@ cv::RotatedRect cv::minAreaRect( InputArray _points )
+ 
+     if( n > 2 )
+     {
+-        rotatingCalipers( hpoints, n, clockwise ? -1.f : 1.f, CALIPERS_MINAREARECT, (float*)out );
++        rotatingCalipers( hpoints, n, CALIPERS_MINAREARECT, (float*)out );
+         box.center.x = out[0].x + (out[1].x + out[2].x)*0.5f;
+         box.center.y = out[0].y + (out[1].y + out[2].y)*0.5f;
+         box.size.width = (float)std::sqrt((double)out[1].x*out[1].x + (double)out[1].y*out[1].y);
+diff --git a/modules/imgproc/test/test_convhull.cpp b/modules/imgproc/test/test_convhull.cpp
+index 3663ce56f6..e6466aa283 100644
+--- a/modules/imgproc/test/test_convhull.cpp
++++ b/modules/imgproc/test/test_convhull.cpp
+@@ -1232,39 +1232,6 @@ TEST(minEnclosingPolygon, pentagon)
+     }
+ }
+ 
+-TEST(Imgproc_minAreaRect, reproducer_21482)
+-{
+-    const int N = 4;
+-    float pts_[N][2] = {
+-        { 188.8991f, 12.400669f },
+-        { 80.64467f, -49.644814f },
+-        { 469.59897f, 173.28242f },
+-        { 690.4597f, 299.86768f },
+-    };
+-
+-    Mat contour(N, 1, CV_32FC2, (void*)pts_);
+-
+-    RotatedRect rr = cv::minAreaRect(contour);
+-
+-    EXPECT_TRUE(checkMinAreaRect(rr, contour)) << rr.center << " " << rr.size << " " << rr.angle;
+-    EXPECT_NEAR(min(rr.size.width, rr.size.height), 0, 1e-5);
+-    EXPECT_GE(max(rr.size.width, rr.size.height), 702);
+-}
+-
+-TEST(Imgproc_minAreaRect, reproducer_21482_small_values)
+-{
+-    const int N = 4;
+-    float pts_[N][2] = { { 0.f, 0.f }, { 1e-4f, 0.f }, { 1e-4f, 1e-4f }, { 0.f, 1e-4f },};
+-
+-    Mat contour(N, 1, CV_32FC2, (void*)pts_);
+-
+-    RotatedRect rr = cv::minAreaRect(contour);
+-
+-    EXPECT_TRUE(checkMinAreaRect(rr, contour)) << rr.center << " " << rr.size << " " << rr.angle;
+-    EXPECT_EQ(rr.size.width, 1e-4f);
+-    EXPECT_EQ(rr.size.height, 1e-4f);
+-}
+-
+ }} // namespace
+ 
+ /* End of file. */

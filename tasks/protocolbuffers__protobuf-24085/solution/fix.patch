@@ -1,0 +1,178 @@
+diff --git a/rust/bazel/aspects.bzl b/rust/bazel/aspects.bzl
+index 1fbad32cd..b38b0c05a 100644
+--- a/rust/bazel/aspects.bzl
++++ b/rust/bazel/aspects.bzl
+@@ -94,6 +94,7 @@ def _generate_rust_gencode(
+         proto_info,
+         proto_lang_toolchain,
+         crate_mapping,
++        feature_configuration,
+         is_upb):
+     """Generates Rust gencode
+ 
+@@ -106,6 +107,7 @@ def _generate_rust_gencode(
+         proto_lang_toolchain (ProtoLangToolchainInfo): proto lang toolchain for Rust
+         crate_mapping (File): File containing the mapping from .proto file import path to its
+                       corresponding containing Rust crate name.
++        feature_configuration (FeatureConfiguration): A feature configuration.
+         is_upb (Bool): True when generating gencode for UPB, False otherwise.
+     Returns:
+         rs_outputs (([File], [File]): tuple(generated Rust files, generated C++ thunks).
+@@ -130,13 +132,16 @@ def _generate_rust_gencode(
+             proto_info = proto_info,
+             extension = ".pb.thunks.cc",
+         )
++    forced_lite_runtime = cc_common.is_enabled(feature_configuration = feature_configuration, feature_name = "proto_force_lite_runtime")
++
+     additional_args = ctx.actions.args()
+ 
+     additional_args.add(
+-        "--rust_opt=experimental-codegen=enabled,kernel={},crate_mapping={},generated_entry_point_rs_file_name={}".format(
++        "--rust_opt=experimental-codegen=enabled,kernel={},crate_mapping={},generated_entry_point_rs_file_name={},forced_lite_runtime={}".format(
+             "upb" if is_upb else "cpp",
+             crate_mapping.path,
+             entry_point_rs_output.basename,
++            "true" if forced_lite_runtime else "false",
+         ),
+     )
+ 
+@@ -361,6 +366,7 @@ def _rust_proto_aspect_common(target, ctx, is_upb):
+         target[ProtoInfo],
+         proto_lang_toolchain,
+         crate_mapping_file,
++        feature_configuration,
+         is_upb,
+     )
+ 
+diff --git a/rust/codegen_traits.rs b/rust/codegen_traits.rs
+index 68dba5927..8cab8fb80 100644
+--- a/rust/codegen_traits.rs
++++ b/rust/codegen_traits.rs
+@@ -273,4 +273,14 @@ pub(crate) mod interop {
+         #[cfg(cpp_kernel)]
+         unsafe fn __unstable_wrap_raw_message_mut_unchecked_lifetime(raw: *mut c_void) -> Self;
+     }
++
++    /// Trait related to message descriptors.
++    /// Note that this is only implemented for the types implementing
++    /// `proto2::Message`.
++    #[cfg(all(cpp_kernel, not(lite_runtime)))]
++    pub trait MessageDescriptorInterop {
++        /// Returns a pointer to a `proto2::Descriptor` or `nullptr` if the
++        /// descriptor is not available.
++        fn __unstable_get_descriptor() -> *const std::ffi::c_void;
++    }
+ }
+diff --git a/rust/cpp.rs b/rust/cpp.rs
+index ef8873916..0e798bfea 100644
+--- a/rust/cpp.rs
++++ b/rust/cpp.rs
+@@ -112,6 +112,7 @@ unsafe extern "C" {
+     pub fn proto2_rust_Message_serialize(m: RawMessage, output: &mut SerializedData) -> bool;
+     pub fn proto2_rust_Message_copy_from(dst: RawMessage, src: RawMessage) -> bool;
+     pub fn proto2_rust_Message_merge_from(dst: RawMessage, src: RawMessage) -> bool;
++    pub fn proto2_rust_Message_get_descriptor(m: RawMessage) -> *const std::ffi::c_void;
+ }
+ 
+ impl Drop for InnerProtoString {
+diff --git a/rust/cpp_kernel/message.cc b/rust/cpp_kernel/message.cc
+index 796f3c70d..402c64e07 100644
+--- a/rust/cpp_kernel/message.cc
++++ b/rust/cpp_kernel/message.cc
+@@ -1,9 +1,13 @@
++#include "google/protobuf/message.h"
++
+ #include <limits>
+ 
+ #include "google/protobuf/message_lite.h"
+ #include "rust/cpp_kernel/serialized_data.h"
+ #include "rust/cpp_kernel/strings.h"
+ 
++constexpr bool kHasFullRuntime = true;
++
+ extern "C" {
+ 
+ void proto2_rust_Message_delete(google::protobuf::MessageLite* m) { delete m; }
+@@ -42,4 +46,17 @@ void proto2_rust_Message_merge_from(google::protobuf::MessageLite* dst,
+   dst->CheckTypeAndMergeFrom(src);
+ }
+ 
++// Returns a pointer to the descriptor of the message, or nullptr if
++// the message is not google::protobuf::Message.
++const void* proto2_rust_Message_get_descriptor(const google::protobuf::MessageLite* m) {
++  if constexpr (kHasFullRuntime) {
++    auto msg = google::protobuf::DynamicCastMessage<google::protobuf::Message>(m);
++    if (msg == nullptr) {
++      return nullptr;
++    }
++    return msg->GetDescriptor();
++  }
++  return nullptr;
++}
++
+ }  // extern "C"
+diff --git a/rust/shared.rs b/rust/shared.rs
+index e1478d4b4..c22e3d582 100644
+--- a/rust/shared.rs
++++ b/rust/shared.rs
+@@ -15,6 +15,8 @@ use std::fmt;
+ // https://smallcultfollowing.com/babysteps/blog/2022/04/12/implied-bounds-and-perfect-derive/
+ 
+ pub use crate::__internal::runtime::message_eq;
++#[cfg(all(cpp_kernel, not(lite_runtime)))]
++pub use crate::codegen_traits::interop::MessageDescriptorInterop;
+ pub use crate::codegen_traits::{
+     create::Parse,
+     interop::{MessageMutInterop, MessageViewInterop, OwnedMessageInterop},
+diff --git a/src/google/protobuf/compiler/rust/context.cc b/src/google/protobuf/compiler/rust/context.cc
+index a1cbedf44..b3075cb8c 100644
+--- a/src/google/protobuf/compiler/rust/context.cc
++++ b/src/google/protobuf/compiler/rust/context.cc
+@@ -87,6 +87,12 @@ absl::StatusOr<Options> Options::Parse(absl::string_view param) {
+         generated_entry_point_rs_file_name_arg->second;
+   }
+ 
++  auto lite = absl::c_find_if(
++      args, [](auto& arg) { return arg.first == "forced_lite_runtime"; });
++  if (lite != args.end()) {
++    opts.force_lite_runtime = lite->second == "true";
++  }
++
+   return opts;
+ }
+ 
+diff --git a/src/google/protobuf/compiler/rust/context.h b/src/google/protobuf/compiler/rust/context.h
+index 36a783d2c..6bdf0c461 100644
+--- a/src/google/protobuf/compiler/rust/context.h
++++ b/src/google/protobuf/compiler/rust/context.h
+@@ -49,6 +49,7 @@ struct Options {
+   Kernel kernel;
+   std::string mapping_file_path;
+   bool strip_nonfunctional_codegen = false;
++  bool force_lite_runtime = false;
+ 
+   // The name to use for the generated entry point rs file.
+   std::string generated_entry_point_rs_file_name = "generated.rs";
+diff --git a/src/google/protobuf/compiler/rust/message.cc b/src/google/protobuf/compiler/rust/message.cc
+index 3a4e6bb01..a470646fa 100644
+--- a/src/google/protobuf/compiler/rust/message.cc
++++ b/src/google/protobuf/compiler/rust/message.cc
+@@ -857,6 +857,18 @@ void GenerateRs(Context& ctx, const Descriptor& msg, const upb::DefPool& pool) {
+         }
+       }
+     )rs");
++
++    if (!ctx.opts().force_lite_runtime &&
++        msg.file()->options().optimize_for() != FileOptions::LITE_RUNTIME) {
++      ctx.Emit({{"Msg", RsSafeName(msg.name())}},
++               R"rs(
++              impl $pb$::MessageDescriptorInterop for $Msg$ {
++                fn __unstable_get_descriptor() -> *const $std$::ffi::c_void {
++                  unsafe { $pbr$::proto2_rust_Message_get_descriptor(<$Msg$View as Default>::default().raw_msg()) }
++                }
++              }
++            )rs");
++    }
+   }
+ }  // NOLINT(readability/fn_size)
+ 

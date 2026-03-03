@@ -1,0 +1,545 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 944c499..a5dc597 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -3,7 +3,7 @@ include_directories(${PROJECT_SOURCE_DIR}/src)
+ 
+ # Define the source files
+ set(SOURCE_FILES "benchmark.cc" "colorprint.cc" "commandlineflags.cc"
+-                 "log.cc" "sleep.cc" "sysinfo.cc" "walltime.cc")
++                 "sleep.cc" "sysinfo.cc" "walltime.cc")
+ # Determine the correct regular expression engine to use
+ if(HAVE_STD_REGEX)
+   set(RE_FILES "re_std.cc")
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index ac64670..9b2d31b 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -18,7 +18,6 @@
+ #include "colorprint.h"
+ #include "commandlineflags.h"
+ #include "internal_macros.h"
+-#include "log.h"
+ #include "re.h"
+ #include "sleep.h"
+ #include "stat.h"
+@@ -383,7 +382,9 @@ void BenchmarkFamilies::FindBenchmarks(
+ 
+     // Match against filter.
+     if (!re.Match(family->name_)) {
+-      VLOG(1) << "Skipping " << family->name_ << "\n";
++#ifdef DEBUG
++      std::cout << "Skipping " << family->name_ << "\n";
++#endif
+       continue;
+     }
+ 
+@@ -844,7 +845,9 @@ void Benchmark::MeasureOverhead() {
+   }
+   overhead = state.runs[0].real_accumulated_time /
+              static_cast<double>(state.runs[0].iterations);
+-  VLOG(1) << "Per-iteration overhead for doing nothing: " << overhead << "\n";
++#ifdef DEBUG
++  std::cout << "Per-iteration overhead for doing nothing: " << overhead << "\n";
++#endif
+ }
+ 
+ void Benchmark::RunInstance(const Instance& b, const BenchmarkReporter* br) {
+@@ -1088,16 +1091,20 @@ bool State::StartRunning() {
+ void State::NewInterval() {
+   stop_time_micros_ = clock_->NowMicros() + interval_micros_;
+   if (!is_continuation_) {
+-    VLOG(1) << "Starting new interval; stopping in " << interval_micros_
+-            << "\n";
++#ifdef DEBUG
++    std::cout << "Starting new interval; stopping in " << interval_micros_
++              << "\n";
++#endif
+     iterations_ = 0;
+     pause_cpu_time_ = 0;
+     pause_real_time_ = 0;
+     start_cpu_ = MyCPUUsage() + ChildrenCPUUsage();
+     start_time_ = walltime::Now();
+   } else {
+-    VLOG(1) << "Continuing interval; stopping in " << interval_micros_
+-            << "\n";
++#ifdef DEBUG
++    std::cout << "Continuing interval; stopping in " << interval_micros_
++              << "\n";
++#endif
+   }
+ }
+ 
+@@ -1107,8 +1114,10 @@ bool State::FinishInterval() {
+            FLAGS_benchmark_iterations / FLAGS_benchmark_repetitions) ||
+       iterations_ < 1) {
+     interval_micros_ *= 2;
+-    VLOG(1) << "Not enough iterations in interval; "
+-            << "Trying again for " << interval_micros_ << " useconds.\n";
++#ifdef DEBUG
++    std::cout << "Not enough iterations in interval; "
++              << "Trying again for " << interval_micros_ << " useconds.\n";
++#endif
+     is_continuation_ = false;
+     NewInterval();
+     return true;
+@@ -1278,11 +1287,8 @@ void RunSpecifiedBenchmarks(const BenchmarkReporter* reporter /*= nullptr*/) {
+ }
+ 
+ void Initialize(int* argc, const char** argv) {
++  walltime::Initialize();
+   internal::ParseCommandLineFlags(argc, argv);
+-  internal::SetLogLevel(FLAGS_v);
+-  // Ensure walltime is initialized by a single thread by forcing the
+-  // initialization.
+-  walltime::Now();
+   internal::Benchmark::MeasureOverhead();
+ }
+ 
+diff --git a/src/check.h b/src/check.h
+index 2b04cd2..6dd79cb 100644
+--- a/src/check.h
++++ b/src/check.h
+@@ -1,52 +1,12 @@
+ #ifndef CHECK_H_
+ #define CHECK_H_
+ 
+-#include <cstdlib>
+-#include <ostream>
+-
+-#include "internal_macros.h"
+-#include "log.h"
+-
+-namespace benchmark {
+-namespace internal {
+-
+-// CheckHandler is the class constructed by failing CHECK macros. CheckHandler
+-// will log information about the failures and abort when it is destructed.
+-class CheckHandler {
+-public:
+-  CheckHandler(const char* check, const char* file, const char* func, int line)
+-    : log_(GetErrorLogInstance())
+-  {
+-    log_ << file << ":" << line << ": " << func << ": Check `"
+-          << check << "' failed. ";
+-  }
+-
+-  std::ostream& GetLog() {
+-    return log_;
+-  }
+-
+-  BENCHMARK_NORETURN ~CheckHandler() {
+-      log_ << std::endl;
+-      std::abort();
+-  }
+-
+-private:
+-  std::ostream& log_;
+-};
+-
+-} // end namespace internal
+-} // end namespace benchmark
+-
+-// The CHECK macro returns a std::ostream object that can have extra information
+-// written to it.
+-#ifndef NDEBUG
+-# define CHECK(b)  (b ? ::benchmark::internal::GetNullLogInstance()        \
+-                      : ::benchmark::internal::CheckHandler(               \
+-                          #b, __FILE__, __func__, __LINE__).GetLog())
+-#else
+-# define CHECK(b) ::benchmark::internal::GetNullLogInstance()
+-#endif
++#include <cassert>
+ 
++#define CHECK(b)             \
++  do {                       \
++    if (!(b)) assert(false); \
++  } while (0)
+ #define CHECK_EQ(a, b) CHECK((a) == (b))
+ #define CHECK_NE(a, b) CHECK((a) != (b))
+ #define CHECK_GE(a, b) CHECK((a) >= (b))
+diff --git a/src/log.cc b/src/log.cc
+deleted file mode 100644
+index b660309..0000000
+--- a/src/log.cc
++++ /dev/null
+@@ -1,40 +0,0 @@
+-#include "log.h"
+-
+-#include <iostream>
+-
+-namespace benchmark {
+-namespace internal {
+-
+-int& LoggingLevelImp() {
+-    static int level = 0;
+-    return level;
+-}
+-
+-void SetLogLevel(int value) {
+-    LoggingLevelImp() = value;
+-}
+-
+-int GetLogLevel() {
+-    return LoggingLevelImp();
+-}
+-
+-class NullLogBuffer : public std::streambuf
+-{
+-public:
+-  int overflow(int c) {
+-    return c;
+-  }
+-};
+-
+-std::ostream& GetNullLogInstance() {
+-  static NullLogBuffer log_buff;
+-  static std::ostream null_log(&log_buff);
+-  return null_log;
+-}
+-
+-std::ostream& GetErrorLogInstance() {
+-  return std::clog;
+-}
+-
+-} // end namespace internal
+-} // end namespace benchmark
+\ No newline at end of file
+diff --git a/src/log.h b/src/log.h
+deleted file mode 100644
+index 3777810..0000000
+--- a/src/log.h
++++ /dev/null
+@@ -1,28 +0,0 @@
+-#ifndef BENCHMARK_LOG_H_
+-#define BENCHMARK_LOG_H_
+-
+-#include <ostream>
+-
+-namespace benchmark {
+-namespace internal {
+-
+-int GetLogLevel();
+-void SetLogLevel(int level);
+-
+-std::ostream& GetNullLogInstance();
+-std::ostream& GetErrorLogInstance();
+-
+-inline std::ostream& GetLogInstanceForLevel(int level) {
+-  if (level <= GetLogLevel()) {
+-    return GetErrorLogInstance();
+-  }
+-  return GetNullLogInstance();
+-}
+-
+-} // end namespace internal
+-} // end namespace benchmark
+-
+-#define VLOG(x) (::benchmark::internal::GetLogInstanceForLevel(x) \
+-                 << "-- LOG(" << x << "): ")
+-
+-#endif
+\ No newline at end of file
+diff --git a/src/walltime.cc b/src/walltime.cc
+index 39c0497..8de4770 100644
+--- a/src/walltime.cc
++++ b/src/walltime.cc
+@@ -1,4 +1,4 @@
+-// Copyright 2015 Google Inc. All rights reserved.
++// Copyright 2014 Google Inc. All rights reserved.
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+ // you may not use this file except in compliance with the License.
+@@ -14,16 +14,14 @@
+ 
+ #include "walltime.h"
+ 
++#include <stdio.h>
++#include <stdint.h>
++#include <string.h>
+ #include <sys/time.h>
+-
+-#include <cstdio>
+-#include <cstdint>
+-#include <cstring>
+-#include <ctime>
++#include <time.h>
+ 
+ #include <atomic>
+ #include <limits>
+-#include <type_traits>
+ 
+ #include "check.h"
+ #include "cycleclock.h"
+@@ -32,6 +30,41 @@
+ namespace benchmark {
+ namespace walltime {
+ namespace {
++const double kMaxErrorInterval = 100e-6;
++
++std::atomic<bool> initialized(false);
++WallTime base_walltime = 0.0;
++int64_t base_cycletime = 0;
++int64_t cycles_per_second;
++double seconds_per_cycle;
++uint32_t last_adjust_time = 0;
++std::atomic<int32_t> drift_adjust(0);
++int64_t max_interval_cycles = 0;
++
++// Helper routines to load/store a float from an AtomicWord. Required because
++// g++ < 4.7 doesn't support std::atomic<float> correctly. I cannot wait to get
++// rid of this horror show.
++inline void SetDrift(float f) {
++  int32_t w;
++  memcpy(&w, &f, sizeof(f));
++  std::atomic_store(&drift_adjust, w);
++}
++
++inline float GetDrift() {
++  float f;
++  int32_t w = std::atomic_load(&drift_adjust);
++  memcpy(&f, &w, sizeof(f));
++  return f;
++}
++
++static_assert(sizeof(float) <= sizeof(int32_t),
++              "type sizes don't allow the drift_adjust hack");
++
++WallTime Slow() {
++  struct timeval tv;
++  gettimeofday(&tv, NULL);
++  return tv.tv_sec + tv.tv_usec * 1e-6;
++}
+ 
+ bool SplitTimezone(WallTime value, bool local, struct tm* t,
+                    double* subsecond) {
+@@ -48,127 +81,58 @@ bool SplitTimezone(WallTime value, bool local, struct tm* t,
+     gmtime_r(&whole_time, t);
+   return true;
+ }
++}  // end namespace
++
++// This routine should be invoked to initialize walltime.
++// It is not intended for general purpose use.
++void Initialize() {
++  CHECK(!std::atomic_load(&initialized));
++  cycles_per_second = static_cast<int64_t>(CyclesPerSecond());
++  CHECK(cycles_per_second != 0);
++  seconds_per_cycle = 1.0 / cycles_per_second;
++  max_interval_cycles =
++      static_cast<int64_t>(cycles_per_second * kMaxErrorInterval);
++  do {
++    base_cycletime = cycleclock::Now();
++    base_walltime = Slow();
++  } while (cycleclock::Now() - base_cycletime > max_interval_cycles);
++  // We are now sure that "base_walltime" and "base_cycletime" were produced
++  // within kMaxErrorInterval of one another.
+ 
+-} // end anonymous namespace
+-
+-
+-namespace {
+-
+-class WallTimeImp
+-{
+-public:
+-  WallTime Now();
+-
+-  static WallTimeImp& GetWallTimeImp() {
+-    static WallTimeImp imp;
+-#if __cplusplus >= 201103L
+-    static_assert(std::is_trivially_destructible<WallTimeImp>::value,
+-                  "WallTimeImp must be trivially destructible to prevent "
+-                  "issues with static destruction");
+-#endif
+-    return imp;
+-  }
+-
+-private:
+-  WallTimeImp();
+-  // Helper routines to load/store a float from an AtomicWord. Required because
+-  // g++ < 4.7 doesn't support std::atomic<float> correctly. I cannot wait to
+-  // get rid of this horror show.
+-  void SetDrift(float f) {
+-    int32_t w;
+-    memcpy(&w, &f, sizeof(f));
+-    std::atomic_store(&drift_adjust_, w);
+-  }
+-
+-  float GetDrift() const {
+-    float f;
+-    int32_t w = std::atomic_load(&drift_adjust_);
+-    memcpy(&f, &w, sizeof(f));
+-    return f;
+-  }
+-
+-  WallTime Slow() const {
+-    struct timeval tv;
+-    gettimeofday(&tv, NULL);
+-    return tv.tv_sec + tv.tv_usec * 1e-6;
+-  }
+-
+-private:
+-  static_assert(sizeof(float) <= sizeof(int32_t),
+-               "type sizes don't allow the drift_adjust hack");
+-
+-  static constexpr double kMaxErrorInterval = 100e-6;
+-
+-  WallTime base_walltime_;
+-  int64_t base_cycletime_;
+-  int64_t cycles_per_second_;
+-  double seconds_per_cycle_;
+-  uint32_t last_adjust_time_;
+-  std::atomic<int32_t> drift_adjust_;
+-  int64_t max_interval_cycles_;
+-
+-  BENCHMARK_DISALLOW_COPY_AND_ASSIGN(WallTimeImp);
+-};
++  SetDrift(0.0);
++  last_adjust_time = static_cast<uint32_t>(uint64_t(base_cycletime) >> 32);
++  std::atomic_store(&initialized, true);
++}
+ 
++WallTime Now() {
++  if (!std::atomic_load(&initialized)) return Slow();
+ 
+-WallTime WallTimeImp::Now() {
+   WallTime now = 0.0;
+   WallTime result = 0.0;
+   int64_t ct = 0;
+   uint32_t top_bits = 0;
+   do {
+     ct = cycleclock::Now();
+-    int64_t cycle_delta = ct - base_cycletime_;
+-    result = base_walltime_ + cycle_delta * seconds_per_cycle_;
++    int64_t cycle_delta = ct - base_cycletime;
++    result = base_walltime + cycle_delta * seconds_per_cycle;
+ 
+     top_bits = static_cast<uint32_t>(uint64_t(ct) >> 32);
+     // Recompute drift no more often than every 2^32 cycles.
+     // I.e., @2GHz, ~ every two seconds
+-    if (top_bits == last_adjust_time_) {  // don't need to recompute drift
++    if (top_bits == last_adjust_time) {  // don't need to recompute drift
+       return result + GetDrift();
+     }
+ 
+     now = Slow();
+-  } while (cycleclock::Now() - ct > max_interval_cycles_);
++  } while (cycleclock::Now() - ct > max_interval_cycles);
+   // We are now sure that "now" and "result" were produced within
+   // kMaxErrorInterval of one another.
+ 
+   SetDrift(now - result);
+-  last_adjust_time_ = top_bits;
++  last_adjust_time = top_bits;
+   return now;
+ }
+ 
+-
+-WallTimeImp::WallTimeImp()
+-    : base_walltime_(0.0), base_cycletime_(0),
+-      cycles_per_second_(0), seconds_per_cycle_(0.0),
+-      last_adjust_time_(0), drift_adjust_(0),
+-      max_interval_cycles_(0) {
+-  cycles_per_second_ = static_cast<int64_t>(CyclesPerSecond());
+-  CHECK(cycles_per_second_ != 0);
+-  seconds_per_cycle_ = 1.0 / cycles_per_second_;
+-  max_interval_cycles_ =
+-      static_cast<int64_t>(cycles_per_second_ * kMaxErrorInterval);
+-  do {
+-    base_cycletime_ = cycleclock::Now();
+-    base_walltime_ = Slow();
+-  } while (cycleclock::Now() - base_cycletime_ > max_interval_cycles_);
+-  // We are now sure that "base_walltime" and "base_cycletime" were produced
+-  // within kMaxErrorInterval of one another.
+-
+-  SetDrift(0.0);
+-  last_adjust_time_ = static_cast<uint32_t>(uint64_t(base_cycletime_) >> 32);
+-}
+-
+-} // end anonymous namespace
+-
+-
+-WallTime Now()
+-{
+-    static WallTimeImp& imp = WallTimeImp::GetWallTimeImp();
+-    return imp.Now();
+-}
+-
+ std::string Print(WallTime time, const char* format, bool local,
+                   int* remainder_us) {
+   char storage[32];
+@@ -186,6 +150,5 @@ std::string Print(WallTime time, const char* format, bool local,
+   }
+   return std::string(storage);
+ }
+-
+ }  // end namespace walltime
+ }  // end namespace benchmark
+diff --git a/src/walltime.h b/src/walltime.h
+index d4a4fce..7d34ddf 100644
+--- a/src/walltime.h
++++ b/src/walltime.h
+@@ -7,6 +7,7 @@ namespace benchmark {
+ typedef double WallTime;
+ 
+ namespace walltime {
++void Initialize();
+ WallTime Now();
+ 
+ // GIVEN: walltime, generic format string (as understood by strftime),
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 392dfb5..e7ec9dd 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -32,7 +32,7 @@ endmacro(add_gtest_test)
+ 
+ # Demonstration executable
+ compile_benchmark_test(benchmark_test)
+-add_test(benchmark benchmark_test --benchmark_min_time=0.1 51)
++add_test(benchmark benchmark_test --benchmark_min_time=0.1 50)
+ add_test(benchmark_filter_simple benchmark_test --benchmark_filter=Calculate 16)
+ add_test(benchmark_filter_suffix benchmark_test --benchmark_filter=Calculate* 16)
+ add_test(benchmark_filter_regex_wildcard benchmark_test --benchmark_filter=.*Calculate.* 16)
+diff --git a/test/benchmark_test.cc b/test/benchmark_test.cc
+index 0a3e48e..cade774 100644
+--- a/test/benchmark_test.cc
++++ b/test/benchmark_test.cc
+@@ -24,9 +24,11 @@
+ 
+ namespace {
+ 
++#ifdef DEBUG
+ int BENCHMARK_NOINLINE Factorial(uint32_t n) {
+   return (n == 1) ? 1 : n * Factorial(n - 1);
+ }
++#endif
+ 
+ double CalculatePi(int depth) {
+   double pi = 0.0;
+@@ -50,6 +52,7 @@ std::vector<int>* test_vector = nullptr;
+ 
+ }  // end namespace
+ 
++#ifdef DEBUG
+ static void BM_Factorial(benchmark::State& state) {
+   int fac_42 = 0;
+   while (state.KeepRunning())
+@@ -58,6 +61,7 @@ static void BM_Factorial(benchmark::State& state) {
+   EXPECT_NE(fac_42, std::numeric_limits<int>::max());
+ }
+ BENCHMARK(BM_Factorial);
++#endif
+ 
+ static void BM_CalculatePiRange(benchmark::State& state) {
+   double pi = 0.0;
+@@ -175,7 +179,9 @@ class TestReporter : public benchmark::internal::ConsoleReporter {
+ int main(int argc, const char* argv[]) {
+   benchmark::Initialize(&argc, argv);
+ 
++#ifdef DEBUG
+   assert(Factorial(8) == 40320);
++#endif
+   assert(CalculatePi(1) == 0.0);
+ 
+   TestReporter test_reporter;

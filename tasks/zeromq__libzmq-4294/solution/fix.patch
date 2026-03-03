@@ -1,0 +1,147 @@
+diff --git a/Makefile.am b/Makefile.am
+index b61ddf0f..5008f7e4 100755
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -1066,7 +1066,8 @@ test_apps += tests/test_poller \
+ 	tests/test_disconnect_msg \
+ 	tests/test_channel \
+ 	tests/test_hiccup_msg \
+-	tests/test_zmq_ppoll_fd
++	tests/test_zmq_ppoll_fd \
++	tests/test_xsub_verbose
+ 
+ tests_test_poller_SOURCES = tests/test_poller.cpp
+ tests_test_poller_LDADD = ${TESTUTIL_LIBS} src/libzmq.la
+@@ -1140,6 +1141,10 @@ tests_test_zmq_ppoll_fd_SOURCES = tests/test_zmq_ppoll_fd.cpp
+ tests_test_zmq_ppoll_fd_LDADD = ${TESTUTIL_LIBS} src/libzmq.la
+ tests_test_zmq_ppoll_fd_CPPFLAGS = ${TESTUTIL_CPPFLAGS}
+ 
++tests_test_xsub_verbose_SOURCES = tests/test_xsub_verbose.cpp
++tests_test_xsub_verbose_LDADD = ${TESTUTIL_LIBS} src/libzmq.la
++tests_test_xsub_verbose_CPPFLAGS = ${TESTUTIL_CPPFLAGS}
++
+ if HAVE_FORK
+ test_apps += tests/test_zmq_ppoll_signals
+ 
+diff --git a/RELICENSE/PaulThiele.md b/RELICENSE/PaulThiele.md
+new file mode 100644
+index 00000000..1042c582
+--- /dev/null
++++ b/RELICENSE/PaulThiele.md
+@@ -0,0 +1,16 @@
++# Permission to Relicense under MPLv2 or any other OSI approved license chosen by the current ZeroMQ BDFL
++
++This is a statement by Paul Thiele that grants permission to
++relicense its copyrights in the libzmq C++ library (ZeroMQ) under the
++Mozilla Public License v2 (MPLv2) or any other Open Source Initiative
++approved license chosen by the current ZeroMQ BDFL (Benevolent
++Dictator for Life).
++
++A portion of the commits made by the Github handle "thielepaul", with
++commit author "Paul Thiele <thielepaul@gmail.com>", are
++copyright of Paul Thiele.  This document hereby grants the libzmq
++project team to relicense libzmq, including all past, present and
++future contributions of the author listed above.
++
++Paul Thiele
++2021/11/04
+diff --git a/doc/zmq_setsockopt.txt b/doc/zmq_setsockopt.txt
+index c8c9029a..3ed69769 100644
+--- a/doc/zmq_setsockopt.txt
++++ b/doc/zmq_setsockopt.txt
+@@ -1252,6 +1252,21 @@ Default value:: NULL
+ Applicable socket types:: ZMQ_XPUB
+ 
+ 
++ZMQ_XSUB_VERBOSE_UNSUBSCRIBE: pass duplicate unsubscribe messages on XSUB socket
++~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++Sets the 'XSUB' socket behaviour on duplicated unsubscriptions. If enabled, the socket
++passes all unsubscribe messages to the caller. If disabled, only the last unsubscription
++from each filter will be passed. The default is 0 (disabled).
++
++NOTE: in DRAFT state, not yet available in stable releases.
++
++[horizontal]
++Option value type:: int
++Option value unit:: 0, 1
++Default value:: 0
++Applicable socket types:: ZMQ_XSUB
++
++
+ ZMQ_ONLY_FIRST_SUBSCRIBE: Process only first subscribe/unsubscribe in a multipart message
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ If set, only the first part of the multipart message is processed as
+diff --git a/include/zmq.h b/include/zmq.h
+index 6becfa3e..4f1fb975 100644
+--- a/include/zmq.h
++++ b/include/zmq.h
+@@ -679,6 +679,7 @@ ZMQ_EXPORT void zmq_threadclose (void *thread_);
+ #define ZMQ_PRIORITY 112
+ #define ZMQ_BUSY_POLL 113
+ #define ZMQ_HICCUP_MSG 114
++#define ZMQ_XSUB_VERBOSE_UNSUBSCRIBE 115
+ 
+ /*  DRAFT ZMQ_RECONNECT_STOP options                                          */
+ #define ZMQ_RECONNECT_STOP_CONN_REFUSED 0x1
+diff --git a/src/xsub.cpp b/src/xsub.cpp
+index 66c4d16b..3a8818c8 100644
+--- a/src/xsub.cpp
++++ b/src/xsub.cpp
+@@ -36,6 +36,7 @@
+ 
+ zmq::xsub_t::xsub_t (class ctx_t *parent_, uint32_t tid_, int sid_) :
+     socket_base_t (parent_, tid_, sid_),
++    _verbose_unsubs (false),
+     _has_message (false),
+     _more_send (false),
+     _more_recv (false),
+@@ -110,6 +111,12 @@ int zmq::xsub_t::xsetsockopt (int option_,
+         _only_first_subscribe = (*static_cast<const int *> (optval_) != 0);
+         return 0;
+     }
++#ifdef ZMQ_BUILD_DRAFT_API
++    else if (option_ == ZMQ_XSUB_VERBOSE_UNSUBSCRIBE) {
++        _verbose_unsubs = (*static_cast<const int *> (optval_) != 0);
++        return 0;
++    }
++#endif
+     errno = EINVAL;
+     return -1;
+ }
+@@ -150,7 +157,8 @@ int zmq::xsub_t::xsend (msg_t *msg_)
+             size = size - 1;
+         }
+         _process_subscribe = true;
+-        if (_subscriptions.rm (data, size))
++        const bool rm_result = _subscriptions.rm (data, size);
++        if (rm_result || _verbose_unsubs)
+             return _dist.send_to_all (msg_);
+     } else
+         //  User message sent upstream to XPUB socket
+diff --git a/src/xsub.hpp b/src/xsub.hpp
+index 6bbbce07..2fc37ea5 100644
+--- a/src/xsub.hpp
++++ b/src/xsub.hpp
+@@ -91,6 +91,10 @@ class xsub_t : public socket_base_t
+     trie_t _subscriptions;
+ #endif
+ 
++    // If true, send all unsubscription messages upstream, not just
++    // unique ones
++    bool _verbose_unsubs;
++
+     //  If true, 'message' contains a matching message to return on the
+     //  next recv call.
+     bool _has_message;
+diff --git a/src/zmq_draft.h b/src/zmq_draft.h
+index 5a1b17ab..5378ce51 100644
+--- a/src/zmq_draft.h
++++ b/src/zmq_draft.h
+@@ -71,6 +71,7 @@
+ #define ZMQ_PRIORITY 112
+ #define ZMQ_BUSY_POLL 113
+ #define ZMQ_HICCUP_MSG 114
++#define ZMQ_XSUB_VERBOSE_UNSUBSCRIBE 115
+ 
+ /*  DRAFT ZMQ_RECONNECT_STOP options                                          */
+ #define ZMQ_RECONNECT_STOP_CONN_REFUSED 0x1

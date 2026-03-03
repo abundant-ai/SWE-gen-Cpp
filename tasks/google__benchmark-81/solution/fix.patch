@@ -1,0 +1,508 @@
+diff --git a/.travis.yml b/.travis.yml
+index 2e6febd..c7c53cc 100644
+--- a/.travis.yml
++++ b/.travis.yml
+@@ -1,29 +1,17 @@
+ matrix:
+   include:
+     - os: linux
+-      env: SUITE=tests    BUILD_TYPE=Debug   STD=c++0x
++      env: BUILD_TYPE=Debug   STD=c++0x
+     - os: linux
+-      env: SUITE=tests    BUILD_TYPE=Debug   STD=c++11
++      env: BUILD_TYPE=Debug   STD=c++11
+     - os: linux
+-      env: SUITE=tests    BUILD_TYPE=Release STD=c++0x
++      env: BUILD_TYPE=Release STD=c++0x
+     - os: linux
+-      env: SUITE=tests    BUILD_TYPE=Release STD=c++11
+-    - os: linux
+-      env: SUITE=examples BUILD_TYPE=Debug   STD=c++0x
+-    - os: linux
+-      env: SUITE=examples BUILD_TYPE=Debug   STD=c++11
+-    - os: linux
+-      env: SUITE=examples BUILD_TYPE=Release STD=c++0x
+-    - os: linux
+-      env: SUITE=examples BUILD_TYPE=Release STD=c++11
++      env: BUILD_TYPE=Release STD=c++11
+     - os: osx
+-      env: SUITE=tests    BUILD_TYPE=Debug   STD=c++11
++      env: BUILD_TYPE=Debug   STD=c++11
+     - os: osx
+-      env: SUITE=tests    BUILD_TYPE=Release STD=c++11
+-    - os: osx
+-      env: SUITE=examples BUILD_TYPE=Debug   STD=c++11
+-    - os: osx
+-      env: SUITE=examples BUILD_TYPE=Release STD=c++11
++      env: BUILD_TYPE=Release STD=c++11
+ 
+ language:
+     - cpp
+@@ -35,12 +23,11 @@ before_install:
+ install:
+     - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$STD" = "c++11" ]; then sudo apt-get install -qq gcc-4.8 g++-4.8; fi
+     - if [ "$TRAVIS_OS_NAME" = "linux" ] && [ "$STD" = "c++11" ]; then sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 90; fi
+-    
++
+ before_script:
+     - mkdir build && cd build
+ 
+ script:
+     - cmake .. -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DCMAKE_CXX_FLAGS="-std=${STD}"
+     - make
+-    - if [ "$SUITE" = "tests" ]; then ./test/re_test; fi
+-    - if [ "$SUITE" = "examples" ]; then ./test/benchmark_test; fi
++    - make CTEST_OUTPUT_ON_FAILURE=1 test
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d1b2ddc..2526faf 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,93 +1,62 @@
+ cmake_minimum_required (VERSION 2.8)
+ project (benchmark)
+ 
++option(BENCHMARK_ENABLE_SHARED  "Enable building a shared library." OFF)
++option(BENCHMARK_ENABLE_TESTING "Enable testing of the benchmark library." ON)
+ # Make sure we can import out CMake functions
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+ 
+-# Import and build Google Test
+-include(ExternalProject)
+-set_directory_properties(properties EP_PREFIX "${CMAKE_BINARY_DIR}/third_party")
+-ExternalProject_Add(googletest
+-  URL "https://googletest.googlecode.com/files/gtest-1.7.0.zip"
+-  URL_MD5 2d6ec8ccdf5c46b05ba54a9fd1d130d7
+-  SOURCE_DIR "${CMAKE_BINARY_DIR}/third_party/gtest"
+-  CMAKE_ARGS "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+-  INSTALL_COMMAND "")
+-ExternalProject_Get_Property(googletest source_dir)
+-include_directories(${source_dir}/include)
+-ExternalProject_Get_Property(googletest binary_dir)
+-link_directories(${binary_dir})
++# Read the git tags to determine the project version
++include(GetGitVersion)
++get_git_version(GIT_VERSION)
++
++# Tell the user what versions we are using
++string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" VERSION ${GIT_VERSION})
++message("-- Version: ${VERSION}")
++
++# The version of the libraries
++set(GENERIC_LIB_VERSION ${VERSION})
++string(SUBSTRING ${VERSION} 0 1 GENERIC_LIB_SOVERSION)
+ 
+ # Try and enable C++11. Don't use C++14 because it doesn't work in some
+ # configurations.
+ include(CheckCXXCompilerFlag)
+-check_cxx_compiler_flag(--std=c++11 HAVE_FLAG_CXX_11)
+-check_cxx_compiler_flag(--std=c++0x HAVE_FLAG_CXX_0X)
++include(AddCXXCompilerFlag)
++include(CXXFeatureCheck)
++
++check_cxx_compiler_flag(-std=c++11 HAVE_FLAG_CXX_11)
++check_cxx_compiler_flag(-std=c++0x HAVE_FLAG_CXX_0X)
+ if (HAVE_FLAG_CXX_11)
+-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --std=c++11")
++  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+ elseif (HAVE_FLAG_CXX_0X)
+-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --std=c++0x")
++  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
+ endif()
+ 
+ # Turn compiler warnings up to 11
+-include(AddCXXCompilerFlag)
+ add_cxx_compiler_flag(-Wall)
++add_cxx_compiler_flag(-Wextra)
+ add_cxx_compiler_flag(-Wshadow)
+ add_cxx_compiler_flag(-Werror)
+ add_cxx_compiler_flag(-pedantic-errors)
++# TODO(ericwf): enable this for g++
+ #add_cxx_compiler_flag(-Wzero-as-null-pointer-constant)
+-
+ # Release flags
+ add_cxx_compiler_flag(-fno-strict-aliasing RELEASE)
+ 
+-# Add a debug definition so we can make decisions in the compilation
+-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG")
+-
+-# Set OS
+-if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+-  add_definitions(-DOS_MACOSX)
+-endif()
+-
+-if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+-  add_definitions(-DOS_LINUX)
+-endif()
+-
+-if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+-  add_definitions(-DOS_WINDOWS)
+-endif()
+-
+-if(${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
+-  add_definitions(-DOS_FREEBSD)
+-endif()
+-
+-# Set CPU
+-if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "x86")
+-  add_definitions(-DARCH_X86)
+-endif()
+-
+-# Read the git tags to determine the project version
+-include(GetGitVersion)
+-get_git_version(GIT_VERSION)
+-
+-# Tell the user what versions we are using
+-string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" VERSION ${GIT_VERSION})
+-message("-- Version: ${VERSION}")
+-
+-# The version of the libraries
+-set(GENERIC_LIB_VERSION ${VERSION})
+-string(SUBSTRING ${VERSION} 0 1 GENERIC_LIB_SOVERSION)
++add_cxx_compiler_flag(-Wthread-safety)
+ 
+ # C++ feature checks
+-include(CXXFeatureCheck)
+ cxx_feature_check(STD_REGEX)
+ cxx_feature_check(GNU_POSIX_REGEX)
+ cxx_feature_check(POSIX_REGEX)
+ 
+ # Set up directories
+ include_directories(${PROJECT_SOURCE_DIR}/include)
+-include_directories(${PROJECT_SOURCE_DIR}/src)
+ 
+ # Build the targets
+-enable_testing()
+ add_subdirectory(src)
+-add_subdirectory(test)
++
++if (BENCHMARK_ENABLE_TESTING)
++  enable_testing()
++  add_subdirectory(test)
++endif()
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 58c9c15..2532454 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -295,7 +295,7 @@ class State {
+   std::unique_ptr<ThreadStats> stats_;
+ 
+   friend class internal::Benchmark;
+-  DISALLOW_COPY_AND_ASSIGN(State)
++  BENCHMARK_DISALLOW_COPY_AND_ASSIGN(State);
+ };
+ 
+ // Interface for custom benchmark result printers.
+@@ -479,7 +479,7 @@ class Benchmark {
+   friend struct ::benchmark::internal::Benchmark::Instance;
+   friend void ::benchmark::internal::RunMatchingBenchmarks(
+       const std::string&, const BenchmarkReporter*);
+-  DISALLOW_COPY_AND_ASSIGN(Benchmark)
++  BENCHMARK_DISALLOW_COPY_AND_ASSIGN(Benchmark);
+ };
+ 
+ // ------------------------------------------------------
+@@ -510,7 +510,7 @@ class ConsoleReporter : public BenchmarkReporter {
+ 
+ #define BENCHMARK(n)                                         \
+   static ::benchmark::internal::Benchmark* BENCHMARK_CONCAT( \
+-      __benchmark_, n, __LINE__) ATTRIBUTE_UNUSED =          \
++      __benchmark_, n, __LINE__) BENCHMARK_UNUSED =          \
+       (new ::benchmark::internal::Benchmark(#n, n))
+ 
+ // Old-style macros
+@@ -530,12 +530,12 @@ class ConsoleReporter : public BenchmarkReporter {
+ // will register BM_Foo<1> as a benchmark.
+ #define BENCHMARK_TEMPLATE(n, a)                             \
+   static ::benchmark::internal::Benchmark* BENCHMARK_CONCAT( \
+-      __benchmark_, n, __LINE__) ATTRIBUTE_UNUSED =          \
++      __benchmark_, n, __LINE__) BENCHMARK_UNUSED =          \
+       (new ::benchmark::internal::Benchmark(#n "<" #a ">", n<a>))
+ 
+ #define BENCHMARK_TEMPLATE2(n, a, b)                         \
+   static ::benchmark::internal::Benchmark* BENCHMARK_CONCAT( \
+-      __benchmark_, n, __LINE__) ATTRIBUTE_UNUSED =          \
++      __benchmark_, n, __LINE__) BENCHMARK_UNUSED =          \
+       (new ::benchmark::internal::Benchmark(#n "<" #a "," #b ">", n<a, b>))
+ 
+ #endif  // BENCHMARK_BENCHMARK_H_
+diff --git a/include/benchmark/macros.h b/include/benchmark/macros.h
+index b842bcc..5e75ed3 100644
+--- a/include/benchmark/macros.h
++++ b/include/benchmark/macros.h
+@@ -1,51 +1,44 @@
++// Copyright 2015 Google Inc. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
+ #ifndef BENCHMARK_MACROS_H_
+ #define BENCHMARK_MACROS_H_
+ 
+-#include <assert.h>
+-#include <stddef.h>
+-
+-#define DISALLOW_COPY_AND_ASSIGN(TypeName) \
+-  TypeName(const TypeName&);               \
+-  void operator=(const TypeName&);
+-
+-// The arraysize(arr) macro returns the # of elements in an array arr.
+-// The expression is a compile-time constant, and therefore can be
+-// used in defining new arrays, for example.  If you use arraysize on
+-// a pointer by mistake, you will get a compile-time error.
+-//
+-// One caveat is that, for C++03, arraysize() doesn't accept any array of
+-// an anonymous type or a type defined inside a function.  In these rare
+-// cases, you have to use the unsafe ARRAYSIZE() macro below.  This is
+-// due to a limitation in C++03's template system.  The limitation has
+-// been removed in C++11.
+-
+-// This template function declaration is used in defining arraysize.
+-// Note that the function doesn't need an implementation, as we only
+-// use its type.
+-template <typename T, size_t N>
+-char (&ArraySizeHelper(T (&array)[N]))[N];
+-
+-// That gcc wants both of these prototypes seems mysterious. VC, for
+-// its part, can't decide which to use (another mystery). Matching of
+-// template overloads: the final frontier.
+-#ifndef COMPILER_MSVC
+-template <typename T, size_t N>
+-char (&ArraySizeHelper(const T (&array)[N]))[N];
++#if __cplusplus < 201103L
++# define BENCHMARK_DISALLOW_COPY_AND_ASSIGN(TypeName)  \
++    TypeName(const TypeName&);                         \
++    TypeName& operator=(const TypeName&)
++#else
++# define BENCHMARK_DISALLOW_COPY_AND_ASSIGN(TypeName)  \
++    TypeName(const TypeName&) = delete;                \
++    TypeName& operator=(const TypeName&) = delete
+ #endif
+ 
+-#define arraysize(array) (sizeof(ArraySizeHelper(array)))
+-
+-//
+-// Prevent the compiler from complaining about or optimizing away variables
+-// that appear unused.
+-#define ATTRIBUTE_UNUSED __attribute__((unused))
++#if defined(__GNUC__)
++# define BENCHMARK_UNUSED __attribute__((unused))
++# define BENCHMARK_ALWAYS_INLINE __attribute__((always_inline))
++#elif defined(_MSC_VER) && !defined(__clang__)
++# define BENCHMARK_UNUSED
++# define BENCHMARK_ALWAYS_INLINE __forceinline
++#else
++# define BENCHMARK_UNUSED
++# define BENCHMARK_ALWAYS_INLINE
++#endif
+ 
+-//
+-// For functions we want to force inline or not inline.
+-// Introduced in gcc 3.1.
+-#define ATTRIBUTE_ALWAYS_INLINE __attribute__((always_inline))
+-#define HAVE_ATTRIBUTE_ALWAYS_INLINE 1
+-#define ATTRIBUTE_NOINLINE __attribute__((noinline))
+-#define HAVE_ATTRIBUTE_NOINLINE 1
++#if defined(__GNUC__)
++# define BENCHMARK_BUILTIN_EXPECT(x, y) __builtin_expect(x, y)
++#else
++# define BENCHMARK_BUILTIN_EXPECT(x, y) x
++#endif
+ 
+ #endif  // BENCHMARK_MACROS_H_
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index fd3bfc7..a5dc597 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1,6 +1,9 @@
+-# Define the source files
+-set(SOURCE_FILES "benchmark.cc" "colorprint.cc" "commandlineflags.cc" "sleep.cc" "sysinfo.cc" "walltime.cc")
++# Allow the source files to find headers in src/
++include_directories(${PROJECT_SOURCE_DIR}/src)
+ 
++# Define the source files
++set(SOURCE_FILES "benchmark.cc" "colorprint.cc" "commandlineflags.cc"
++                 "sleep.cc" "sysinfo.cc" "walltime.cc")
+ # Determine the correct regular expression engine to use
+ if(HAVE_STD_REGEX)
+   set(RE_FILES "re_std.cc")
+@@ -12,19 +15,20 @@ else()
+   message(FATAL_ERROR "Failed to determine the source files for the regular expression backend")
+ endif()
+ 
+-# Build a regular expression library
+-add_library(benchmark_re ${RE_FILES})
+-set_target_properties(benchmark_re PROPERTIES
+-  VERSION ${GENERIC_LIB_VERSION}
+-  SOVERSION ${GENERIC_LIB_SOVERSION}
+-)
+-
+ # Build the benchmark library
+-add_library(benchmark ${SOURCE_FILES} ${RE_FILES})
++if (BENCHMARK_ENABLE_SHARED)
++  add_library(benchmark SHARED ${SOURCE_FILES} ${RE_FILES})
++  find_package(Threads REQUIRED)
++  target_link_libraries(benchmark ${CMAKE_THREAD_LIBS_INIT})
++else()
++  add_library(benchmark STATIC ${SOURCE_FILES} ${RE_FILES})
++endif()
++
+ set_target_properties(benchmark PROPERTIES
++  OUTPUT_NAME "benchmark"
+   VERSION ${GENERIC_LIB_VERSION}
+   SOVERSION ${GENERIC_LIB_SOVERSION}
+-)
++  )
+ 
+ # Install target (will install the library to specified CMAKE_INSTALL_PREFIX variable)
+ install(
+@@ -32,6 +36,7 @@ install(
+   ARCHIVE DESTINATION lib
+   LIBRARY DESTINATION lib
+   COMPONENT library)
++
+ install(
+   DIRECTORY "${PROJECT_SOURCE_DIR}/include/benchmark"
+   DESTINATION include
+diff --git a/src/arraysize.h b/src/arraysize.h
+new file mode 100644
+index 0000000..3a7c0c7
+--- /dev/null
++++ b/src/arraysize.h
+@@ -0,0 +1,36 @@
++#ifndef BENCHMARK_ARRAYSIZE_H_
++#define BENCHMARK_ARRAYSIZE_H_
++
++#include <cstddef>
++
++#include "internal_macros.h"
++
++namespace benchmark {
++namespace internal {
++// The arraysize(arr) macro returns the # of elements in an array arr.
++// The expression is a compile-time constant, and therefore can be
++// used in defining new arrays, for example.  If you use arraysize on
++// a pointer by mistake, you will get a compile-time error.
++//
++
++
++// This template function declaration is used in defining arraysize.
++// Note that the function doesn't need an implementation, as we only
++// use its type.
++template <typename T, size_t N>
++char (&ArraySizeHelper(T (&array)[N]))[N];
++
++// That gcc wants both of these prototypes seems mysterious. VC, for
++// its part, can't decide which to use (another mystery). Matching of
++// template overloads: the final frontier.
++#ifndef COMPILER_MSVC
++template <typename T, size_t N>
++char (&ArraySizeHelper(const T (&array)[N]))[N];
++#endif
++
++#define arraysize(array) (sizeof(::benchmark::internal::ArraySizeHelper(array)))
++
++} // end namespace internal
++} // end namespace benchmark
++
++#endif // BENCHMARK_ARRAYSIZE_H_
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 47e4919..9b2d31b 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -13,9 +13,11 @@
+ // limitations under the License.
+ 
+ #include "benchmark/benchmark.h"
++#include "arraysize.h"
+ #include "check.h"
+ #include "colorprint.h"
+ #include "commandlineflags.h"
++#include "internal_macros.h"
+ #include "re.h"
+ #include "sleep.h"
+ #include "stat.h"
+@@ -628,7 +630,7 @@ class State::FastClock {
+     }
+   }
+ 
+-  DISALLOW_COPY_AND_ASSIGN(FastClock)
++  BENCHMARK_DISALLOW_COPY_AND_ASSIGN(FastClock);
+ };
+ 
+ struct State::ThreadStats {
+@@ -693,7 +695,7 @@ struct State::SharedState {
+         exited(0),
+         threads(b == nullptr ? 1 : b->threads) { }
+ 
+-  DISALLOW_COPY_AND_ASSIGN(SharedState)
++  BENCHMARK_DISALLOW_COPY_AND_ASSIGN(SharedState);
+ };
+ 
+ namespace internal {
+diff --git a/src/cycleclock.h b/src/cycleclock.h
+index 7f9514b..0ad430f 100644
+--- a/src/cycleclock.h
++++ b/src/cycleclock.h
+@@ -49,7 +49,7 @@ namespace benchmark {
+ //    https://setisvn.ssl.berkeley.edu/svn/lib/fftw-3.0.1/kernel/cycle.h
+ namespace cycleclock {
+ // This should return the number of cycles since power-on.  Thread-safe.
+-inline ATTRIBUTE_ALWAYS_INLINE int64_t Now() {
++inline BENCHMARK_ALWAYS_INLINE int64_t Now() {
+ #if defined(OS_MACOSX)
+   // this goes at the top because we need ALL Macs, regardless of
+   // architecture, to return the number of "mach time units" that
+diff --git a/src/internal_macros.h b/src/internal_macros.h
+new file mode 100644
+index 0000000..6667a2e
+--- /dev/null
++++ b/src/internal_macros.h
+@@ -0,0 +1,40 @@
++#ifndef BENCHMARK_INTERNAL_MACROS_H_
++#define BENCHMARK_INTERNAL_MACROS_H_
++
++#include "benchmark/macros.h"
++
++#ifndef __has_feature
++# define __has_feature(x) 0
++#endif
++
++#if __has_feature(cxx_attributes)
++# define BENCHMARK_NORETURN [[noreturn]]
++#elif defined(__GNUC__)
++# define BENCHMARK_NORETURN __attribute__((noreturn))
++#else
++# define BENCHMARK_NORETURN
++#endif
++
++#if defined(__CYGWIN__)
++# define OS_CYGWIN 1
++#elif defined(_WIN32)
++# define OS_WINDOWS 1
++#elif defined(__APPLE__)
++// TODO(ericwf) This doesn't actually check that it is a Mac OSX system. Just
++// that it is an apple system.
++# define OS_MACOSX 1
++#elif defined(__FreeBSD__)
++# define OS_FREEBSD 1
++#elif defined(__linux__)
++# define OS_LINUX 1
++#endif
++
++#if defined(__clang__)
++# define COMPILER_CLANG
++#elif defined(_MSC_VER)
++# define COMPILER_MSVC
++#elif defined(__GNUC__)
++# define COMPILER_GCC
++#endif
++
++#endif // BENCHMARK_INTERNAL_MACROS_H_

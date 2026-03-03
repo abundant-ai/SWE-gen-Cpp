@@ -9,10 +9,26 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install C++ compiler and CMake (required for this C++ project using CMake)
+# Install C++ compiler, CMake, and Ninja (C++20 modules require Ninja and Clang 18+)
 RUN apt-get update && apt-get install -y \
     cmake \
-    && rm -rf /var/lib/apt/lists/*
+    ninja-build \
+    wget \
+    lsb-release \
+    software-properties-common \
+    gnupg \
+    && wget https://apt.llvm.org/llvm.sh \
+    && chmod +x llvm.sh \
+    && ./llvm.sh 18 \
+    && apt-get install -y clang-tools-18 libc++-18-dev libc++abi-18-dev \
+    && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100 \
+    && update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++-18 100 \
+    && update-alternatives --install /usr/bin/clang-scan-deps clang-scan-deps /usr/bin/clang-scan-deps-18 100 \
+    && rm -rf /var/lib/apt/lists/* llvm.sh
+
+# Set CMake to use libc++ with Clang for C++20 module support
+ENV CMAKE_CXX_FLAGS="-stdlib=libc++"
 
 WORKDIR /app
 
@@ -25,8 +41,8 @@ RUN git clone https://github.com/taskflow/taskflow.git src && \
 
 WORKDIR /app/src
 
-# Build the project with CMake
-RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+# Build the project with CMake (use Ninja generator for potential C++20 module support in tests)
+RUN cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build --parallel $(nproc)
 
 # If install/build steps touched tracked files, reset them so bug.patch applies cleanly

@@ -1,0 +1,188 @@
+diff --git a/.gitignore b/.gitignore
+index b538747..3c1b4f2 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -10,6 +10,10 @@
+ *.pyc
+ __pycache__
+ 
++# lcov
++*.lcov
++/lcov
++
+ # cmake files.
+ /Testing
+ CMakeCache.txt
+@@ -22,8 +26,7 @@ Makefile
+ # in-source build.
+ bin/
+ lib/
+-/test/benchmark_test
+-/test/re_test
++/test/*_test
+ 
+ # exuberant ctags.
+ tags
+diff --git a/.travis.yml b/.travis.yml
+index 91e82eb..8b138ce 100644
+--- a/.travis.yml
++++ b/.travis.yml
+@@ -4,6 +4,8 @@ language: cpp
+ # travis-ci.org more readable.
+ matrix:
+     include:
++        - compiler: gcc
++          env: COMPILER=g++-4.6     STD=c++0x BUILD_TYPE=Coverage
+         - compiler: gcc
+           env: COMPILER=g++-4.6     STD=c++0x BUILD_TYPE=Debug
+         - compiler: gcc
+@@ -21,7 +23,19 @@ before_script:
+     - source .travis-setup.sh
+     - mkdir build && cd build
+ 
++install:
++  - if [ "${BUILD_TYPE}" == "Coverage" -a "${TRAVIS_OS_NAME}" == "linux" ]; then
++      PATH=~/.local/bin:${PATH};
++      pip install --user --upgrade pip;
++      pip install --user cpp-coveralls;
++    fi
++
+ script:
+     - cmake .. -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DCMAKE_CXX_FLAGS="-std=${STD}"
+     - make
+     - make CTEST_OUTPUT_ON_FAILURE=1 test
++
++after_success:
++  - if [ "${BUILD_TYPE}" == "Coverage" -a "${TRAVIS_OS_NAME}" == "linux" ]; then
++      coveralls --include src --include include --gcov-options '\-lp' --root .. --build-root .;
++    fi
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index cb57f3e..911f309 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2,6 +2,7 @@ cmake_minimum_required (VERSION 2.8.11)
+ project (benchmark)
+ 
+ option(BENCHMARK_ENABLE_TESTING "Enable testing of the benchmark library." ON)
++option(BENCHMARK_ENABLE_LTO "Enable link time optimisation of the benchmark library." OFF)
+ # Make sure we can import out CMake functions
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+ 
+@@ -17,38 +18,74 @@ message("-- Version: ${VERSION}")
+ set(GENERIC_LIB_VERSION ${VERSION})
+ string(SUBSTRING ${VERSION} 0 1 GENERIC_LIB_SOVERSION)
+ 
+-# Try and enable C++11. Don't use C++14 because it doesn't work in some
+-# configurations.
++# Import our CMake modules
+ include(CheckCXXCompilerFlag)
+ include(AddCXXCompilerFlag)
+ include(CXXFeatureCheck)
+ 
+-check_cxx_compiler_flag(-std=c++11 HAVE_FLAG_CXX_11)
+-check_cxx_compiler_flag(-std=c++0x HAVE_FLAG_CXX_0X)
+-if (HAVE_FLAG_CXX_11)
+-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+-elseif (HAVE_FLAG_CXX_0X)
+-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
++# Try and enable C++11. Don't use C++14 because it doesn't work in some
++# configurations.
++add_cxx_compiler_flag(-std=c++11)
++if (NOT HAVE_CXX_FLAG_STD_CXX11)
++  add_cxx_compiler_flag(-std=c++0x)
+ endif()
+ 
+ # Turn compiler warnings up to 11
+ add_cxx_compiler_flag(-Wall)
+ add_cxx_compiler_flag(-Wextra)
+ add_cxx_compiler_flag(-Wshadow)
+-add_cxx_compiler_flag(-Werror)
++add_cxx_compiler_flag(-Werror RELEASE)
++add_cxx_compiler_flag(-pedantic)
+ add_cxx_compiler_flag(-pedantic-errors)
+ add_cxx_compiler_flag(-Wshorten-64-to-32)
+ add_cxx_compiler_flag(-Wfloat-equal)
+ add_cxx_compiler_flag(-Wzero-as-null-pointer-constant)
+-# Release flags
+-add_cxx_compiler_flag(-fno-strict-aliasing RELEASE)
+-
++add_cxx_compiler_flag(-fstrict-aliasing)
++if (HAVE_CXX_FLAG_FSTRICT_ALIASING)
++  add_cxx_compiler_flag(-Wstrict-aliasing)
++endif()
+ add_cxx_compiler_flag(-Wthread-safety)
+ if (HAVE_WTHREAD_SAFETY)
+   add_definitions(-DHAVE_WTHREAD_SAFETY)
+   cxx_feature_check(THREAD_SAFETY_ATTRIBUTES)
+ endif()
+ 
++# Link time optimisation
++if (BENCHMARK_ENABLE_LTO)
++  add_cxx_compiler_flag(-flto)
++  if ("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU")
++    find_program(GCC_AR gcc-ar)
++    if (GCC_AR)
++      set(CMAKE_AR ${GCC_AR})
++    endif()
++    find_program(GCC_RANLIB gcc-ranlib)
++    if (GCC_RANLIB)
++      set(CMAKE_RANLIB ${GCC_RANLIB})
++    endif()
++  endif()
++endif()
++
++# Coverage build type
++set(CMAKE_CXX_FLAGS_COVERAGE "${CMAKE_CXX_FLAGS_DEBUG}" CACHE STRING
++  "Flags used by the C++ compiler during coverage builds."
++  FORCE)
++set(CMAKE_EXE_LINKER_FLAGS_COVERAGE
++  "${CMAKE_EXE_LINKER_FLAGS_DEBUG}" CACHE STRING
++  "Flags used for linking binaries during coverage builds."
++  FORCE)
++set(CMAKE_SHARED_LINKER_FLAGS_COVERAGE
++  "${CMAKE_SHARED_LINKER_FLAGS_DEBUG}" CACHE STRING
++  "Flags used by the shared libraries linker during coverage builds."
++  FORCE)
++mark_as_advanced(
++  CMAKE_CXX_FLAGS_COVERAGE
++  CMAKE_EXE_LINKER_FLAGS_COVERAGE
++  CMAKE_SHARED_LINKER_FLAGS_COVERAGE)
++set(CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}" CACHE STRING
++  "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel Coverage."
++  FORCE)
++add_cxx_compiler_flag(--coverage COVERAGE)
++
+ # C++ feature checks
+ cxx_feature_check(STD_REGEX)
+ cxx_feature_check(GNU_POSIX_REGEX)
+diff --git a/cmake/AddCXXCompilerFlag.cmake b/cmake/AddCXXCompilerFlag.cmake
+index 7c0f5a3..870f11a 100644
+--- a/cmake/AddCXXCompilerFlag.cmake
++++ b/cmake/AddCXXCompilerFlag.cmake
+@@ -20,18 +20,17 @@ set(__add_cxx_compiler_flag INCLUDED)
+ include(CheckCXXCompilerFlag)
+ 
+ function(add_cxx_compiler_flag FLAG)
+-  if(ARGV1)
+-    set(VARIANT ${ARGV1})
+-    string(TOLOWER ${VARIANT} VARIANT)
+-    set(VARIANT " ${VARIANT}")
+-  endif()
+-  string(TOUPPER "HAVE_${FLAG}" SANITIZED_FLAG)
++  string(TOUPPER "HAVE_CXX_FLAG_${FLAG}" SANITIZED_FLAG)
++  string(REPLACE "+" "X" SANITIZED_FLAG ${SANITIZED_FLAG})
+   string(REGEX REPLACE "[^A-Za-z_0-9]" "_" SANITIZED_FLAG ${SANITIZED_FLAG})
+   string(REGEX REPLACE "_+" "_" SANITIZED_FLAG ${SANITIZED_FLAG})
+-  check_cxx_compiler_flag(${FLAG} ${SANITIZED_FLAG})
++  set(CMAKE_REQUIRED_FLAGS "${FLAG}")
++  check_cxx_compiler_flag("" ${SANITIZED_FLAG})
+   if(${SANITIZED_FLAG})
+-    string(REGEX REPLACE "[^A-Za-z_0-9]" "_" VARIANT "${VARIANT}")
+-    string(TOUPPER "${VARIANT}" VARIANT)
++    set(VARIANT ${ARGV1})
++    if(ARGV1)
++      string(TOUPPER "_${VARIANT}" VARIANT)
++    endif()
+     set(CMAKE_CXX_FLAGS${VARIANT} "${CMAKE_CXX_FLAGS${VARIANT}} ${FLAG}" PARENT_SCOPE)
+   endif()
+ endfunction()

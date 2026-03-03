@@ -6,53 +6,34 @@ cd /app/src
 mkdir -p "tests"
 cp "/tests/autotest-appveyor.ps1" "tests/autotest-appveyor.ps1"
 
-# The actual test is to verify the CMake configuration
-# With the fix: CMAKE should default to C++17 when supported
-# Without the fix (bug.patch applied): CMAKE defaults to C++11
+# This PR makes string_view support automatically available when building with C++17.
+# In the bug state (BASE), PUGIXML_HAS_STRING_VIEW is NOT defined unless PUGIXML_STRING_VIEW is manually set.
+# In the fixed state (HEAD), PUGIXML_HAS_STRING_VIEW IS automatically defined with C++17.
 
-# Configure with CMake and check what C++ standard is used
-mkdir -p build_test
-cd build_test
+# Create a test program that checks if PUGIXML_HAS_STRING_VIEW is defined
+cat > test_string_view_auto.cpp << 'EOF'
+#include "src/pugixml.hpp"
 
-echo "# Configuring with CMake (no explicit C++ standard)"
-cmake .. -DPUGIXML_BUILD_TESTS=ON 2>&1 | tee cmake_output.txt
+#ifndef PUGIXML_HAS_STRING_VIEW
+#error "PUGIXML_HAS_STRING_VIEW should be automatically defined when compiling with C++17, but it is not!"
+#endif
 
-echo "# Checking CMakeLists.txt for C++ standard logic:"
-grep -A5 "CMAKE_CXX_STANDARD_REQUIRED" ../CMakeLists.txt || echo "# No CMAKE_CXX_STANDARD_REQUIRED logic found"
+int main() {
+    return 0;
+}
+EOF
 
-# CMAKE_CXX_STANDARD might not be in the cache since it's set without CACHE keyword
-# Check the build flags in compile_commands.json or build.make files
-echo "# Checking for actual compiler flags:"
-
-# Try to build and capture the actual compile command
-cmake --build . --verbose 2>&1 | tee build_output.txt | head -50
-
-# Extract the actual C++ standard from compiler flags
-if grep -q "\-std=c++17\|\-std=gnu++17" build_output.txt; then
-    echo "# C++17 flag detected in build (FIX is applied)"
-    test_status=0
-elif grep -q "\-std=c++11\|\-std=gnu++11" build_output.txt; then
-    echo "# C++11 flag detected in build (BUG is present)"
-    test_status=1
-elif grep -q "\-std=c++14\|\-std=gnu++14" build_output.txt; then
-    echo "# C++14 flag detected (unexpected)"
-    test_status=1
-else
-    # No explicit -std flag means compiler default (likely C++11 or C++14)
-    echo "# No explicit -std flag found, checking CMakeLists.txt logic"
-    # Check if the fix logic is present
-    if grep -q "set(CMAKE_CXX_STANDARD 17)" ../CMakeLists.txt; then
-        echo "# CMakeLists.txt has C++17 logic but it wasn't applied - possible CMake version issue"
-        test_status=1
-    else
-        echo "# C++17 logic not found in CMakeLists.txt (BUG is present)"
-        test_status=1
-    fi
-fi
+# Try to compile the test with C++17 (no manual PUGIXML_STRING_VIEW define)
+# This will FAIL in bug state (error: PUGIXML_HAS_STRING_VIEW not defined)
+# This will PASS in fixed state (PUGIXML_HAS_STRING_VIEW is auto-defined)
+g++ -std=c++17 test_string_view_auto.cpp -I. -o test_string_view_auto
+test_status=$?
 
 if [ $test_status -eq 0 ]; then
+  echo "SUCCESS: PUGIXML_HAS_STRING_VIEW is automatically defined with C++17"
   echo 1 > /logs/verifier/reward.txt
 else
+  echo "FAILURE: PUGIXML_HAS_STRING_VIEW is not automatically defined with C++17"
   echo 0 > /logs/verifier/reward.txt
 fi
 exit "$test_status"

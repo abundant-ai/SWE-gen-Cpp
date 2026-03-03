@@ -1,0 +1,495 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 09fe0b2..316bd3c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -3,6 +3,20 @@ project (benchmark)
+ 
+ find_package(Threads REQUIRED)
+ 
++# Import and build Google Test
++include(ExternalProject)
++set_directory_properties(properties EP_PREFIX "${CMAKE_BINARY_DIR}/third_party")
++ExternalProject_Add(googletest
++    URL "https://googletest.googlecode.com/files/gtest-1.7.0.zip"
++    URL_HASH SHA1=f85f6d2481e2c6c4a18539e391aa4ea8ab0394af
++    TLS_VERIFY on
++    SOURCE_DIR "${CMAKE_BINARY_DIR}/third_party/gtest"
++    INSTALL_COMMAND "")
++ExternalProject_Get_Property(googletest source_dir)
++include_directories(${source_dir}/include)
++ExternalProject_Get_Property(googletest binary_dir)
++link_directories(${binary_dir})
++
+ set(CMAKE_CXX_FLAGS "-Wall -Werror -pedantic-errors --std=c++0x")
+ set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
+ set(CMAKE_CXX_FLAGS_RELEASE "-fno-strict-aliasing -O3 -DNDEBUG")
+@@ -30,19 +44,6 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
+ include_directories(${PROJECT_SOURCE_DIR}/src)
+ 
+ # Build the targets
+-FILE(GLOB SOURCE_FILES "src/*.cc")
+-add_library(benchmark STATIC ${SOURCE_FILES})
+-
+-add_executable(benchmark_test test/benchmark_test.cc)
+-target_link_libraries(benchmark_test benchmark ${CMAKE_THREAD_LIBS_INIT})
+-
+-# Install target (will install the library to specified CMAKE_INSTALL_PREFIX variable)
+-INSTALL(
+-  TARGETS benchmark
+-  ARCHIVE DESTINATION lib
+-  LIBRARY DESTINATION lib
+-  COMPONENT library)
+-INSTALL(
+-  DIRECTORY "${PROJECT_SOURCE_DIR}/include/benchmark"
+-  DESTINATION include
+-  FILES_MATCHING PATTERN "*.*h")
+\ No newline at end of file
++enable_testing()
++add_subdirectory(src)
++add_subdirectory(test)
+diff --git a/CONTRIBUTORS b/CONTRIBUTORS
+index 5b73510..c20993a 100644
+--- a/CONTRIBUTORS
++++ b/CONTRIBUTORS
+@@ -23,6 +23,7 @@
+ # Please keep the list sorted.
+ 
+ Arne Beer <arne@twobeer.de>
++Chris Kennelly <ckennelly@google.com> <ckennelly@ckennelly.com>
+ Christopher Seymour <chris.j.seymour@hotmail.com>
+ David Coeurjolly <david.coeurjolly@liris.cnrs.fr>
+ Dominic Hamon <dma@stripysock.com>
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 977e646..e7ec531 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -178,6 +178,7 @@ void UseRealTime();
+ 
+ namespace internal {
+ class Benchmark;
++class BenchmarkFamilies;
+ }
+ 
+ // State is passed to a running Benchmark and contains state for the
+@@ -444,15 +445,12 @@ class Benchmark {
+   // Used inside the benchmark implementation
+   struct Instance;
+ 
+-  // Extract the list of benchmark instances that match the specified
+-  // regular expression.
+-  static void FindBenchmarks(const std::string& re,
+-                             std::vector<Instance>* benchmarks);
+-
+   // Measure the overhead of an empty benchmark to subtract later.
+   static void MeasureOverhead();
+ 
+  private:
++  friend class BenchmarkFamilies;
++
+   std::vector<Benchmark::Instance> CreateBenchmarkInstances(int rangeXindex,
+                                                             int rangeYindex);
+ 
+diff --git a/include/benchmark/macros.h b/include/benchmark/macros.h
+index 316f87d..da408d4 100644
+--- a/include/benchmark/macros.h
++++ b/include/benchmark/macros.h
+@@ -2,6 +2,7 @@
+ #define BENCHMARK_MACROS_H_
+ 
+ #include <assert.h>
++#include <stddef.h>
+ 
+ #define DISALLOW_COPY_AND_ASSIGN(TypeName) \
+   TypeName(const TypeName&);               \
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+new file mode 100644
+index 0000000..5c6a390
+--- /dev/null
++++ b/src/CMakeLists.txt
+@@ -0,0 +1,16 @@
++set(SOURCE_FILES "benchmark.cc" "colorprint.cc" "commandlineflags.cc" "sleep.cc" "sysinfo.cc" "walltime.cc")
++set(RE_FILES "re.cc")
++
++add_library(benchmark_re STATIC ${RE_FILES})
++add_library(benchmark STATIC ${SOURCE_FILES} ${RE_FILES})
++
++# Install target (will install the library to specified CMAKE_INSTALL_PREFIX variable)
++install(
++  TARGETS benchmark
++  ARCHIVE DESTINATION lib
++  LIBRARY DESTINATION lib
++  COMPONENT library)
++install(
++  DIRECTORY "${PROJECT_SOURCE_DIR}/include/benchmark"
++  DESTINATION include
++  FILES_MATCHING PATTERN "*.*h")
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 7e1357f..3cfbe59 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -17,6 +17,7 @@
+ #include "colorprint.h"
+ #include "commandlineflags.h"
+ #include "mutex_lock.h"
++#include "re.h"
+ #include "sleep.h"
+ #include "stat.h"
+ #include "sysinfo.h"
+@@ -27,12 +28,6 @@
+ #include <semaphore.h>
+ #include <string.h>
+ 
+-#if defined OS_FREEBSD
+-#include <gnuregex.h>
+-#else
+-#include <regex.h>
+-#endif
+-
+ #include <algorithm>
+ #include <atomic>
+ #include <iostream>
+@@ -189,11 +184,7 @@ inline std::string HumanReadableNumber(double n) {
+ // For non-dense Range, intermediate values are powers of kRangeMultiplier.
+ static const int kRangeMultiplier = 8;
+ 
+-// List of all registered benchmarks.  Note that each registered
+-// benchmark identifies a family of related benchmarks to run.
+ static pthread_mutex_t benchmark_mutex;
+-static std::vector<internal::Benchmark*>* families = NULL;
+-
+ pthread_mutex_t starting_mutex;
+ pthread_cond_t starting_cv;
+ 
+@@ -298,6 +289,105 @@ void ComputeStats(const std::vector<BenchmarkReporter::Run>& reports,
+ 
+ namespace internal {
+ 
++// Class for managing registered benchmarks.  Note that each registered
++// benchmark identifies a family of related benchmarks to run.
++class BenchmarkFamilies {
++ public:
++  static BenchmarkFamilies* GetInstance();
++
++  // Registers a benchmark family and returns the index assigned to it.
++  int AddBenchmark(Benchmark* family);
++
++  // Unregisters a family at the given index.
++  void RemoveBenchmark(int index);
++
++  // Extract the list of benchmark instances that match the specified
++  // regular expression.
++  void FindBenchmarks(const std::string& re,
++                      std::vector<Benchmark::Instance>* benchmarks);
++ private:
++  BenchmarkFamilies();
++  ~BenchmarkFamilies();
++
++  std::vector<Benchmark*> families_;
++};
++
++BenchmarkFamilies* BenchmarkFamilies::GetInstance() {
++  static BenchmarkFamilies instance;
++  return &instance;
++}
++
++BenchmarkFamilies::BenchmarkFamilies() { }
++
++BenchmarkFamilies::~BenchmarkFamilies() {
++  for (internal::Benchmark* family : families_) {
++    delete family;
++  }
++}
++
++int BenchmarkFamilies::AddBenchmark(Benchmark* family) {
++  mutex_lock l(&benchmark_mutex);
++  int index = families_.size();
++  families_.push_back(family);
++  return index;
++}
++
++void BenchmarkFamilies::RemoveBenchmark(int index) {
++  mutex_lock l(&benchmark_mutex);
++  families_[index] = NULL;
++
++  // Shrink the vector if convenient.
++  while (!families_.empty() && families_.back() == NULL) {
++    families_.pop_back();
++  }
++}
++
++void BenchmarkFamilies::FindBenchmarks(
++    const std::string& spec,
++    std::vector<Benchmark::Instance>* benchmarks) {
++  // Make regular expression out of command-line flag
++  Regex re;
++  std::string re_error;
++  if (!re.Init(spec, &re_error)) {
++    std::cerr << "Could not compile benchmark re: " << re_error << std::endl;
++    return;
++  }
++
++  mutex_lock l(&benchmark_mutex);
++  for (internal::Benchmark* family : families_) {
++    if (family == nullptr) continue;  // Family was deleted
++
++    // Match against filter.
++    if (!re.Match(family->name_)) {
++#ifdef DEBUG
++      std::cout << "Skipping " << family->name_ << "\n";
++#endif
++      continue;
++    }
++
++    std::vector<Benchmark::Instance> instances;
++    if (family->rangeX_.empty() && family->rangeY_.empty()) {
++      instances = family->CreateBenchmarkInstances(
++        Benchmark::kNoRange, Benchmark::kNoRange);
++      benchmarks->insert(benchmarks->end(), instances.begin(), instances.end());
++    } else if (family->rangeY_.empty()) {
++      for (size_t x = 0; x < family->rangeX_.size(); ++x) {
++        instances = family->CreateBenchmarkInstances(x, Benchmark::kNoRange);
++        benchmarks->insert(benchmarks->end(), instances.begin(),
++                           instances.end());
++      }
++    } else {
++      for (size_t x = 0; x < family->rangeX_.size(); ++x) {
++        for (size_t y = 0; y < family->rangeY_.size(); ++y) {
++          instances = family->CreateBenchmarkInstances(x, y);
++          benchmarks->insert(benchmarks->end(), instances.begin(),
++                             instances.end());
++        }
++      }
++    }
++  }
++}
++
+ std::string ConsoleReporter::PrintMemoryUsage(double bytes) const {
+   if (!get_memory_usage || bytes < 0.0) return "";
+ 
+@@ -598,18 +688,11 @@ namespace internal {
+ 
+ Benchmark::Benchmark(const char* name, BenchmarkFunction f)
+     : name_(name), function_(f) {
+-  mutex_lock l(&benchmark_mutex);
+-  if (families == nullptr) families = new std::vector<Benchmark*>();
+-  registration_index_ = families->size();
+-  families->push_back(this);
++  registration_index_ = BenchmarkFamilies::GetInstance()->AddBenchmark(this);
+ }
+ 
+ Benchmark::~Benchmark() {
+-  mutex_lock l(&benchmark_mutex);
+-  CHECK((*families)[registration_index_] == this);
+-  (*families)[registration_index_] = NULL;
+-  // Shrink the vector if convenient.
+-  while (!families->empty() && families->back() == NULL) families->pop_back();
++  BenchmarkFamilies::GetInstance()->RemoveBenchmark(registration_index_);
+ }
+ 
+ Benchmark* Benchmark::Arg(int x) {
+@@ -740,57 +823,6 @@ std::vector<Benchmark::Instance> Benchmark::CreateBenchmarkInstances(
+   return instances;
+ }
+ 
+-// Extract the list of benchmark instances that match the specified
+-// regular expression.
+-void Benchmark::FindBenchmarks(const std::string& spec,
+-                               std::vector<Instance>* benchmarks) {
+-  // Make regular expression out of command-line flag
+-  regex_t re;
+-  int ec = regcomp(&re, spec.c_str(), REG_EXTENDED | REG_NOSUB);
+-  if (ec != 0) {
+-    size_t needed = regerror(ec, &re, NULL, 0);
+-    char* errbuf = new char[needed];
+-    regerror(ec, &re, errbuf, needed);
+-    std::cerr << "Could not compile benchmark re: " << errbuf << "\n";
+-    delete[] errbuf;
+-    return;
+-  }
+-
+-  mutex_lock l(&benchmark_mutex);
+-  if (families == nullptr) return;  // There's no families.
+-  for (Benchmark* family : *families) {
+-    if (family == nullptr) continue;  // Family was deleted
+-
+-    // Match against filter.
+-    if (regexec(&re, family->name_.c_str(), 0, NULL, 0) != 0) {
+-#ifdef DEBUG
+-      std::cout << "Skipping " << family->name_ << "\n";
+-#endif
+-      continue;
+-    }
+-
+-    std::vector<Benchmark::Instance> instances;
+-    if (family->rangeX_.empty() && family->rangeY_.empty()) {
+-      instances = family->CreateBenchmarkInstances(kNoRange, kNoRange);
+-      benchmarks->insert(benchmarks->end(), instances.begin(), instances.end());
+-    } else if (family->rangeY_.empty()) {
+-      for (size_t x = 0; x < family->rangeX_.size(); ++x) {
+-        instances = family->CreateBenchmarkInstances(x, kNoRange);
+-        benchmarks->insert(benchmarks->end(), instances.begin(),
+-                           instances.end());
+-      }
+-    } else {
+-      for (size_t x = 0; x < family->rangeX_.size(); ++x) {
+-        for (size_t y = 0; y < family->rangeY_.size(); ++y) {
+-          instances = family->CreateBenchmarkInstances(x, y);
+-          benchmarks->insert(benchmarks->end(), instances.begin(),
+-                             instances.end());
+-        }
+-      }
+-    }
+-  }
+-}
+-
+ void Benchmark::MeasureOverhead() {
+   State::FastClock clock(State::FastClock::CPU_TIME);
+   State::SharedState state(nullptr);
+@@ -1135,7 +1167,7 @@ void RunMatchingBenchmarks(const std::string& spec,
+   if (spec.empty()) return;
+ 
+   std::vector<internal::Benchmark::Instance> benchmarks;
+-  internal::Benchmark::FindBenchmarks(spec, &benchmarks);
++  BenchmarkFamilies::GetInstance()->FindBenchmarks(spec, &benchmarks);
+ 
+   // Determine the width of the name field using a minimum width of 10.
+   // Also determine max number of threads needed.
+@@ -1174,7 +1206,7 @@ void FindMatchingBenchmarkNames(const std::string& spec,
+   if (spec.empty()) return;
+ 
+   std::vector<internal::Benchmark::Instance> benchmarks;
+-  internal::Benchmark::FindBenchmarks(spec, &benchmarks);
++  BenchmarkFamilies::GetInstance()->FindBenchmarks(spec, &benchmarks);
+   std::transform(benchmarks.begin(), benchmarks.end(), benchmark_names->begin(),
+                  [](const internal::Benchmark::Instance& b) { return b.name; });
+ }
+diff --git a/src/re.cc b/src/re.cc
+new file mode 100644
+index 0000000..e51e2b6
+--- /dev/null
++++ b/src/re.cc
+@@ -0,0 +1,59 @@
++// Copyright 2014 Google Inc. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#include <benchmark/macros.h>
++#include "re.h"
++
++namespace benchmark {
++
++Regex::Regex() : init_(false) { }
++
++bool Regex::Init(const std::string& spec, std::string* error) {
++  int ec = regcomp(&re_, spec.c_str(), REG_EXTENDED | REG_NOSUB);
++  if (ec != 0) {
++    if (error) {
++      size_t needed = regerror(ec, &re_, NULL, 0);
++      char* errbuf = new char[needed];
++      regerror(ec, &re_, errbuf, needed);
++
++      // regerror returns the number of bytes necessary to null terminate
++      // the string, so we move that when assigning to error.
++      CHECK_NE(needed, 0);
++      error->assign(errbuf, needed - 1);
++
++      delete[] errbuf;
++    }
++
++    return false;
++  }
++
++  init_ = true;
++  return true;
++}
++
++Regex::~Regex() {
++  if (init_) {
++    regfree(&re_);
++  }
++}
++
++bool Regex::Match(const std::string& str) {
++  if (!init_) {
++    return false;
++  }
++
++  return regexec(&re_, str.c_str(), 0, NULL, 0) == 0;
++}
++
++}  // end namespace benchmark
+diff --git a/src/re.h b/src/re.h
+new file mode 100644
+index 0000000..b179bb2
+--- /dev/null
++++ b/src/re.h
+@@ -0,0 +1,50 @@
++// Copyright 2014 Google Inc. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#ifndef BENCHMARK_RE_H_
++#define BENCHMARK_RE_H_
++
++#if defined OS_FREEBSD
++#include <gnuregex.h>
++#else
++#include <regex.h>
++#endif
++#include <string>
++
++namespace benchmark {
++
++// A wrapper around the POSIX regular expression API that provides automatic
++// cleanup
++class Regex {
++ public:
++  Regex();
++  ~Regex();
++
++  // Compile a regular expression matcher from spec.  Returns true on success.
++  //
++  // On failure (and if error is not NULL), error is populated with a human
++  // readable error message if an error occurs.
++  bool Init(const std::string& spec, std::string* error);
++
++  // Returns whether str matches the compiled regular expression.
++  bool Match(const std::string& str);
++ private:
++  bool init_;
++  // Underlying regular expression object
++  regex_t re_;
++};
++
++}  // end namespace benchmark
++
++#endif  // BENCHMARK_RE_H_
+diff --git a/third_party/.gitignore b/third_party/.gitignore
+new file mode 100644
+index 0000000..2b5bda7
+--- /dev/null
++++ b/third_party/.gitignore
+@@ -0,0 +1,3 @@
++gtest
++src
++tmp

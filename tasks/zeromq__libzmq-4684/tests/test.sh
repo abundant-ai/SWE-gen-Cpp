@@ -2,21 +2,22 @@
 
 cd /app/src
 
-# Set CTest output to be verbose on failure
-export CTEST_OUTPUT_ON_FAILURE=1
-
 # Copy HEAD test files from /tests (overwrites BASE state)
-mkdir -p "tests"
 cp "/tests/CMakeLists.txt" "tests/CMakeLists.txt"
+mkdir -p "builds/cmake/Modules"
+cp "/tests/Findgssapi_krb5.cmake" "builds/cmake/Modules/Findgssapi_krb5.cmake"
 
-# Check if the main CMakeLists.txt has GSSAPI support
-# Oracle will have it (from fix.patch), NOP won't (still buggy)
-if grep -q "option(WITH_GSSAPI_KRB5" CMakeLists.txt && \
-   grep -q "find_package(\"gssapi_krb5\"" CMakeLists.txt; then
-  # GSSAPI support is present in main CMakeLists.txt - this is correct
-  test_status=0
+# Reconfigure and rebuild to test the updated CMakeLists.txt with GSSAPI support
+cd build
+cmake .. -DENABLE_DRAFTS=ON -DBUILD_TESTS=ON -DWITH_GSSAPI_KRB5=ON 2>&1 | tee cmake_output.txt
+
+# Check if GSSAPI support was properly recognized
+if grep -q "Using GSSAPI_KRB5" cmake_output.txt; then
+  # GSSAPI support is enabled, build should succeed
+  make -j$(nproc)
+  test_status=$?
 else
-  # GSSAPI support is missing - the fix wasn't fully applied
+  # GSSAPI option not recognized (buggy state)
   test_status=1
 fi
 

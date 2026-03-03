@@ -1,0 +1,152 @@
+diff --git a/include/benchmark/benchmark_api.h b/include/benchmark/benchmark_api.h
+index 41b8b4f..78a9210 100644
+--- a/include/benchmark/benchmark_api.h
++++ b/include/benchmark/benchmark_api.h
+@@ -149,7 +149,7 @@ void Initialize(int* argc, const char** argv);
+ // Otherwise, run all benchmarks specified by the --benchmark_filter flag,
+ // and exit after running the benchmarks.
+ void RunSpecifiedBenchmarks();
+-void RunSpecifiedBenchmarks(BenchmarkReporter* reporter);
++void RunSpecifiedBenchmarks(const BenchmarkReporter* reporter);
+ 
+ // If this routine is called, peak memory allocation past this point in the
+ // benchmark is reported at the end of the benchmark report line. (It is
+diff --git a/include/benchmark/reporter.h b/include/benchmark/reporter.h
+index b66854c..66dc6dd 100644
+--- a/include/benchmark/reporter.h
++++ b/include/benchmark/reporter.h
+@@ -67,17 +67,13 @@ class BenchmarkReporter {
+   // platform under which the benchmarks are running. The benchmark run is
+   // never started if this function returns false, allowing the reporter
+   // to skip runs based on the context information.
+-  virtual bool ReportContext(const Context& context) = 0;
++  virtual bool ReportContext(const Context& context) const = 0;
+ 
+   // Called once for each group of benchmark runs, gives information about
+   // cpu-time and heap memory usage during the benchmark run.
+   // Note that all the grouped benchmark runs should refer to the same
+   // benchmark, thus have the same name.
+-  virtual void ReportRuns(const std::vector<Run>& report) = 0;
+-
+-  // Called once and only once after ever group of benchmarks is run and
+-  // reported.
+-  virtual void Finalize();
++  virtual void ReportRuns(const std::vector<Run>& report) const = 0;
+ 
+   virtual ~BenchmarkReporter();
+ };
+@@ -86,12 +82,12 @@ class BenchmarkReporter {
+ // default reporter used by RunSpecifiedBenchmarks().
+ class ConsoleReporter : public BenchmarkReporter {
+  public:
+-  virtual bool ReportContext(const Context& context);
+-  virtual void ReportRuns(const std::vector<Run>& reports);
++  virtual bool ReportContext(const Context& context) const;
++  virtual void ReportRuns(const std::vector<Run>& reports) const;
+  private:
+-  virtual void PrintRunData(const Run& report);
+-
+-  size_t name_field_width_;
++  virtual void PrintRunData(const Run& report) const;
++  // TODO(ericwf): Find a better way to share this information.
++  mutable size_t name_field_width_;
+ };
+ 
+ } // end namespace benchmark
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 69562ff..0c3fcb3 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -606,7 +606,7 @@ void RunInThread(const benchmark::internal::Benchmark::Instance* b,
+ }
+ 
+ void RunBenchmark(const benchmark::internal::Benchmark::Instance& b,
+-                  BenchmarkReporter* br) EXCLUDES(GetBenchmarkLock()) {
++                  const BenchmarkReporter* br) EXCLUDES(GetBenchmarkLock()) {
+   int iters = FLAGS_benchmark_iterations ? FLAGS_benchmark_iterations
+                                          : 1;
+   std::vector<BenchmarkReporter::Run> reports;
+@@ -763,7 +763,7 @@ void State::SetLabel(const char* label) {
+ namespace internal {
+ 
+ void RunMatchingBenchmarks(const std::string& spec,
+-                           BenchmarkReporter* reporter) {
++                           const BenchmarkReporter* reporter) {
+   CHECK(reporter != nullptr);
+   if (spec.empty()) return;
+ 
+@@ -813,15 +813,12 @@ void RunSpecifiedBenchmarks() {
+   RunSpecifiedBenchmarks(nullptr);
+ }
+ 
+-void RunSpecifiedBenchmarks(BenchmarkReporter* provided_reporter) {
++void RunSpecifiedBenchmarks(const BenchmarkReporter* reporter) {
+   std::string spec = FLAGS_benchmark_filter;
+   if (spec.empty() || spec == "all")
+     spec = ".";  // Regexp that matches all benchmarks
+   ConsoleReporter default_reporter;
+-  BenchmarkReporter* reporter = provided_reporter ? provided_reporter
+-                                                  : &default_reporter;
+-  internal::RunMatchingBenchmarks(spec, reporter);
+-  reporter->Finalize();
++  internal::RunMatchingBenchmarks(spec, reporter ? reporter : &default_reporter);
+ }
+ 
+ namespace internal {
+diff --git a/src/reporter.cc b/src/reporter.cc
+index 27258c2..d9e62ed 100644
+--- a/src/reporter.cc
++++ b/src/reporter.cc
+@@ -85,13 +85,10 @@ void ComputeStats(const std::vector<BenchmarkReporter::Run>& reports,
+ 
+ } // end namespace
+ 
+-void BenchmarkReporter::Finalize() {
+-}
+ 
+-BenchmarkReporter::~BenchmarkReporter() {
+-}
++BenchmarkReporter::~BenchmarkReporter() {}
+ 
+-bool ConsoleReporter::ReportContext(const Context& context) {
++bool ConsoleReporter::ReportContext(const Context& context) const {
+   name_field_width_ = context.name_field_width;
+ 
+   fprintf(stdout,
+@@ -128,7 +125,8 @@ bool ConsoleReporter::ReportContext(const Context& context) {
+   return true;
+ }
+ 
+-void ConsoleReporter::ReportRuns(const std::vector<Run>& reports) {
++void ConsoleReporter::ReportRuns(
++    const std::vector<Run>& reports) const {
+   if (reports.empty()) {
+     return;
+   }
+@@ -153,7 +151,7 @@ void ConsoleReporter::ReportRuns(const std::vector<Run>& reports) {
+   fprintf(stdout, "\n");
+ }
+ 
+-void ConsoleReporter::PrintRunData(const Run& result) {
++void ConsoleReporter::PrintRunData(const Run& result) const {
+   // Format bytes per second
+   std::string rate;
+   if (result.bytes_per_second > 0) {
+diff --git a/test/filter_test.cc b/test/filter_test.cc
+index 931a534..d263089 100644
+--- a/test/filter_test.cc
++++ b/test/filter_test.cc
+@@ -23,11 +23,11 @@ double CalculatePi(int depth) {
+ 
+ class TestReporter : public benchmark::ConsoleReporter {
+  public:
+-  virtual bool ReportContext(const Context& context) {
++  virtual bool ReportContext(const Context& context) const {
+     return ConsoleReporter::ReportContext(context);
+   };
+ 
+-  virtual void ReportRuns(const std::vector<Run>& report) {
++  virtual void ReportRuns(const std::vector<Run>& report) const {
+     ++count_;
+     ConsoleReporter::ReportRuns(report);
+   };

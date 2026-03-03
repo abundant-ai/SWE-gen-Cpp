@@ -2,46 +2,25 @@
 
 cd /app/src
 
-# This PR adds special treatment for writing single quotes within attribute values
-# The fix escapes single quotes as &apos; in attribute values
+# Copy HEAD test files from /tests (overwrites BASE state)
+mkdir -p "tests"
+cp "/tests/test_write.cpp" "tests/test_write.cpp"
 
-# Create a simple test program to check if single quotes are escaped in attributes
-cat > /tmp/test_single_quote.cpp << 'EOF'
-#include "src/pugixml.hpp"
-#include <iostream>
-#include <sstream>
+# Rebuild with the updated test files using C++17 and PUGIXML_STRING_VIEW to enable string_view support
+# Re-apply the compiler warning fixes
+sed -i 's/CXXFLAGS=-g -Wall -Wextra -Werror/CXXFLAGS=-g -Wall -Wextra -Werror -Wno-error=implicit-fallthrough -Wno-error=expansion-to-defined -Wno-error=self-move -Wno-error=deprecated-declarations/' Makefile
+make clean && make cxxstd=c++17 defines=PUGIXML_STRING_VIEW -j$(nproc)
+test_status=$?
 
-int main() {
-    pugi::xml_document doc;
-    pugi::xml_node node = doc.append_child("node");
+if [ $test_status -ne 0 ]; then
+  echo "Build failed"
+  echo 0 > /logs/verifier/reward.txt
+  exit $test_status
+fi
 
-    // Set an attribute value that contains a single quote
-    node.append_attribute("attr") = "<>'\"";
-
-    // Write to string
-    std::ostringstream oss;
-    doc.save(oss, "", pugi::format_raw | pugi::format_no_declaration);
-    std::string output = oss.str();
-
-    // Check if single quote is escaped as &apos;
-    if (output.find("&apos;") != std::string::npos) {
-        std::cout << "PASS: Single quotes are escaped as &apos;" << std::endl;
-        return 0;
-    } else if (output.find("attr=\"<>'\"") != std::string::npos) {
-        std::cout << "FAIL: Single quotes are NOT escaped (found raw ')" << std::endl;
-        return 1;
-    } else {
-        std::cout << "UNEXPECTED: Output was: " << output << std::endl;
-        return 1;
-    }
-}
-EOF
-
-# Compile the test program
-g++ -std=c++11 -I. /tmp/test_single_quote.cpp src/pugixml.cpp -o /tmp/test_single_quote
-
-# Run the test
-/tmp/test_single_quote
+# Run the test executable
+# The test suite will run all tests, including the updated test_write.cpp
+./build/make-g++-debug-PUGIXML_STRING_VIEW-c++17/test
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

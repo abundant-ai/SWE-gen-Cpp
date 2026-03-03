@@ -33,7 +33,7 @@ RUN mkdir -p build && cd build && \
     cmake .. -DENABLE_DRAFTS=ON -DBUILD_TESTS=ON -DWITH_GSSAPI_KRB5=ON && \
     make -j$(nproc)
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)

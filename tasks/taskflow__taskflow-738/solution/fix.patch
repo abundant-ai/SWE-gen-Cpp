@@ -1,0 +1,107 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5446c015..bb12cc52 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -30,6 +30,11 @@ MESSAGE(STATUS "CMAKE_ROOT: " ${CMAKE_ROOT})
+ # Project name
+ project(Taskflow VERSION 4.0.0 LANGUAGES CXX)
+ 
++# Set C++ standard
++set(CMAKE_CXX_STANDARD 20)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++set(CMAKE_CXX_EXTENSIONS OFF)
++
+ # build options
+ option(TF_BUILD_BENCHMARKS "Enables builds of benchmarks" OFF)
+ option(TF_BUILD_PROFILER "Enables builds of profiler" OFF)
+@@ -161,7 +166,7 @@ target_compile_options(
+   $<$<CXX_COMPILER_ID:AppleClang>:-Wall -Wextra -Wfatal-errors -Wshadow>
+   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:Clang>>:-Wall -Wextra -Wfatal-errors -Wshadow>
+   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU>>:-Wall -Wextra -Wfatal-errors -Wshadow>
+-  $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/W3 /permissive->
++  $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/W4 /WX>
+ )
+ 
+ # cuda compiler options
+@@ -173,7 +178,7 @@ if(TF_BUILD_CUDA)
+     INTERFACE
+     $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:CLANG>>:--extended-lambda -Xcompiler=-Wall,-Wextra,-Wfatal-errors,-Wshadow>
+     $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:GNU>>:--extended-lambda -Xcompiler=-Wall,-Wextra,-Wfatal-errors,-Wshadow>
+-    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:--extended-lambda -Xcompiler=/W3,/permissive->
++    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:--extended-lambda -Xcompiler=/W4 /WX>
+   )
+ endif(TF_BUILD_CUDA)
+ 
+@@ -283,6 +288,9 @@ target_include_directories(${PROJECT_NAME} INTERFACE
+   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+   $<INSTALL_INTERFACE:include/> 
+ )
++# When building with MSVC compiler disable warnings on variables padding changed
++# for taskflow/core/tsq.hpp and taskflow/utility/mpmc.hpp
++target_compile_options(${PROJECT_NAME} INTERFACE $<$<BOOL:${MSVC}>:/wd4324>)
+ 
+ # -----------------------------------------------------------------------------
+ # Example program 
+diff --git a/taskflow/algorithm/sort.hpp b/taskflow/algorithm/sort.hpp
+index bd0bcde8..04f3bb4b 100644
+--- a/taskflow/algorithm/sort.hpp
++++ b/taskflow/algorithm/sort.hpp
+@@ -620,7 +620,7 @@ auto make_sort_task(B b, E e, C cmp) {
+     detail::parallel_pdqsort<B_t, C,
+       is_std_compare_v<std::decay_t<C>> &&
+       std::is_arithmetic_v<typename std::iterator_traits<B_t>::value_type>
+-    >(rt, beg, end, cmp, log2(size_t(end - beg)));
++    >(rt, beg, end, cmp, static_cast<int>(log2(size_t(end - beg))));
+   };
+ }
+   
+diff --git a/taskflow/core/nonblocking_notifier.hpp b/taskflow/core/nonblocking_notifier.hpp
+index 215399af..bb0af5a4 100644
+--- a/taskflow/core/nonblocking_notifier.hpp
++++ b/taskflow/core/nonblocking_notifier.hpp
+@@ -265,7 +265,7 @@ class NonblockingNotifierV1 {
+       }
+       uint64_t waiters = (state & kWaiterMask) >> kWaiterShift;
+       uint64_t newstate;
+-      if (all) {
++      if constexpr (all) {
+         // Reset prewait counter and empty wait list.
+         newstate = (state & kEpochMask) + (kEpochInc * waiters) + kStackMask;
+       } else if (waiters) {
+@@ -287,11 +287,11 @@ class NonblockingNotifierV1 {
+         newstate = (state & kEpochMask) + next;
+       }
+       if (_state.compare_exchange_weak(state, newstate,
+-                                       std::memory_order_acquire)) {
+-        if (!all && waiters) return;  // unblocked pre-wait thread
++                                      std::memory_order_acquire)) {
++        if constexpr (!all) { if(waiters) return; }  // unblocked pre-wait thread
+         if ((state & kStackMask) == kStackMask) return;
+         Waiter* w = &_waiters[state & kStackMask];
+-        if (!all) {
++        if constexpr (!all) {
+           w->next.store(nullptr, std::memory_order_relaxed);
+         }
+         _unpark(w);
+@@ -505,7 +505,7 @@ class NonblockingNotifierV2 {
+       // Easy case: no waiters.
+       if ((state & kStackMask) == kStackMask && waiters == sigs) return;
+       uint64_t newstate;
+-      if (notifyAll) {
++      if constexpr (notifyAll) {
+         // Empty wait stack and set signal to number of pre-wait threads.
+         newstate = (state & kWaiterMask) | (waiters << kSignalShift) | kStackMask;
+       } else if (sigs < waiters) {
+@@ -519,10 +519,10 @@ class NonblockingNotifierV2 {
+       }
+       //_check_state(newstate);
+       if (_state.compare_exchange_weak(state, newstate, std::memory_order_acq_rel)) {
+-        if (!notifyAll && (sigs < waiters)) return;  // unblocked pre-wait thread
++        if constexpr (!notifyAll) { if (sigs < waiters) return; } // unblocked pre-wait thread
+         if ((state & kStackMask) == kStackMask) return;
+         Waiter* w = &_waiters[state & kStackMask];
+-        if (!notifyAll) w->next.store(kStackMask, std::memory_order_relaxed);
++        if constexpr (!notifyAll) { w->next.store(kStackMask, std::memory_order_relaxed); }
+         _unpark(w);
+         return;
+       }

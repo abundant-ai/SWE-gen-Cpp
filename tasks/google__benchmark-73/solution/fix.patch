@@ -1,0 +1,277 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 89cea31..58c9c15 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -227,7 +227,7 @@ class State {
+   int range_x() const;
+   int range_y() const;
+ 
+-  int iterations() const { return total_iterations_; }
++  int64_t iterations() const { return total_iterations_; }
+ 
+   const int thread_index;
+ 
+@@ -312,7 +312,7 @@ class BenchmarkReporter {
+     bool cpu_scaling_enabled;
+ 
+     // The number of chars in the longest benchmark name.
+-    int name_field_width;
++    size_t name_field_width;
+   };
+ 
+   struct Run {
+@@ -454,12 +454,12 @@ class Benchmark {
+  private:
+   friend class BenchmarkFamilies;
+ 
+-  std::vector<Benchmark::Instance> CreateBenchmarkInstances(int rangeXindex,
+-                                                            int rangeYindex);
++  std::vector<Benchmark::Instance> CreateBenchmarkInstances(size_t rangeXindex,
++                                                            size_t rangeYindex);
+ 
+   std::string name_;
+   BenchmarkFunction function_;
+-  int registration_index_;
++  size_t registration_index_;
+   std::vector<int> rangeX_;
+   std::vector<int> rangeY_;
+   std::vector<int> thread_counts_;
+@@ -469,7 +469,8 @@ class Benchmark {
+   static const int kNumCpuMarker = -1;
+ 
+   // Special value used to indicate that no range is required.
+-  static const int kNoRange = -1;
++  static const size_t kNoRangeIndex = std::numeric_limits<size_t>::max();
++  static const int kNoRange = std::numeric_limits<int>::max();
+ 
+   static void AddRange(std::vector<int>* dst, int lo, int hi, int mult);
+   static double MeasurePeakHeapMemory(const Instance& b);
+@@ -494,7 +495,7 @@ class ConsoleReporter : public BenchmarkReporter {
+  private:
+   std::string PrintMemoryUsage(double bytes) const;
+   virtual void PrintRunData(const Run& report) const;
+-  mutable int name_field_width_;
++  mutable size_t name_field_width_;
+ };
+ 
+ }  // end namespace internal
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 506f7c1..47e4919 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -91,10 +91,10 @@ static_assert(arraysize(kBigSIUnits) == arraysize(kBigIECUnits),
+               "SI and IEC unit arrays must be the same size");
+ static_assert(arraysize(kSmallSIUnits) == arraysize(kBigSIUnits),
+               "Small SI and Big SI unit arrays must be the same size");
+-static const int kUnitsSize = arraysize(kBigSIUnits);
++static const size_t kUnitsSize = arraysize(kBigSIUnits);
+ 
+ void ToExponentAndMantissa(double val, double thresh, int precision,
+-                           double one_k, std::string* mantissa, int* exponent) {
++                           double one_k, std::string* mantissa, size_t* exponent) {
+   std::stringstream mantissa_stream;
+ 
+   if (val < 0) {
+@@ -144,10 +144,10 @@ void ToExponentAndMantissa(double val, double thresh, int precision,
+   *mantissa = mantissa_stream.str();
+ }
+ 
+-std::string ExponentToPrefix(int exponent, bool iec) {
++std::string ExponentToPrefix(size_t exponent, bool iec) {
+   if (exponent == 0) return "";
+ 
+-  const int index = (exponent > 0 ? exponent - 1 : -exponent - 1);
++  const size_t index = (exponent > 0 ? exponent - 1 : -exponent - 1);
+   if (index >= kUnitsSize) return "";
+ 
+   const char* array =
+@@ -161,7 +161,7 @@ std::string ExponentToPrefix(int exponent, bool iec) {
+ std::string ToBinaryStringFullySpecified(double value, double threshold,
+                                          int precision) {
+   std::string mantissa;
+-  int exponent;
++  size_t exponent;
+   ToExponentAndMantissa(value, threshold, precision, 1024.0, &mantissa,
+                         &exponent);
+   return mantissa + ExponentToPrefix(exponent, false);
+@@ -311,10 +311,10 @@ class BenchmarkFamilies {
+   static BenchmarkFamilies* GetInstance();
+ 
+   // Registers a benchmark family and returns the index assigned to it.
+-  int AddBenchmark(Benchmark* family);
++  size_t AddBenchmark(Benchmark* family);
+ 
+   // Unregisters a family at the given index.
+-  void RemoveBenchmark(int index);
++  void RemoveBenchmark(size_t index);
+ 
+   // Extract the list of benchmark instances that match the specified
+   // regular expression.
+@@ -341,7 +341,7 @@ BenchmarkFamilies::~BenchmarkFamilies() {
+   }
+ }
+ 
+-int BenchmarkFamilies::AddBenchmark(Benchmark* family) {
++size_t BenchmarkFamilies::AddBenchmark(Benchmark* family) {
+   std::lock_guard<std::mutex> l(mutex_);
+   // This loop attempts to reuse an entry that was previously removed to avoid
+   // unncessary growth of the vector.
+@@ -351,12 +351,12 @@ int BenchmarkFamilies::AddBenchmark(Benchmark* family) {
+       return index;
+     }
+   }
+-  int index = families_.size();
++  size_t index = families_.size();
+   families_.push_back(family);
+   return index;
+ }
+ 
+-void BenchmarkFamilies::RemoveBenchmark(int index) {
++void BenchmarkFamilies::RemoveBenchmark(size_t index) {
+   std::lock_guard<std::mutex> l(mutex_);
+   families_[index] = NULL;
+   // Don't shrink families_ here, we might be called by the destructor of
+@@ -389,12 +389,13 @@ void BenchmarkFamilies::FindBenchmarks(
+     std::vector<Benchmark::Instance> instances;
+     if (family->rangeX_.empty() && family->rangeY_.empty()) {
+       instances = family->CreateBenchmarkInstances(
+-        Benchmark::kNoRange, Benchmark::kNoRange);
++        Benchmark::kNoRangeIndex, Benchmark::kNoRangeIndex);
+       std::copy(instances.begin(), instances.end(),
+                 std::back_inserter(*benchmarks));
+     } else if (family->rangeY_.empty()) {
+       for (size_t x = 0; x < family->rangeX_.size(); ++x) {
+-        instances = family->CreateBenchmarkInstances(x, Benchmark::kNoRange);
++        instances = family->CreateBenchmarkInstances(
++          x, Benchmark::kNoRangeIndex);
+         std::copy(instances.begin(), instances.end(),
+                   std::back_inserter(*benchmarks));
+       }
+@@ -440,7 +441,7 @@ bool ConsoleReporter::ReportContext(const BenchmarkReporter::Context& context)
+   }
+ 
+   int output_width = fprintf(stdout, "%s%-*s %10s %10s %10s\n",
+-                             Prefix(), name_field_width_, "Benchmark",
++                             Prefix(), int(name_field_width_), "Benchmark",
+                              "Time(ns)", "CPU(ns)", "Iterations");
+   std::cout << std::string(output_width - 1, '-').c_str() << "\n";
+ 
+@@ -794,7 +795,7 @@ void Benchmark::AddRange(std::vector<int>* dst, int lo, int hi, int mult) {
+ }
+ 
+ std::vector<Benchmark::Instance> Benchmark::CreateBenchmarkInstances(
+-    int rangeXindex, int rangeYindex) {
++    size_t rangeXindex, size_t rangeYindex) {
+   // Special list of thread counts to use when none are specified
+   std::vector<int> one_thread;
+   one_thread.push_back(1);
+@@ -810,12 +811,12 @@ std::vector<Benchmark::Instance> Benchmark::CreateBenchmarkInstances(
+     instance.bm = this;
+     instance.threads = num_threads;
+ 
+-    if (rangeXindex != kNoRange) {
++    if (rangeXindex != kNoRangeIndex) {
+       instance.rangeX = rangeX_[rangeXindex];
+       instance.rangeXset = true;
+       AppendHumanReadable(instance.rangeX, &instance.name);
+     }
+-    if (rangeYindex != kNoRange) {
++    if (rangeYindex != kNoRangeIndex) {
+       instance.rangeY = rangeY_[rangeYindex];
+       instance.rangeYset = true;
+       AppendHumanReadable(instance.rangeY, &instance.name);
+@@ -1231,20 +1232,21 @@ void RunMatchingBenchmarks(const std::string& spec,
+ 
+   // Determine the width of the name field using a minimum width of 10.
+   // Also determine max number of threads needed.
+-  int name_field_width = 10;
++  size_t name_field_width = 10;
+   for (const internal::Benchmark::Instance& benchmark : benchmarks) {
+     // Add width for _stddev and threads:XX
+     if (benchmark.threads > 1 && FLAGS_benchmark_repetitions > 1) {
+       name_field_width =
+-          std::max<int>(name_field_width, benchmark.name.size() + 17);
++          std::max<size_t>(name_field_width, benchmark.name.size() + 17);
+     } else if (benchmark.threads > 1) {
+       name_field_width =
+-          std::max<int>(name_field_width, benchmark.name.size() + 10);
++          std::max<size_t>(name_field_width, benchmark.name.size() + 10);
+     } else if (FLAGS_benchmark_repetitions > 1) {
+       name_field_width =
+-          std::max<int>(name_field_width, benchmark.name.size() + 7);
++          std::max<size_t>(name_field_width, benchmark.name.size() + 7);
+     } else {
+-      name_field_width = std::max<int>(name_field_width, benchmark.name.size());
++      name_field_width =
++          std::max<size_t>(name_field_width, benchmark.name.size());
+     }
+   }
+ 
+diff --git a/src/sysinfo.cc b/src/sysinfo.cc
+index e907cc3..2d1ce24 100644
+--- a/src/sysinfo.cc
++++ b/src/sysinfo.cc
+@@ -55,7 +55,7 @@ int64_t EstimateCyclesPerSecond() {
+ #if defined OS_LINUX || defined OS_CYGWIN
+ // Helper function for reading an int from a file. Returns true if successful
+ // and the memory location pointed to by value is set to the value read.
+-bool ReadIntFromFile(const char* file, int* value) {
++bool ReadIntFromFile(const char* file, long* value) {
+   bool ret = false;
+   int fd = open(file, O_RDONLY);
+   if (fd != -1) {
+@@ -63,7 +63,7 @@ bool ReadIntFromFile(const char* file, int* value) {
+     char* err;
+     memset(line, '\0', sizeof(line));
+     CHECK(read(fd, line, sizeof(line) - 1));
+-    const int temp_value = strtol(line, &err, 10);
++    const long temp_value = strtol(line, &err, 10);
+     if (line[0] != '\0' && (*err == '\n' || *err == '\0')) {
+       *value = temp_value;
+       ret = true;
+@@ -78,7 +78,7 @@ void InitializeSystemInfo() {
+ #if defined OS_LINUX || defined OS_CYGWIN
+   char line[1024];
+   char* err;
+-  int freq;
++  long freq;
+ 
+   bool saw_mhz = false;
+ 
+@@ -120,13 +120,13 @@ void InitializeSystemInfo() {
+ 
+   double bogo_clock = 1.0;
+   bool saw_bogo = false;
+-  int max_cpu_id = 0;
++  long max_cpu_id = 0;
+   int num_cpus = 0;
+   line[0] = line[1] = '\0';
+-  int chars_read = 0;
++  size_t chars_read = 0;
+   do {  // we'll exit when the last read didn't read anything
+     // Move the next line to the beginning of the buffer
+-    const int oldlinelen = strlen(line);
++    const size_t oldlinelen = strlen(line);
+     if (sizeof(line) == oldlinelen + 1)  // oldlinelen took up entire line
+       line[0] = '\0';
+     else  // still other lines left to save
+@@ -134,8 +134,8 @@ void InitializeSystemInfo() {
+     // Terminate the new line, reading more if we can't find the newline
+     char* newline = strchr(line, '\n');
+     if (newline == NULL) {
+-      const int linelen = strlen(line);
+-      const int bytes_to_read = sizeof(line) - 1 - linelen;
++      const size_t linelen = strlen(line);
++      const size_t bytes_to_read = sizeof(line) - 1 - linelen;
+       CHECK(bytes_to_read > 0);  // because the memmove recovered >=1 bytes
+       chars_read = read(fd, line + linelen, bytes_to_read);
+       line[linelen + chars_read] = '\0';
+@@ -164,7 +164,7 @@ void InitializeSystemInfo() {
+       num_cpus++;  // count up every time we see an "processor :" entry
+       const char* freqstr = strchr(line, ':');
+       if (freqstr) {
+-        const int cpu_id = strtol(freqstr + 1, &err, 10);
++        const long cpu_id = strtol(freqstr + 1, &err, 10);
+         if (freqstr[1] != '\0' && *err == '\0' && max_cpu_id < cpu_id)
+           max_cpu_id = cpu_id;
+       }

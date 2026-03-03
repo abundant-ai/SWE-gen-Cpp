@@ -9,11 +9,12 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install C++ build tools and CMake
+# Install C++ build tools, CMake, and GSSAPI library
 RUN apt-get update && apt-get install -y \
     cmake \
     g++ \
     pkg-config \
+    libkrb5-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -27,12 +28,12 @@ RUN git clone https://github.com/zeromq/libzmq.git src && \
 
 WORKDIR /app/src
 
-# Build libzmq with ENABLE_DRAFTS=ON (required for test_peer_disconnect)
+# Build libzmq with ENABLE_DRAFTS=ON and GSSAPI support
 RUN mkdir -p build && cd build && \
-    cmake .. -DENABLE_DRAFTS=ON -DBUILD_TESTS=ON && \
+    cmake .. -DENABLE_DRAFTS=ON -DBUILD_TESTS=ON -DWITH_GSSAPI_KRB5=ON && \
     make -j$(nproc)
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)

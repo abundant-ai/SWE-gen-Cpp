@@ -1,14 +1,12 @@
 FROM ubuntu:24.04
 
-# Base system packages
+# Base system packages (common to all languages)
 RUN apt-get update && apt-get install -y \
     git \
     curl \
     ca-certificates \
     patch \
     build-essential \
-    cmake \
-    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # No additional language runtime needed - pugixml is a C++ header-only library
@@ -24,11 +22,12 @@ RUN git clone https://github.com/zeux/pugixml.git src && \
 
 WORKDIR /app/src
 
-# Build the test suite using cmake
-RUN cmake . -DBUILD_TESTS=ON && \
-    make -j$(nproc)
+# Build the test suite using Makefile with C++17 and PUGIXML_STRING_VIEW to enable string_view support
+# Disable some warnings as errors (newer gcc version issues)
+RUN sed -i 's/CXXFLAGS=-g -Wall -Wextra -Werror/CXXFLAGS=-g -Wall -Wextra -Werror -Wno-error=implicit-fallthrough -Wno-error=expansion-to-defined -Wno-error=self-move -Wno-error=deprecated-declarations/' Makefile && \
+    make cxxstd=c++17 defines=PUGIXML_STRING_VIEW -j$(nproc)
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
+# Reset tracked files so bug.patch applies cleanly
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
@@ -36,9 +35,9 @@ COPY bug.patch /tmp/bug.patch
 RUN git apply --whitespace=fix /tmp/bug.patch && rm /tmp/bug.patch
 
 # Rebuild after applying bug.patch since this is compiled C++
-RUN rm -rf CMakeCache.txt CMakeFiles && \
-    cmake . -DBUILD_TESTS=ON && \
-    make -j$(nproc)
+# Re-apply the compiler warning fixes and build with C++17 and PUGIXML_STRING_VIEW
+RUN sed -i 's/CXXFLAGS=-g -Wall -Wextra -Werror/CXXFLAGS=-g -Wall -Wextra -Werror -Wno-error=implicit-fallthrough -Wno-error=expansion-to-defined -Wno-error=self-move -Wno-error=deprecated-declarations/' Makefile && \
+    make clean && make cxxstd=c++17 defines=PUGIXML_STRING_VIEW -j$(nproc)
 
 RUN rm -rf /app/src/.git
 
