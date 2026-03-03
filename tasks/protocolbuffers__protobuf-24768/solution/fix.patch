@@ -1,0 +1,248 @@
+diff --git a/python/google/protobuf/internal/proto_api_test_ext.cc b/python/google/protobuf/internal/proto_api_test_ext.cc
+index 165e075f7..ffc4dcd92 100644
+--- a/python/google/protobuf/internal/proto_api_test_ext.cc
++++ b/python/google/protobuf/internal/proto_api_test_ext.cc
+@@ -8,6 +8,7 @@
+ #include "google/protobuf/descriptor.h"
+ #include "google/protobuf/dynamic_message.h"
+ #include "google/protobuf/message.h"
++#include "google/protobuf/text_format.h"
+ #include "google/protobuf/unittest.pb.h"
+ #include "google/protobuf/proto_api.h"
+ #include "third_party/pybind11/include/pybind11/eval.h"
+@@ -137,10 +138,65 @@ auto ReprDynamicMessage(int value) {
+   return result_string;
+ }
+ 
++py::object CreateDynamicPoolMessage() {
++  FileDescriptorProto file_descriptor;
++  file_descriptor.set_name("test_file");
++  file_descriptor.set_package("test_package");
++  DescriptorProto* message_descriptor = file_descriptor.add_message_type();
++  message_descriptor->set_name("MyMessage");
++  FieldDescriptorProto* field_descriptor = message_descriptor->add_field();
++  field_descriptor->set_name("my_field");
++  field_descriptor->set_number(1);
++  field_descriptor->set_label(FieldDescriptorProto::LABEL_OPTIONAL);
++  field_descriptor->set_type(FieldDescriptorProto::TYPE_INT32);
++  auto owned_pool = std::make_unique<DescriptorPool>();
++  if (!owned_pool->BuildFile(file_descriptor)) {
++    throw std::runtime_error("Failed to build file descriptor");
++  }
++
++  // Create a Python DescriptorPool from the C++ one.
++  const PyProto_API* api = GetProtoApi();
++  auto py_pool = py::reinterpret_steal<py::object>(
++      api->DescriptorPool_FromPool(std::move(owned_pool), nullptr));
++  if (!py_pool) {
++    throw py::error_already_set();
++  }
++
++  const DescriptorPool* pool = api->DescriptorPool_AsPool(py_pool.ptr());
++  if (!pool) {
++    throw py::error_already_set();
++  }
++
++  // Navigate through the C++ Descriptors, and create a Python message.
++  const Descriptor* descriptor =
++      pool->FindMessageTypeByName("test_package.MyMessage");
++  if (!descriptor) {
++    throw std::runtime_error("Failed to find file descriptor");
++  }
++  auto py_msg =
++      py::reinterpret_steal<py::object>(api->NewMessage(descriptor, nullptr));
++  if (!py_msg) {
++    throw py::error_already_set();
++  }
++  Message* msg = api->GetMutableMessagePointer(py_msg.ptr());
++  if (!msg) {
++    throw py::error_already_set();
++  }
++
++  // Populate the message, and return it.
++  if (!google::protobuf::TextFormat::ParseFromString("my_field: 42", msg)) {
++    throw std::runtime_error("Failed to parse message");
++  }
++  // This is safe: the Python object keeps a reference to the Python
++  // DescriptorPool, which owns the C++ DescriptorPool.
++  return py_msg;
++}
++
+ PYBIND11_MODULE(proto_api_test_ext, m) {
+   m.def("get_const_message", &GetConstMessage);
+   m.def("set_message_field_with_mutator", &SetMessageFieldWithMutator);
+   m.def("repr_dynamic_message", &ReprDynamicMessage);
++  m.def("create_dynamic_pool_message", &CreateDynamicPoolMessage);
+ }
+ 
+ }  // namespace python
+diff --git a/python/google/protobuf/proto_api.h b/python/google/protobuf/proto_api.h
+index 43f5fd21a..cc07e6f7d 100644
+--- a/python/google/protobuf/proto_api.h
++++ b/python/google/protobuf/proto_api.h
+@@ -23,11 +23,13 @@
+ #define GOOGLE_PROTOBUF_PYTHON_PROTO_API_H__
+ 
+ #include <cstddef>
++#include <memory>
+ #include <string>
+ #define PY_SSIZE_T_CLEAN
+ #include <Python.h>
+ 
+ #include "absl/status/status.h"
++#include "google/protobuf/descriptor.h"
+ #include "google/protobuf/descriptor_database.h"
+ #include "google/protobuf/message.h"
+ 
+@@ -142,9 +144,25 @@ struct PyProto_API {
+   // As long as the returned Python DescriptorPool object is kept alive,
+   // functions that process C++ descriptors or messages created from this pool
+   // can work and return their Python counterparts.
++  // On error, returns nullptr and sets a Python exception.
+   virtual PyObject* DescriptorPool_FromPool(
+       const google::protobuf::DescriptorPool* pool) const = 0;
+ 
++  // Takes ownership of a C++ DescriptorPool and returns a Python DescriptorPool
++  // that wraps it.
++  // The optional google::protobuf::DescriptorDatabase will also be owned by the Python
++  // DescriptorPool: use it when the C++ DescriptorPool was built with this
++  // database.
++  // On error, returns nullptr and sets a Python exception.
++  virtual PyObject* DescriptorPool_FromPool(
++      std::unique_ptr<const google::protobuf::DescriptorPool> pool,
++      std::unique_ptr<const google::protobuf::DescriptorDatabase> database) const = 0;
++
++  // Returns the C++ descriptor pool wrapped by a Python object.
++  // On error, returns nullptr and sets a Python exception.
++  virtual const google::protobuf::DescriptorPool* DescriptorPool_AsPool(
++      PyObject* pool) const = 0;
++
+  protected:
+   PythonMessageMutator CreatePythonMessageMutator(Message* owned_msg,
+                                                   Message* msg,
+diff --git a/python/google/protobuf/pyext/descriptor_pool.cc b/python/google/protobuf/pyext/descriptor_pool.cc
+index 9a15c2f19..56051abc7 100644
+--- a/python/google/protobuf/pyext/descriptor_pool.cc
++++ b/python/google/protobuf/pyext/descriptor_pool.cc
+@@ -7,6 +7,7 @@
+ 
+ // Implements the DescriptorPool, which collects all descriptors.
+ 
++#include <memory>
+ #include <string>
+ #include <utility>
+ #include <vector>
+@@ -21,6 +22,7 @@
+ #include "absl/status/status.h"
+ #include "absl/strings/str_cat.h"
+ #include "absl/strings/string_view.h"
++#include "google/protobuf/descriptor_database.h"
+ #include "google/protobuf/pyext/descriptor.h"
+ #include "google/protobuf/pyext/descriptor_database.h"
+ #include "google/protobuf/pyext/descriptor_pool.h"
+@@ -764,6 +766,54 @@ PyObject* PyDescriptorPool_FromPool(const DescriptorPool* pool) {
+   return reinterpret_cast<PyObject*>(cpool);
+ }
+ 
++PyObject* PyDescriptorPool_FromPool(
++    std::unique_ptr<const google::protobuf::DescriptorPool> pool,
++    std::unique_ptr<const google::protobuf::DescriptorDatabase> database) {
++  if (pool == nullptr) {
++    PyErr_SetString(PyExc_ValueError, "DescriptorPool is null");
++    return nullptr;
++  }
++  // There should not be any Python-side pool for this C++ object.
++  PyDescriptorPool* existing_pool = GetDescriptorPool_FromPool(pool.get());
++  if (existing_pool != nullptr) {
++    PyErr_SetString(PyExc_ValueError, "DescriptorPool already registered");
++    return nullptr;
++  } else {
++    PyErr_Clear();
++  }
++
++  PyDescriptorPool* cpool = cdescriptor_pool::_CreateDescriptorPool();
++  if (cpool == nullptr) {
++    return nullptr;
++  }
++  cpool->pool = pool.release();
++  cpool->is_owned = true;
++  cpool->database = database.release();
++  cpool->is_mutable = false;
++  cpool->underlay = nullptr;
++
++  {
++    FreeThreadingLockGuard lock(descriptor_pool_map_mutex);
++    if (!descriptor_pool_map->insert(std::make_pair(cpool->pool, cpool))
++             .second) {
++      // Should never happen -- We already checked the existence above.
++      PyErr_SetString(PyExc_ValueError, "DescriptorPool already registered");
++      return nullptr;
++    }
++  }
++
++  return reinterpret_cast<PyObject*>(cpool);
++}
++
++const DescriptorPool* PyDescriptorPool_AsPool(PyObject* pool) {
++  if (!PyObject_TypeCheck(pool, &PyDescriptorPool_Type)) {
++    PyErr_SetString(PyExc_TypeError, "Not a DescriptorPool");
++    return nullptr;
++  }
++  PyDescriptorPool* cpool = reinterpret_cast<PyDescriptorPool*>(pool);
++  return cpool->pool;
++}
++
+ }  // namespace python
+ }  // namespace protobuf
+ }  // namespace google
+diff --git a/python/google/protobuf/pyext/descriptor_pool.h b/python/google/protobuf/pyext/descriptor_pool.h
+index 929a73a51..651d76953 100644
+--- a/python/google/protobuf/pyext/descriptor_pool.h
++++ b/python/google/protobuf/pyext/descriptor_pool.h
+@@ -8,6 +8,7 @@
+ #ifndef GOOGLE_PROTOBUF_PYTHON_CPP_DESCRIPTOR_POOL_H__
+ #define GOOGLE_PROTOBUF_PYTHON_CPP_DESCRIPTOR_POOL_H__
+ 
++#include <memory>
+ #define PY_SSIZE_T_CLEAN
+ #include <Python.h>
+ 
+@@ -119,6 +120,16 @@ PyDescriptorPool* GetDescriptorPool_FromPool(const DescriptorPool* pool);
+ // Returns a new reference.
+ PyObject* PyDescriptorPool_FromPool(const DescriptorPool* pool);
+ 
++// Takes ownership of a C++ DescriptorPool and returns a new Python
++// DescriptorPool that wraps it.
++// If set, the DescriptorDatabase is also managed by the returned object.
++PyObject* PyDescriptorPool_FromPool(
++    std::unique_ptr<const google::protobuf::DescriptorPool> pool,
++    std::unique_ptr<const google::protobuf::DescriptorDatabase> database);
++
++// Returns the C++ descriptor pool wrapped by a Python object.
++const DescriptorPool* PyDescriptorPool_AsPool(PyObject* pool);
++
+ // Initialize objects used by this module.
+ bool InitDescriptorPool();
+ 
+diff --git a/python/google/protobuf/pyext/message_module.cc b/python/google/protobuf/pyext/message_module.cc
+index b2c618807..ae50346fa 100644
+--- a/python/google/protobuf/pyext/message_module.cc
++++ b/python/google/protobuf/pyext/message_module.cc
+@@ -379,6 +379,17 @@ struct ApiImplementation : google::protobuf::python::PyProto_API {
+       const google::protobuf::DescriptorPool* pool) const override {
+     return google::protobuf::python::PyDescriptorPool_FromPool(pool);
+   }
++  PyObject* DescriptorPool_FromPool(
++      std::unique_ptr<const google::protobuf::DescriptorPool> pool,
++      std::unique_ptr<const google::protobuf::DescriptorDatabase> database)
++      const override {
++    return google::protobuf::python::PyDescriptorPool_FromPool(std::move(pool),
++                                                     std::move(database));
++  }
++  const google::protobuf::DescriptorPool* DescriptorPool_AsPool(
++      PyObject* pool) const override {
++    return google::protobuf::python::PyDescriptorPool_AsPool(pool);
++  }
+ };
+ 
+ }  // namespace

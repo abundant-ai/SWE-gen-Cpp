@@ -1,0 +1,278 @@
+diff --git a/include/simdjson/error.h b/include/simdjson/error.h
+index bf8315a8..39708da5 100644
+--- a/include/simdjson/error.h
++++ b/include/simdjson/error.h
+@@ -18,7 +18,7 @@ enum error_code {
+   SUCCESS = 0,                ///< No error
+   CAPACITY,                   ///< This parser can't support a document that big
+   MEMALLOC,                   ///< Error allocating memory, most likely out of memory
+-  TAPE_ERROR,                 ///< Something went wrong, this is a generic error
++  TAPE_ERROR,                 ///< Something went wrong while writing to the tape (stage 2), this is a generic error
+   DEPTH_ERROR,                ///< Your document exceeds the user-specified depth limitation
+   STRING_ERROR,               ///< Problem while parsing a string
+   T_ATOM_ERROR,               ///< Problem while parsing an atom starting with the letter 't'
+@@ -45,7 +45,6 @@ enum error_code {
+   INCOMPLETE_ARRAY_OR_OBJECT, ///< The document ends early.
+   SCALAR_DOCUMENT_AS_VALUE,   ///< A scalar document is treated as a value.
+   OUT_OF_BOUNDS,              ///< Attempted to access location outside of document.
+-  TRAILING_CONTENT,           ///< Unexpected trailing content in the JSON input
+   NUM_ERROR_CODES
+ };
+ 
+diff --git a/include/simdjson/generic/ondemand/json_iterator-inl.h b/include/simdjson/generic/ondemand/json_iterator-inl.h
+index c76b740d..e13632cc 100644
+--- a/include/simdjson/generic/ondemand/json_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/json_iterator-inl.h
+@@ -154,10 +154,6 @@ simdjson_inline bool json_iterator::at_root() const noexcept {
+   return position() == root_position();
+ }
+ 
+-simdjson_inline bool json_iterator::is_single_token() const noexcept {
+-  return parser->implementation->n_structural_indexes == 1;
+-}
+-
+ simdjson_inline bool json_iterator::streaming() const noexcept {
+   return _streaming;
+ }
+diff --git a/include/simdjson/generic/ondemand/json_iterator.h b/include/simdjson/generic/ondemand/json_iterator.h
+index 82d06f8f..e02f335a 100644
+--- a/include/simdjson/generic/ondemand/json_iterator.h
++++ b/include/simdjson/generic/ondemand/json_iterator.h
+@@ -117,14 +117,6 @@ public:
+    */
+   simdjson_inline const uint8_t *return_current_and_advance() noexcept;
+ 
+-  /**
+-   * Returns true if there is a single token in the index (i.e., it is
+-   * a JSON with a scalar value such as a single number).
+-   *
+-   * @return whether there is a single token
+-   */
+-  simdjson_inline bool is_single_token() const noexcept;
+-
+   /**
+    * Assert that there are at least the given number of tokens left.
+    *
+diff --git a/include/simdjson/generic/ondemand/value_iterator-inl.h b/include/simdjson/generic/ondemand/value_iterator-inl.h
+index c099c99d..4b6d5946 100644
+--- a/include/simdjson/generic/ondemand/value_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/value_iterator-inl.h
+@@ -547,16 +547,10 @@ simdjson_inline simdjson_result<bool> value_iterator::is_root_integer() noexcept
+   if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf)) {
+     return false; // if there are more than 20 characters, it cannot be represented as an integer.
+   }
+-  auto answer = numberparsing::is_integer(tmpbuf);
+-  // If the parsing was a success, we must still check that it is
+-  // a single scalar. Note that we parse first because of cases like '[]' where
+-  // getting TRAILING_CONTENT is wrong.
+-  if((answer.error() == SUCCESS) && (!_json_iter->is_single_token())) { return TRAILING_CONTENT; }
+-  return answer;
++  return numberparsing::is_integer(tmpbuf);
+ }
+ 
+ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::number_type> value_iterator::get_root_number_type() noexcept {
+-  if (!_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+   auto max_len = peek_start_length();
+   auto json = peek_root_scalar("number");
+   // Per https://www.exploringbinary.com/maximum-number-of-decimal-digits-in-binary-floating-point-numbers/,
+@@ -567,12 +561,7 @@ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::number_type>
+     logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 1082 characters");
+     return NUMBER_ERROR;
+   }
+-  // If the parsing was a success, we must still check that it is
+-  // a single scalar. Note that we parse first because of cases like '[]' where
+-  // getting TRAILING_CONTENT is wrong.
+-  auto answer = numberparsing::get_number_type(tmpbuf);
+-  if((answer.error() == SUCCESS) && (!_json_iter->is_single_token())) { return TRAILING_CONTENT; }
+-  return answer;
++  return numberparsing::get_number_type(tmpbuf);
+ }
+ simdjson_inline simdjson_result<number> value_iterator::get_root_number() noexcept {
+   auto max_len = peek_start_length();
+@@ -588,7 +577,6 @@ simdjson_inline simdjson_result<number> value_iterator::get_root_number() noexce
+   number num;
+   error_code error =  numberparsing::parse_number(tmpbuf, num);
+   if(error) { return error; }
+-  if (!_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+   advance_root_scalar("number");
+   return num;
+ }
+@@ -608,10 +596,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<uint64_t> value_iterator::g
+     return NUMBER_ERROR;
+   }
+   auto result = numberparsing::parse_unsigned(tmpbuf);
+-  if(result.error() == SUCCESS) {
+-    if (!_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+-    advance_root_scalar("uint64");
+-  }
++  if(result.error() == SUCCESS) { advance_root_scalar("uint64"); }
+   return result;
+ }
+ simdjson_warn_unused simdjson_inline simdjson_result<uint64_t> value_iterator::get_root_uint64_in_string() noexcept {
+@@ -623,10 +608,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<uint64_t> value_iterator::g
+     return NUMBER_ERROR;
+   }
+   auto result = numberparsing::parse_unsigned_in_string(tmpbuf);
+-  if(result.error() == SUCCESS) {
+-    if (!_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+-    advance_root_scalar("uint64");
+-  }
++  if(result.error() == SUCCESS) { advance_root_scalar("uint64"); }
+   return result;
+ }
+ simdjson_warn_unused simdjson_inline simdjson_result<int64_t> value_iterator::get_root_int64() noexcept {
+@@ -639,10 +621,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<int64_t> value_iterator::ge
+   }
+ 
+   auto result = numberparsing::parse_integer(tmpbuf);
+-  if(result.error() == SUCCESS) {
+-    if (!_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+-    advance_root_scalar("int64");
+-  }
++  if(result.error() == SUCCESS) { advance_root_scalar("int64"); }
+   return result;
+ }
+ simdjson_warn_unused simdjson_inline simdjson_result<int64_t> value_iterator::get_root_int64_in_string() noexcept {
+@@ -655,10 +634,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<int64_t> value_iterator::ge
+   }
+ 
+   auto result = numberparsing::parse_integer_in_string(tmpbuf);
+-  if(result.error() == SUCCESS) {
+-    if (!_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+-    advance_root_scalar("int64");
+-  }
++  if(result.error() == SUCCESS) { advance_root_scalar("int64"); }
+   return result;
+ }
+ simdjson_warn_unused simdjson_inline simdjson_result<double> value_iterator::get_root_double() noexcept {
+@@ -673,10 +649,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<double> value_iterator::get
+     return NUMBER_ERROR;
+   }
+   auto result = numberparsing::parse_double(tmpbuf);
+-  if(result.error() == SUCCESS) {
+-    if (!_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+-    advance_root_scalar("double");
+-  }
++  if(result.error() == SUCCESS) { advance_root_scalar("double"); }
+   return result;
+ }
+ 
+@@ -692,10 +665,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<double> value_iterator::get
+     return NUMBER_ERROR;
+   }
+   auto result = numberparsing::parse_double_in_string(tmpbuf);
+-  if(result.error() == SUCCESS) {
+-    if (!_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+-    advance_root_scalar("double");
+-  }
++  if(result.error() == SUCCESS) { advance_root_scalar("double"); }
+   return result;
+ }
+ simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::get_root_bool() noexcept {
+@@ -704,15 +674,10 @@ simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::get_r
+   uint8_t tmpbuf[5+1];
+   if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf)) { return incorrect_type_error("Not a boolean"); }
+   auto result = parse_bool(tmpbuf);
+-  if(result.error() == SUCCESS) {
+-    if (!_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+-    advance_root_scalar("bool");
+-  }
++  if(result.error() == SUCCESS) { advance_root_scalar("bool"); }
+   return result;
+ }
+ simdjson_inline bool value_iterator::is_root_null() noexcept {
+-  // If there is trailing content, then the document is not null.
+-  if (!_json_iter->is_single_token()) { return false; }
+   auto max_len = peek_start_length();
+   auto json = peek_root_scalar("null");
+   bool result = (max_len >= 4 && !atomparsing::str4ncmp(json, "null") &&
+diff --git a/src/internal/error_tables.cpp b/src/internal/error_tables.cpp
+index 28a139f9..e66f7da2 100644
+--- a/src/internal/error_tables.cpp
++++ b/src/internal/error_tables.cpp
+@@ -33,8 +33,7 @@ namespace internal {
+     { INSUFFICIENT_PADDING, "simdjson requires the input JSON string to have at least SIMDJSON_PADDING extra bytes allocated, beyond the string's length. Consider using the simdjson::padded_string class if needed." },
+     { INCOMPLETE_ARRAY_OR_OBJECT, "JSON document ended early in the middle of an object or array." },
+     { SCALAR_DOCUMENT_AS_VALUE, "A JSON document made of a scalar (number, Boolean, null or string) is treated as a value. Use get_bool(), get_double(), etc. on the document instead. "},
+-    { OUT_OF_BOUNDS, "Attempted to access location outside of document."},
+-    { TRAILING_CONTENT, "Unexpected trailing content in the JSON input."}
++    { OUT_OF_BOUNDS, "Attempted to access location outside of document."}
+   }; // error_messages[]
+ 
+ } // namespace internal
+diff --git a/tests/ondemand/ondemand_number_tests.cpp b/tests/ondemand/ondemand_number_tests.cpp
+index 896f21d4..0940a652 100644
+--- a/tests/ondemand/ondemand_number_tests.cpp
++++ b/tests/ondemand/ondemand_number_tests.cpp
+@@ -264,61 +264,6 @@ namespace number_tests {
+     TEST_SUCCEED();
+   }
+ 
+-  bool issue1878() {
+-    TEST_START();
+-    ondemand::parser parser;
+-    auto json = R"(123_abc)"_padded;
+-    for (char ch : {'_', '%', 'z', '&', '\\', '/', '*'}) {
+-      json.data()[3] = ch;
+-      ondemand::document doc;
+-      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-      ASSERT_ERROR(doc.get_int64().error(), NUMBER_ERROR);
+-    }
+-    for (char ch : {'[', ']', '{', '}', ',', ' '}) {
+-      json.data()[3] = ch;
+-      ondemand::document doc;
+-      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-      ASSERT_ERROR(doc.get_int64().error(), TRAILING_CONTENT);
+-    }
+-    for (char ch : {'_', '%', 'z', '&', '\\', '/', '*'}) {
+-      json.data()[3] = ch;
+-      ondemand::document doc;
+-      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-      ASSERT_ERROR(doc.get_uint64().error(), NUMBER_ERROR);
+-    }
+-    for (char ch : {'[', ']', '{', '}', ',', ' '}) {
+-      json.data()[3] = ch;
+-      ondemand::document doc;
+-      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-      ASSERT_ERROR(doc.get_uint64().error(), TRAILING_CONTENT);
+-    }
+-    for (char ch : {'_', '%', 'z', '&', '\\', '/', '*'}) {
+-      json.data()[3] = ch;
+-      ondemand::document doc;
+-      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-      ASSERT_ERROR(doc.get_double().error(), NUMBER_ERROR);
+-    }
+-    for (char ch : {'[', ']', '{', '}', ',', ' '}) {
+-      json.data()[3] = ch;
+-      ondemand::document doc;
+-      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-      ASSERT_ERROR(doc.get_double().error(), TRAILING_CONTENT);
+-    }
+-    for (char ch : {'_', '%', 'z', '&', '\\', '/', '*'}) {
+-      json.data()[3] = ch;
+-      ondemand::document doc;
+-      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-      ASSERT_ERROR(doc.get_number().error(), NUMBER_ERROR);
+-    }
+-    for (char ch : {'[', ']', '{', '}', ',', ' '}) {
+-      json.data()[3] = ch;
+-      ondemand::document doc;
+-      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-      ASSERT_ERROR(doc.get_number().error(), TRAILING_CONTENT);
+-    }
+-    TEST_SUCCEED();
+-  }
+-
+   bool get_root_number_tests() {
+     TEST_START();
+     ondemand::parser parser;
+@@ -376,8 +321,7 @@ namespace number_tests {
+     TEST_SUCCEED();
+   }
+   bool run() {
+-    return issue1878() &&
+-           get_root_number_tests() &&
++    return get_root_number_tests() &&
+            get_number_tests()&&
+            small_integers() &&
+            powers_of_two() &&

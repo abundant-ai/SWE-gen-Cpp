@@ -1,0 +1,340 @@
+diff --git a/.drone.yml b/.drone.yml
+index 33c3ac7c..09621102 100644
+--- a/.drone.yml
++++ b/.drone.yml
+@@ -273,29 +273,6 @@ steps:
+     - ASAN_OPTIONS="detect_leaks=0" ctest $CTEST_FLAGS -LE "acceptance|per_implementation" # Everything we haven't run yet, run now.
+ ---
+ kind: pipeline
+-name: ninja-clang9
+-platform: { os: linux, arch: amd64 }
+-steps:
+-- name: Build and Test
+-  image: conanio/clang9
+-  user: root
+-  environment:
+-    CC: clang-9
+-    CXX: clang++-9
+-    BUILD_FLAGS: -- -j 4
+-    CMAKE_FLAGS: -GNinja -DSIMDJSON_BUILD_STATIC=ON
+-    CTEST_FLAGS: -j4 --output-on-failure
+-    CXXFLAGS: -stdlib=libc++
+-  commands:
+-    - apt-get update -qq
+-    - apt-get install -y cmake
+-    - mkdir build
+-    - cd build
+-    - cmake $CMAKE_FLAGS ..
+-    - cmake --build . $BUILD_FLAGS
+-    - ctest $CTEST_FLAGS
+----
+-kind: pipeline
+ name: libcpp-clang9
+ platform: { os: linux, arch: amd64 }
+ steps:
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1dfde04e..5733ec84 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -16,10 +16,8 @@ include(GNUInstallDirs)
+ include(cmake/simdjson-flags.cmake)
+ include(cmake/simdjson-user-cmakecache.cmake)
+ 
+-
+-
+ if(SIMDJSON_JUST_LIBRARY)
+-  message( STATUS "Building just the library, omitting all tests, tools and benchmarks." )
++  MESSAGE( STATUS "Building just the library, omitting all tests, tools and benchmarks." )
+ endif()
+ 
+ #
+@@ -41,8 +39,7 @@ add_subdirectory(include)
+ add_subdirectory(src)
+ add_subdirectory(windows)
+ if(NOT(SIMDJSON_JUST_LIBRARY))
+-  add_subdirectory(dependencies) ## This needs to be before tools because of cxxopts
+-  add_subdirectory(tools)  ## This needs to be before tests because of cxxopts
++  add_subdirectory(tools)
+   add_subdirectory(singleheader)
+ endif()
+ 
+@@ -50,6 +47,7 @@ endif()
+ # Compile tools / tests / benchmarks
+ #
+ if(NOT(SIMDJSON_JUST_LIBRARY))
++  add_subdirectory(dependencies)
+   add_subdirectory(tests)
+   add_subdirectory(examples)
+   add_subdirectory(benchmark)
+diff --git a/benchmark/CMakeLists.txt b/benchmark/CMakeLists.txt
+index 7ceee84a..09debbc4 100644
+--- a/benchmark/CMakeLists.txt
++++ b/benchmark/CMakeLists.txt
+@@ -14,13 +14,13 @@ target_compile_definitions(parse_nonumberparsing PRIVATE SIMDJSON_SKIPNUMBERPARS
+ add_executable(parse_nostringparsing parse.cpp)
+ target_compile_definitions(parse_nostringparsing PRIVATE SIMDJSON_SKIPSTRINGPARSING)
+ 
+-if (TARGET benchmark::benchmark)
++if (SIMDJSON_GOOGLE_BENCHMARKS)
+   link_libraries(benchmark::benchmark)
+   add_executable(bench_parse_call bench_parse_call.cpp)
+   add_executable(bench_dom_api bench_dom_api.cpp)
+ endif()
+ 
+-if (TARGET competition-all)
++if (SIMDJSON_COMPETITION)
+   add_executable(distinctuseridcompetition distinctuseridcompetition.cpp)
+   target_link_libraries(distinctuseridcompetition competition-core)
+   add_executable(minifiercompetition minifiercompetition.cpp)
+diff --git a/benchmark/checkperf.cmake b/benchmark/checkperf.cmake
+index d1ae21b0..321f87c3 100644
+--- a/benchmark/checkperf.cmake
++++ b/benchmark/checkperf.cmake
+@@ -7,8 +7,7 @@
+ 
+ # Clone the repository if it's not there
+ find_package(Git QUIET)
+-if (SIMDJSON_IS_UNDER_GIT AND Git_FOUND AND (GIT_VERSION_STRING VERSION_GREATER  "2.1.4") AND (NOT CMAKE_GENERATOR MATCHES Ninja) ) # We use "-C" which requires a recent git
+-  message(STATUS "Git is available and it is recent. We are enabling checkperf targets.")
++if (Git_FOUND)
+   # sync_git_repository(myrepo ...) creates two targets:
+   # myrepo - if the repo does not exist, creates and syncs it against the origin branch
+   # update_myrepo - will update the repo against the origin branch (and create if needed)
+@@ -92,10 +91,5 @@ if (SIMDJSON_IS_UNDER_GIT AND Git_FOUND AND (GIT_VERSION_STRING VERSION_GREATER
+   set_property(TEST checkperf APPEND PROPERTY LABELS per_implementation)
+   set_property(TEST checkperf APPEND PROPERTY DEPENDS parse perfdiff ${SIMDJSON_USER_CMAKECACHE})
+   set_property(TEST checkperf PROPERTY RUN_SERIAL TRUE)
+-else()
+-  if (CMAKE_GENERATOR MATCHES Ninja)
+-   message(STATUS "We disable the checkperf targets under Ninja.")
+-  else() 
+-   message(STATUS "Either git is unavailable or else it is too old. We are disabling checkperf targets.")
+-  endif()
+-endif ()
++
++endif (Git_FOUND)
+diff --git a/cmake/simdjson-flags.cmake b/cmake/simdjson-flags.cmake
+index b71748a3..0ea36b1e 100644
+--- a/cmake/simdjson-flags.cmake
++++ b/cmake/simdjson-flags.cmake
+@@ -1,21 +1,4 @@
+-
+-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+-  message (STATUS "The simdjson repository appears to be standalone.")  
+-  option(SIMDJSON_JUST_LIBRARY "Build just the library, omit tests, tools and benchmarks" OFF)
+-  message (STATUS "By default, we attempt to build everything.")
+-else()
+-  message (STATUS "The simdjson repository appears to be used as a subdirectory.")
+-  option(SIMDJSON_JUST_LIBRARY "Build just the library, omit tests, tools and benchmarks" ON)
+-  message (STATUS "By default, we just build the library.")
+-endif()
+-
+-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/.git)
+-  set(SIMDJSON_IS_UNDER_GIT ON CACHE BOOL  "Whether cmake is under git control")
+-  message( STATUS "The simdjson repository appears to be under git." )
+-else()
+-  set(SIMDJSON_IS_UNDER_GIT OFF CACHE BOOL  "Whether cmake is under git control")
+-  message( STATUS "The simdjson repository does not appear to be under git." )
+-endif()
++option(SIMDJSON_JUST_LIBRARY "Build just the library, omit tests, tools and benchmarks" OFF)
+ 
+ #
+ # Flags used by exes and by the simdjson library (project-wide flags)
+diff --git a/dependencies/CMakeLists.txt b/dependencies/CMakeLists.txt
+index a71797c3..4abd4fb6 100644
+--- a/dependencies/CMakeLists.txt
++++ b/dependencies/CMakeLists.txt
+@@ -1,88 +1,74 @@
+ # Initializes a git submodule if it hasn't been initialized before
+-
+-
+-find_package(Git QUIET) # We want the library to build even if git is missing
+-if ((Git_FOUND) AND (SIMDJSON_IS_UNDER_GIT))
+-  message(STATUS "Git is available.")
+-  # Does NOT attempt to update or otherwise modify git submodules that are already initialized.
+-  function(initialize_submodule DIRECTORY)
+-    if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${DIRECTORY}/.git)
+-      message(STATUS "${CMAKE_CURRENT_SOURCE_DIR}/${DIRECTORY}/.git does not exist. Initializing ${DIRECTORY} submodule ...")
+-      execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init ${CMAKE_CURRENT_SOURCE_DIR}/${DIRECTORY}
+-                      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+-                      RESULT_VARIABLE GIT_EXIT_CODE)
+-      if(NOT GIT_EXIT_CODE EQUAL "0")
+-        message(FATAL_ERROR "${GIT_EXECUTABLE} submodule update --init dependencies/${DIRECTORY} failed with exit code ${GIT_EXIT_CODE}, please checkout submodules")
+-      endif()
++# Does NOT attempt to update or otherwise modify git submodules that are already initialized.
++function(initialize_submodule DIRECTORY)
++  if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${DIRECTORY}/.git)
++    find_package(Git QUIET REQUIRED)
++    message(STATUS "${CMAKE_CURRENT_SOURCE_DIR}/${DIRECTORY}/.git does not exist. Initializing ${DIRECTORY} submodule ...")
++    execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init ${CMAKE_CURRENT_SOURCE_DIR}/${DIRECTORY}
++                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
++                    RESULT_VARIABLE GIT_EXIT_CODE)
++    if(NOT GIT_EXIT_CODE EQUAL "0")
++      message(FATAL_ERROR "${GIT_EXECUTABLE} submodule update --init dependencies/${DIRECTORY} failed with exit code ${GIT_EXIT_CODE}, please checkout submodules")
+     endif()
+-  endfunction(initialize_submodule)
+-
+-  if (SIMDJSON_GOOGLE_BENCHMARKS)
+-    option(BENCHMARK_ENABLE_TESTING OFF)
+-    set(BENCHMARK_ENABLE_TESTING OFF)
+-    option(BENCHMARK_ENABLE_INSTALL OFF)
+-    set(BENCHMARK_ENABLE_INSTALL OFF)
+-    initialize_submodule(benchmark)
+-    add_subdirectory(benchmark)
+-  endif()
+-
+-  if (SIMDJSON_COMPETITION)
+-    initialize_submodule(cJSON)
+-    add_library(competition-cJSON INTERFACE)
+-    target_include_directories(competition-cJSON INTERFACE cJSON)
+-
+-    initialize_submodule(fastjson)
+-    add_library(competition-fastjson INTERFACE)
+-    target_include_directories(competition-fastjson INTERFACE fastjson/src fastjson/include)
+-
+-    initialize_submodule(gason)
+-    add_library(competition-gason INTERFACE)
+-    target_include_directories(competition-gason INTERFACE gason/src)
+-
+-    initialize_submodule(jsmn)
+-    add_library(competition-jsmn INTERFACE)
+-    target_include_directories(competition-jsmn INTERFACE jsmn)
+-
+-    initialize_submodule(json)
+-    add_library(competition-json INTERFACE)
+-    target_include_directories(competition-json INTERFACE json/single_include)
+-
+-    initialize_submodule(json11)
+-    add_library(competition-json11 INTERFACE)
+-    target_include_directories(competition-json11 INTERFACE json11)
+-
+-    add_library(competition-jsoncppdist INTERFACE)
+-    target_include_directories(competition-jsoncppdist INTERFACE jsoncppdist)
+-
+-    initialize_submodule(rapidjson)
+-    add_library(competition-rapidjson INTERFACE)
+-    target_include_directories(competition-rapidjson INTERFACE rapidjson/include)
+-
+-    initialize_submodule(sajson)
+-    add_library(competition-sajson INTERFACE)
+-    target_include_directories(competition-sajson INTERFACE sajson/include)
+-
+-    initialize_submodule(ujson4c)
+-    add_library(competition-ujson4c ujson4c/src/ujdecode.c)
+-    target_include_directories(competition-ujson4c PUBLIC ujson4c/3rdparty ujson4c/src)
+-
+-    add_library(competition-core INTERFACE)
+-    target_link_libraries(competition-core INTERFACE competition-json competition-rapidjson competition-sajson competition-cJSON competition-jsmn)
+-
+-    add_library(competition-all INTERFACE)
+-    target_link_libraries(competition-all INTERFACE competition-core competition-jsoncppdist competition-json11 competition-fastjson competition-gason competition-ujson4c)
+-  endif()
+-
+-  initialize_submodule(cxxopts)
+-  message(STATUS "We acquired cxxopts and we are adding it as a library and target.")
+-  add_library(cxxopts INTERFACE)
+-  target_include_directories(cxxopts INTERFACE cxxopts/include)
+-else()
+-  message(STATUS "Git is unavailable.")
+-  if(SIMDJSON_COMPETITION)
+-    message (STATUS "'SIMDJSON_COMPETITION' is requested, but we cannot download the  remote repositories." )
+-  endif()
+-  if(SIMDJSON_GOOGLE_BENCHMARKS)
+-    message (STATUS "'SIMDJSON_GOOGLE_BENCHMARKS' is requested, but we cannot download the remote repositories." )
+   endif()
+-endif()
+\ No newline at end of file
++endfunction(initialize_submodule)
++
++if (SIMDJSON_GOOGLE_BENCHMARKS)
++  option(BENCHMARK_ENABLE_TESTING OFF)
++  set(BENCHMARK_ENABLE_TESTING OFF)
++  option(BENCHMARK_ENABLE_INSTALL OFF)
++  set(BENCHMARK_ENABLE_INSTALL OFF)
++  initialize_submodule(benchmark)
++  add_subdirectory(benchmark)
++endif()
++
++if (SIMDJSON_COMPETITION)
++  initialize_submodule(cJSON)
++  add_library(competition-cJSON INTERFACE)
++  target_include_directories(competition-cJSON INTERFACE cJSON)
++
++  initialize_submodule(fastjson)
++  add_library(competition-fastjson INTERFACE)
++  target_include_directories(competition-fastjson INTERFACE fastjson/src fastjson/include)
++
++  initialize_submodule(gason)
++  add_library(competition-gason INTERFACE)
++  target_include_directories(competition-gason INTERFACE gason/src)
++
++  initialize_submodule(jsmn)
++  add_library(competition-jsmn INTERFACE)
++  target_include_directories(competition-jsmn INTERFACE jsmn)
++
++  initialize_submodule(json)
++  add_library(competition-json INTERFACE)
++  target_include_directories(competition-json INTERFACE json/single_include)
++
++  initialize_submodule(json11)
++  add_library(competition-json11 INTERFACE)
++  target_include_directories(competition-json11 INTERFACE json11)
++
++  add_library(competition-jsoncppdist INTERFACE)
++  target_include_directories(competition-jsoncppdist INTERFACE jsoncppdist)
++
++  initialize_submodule(rapidjson)
++  add_library(competition-rapidjson INTERFACE)
++  target_include_directories(competition-rapidjson INTERFACE rapidjson/include)
++
++  initialize_submodule(sajson)
++  add_library(competition-sajson INTERFACE)
++  target_include_directories(competition-sajson INTERFACE sajson/include)
++
++  initialize_submodule(ujson4c)
++  add_library(competition-ujson4c ujson4c/src/ujdecode.c)
++  target_include_directories(competition-ujson4c PUBLIC ujson4c/3rdparty ujson4c/src)
++
++  add_library(competition-core INTERFACE)
++  target_link_libraries(competition-core INTERFACE competition-json competition-rapidjson competition-sajson competition-cJSON competition-jsmn)
++
++  add_library(competition-all INTERFACE)
++  target_link_libraries(competition-all INTERFACE competition-core competition-jsoncppdist competition-json11 competition-fastjson competition-gason competition-ujson4c)
++endif()
++
++initialize_submodule(cxxopts)
++add_library(cxxopts INTERFACE)
++target_include_directories(cxxopts INTERFACE cxxopts/include)
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 5ce27c4e..c15c164e 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -64,7 +64,7 @@ find_program(BASH bash)
+ 
+ 
+ # Script tests
+-if (BASH AND (NOT MSVC) AND (TARGET json2json)) # The scripts are not robust enough to run under Windows even if bash is available
++if (BASH AND (NOT MSVC)) # The scripts are not robust enough to run under Windows even if bash is available
+   #
+   # json2json test
+   #
+diff --git a/tools/CMakeLists.txt b/tools/CMakeLists.txt
+index 6f5caa38..81d8aae6 100644
+--- a/tools/CMakeLists.txt
++++ b/tools/CMakeLists.txt
+@@ -1,9 +1,5 @@
+-if(TARGET cxxopts) # we only build the tools if cxxopts is available
+-  message(STATUS "We have cxxopts as a dependency and we are buiding the tools (e.g., json2json).")
+-  link_libraries(simdjson simdjson-internal-flags simdjson-windows-headers cxxopts)
+-  add_executable(json2json json2json.cpp)
+-  add_executable(jsonstats jsonstats.cpp)
+-  add_executable(minify minify.cpp)
+-else()
+-  message(STATUS "We are missing cxxopts as a dependency so the tools (e.g., json2json) are omitted.")
+-endif()
+\ No newline at end of file
++link_libraries(simdjson simdjson-internal-flags simdjson-windows-headers cxxopts)
++
++add_executable(json2json json2json.cpp)
++add_executable(jsonstats jsonstats.cpp)
++add_executable(minify minify.cpp)

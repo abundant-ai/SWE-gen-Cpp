@@ -1,0 +1,245 @@
+diff --git a/.clang-format b/.clang-format
+index 4b3f13f..70fe225 100644
+--- a/.clang-format
++++ b/.clang-format
+@@ -3,3 +3,4 @@ Language:        Cpp
+ BasedOnStyle:  Google
+ ...
+ 
++PointerAlignment: Left
+diff --git a/.gitignore b/.gitignore
+index 8c30e28..806d04c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -56,3 +56,6 @@ build*/
+ # Visual Studio 2015/2017 cache/options directory
+ .vs/
+ CMakeSettings.json
++
++# Visual Studio Code cache/options directory
++.vscode/
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 2954ff4..51e15dc 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -246,11 +246,11 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ #endif
+ 
+ #if defined(__GNUC__) || __has_builtin(__builtin_unreachable)
+-  #define BENCHMARK_UNREACHABLE() __builtin_unreachable()
++#define BENCHMARK_UNREACHABLE() __builtin_unreachable()
+ #elif defined(_MSC_VER)
+-  #define BENCHMARK_UNREACHABLE() __assume(false)
++#define BENCHMARK_UNREACHABLE() __assume(false)
+ #else
+-  #define BENCHMARK_UNREACHABLE() ((void)0)
++#define BENCHMARK_UNREACHABLE() ((void)0)
+ #endif
+ 
+ namespace benchmark {
+@@ -1293,10 +1293,11 @@ struct CPUInfo {
+   BENCHMARK_DISALLOW_COPY_AND_ASSIGN(CPUInfo);
+ };
+ 
+-//Adding Struct for System Information
++// Adding Struct for System Information
+ struct SystemInfo {
+   std::string name;
+   static const SystemInfo& Get();
++
+  private:
+   SystemInfo();
+   BENCHMARK_DISALLOW_COPY_AND_ASSIGN(SystemInfo);
+@@ -1336,12 +1337,14 @@ class BenchmarkReporter {
+   };
+ 
+   struct Run {
++    static const int64_t no_repetition_index = -1;
+     enum RunType { RT_Iteration, RT_Aggregate };
+ 
+     Run()
+         : run_type(RT_Iteration),
+           error_occurred(false),
+           iterations(1),
++          threads(1),
+           time_unit(kNanosecond),
+           real_accumulated_time(0),
+           cpu_accumulated_time(0),
+@@ -1358,13 +1361,16 @@ class BenchmarkReporter {
+ 
+     std::string benchmark_name() const;
+     BenchmarkName run_name;
+-    RunType run_type;          // is this a measurement, or an aggregate?
++    RunType run_type;
+     std::string aggregate_name;
+     std::string report_label;  // Empty if not set by benchmark.
+     bool error_occurred;
+     std::string error_message;
+ 
+     int64_t iterations;
++    int64_t threads;
++    int64_t repetition_index;
++    int64_t repetitions;
+     TimeUnit time_unit;
+     double real_accumulated_time;
+     double cpu_accumulated_time;
+@@ -1502,8 +1508,9 @@ class JSONReporter : public BenchmarkReporter {
+   bool first_report_;
+ };
+ 
+-class BENCHMARK_DEPRECATED_MSG("The CSV Reporter will be removed in a future release")
+-      CSVReporter : public BenchmarkReporter {
++class BENCHMARK_DEPRECATED_MSG(
++    "The CSV Reporter will be removed in a future release") CSVReporter
++    : public BenchmarkReporter {
+  public:
+   CSVReporter() : printed_header_(false) {}
+   virtual bool ReportContext(const Context& context);
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index 9e1f6e4..f4ea5f2 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -64,7 +64,8 @@ static const size_t kMaxIterations = 1000000000;
+ BenchmarkReporter::Run CreateRunReport(
+     const benchmark::internal::BenchmarkInstance& b,
+     const internal::ThreadManager::Result& results, size_t memory_iterations,
+-    const MemoryManager::Result& memory_result, double seconds) {
++    const MemoryManager::Result& memory_result, double seconds,
++    int64_t repetition_index) {
+   // Create report about this benchmark run.
+   BenchmarkReporter::Run report;
+ 
+@@ -75,6 +76,9 @@ BenchmarkReporter::Run CreateRunReport(
+   // This is the total iterations across all threads.
+   report.iterations = results.iterations;
+   report.time_unit = b.time_unit;
++  report.threads = b.threads;
++  report.repetition_index = repetition_index;
++  report.repetitions = b.repetitions;
+ 
+   if (!report.error_occurred) {
+     if (b.use_manual_time) {
+@@ -150,8 +154,7 @@ class BenchmarkRunner {
+     }
+ 
+     for (int repetition_num = 0; repetition_num < repeats; repetition_num++) {
+-      const bool is_the_first_repetition = repetition_num == 0;
+-      DoOneRepetition(is_the_first_repetition);
++      DoOneRepetition(repetition_num);
+     }
+ 
+     // Calculate additional statistics
+@@ -276,7 +279,8 @@ class BenchmarkRunner {
+            ((i.results.real_time_used >= 5 * min_time) && !b.use_manual_time);
+   }
+ 
+-  void DoOneRepetition(bool is_the_first_repetition) {
++  void DoOneRepetition(int64_t repetition_index) {
++    const bool is_the_first_repetition = repetition_index == 0;
+     IterationResults i;
+ 
+     // We *may* be gradually increasing the length (iteration count)
+@@ -326,8 +330,9 @@ class BenchmarkRunner {
+     }
+ 
+     // Ok, now actualy report.
+-    BenchmarkReporter::Run report = CreateRunReport(
+-        b, i.results, memory_iterations, memory_result, i.seconds);
++    BenchmarkReporter::Run report =
++        CreateRunReport(b, i.results, memory_iterations, memory_result,
++                        i.seconds, repetition_index);
+ 
+     if (!report.error_occurred && b.complexity != oNone)
+       complexity_reports.push_back(report);
+diff --git a/src/complexity.cc b/src/complexity.cc
+index 4c6fcf6..e65bd2e 100644
+--- a/src/complexity.cc
++++ b/src/complexity.cc
+@@ -191,7 +191,11 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+   Run big_o;
+   big_o.run_name = run_name;
+   big_o.run_type = BenchmarkReporter::Run::RT_Aggregate;
++  big_o.repetitions = reports[0].repetitions;
++  big_o.repetition_index = Run::no_repetition_index;
++  big_o.threads = reports[0].threads;
+   big_o.aggregate_name = "BigO";
++  big_o.report_label = reports[0].report_label;
+   big_o.iterations = 0;
+   big_o.real_accumulated_time = result_real.coef;
+   big_o.cpu_accumulated_time = result_cpu.coef;
+@@ -208,11 +212,13 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+   // Only add label to mean/stddev if it is same for all runs
+   Run rms;
+   rms.run_name = run_name;
+-  big_o.report_label = reports[0].report_label;
+   rms.run_type = BenchmarkReporter::Run::RT_Aggregate;
+   rms.aggregate_name = "RMS";
+   rms.report_label = big_o.report_label;
+   rms.iterations = 0;
++  rms.repetition_index = Run::no_repetition_index;
++  rms.repetitions = reports[0].repetitions;
++  rms.threads = reports[0].threads;
+   rms.real_accumulated_time = result_real.rms / multiplier;
+   rms.cpu_accumulated_time = result_cpu.rms / multiplier;
+   rms.report_rms = true;
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index 25beba0..dd4ba30 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -16,6 +16,7 @@
+ #include "complexity.h"
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <cstdint>
+ #include <iomanip>  // for setprecision
+ #include <iostream>
+@@ -23,7 +24,6 @@
+ #include <string>
+ #include <tuple>
+ #include <vector>
+-#include <cmath>
+ 
+ #include "string_util.h"
+ #include "timers.h"
+@@ -59,9 +59,11 @@ std::string FormatKV(std::string const& key, double value) {
+   else if (std::isinf(value))
+     ss << (value < 0 ? "-" : "") << "Infinity";
+   else {
+-    const auto max_digits10 = std::numeric_limits<decltype(value)>::max_digits10;
++    const auto max_digits10 =
++        std::numeric_limits<decltype(value)>::max_digits10;
+     const auto max_fractional_digits10 = max_digits10 - 1;
+-    ss << std::scientific << std::setprecision(max_fractional_digits10) << value;
++    ss << std::scientific << std::setprecision(max_fractional_digits10)
++       << value;
+   }
+   return ss.str();
+ }
+@@ -184,6 +186,12 @@ void JSONReporter::PrintRunData(Run const& run) {
+     }
+     BENCHMARK_UNREACHABLE();
+   }()) << ",\n";
++  out << indent << FormatKV("repetitions", run.repetitions) << ",\n";
++  if (run.run_type != BenchmarkReporter::Run::RT_Aggregate) {
++    out << indent << FormatKV("repetition_index", run.repetition_index)
++        << ",\n";
++  }
++  out << indent << FormatKV("threads", run.threads) << ",\n";
+   if (run.run_type == BenchmarkReporter::Run::RT_Aggregate) {
+     out << indent << FormatKV("aggregate_name", run.aggregate_name) << ",\n";
+   }
+diff --git a/src/statistics.cc b/src/statistics.cc
+index e9a170f..4dc2c95 100644
+--- a/src/statistics.cc
++++ b/src/statistics.cc
+@@ -149,6 +149,9 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+     Run data;
+     data.run_name = reports[0].run_name;
+     data.run_type = BenchmarkReporter::Run::RT_Aggregate;
++    data.threads = reports[0].threads;
++    data.repetitions = reports[0].repetitions;
++    data.repetition_index = Run::no_repetition_index;
+     data.aggregate_name = Stat.name_;
+     data.report_label = report_label;
+ 

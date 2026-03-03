@@ -1,0 +1,384 @@
+diff --git a/doc/basics.md b/doc/basics.md
+index 6506f9f1..c46a675f 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -18,7 +18,6 @@ An overview of what you need to know to use simdjson, with examples.
+ * [Error Handling](#error-handling)
+   * [Error Handling Example](#error-handling-example)
+   * [Exceptions](#exceptions)
+-* [Rewinding](#rewinding)
+ * [Direct Access to the Raw String](#direct-access-to-the-raw-string)
+ * [Newline-Delimited JSON (ndjson) and JSON lines](#newline-delimited-json-ndjson-and-json-lines)
+ * [Thread Safety](#thread-safety)
+@@ -726,52 +725,6 @@ int main(void) {
+ }
+ ```
+ 
+-
+-Rewinding
+-----------
+-
+-In some instances, you may need to go through a document more than once. For that purpose, you may
+-call the `rewind()` method on the document instance. It allows you to restart processing from the beginning without rescanning all of the input data again. It invalidates all values, objects and arrays
+-that you have created so far (including unescaped strings).
+-
+-In the following example, we print on the screen the number of cars in the JSON input file
+-before printout the data.
+-
+-```C++
+-  ondemand::parser parser;
+-  auto cars_json = R"( [
+-    { "make": "Toyota", "model": "Camry",  "year": 2018, "tire_pressure": [ 40.1, 39.9, 37.7, 40.4 ] },
+-    { "make": "Kia",    "model": "Soul",   "year": 2012, "tire_pressure": [ 30.1, 31.0, 28.6, 28.7 ] },
+-    { "make": "Toyota", "model": "Tercel", "year": 1999, "tire_pressure": [ 29.8, 30.0, 30.2, 30.5 ] }
+-  ] )"_padded;
+-
+-  auto doc = parser.iterate(cars_json);
+-  for (simdjson_unused ondemand::object car : doc) {
+-    if(car["make"] == "Toyota") { count++; }
+-  }
+-  std::cout << "We have " << count << " Toyota cars.\n";
+-  doc.rewind();
+-  for (ondemand::object car : doc) {
+-    cout << "Make/Model: " << std::string_view(car["make"]) << "/" << std::string_view(car["model"]) << endl;
+-  }
+-```
+-
+-You may also rewind arrays and objects, as in the following example:
+-
+-```C++
+-  auto doc = parser.iterate(cars_json);
+-  ondemand::array doc_array = doc;
+-  size_t count = 0;
+-  for (simdjson_unused ondemand::object car : doc) {
+-    if(car["make"] == "Toyota") { count++; }
+-  }
+-  std::cout << "We have " << count << " Toyota cars.\n";
+-  doc_array.rewind();
+-  for (ondemand::object car : doc_array) {
+-    cout << "Make/Model: " << std::string_view(car["make"]) << "/" << std::string_view(car["model"]) << endl;
+-  }
+-```
+-
+ Direct Access to the Raw String
+ --------------------------------
+ 
+@@ -791,8 +744,6 @@ std::string_view token = obj["value"].raw_json_token();
+ // token has value "12321323213213213213213213213211223"
+ ```
+ 
+-Performance note: the On Demand front-end does not materialize the parsed numbers and other values. If you are accessing everything twice, you may need to parse them twice. Thus the rewind functionality is
+-best suited for cases where the first pass only scans the structure of the document.
+ The `raw_json_token` method even works when the JSON value is a string. In such cases, it
+ will return the complete string with the quotes and with eventual escaped sequences as in the
+ source document.
+diff --git a/include/simdjson/generic/ondemand/document-inl.h b/include/simdjson/generic/ondemand/document-inl.h
+index f95a7b79..1fed70f6 100644
+--- a/include/simdjson/generic/ondemand/document-inl.h
++++ b/include/simdjson/generic/ondemand/document-inl.h
+@@ -12,10 +12,6 @@ simdjson_really_inline document document::start(json_iterator &&iter) noexcept {
+   return document(std::forward<json_iterator>(iter));
+ }
+ 
+-inline void document::rewind() noexcept {
+-  iter.rewind();
+-}
+-
+ simdjson_really_inline value_iterator document::resume_value_iterator() noexcept {
+   return value_iterator(&iter, 1, iter.root_checkpoint());
+ }
+@@ -146,11 +142,7 @@ simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::docume
+     )
+ {
+ }
+-simdjson_really_inline error_code simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document>::rewind() noexcept {
+-  if (error()) { return error(); }
+-  first.rewind();
+-  return SUCCESS;
+-}
++
+ simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterator> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document>::begin() & noexcept {
+   if (error()) { return error(); }
+   return first.begin();
+diff --git a/include/simdjson/generic/ondemand/document.h b/include/simdjson/generic/ondemand/document.h
+index 80fe748d..952482ec 100644
+--- a/include/simdjson/generic/ondemand/document.h
++++ b/include/simdjson/generic/ondemand/document.h
+@@ -298,12 +298,6 @@ public:
+    */
+   simdjson_really_inline simdjson_result<std::string_view> raw_json_token() noexcept;
+ 
+-  /**
+-   * Reset the iterator inside the document instance so we are pointing back at the
+-   * beginning of the document, as if it had just been created.
+-   */
+-  inline void rewind() noexcept;
+-
+ protected:
+   simdjson_really_inline document(ondemand::json_iterator &&iter) noexcept;
+   simdjson_really_inline const uint8_t *text(uint32_t idx) const noexcept;
+@@ -341,7 +335,6 @@ public:
+   simdjson_really_inline simdjson_result(SIMDJSON_IMPLEMENTATION::ondemand::document &&value) noexcept; ///< @private
+   simdjson_really_inline simdjson_result(error_code error) noexcept; ///< @private
+   simdjson_really_inline simdjson_result() noexcept = default;
+-  simdjson_really_inline error_code rewind() noexcept;
+ 
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array> get_array() & noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::object> get_object() & noexcept;
+diff --git a/include/simdjson/generic/ondemand/json_iterator-inl.h b/include/simdjson/generic/ondemand/json_iterator-inl.h
+index 1ee79764..5d66ffee 100644
+--- a/include/simdjson/generic/ondemand/json_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/json_iterator-inl.h
+@@ -28,13 +28,6 @@ simdjson_really_inline json_iterator::json_iterator(const uint8_t *buf, ondemand
+   logger::log_headers();
+ }
+ 
+-inline void json_iterator::rewind() noexcept {
+-  token.index = parser->implementation->structural_indexes.get();
+-  logger::log_headers(); // We start again
+-  _string_buf_loc = parser->string_buf.get();
+-  _depth = 1;
+-}
+-
+ // GCC 7 warns when the first line of this function is inlined away into oblivion due to the caller
+ // relating depth and parent_depth, which is a desired effect. The warning does not show up if the
+ // skip_child() function is not marked inline).
+diff --git a/include/simdjson/generic/ondemand/json_iterator.h b/include/simdjson/generic/ondemand/json_iterator.h
+index 6d5401fb..1a2bdb3c 100644
+--- a/include/simdjson/generic/ondemand/json_iterator.h
++++ b/include/simdjson/generic/ondemand/json_iterator.h
+@@ -50,7 +50,7 @@ public:
+   simdjson_really_inline json_iterator(json_iterator &&other) noexcept;
+   simdjson_really_inline json_iterator &operator=(json_iterator &&other) noexcept;
+   simdjson_really_inline explicit json_iterator(const json_iterator &other) noexcept = default;
+-  simdjson_really_inline json_iterator &operator=(const json_iterator &other) noexcept = default;
++  simdjson_really_inline json_iterator &operator=(const json_iterator &other) noexcept = delete;
+ 
+   /**
+    * Skips a JSON value, whether it is a scalar, array or object.
+@@ -194,11 +194,6 @@ public:
+   simdjson_really_inline token_position start_position(depth_t depth) const noexcept;
+   simdjson_really_inline void set_start_position(depth_t depth, token_position position) noexcept;
+ #endif
+-  /**
+-   * Updates this json iterator so that it is back at the beginning of the document,
+-   * as if it had just been created.
+-   */
+-  inline void rewind() noexcept;
+  /* Useful for debugging and logging purposes. */
+   inline std::string to_string() const noexcept;
+ 
+diff --git a/include/simdjson/generic/ondemand/object.h b/include/simdjson/generic/ondemand/object.h
+index 5dd72fe9..0b0244e0 100644
+--- a/include/simdjson/generic/ondemand/object.h
++++ b/include/simdjson/generic/ondemand/object.h
+@@ -18,6 +18,7 @@ public:
+ 
+   simdjson_really_inline simdjson_result<object_iterator> begin() noexcept;
+   simdjson_really_inline simdjson_result<object_iterator> end() noexcept;
++
+   /**
+    * Look up a field by name on an object (order-sensitive).
+    *
+diff --git a/include/simdjson/generic/ondemand/value_iterator.h b/include/simdjson/generic/ondemand/value_iterator.h
+index 3980b749..706bca2a 100644
+--- a/include/simdjson/generic/ondemand/value_iterator.h
++++ b/include/simdjson/generic/ondemand/value_iterator.h
+@@ -25,6 +25,8 @@ protected:
+   depth_t _depth{};
+   /**
+    * The starting token index for this value
++   *
++   * PERF NOTE: this is a safety check; we expect this to be elided in release builds.
+    */
+   token_position _start_position{};
+ 
+@@ -282,7 +284,6 @@ public:
+   /** @} */
+ 
+ protected:
+-
+   /* Useful for debugging and logging purposes. */
+    inline std::string to_string() const noexcept;
+   simdjson_really_inline value_iterator(json_iterator *json_iter, depth_t depth, token_position start_index) noexcept;
+diff --git a/tests/ondemand/ondemand_array_tests.cpp b/tests/ondemand/ondemand_array_tests.cpp
+index 4939f31d..a5beef46 100644
+--- a/tests/ondemand/ondemand_array_tests.cpp
++++ b/tests/ondemand/ondemand_array_tests.cpp
+@@ -146,41 +146,14 @@ namespace array_tests {
+       ASSERT_RESULT( doc_result.type(), json_type::array );
+       ASSERT_SUCCESS( doc_result.get(array) );
+ 
+-      size_t i = 0;
++      size_t i=0;
+       for (auto value : array) {
+         int64_t actual;
+         ASSERT_SUCCESS( value.get(actual) );
+         ASSERT_EQUAL(actual, expected_value[i]);
+         i++;
+       }
+-      ASSERT_EQUAL(i*sizeof(int64_t), sizeof(expected_value));
+-      return true;
+-    }));
+-
+-    SUBTEST("ondemand::array-document-rewind", test_ondemand_doc(json, [&](auto doc_result) {
+-      ondemand::array array;
+-      ASSERT_RESULT( doc_result.type(), json_type::array );
+-      ASSERT_SUCCESS( doc_result.get(array) );
+-
+-      size_t i = 0;
+-      for (auto value : array) { (void)value; i++; }
+       ASSERT_EQUAL(i*sizeof(uint64_t), sizeof(expected_value));
+-      std::vector<int64_t> container(i); // container of size 'i'.
+-
+-      doc_result.rewind();
+-      ASSERT_RESULT( doc_result.type(), json_type::array );
+-      ASSERT_SUCCESS( doc_result.get(array) );
+-      i = 0;
+-      for (auto value : array) {
+-        int64_t actual;
+-        ASSERT_SUCCESS( value.get(actual) );
+-        container[i] = actual;
+-        i++;
+-      }
+-      ASSERT_EQUAL(i * sizeof(int64_t), sizeof(expected_value));
+-      for(size_t j = 0; j < sizeof(expected_value)/sizeof(int64_t); j++) {
+-        ASSERT_EQUAL(container[j], expected_value[j]);
+-      }
+       return true;
+     }));
+ 
+@@ -448,25 +421,9 @@ namespace array_tests {
+       for (simdjson_unused auto value : doc_result) { TEST_FAIL("Unexpected value"); }
+       return true;
+     }));
+-    SUBTEST("ondemand::array-document-rewind", test_ondemand_doc(json, [&](auto doc_result) {
+-      ondemand::array array;
+-      ASSERT_RESULT( doc_result.type(), json_type::array );
+-      ASSERT_SUCCESS( doc_result.get(array) );
+-
+-      size_t i = 0;
+-      for (auto value : array) { (void) value; i++; }
+-      ASSERT_EQUAL(i, 0);
+-
+-      doc_result.rewind();
+-      ASSERT_RESULT( doc_result.type(), json_type::array );
+-      ASSERT_SUCCESS( doc_result.get(array) );
+-      i = 0;
+-      for (auto value : array) { (void) value; i++; }
+-      ASSERT_EQUAL(i, 0);
+-      return true;
+-    }));
+     TEST_SUCCEED();
+   }
++
+ #if SIMDJSON_EXCEPTIONS
+ 
+   bool iterate_array_exception() {
+diff --git a/tests/ondemand/ondemand_object_tests.cpp b/tests/ondemand/ondemand_object_tests.cpp
+index 5c537965..b405d493 100644
+--- a/tests/ondemand/ondemand_object_tests.cpp
++++ b/tests/ondemand/ondemand_object_tests.cpp
+@@ -212,31 +212,6 @@ namespace object_tests {
+       ASSERT_EQUAL( i*sizeof(uint64_t), sizeof(expected_value) );
+       return true;
+     }));
+-    SUBTEST("ondemand::object-document-rewind", test_ondemand_doc(json, [&](auto doc_result) {
+-      ondemand::object object;
+-      ASSERT_RESULT( doc_result.type(), json_type::object );
+-      ASSERT_SUCCESS( doc_result.get(object) );
+-      size_t i = 0;
+-      for (auto [ field, error ] : object) {
+-        ASSERT_SUCCESS(error);
+-        ASSERT_EQUAL( field.key(), expected_key[i]);
+-        ASSERT_EQUAL( field.value().get_uint64().value_unsafe(), expected_value[i] );
+-        i++;
+-      }
+-      ASSERT_EQUAL( i*sizeof(uint64_t), sizeof(expected_value) );
+-      doc_result.rewind();
+-      ASSERT_RESULT( doc_result.type(), json_type::object );
+-      ASSERT_SUCCESS( doc_result.get(object) );
+-      i = 0;
+-      for (auto [ field, error ] : object) {
+-        ASSERT_SUCCESS(error);
+-        ASSERT_EQUAL( field.key(), expected_key[i]);
+-        ASSERT_EQUAL( field.value().get_uint64().value_unsafe(), expected_value[i] );
+-        i++;
+-      }
+-      ASSERT_EQUAL( i*sizeof(uint64_t), sizeof(expected_value) );
+-      return true;
+-    }));
+     SUBTEST("simdjson_result<ondemand::object>", test_ondemand_doc(json, [&](auto doc_result) {
+       simdjson_result<ondemand::object> object_result = doc_result.get_object();
+       size_t i = 0;
+@@ -1072,27 +1047,6 @@ namespace object_tests {
+       }
+       return true;
+     }));
+-    SUBTEST("ondemand::object-document-rewind", test_ondemand_doc(json, [&](auto doc_result) {
+-      ondemand::object object;
+-      ASSERT_RESULT( doc_result.type(), json_type::object );
+-      ASSERT_SUCCESS( doc_result.get(object) );
+-      size_t i = 0;
+-      for (auto [ field, error ] : object) {
+-        (void)field;
+-        (void)error;
+-        i++;
+-      }
+-      ASSERT_EQUAL( i, 0 );
+-      doc_result.rewind();
+-      i = 0;
+-      for (auto [ field, error ] : object) {
+-        (void)field;
+-        (void)error;
+-        i++;
+-      }
+-      ASSERT_EQUAL( i, 0 );
+-      return true;
+-    }));
+ 
+     TEST_SUCCEED();
+   }
+diff --git a/tests/ondemand/ondemand_readme_examples.cpp b/tests/ondemand/ondemand_readme_examples.cpp
+index f152b4fe..902684d5 100644
+--- a/tests/ondemand/ondemand_readme_examples.cpp
++++ b/tests/ondemand/ondemand_readme_examples.cpp
+@@ -129,30 +129,6 @@ bool using_the_parsed_json_3() {
+   TEST_SUCCEED();
+ }
+ 
+-
+-bool using_the_parsed_json_rewind() {
+-  TEST_START();
+-
+-  ondemand::parser parser;
+-  auto cars_json = R"( [
+-    { "make": "Toyota", "model": "Camry",  "year": 2018, "tire_pressure": [ 40.1, 39.9, 37.7, 40.4 ] },
+-    { "make": "Kia",    "model": "Soul",   "year": 2012, "tire_pressure": [ 30.1, 31.0, 28.6, 28.7 ] },
+-    { "make": "Toyota", "model": "Tercel", "year": 1999, "tire_pressure": [ 29.8, 30.0, 30.2, 30.5 ] }
+-  ] )"_padded;
+-
+-  auto doc = parser.iterate(cars_json);
+-  size_t count = 0;
+-  for (simdjson_unused ondemand::object car : doc) {
+-    if(car["make"] == "Toyota") { count++; }
+-  }
+-  std::cout << "We have " << count << " Toyota cars.\n";
+-  doc.rewind();
+-  for (ondemand::object car : doc) {
+-    cout << "Make/Model: " << std::string_view(car["make"]) << "/" << std::string_view(car["model"]) << endl;
+-  }
+-  TEST_SUCCEED();
+-}
+-
+ bool using_the_parsed_json_4() {
+   TEST_START();
+ 
+@@ -215,7 +191,6 @@ int main() {
+     true
+ #if SIMDJSON_EXCEPTIONS
+ //    && basics_1() // Fails because twitter.json isn't in current directory. Compile test only.
+-    && using_the_parsed_json_rewind()
+     && basics_2()
+     && using_the_parsed_json_1()
+     && using_the_parsed_json_2()

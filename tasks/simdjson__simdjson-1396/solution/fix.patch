@@ -1,0 +1,254 @@
+diff --git a/benchmark/bench_dom_api.cpp b/benchmark/bench_dom_api.cpp
+index 53caafa7..778d1439 100644
+--- a/benchmark/bench_dom_api.cpp
++++ b/benchmark/bench_dom_api.cpp
+@@ -503,7 +503,7 @@ static void twitter_default_profile(State& state) {
+     for (dom::object tweet : doc["statuses"]) {
+       dom::object user = tweet["user"];
+       if (user["default_profile"]) {
+-        default_users.insert(user["screen_name"]);
++        default_users.emplace(user["screen_name"]);
+       }
+     }
+     if (default_users.size() != 86) { return; }
+@@ -523,7 +523,7 @@ static void twitter_image_sizes(State& state) {
+       if (not (error = tweet["entities"]["media"].get(media))) {
+         for (dom::object image : media) {
+           for (auto size : image["sizes"].get<dom::object>()) {
+-            image_sizes.insert({ size.value["w"], size.value["h"] });
++             image_sizes.emplace(size.value["w"], size.value["h"]);
+           }
+         }
+       }
+@@ -607,7 +607,7 @@ static void iterator_twitter_default_profile(State& state) {
+ 
+             // default_users.insert(user["screen_name"]);
+             if (!(iter.move_to_key("screen_name") && iter.is_string())) { return; }
+-            default_users.insert(string_view(iter.get_string(), iter.get_string_length()));
++            default_users.emplace(iter.get_string(), iter.get_string_length());
+           }
+           if (!iter.up()) { return; } // back to user
+         }
+@@ -645,7 +645,7 @@ static void error_code_twitter_image_sizes(State& state) noexcept {
+             uint64_t width, height;
+             if ((error = size.value["w"].get(width))) { return; }
+             if ((error = size.value["h"].get(height))) { return; }
+-            image_sizes.insert({ width, height });
++            image_sizes.emplace(width, height);
+           }
+         }
+       }
+@@ -699,7 +699,7 @@ static void iterator_twitter_image_sizes(State& state) {
+                     if (!(iter.move_to_key("h")) && !iter.is_integer()) { return; }
+                     uint64_t height = iter.get_integer();
+                     if (!iter.up()) { return; } // back to size
+-                    image_sizes.insert({ width, height });
++                    image_sizes.emplace(width, height);
+ 
+                   } while (iter.next()); // next size
+                   if (!iter.up()) { return; } // back to sizes
+diff --git a/benchmark/get_corpus_benchmark.cpp b/benchmark/get_corpus_benchmark.cpp
+index 89557812..94ae46e2 100644
+--- a/benchmark/get_corpus_benchmark.cpp
++++ b/benchmark/get_corpus_benchmark.cpp
+@@ -9,7 +9,7 @@ simdjson_never_inline
+ double bench(std::string filename, simdjson::padded_string& p) {
+   std::chrono::time_point<std::chrono::steady_clock> start_clock =
+       std::chrono::steady_clock::now();
+-  simdjson::padded_string::load(filename).first.swap(p);
++  simdjson::padded_string::load(filename).value_unsafe().swap(p);
+   std::chrono::time_point<std::chrono::steady_clock> end_clock =
+       std::chrono::steady_clock::now();
+   std::chrono::duration<double> elapsed = end_clock - start_clock;
+diff --git a/benchmark/parse_stream.cpp b/benchmark/parse_stream.cpp
+index d893fd1d..1217535e 100644
+--- a/benchmark/parse_stream.cpp
++++ b/benchmark/parse_stream.cpp
+@@ -25,11 +25,12 @@ int main(int argc, char *argv[]) {
+     exit(1);
+   }
+   const char *filename = argv[1];
+-  auto[p, err] = simdjson::padded_string::load(filename);
+-  if (err) {
++  auto v = simdjson::padded_string::load(filename);
++  if (v.error()) {
+     std::cerr << "Could not load the file " << filename << std::endl;
+     return EXIT_FAILURE;
+   }
++  const simdjson::padded_string& p = v.value_unsafe();
+   if (test_baseline) {
+     std::wclog << "Baseline: Getline + normal parse... " << std::endl;
+     std::cout << "Gigabytes/second\t"
+diff --git a/fuzz/fuzz_dump.cpp b/fuzz/fuzz_dump.cpp
+index f520b106..30270d36 100644
+--- a/fuzz/fuzz_dump.cpp
++++ b/fuzz/fuzz_dump.cpp
+@@ -8,39 +8,48 @@
+ #include "NullBuffer.h"
+ 
+ // example from doc/basics.md#tree-walking-and-json-element-types
+-static void print_json(std::ostream& os, simdjson::dom::element element) {
++/***
++ * Important: This function should compile without support for exceptions.
++ */
++static void print_json(std::ostream& os, simdjson::dom::element element) noexcept {
+   const char endl='\n';
+   switch (element.type()) {
+   case simdjson::dom::element_type::ARRAY:
+     os << "[";
+-    for (simdjson::dom::element child : element.get<simdjson::dom::array>().first) {
+-      print_json(os, child);
+-      os << ",";
++    {
++      simdjson::dom::array array = element.get<simdjson::dom::array>().value_unsafe();
++      for (simdjson::dom::element child : array) {
++        print_json(os, child);
++        os << ",";
++      }
+     }
+     os << "]";
+     break;
+   case simdjson::dom::element_type::OBJECT:
+     os << "{";
+-    for (simdjson::dom::key_value_pair field : element.get<simdjson::dom::object>().first) {
+-      os << "\"" << field.key << "\": ";
+-      print_json(os, field.value);
++    {
++      simdjson::dom::object object = element.get<simdjson::dom::object>().value_unsafe();
++      for (simdjson::dom::key_value_pair field : object) {
++        os << "\"" << field.key << "\": ";
++        print_json(os, field.value);
++      }
+     }
+     os << "}";
+     break;
+   case simdjson::dom::element_type::INT64:
+-    os << element.get<int64_t>().first << endl;
++    os << element.get_int64().value_unsafe() << endl;
+     break;
+   case simdjson::dom::element_type::UINT64:
+-    os << element.get<uint64_t>().first << endl;
++    os << element.get_uint64().value_unsafe() << endl;
+     break;
+   case simdjson::dom::element_type::DOUBLE:
+-    os << element.get<double>().first << endl;
++    os << element.get_double().value_unsafe() << endl;
+     break;
+   case simdjson::dom::element_type::STRING:
+-    os << element.get<std::string_view>().first << endl;
++    os << element.get_string().value_unsafe() << endl;
+     break;
+   case simdjson::dom::element_type::BOOL:
+-    os << element.get<bool>().first << endl;
++    os << element.get_bool().value_unsafe() << endl;
+     break;
+   case simdjson::dom::element_type::NULL_VALUE:
+     os << "null" << endl;
+diff --git a/include/simdjson/error-inl.h b/include/simdjson/error-inl.h
+index 7622114b..681df206 100644
+--- a/include/simdjson/error-inl.h
++++ b/include/simdjson/error-inl.h
+@@ -92,6 +92,16 @@ simdjson_really_inline simdjson_result_base<T>::operator T&&() && noexcept(false
+ 
+ #endif // SIMDJSON_EXCEPTIONS
+ 
++template<typename T>
++simdjson_really_inline const T& simdjson_result_base<T>::value_unsafe() const& noexcept {
++  return this->first;
++}
++
++template<typename T>
++simdjson_really_inline T&& simdjson_result_base<T>::value_unsafe() && noexcept {
++  return std::forward<T>(this->first);;
++}
++
+ template<typename T>
+ simdjson_really_inline simdjson_result_base<T>::simdjson_result_base(T &&value, error_code error) noexcept
+     : std::pair<T, error_code>(std::forward<T>(value), error) {}
+@@ -150,6 +160,16 @@ simdjson_really_inline simdjson_result<T>::operator T&&() && noexcept(false) {
+ 
+ #endif // SIMDJSON_EXCEPTIONS
+ 
++template<typename T>
++simdjson_really_inline const T& simdjson_result<T>::value_unsafe() const& noexcept {
++  return internal::simdjson_result_base<T>::value_unsafe();
++}
++
++template<typename T>
++simdjson_really_inline T&& simdjson_result<T>::value_unsafe() && noexcept {
++  return std::forward<internal::simdjson_result_base<T>>(*this).value_unsafe();
++}
++
+ template<typename T>
+ simdjson_really_inline simdjson_result<T>::simdjson_result(T &&value, error_code error) noexcept
+     : internal::simdjson_result_base<T>(std::forward<T>(value), error) {}
+diff --git a/include/simdjson/error.h b/include/simdjson/error.h
+index 08161c2f..e4792c08 100644
+--- a/include/simdjson/error.h
++++ b/include/simdjson/error.h
+@@ -97,7 +97,7 @@ namespace internal {
+  * Then any method returning simdjson_result<T> will be chainable with your methods.
+  */
+ template<typename T>
+-struct simdjson_result_base : public std::pair<T, error_code> {
++struct simdjson_result_base : protected std::pair<T, error_code> {
+ 
+   /**
+    * Create a new empty result with error = UNINITIALIZED.
+@@ -168,8 +168,20 @@ struct simdjson_result_base : public std::pair<T, error_code> {
+    * @throw simdjson_error if there was an error.
+    */
+   simdjson_really_inline operator T&&() && noexcept(false);
+-
+ #endif // SIMDJSON_EXCEPTIONS
++
++  /**
++   * Get the result value. This function is safe if and only
++   * the error() method returns a value that evoluates to false.
++   */
++  simdjson_really_inline const T& value_unsafe() const& noexcept;
++
++  /**
++   * Take the result value (move it). This function is safe if and only
++   * the error() method returns a value that evoluates to false.
++   */
++  simdjson_really_inline T&& value_unsafe() && noexcept;
++
+ }; // struct simdjson_result_base
+ 
+ } // namespace internal
+@@ -247,8 +259,20 @@ struct simdjson_result : public internal::simdjson_result_base<T> {
+    * @throw simdjson_error if there was an error.
+    */
+   simdjson_really_inline operator T&&() && noexcept(false);
+-
+ #endif // SIMDJSON_EXCEPTIONS
++
++  /**
++   * Get the result value. This function is safe if and only
++   * the error() method returns a value that evoluates to false.
++   */
++  simdjson_really_inline const T& value_unsafe() const& noexcept;
++
++  /**
++   * Take the result value (move it). This function is safe if and only
++   * the error() method returns a value that evoluates to false.
++   */
++  simdjson_really_inline T&& value_unsafe() && noexcept;
++
+ }; // struct simdjson_result
+ 
+ #ifndef SIMDJSON_DISABLE_DEPRECATED_API
+diff --git a/include/simdjson/generic/ondemand/parser-inl.h b/include/simdjson/generic/ondemand/parser-inl.h
+index e6b5ff84..7b03ec68 100644
+--- a/include/simdjson/generic/ondemand/parser-inl.h
++++ b/include/simdjson/generic/ondemand/parser-inl.h
+@@ -35,7 +35,7 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::it
+ simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::iterate(const simdjson_result<padded_string> &result) & noexcept {
+   // We don't presently have a way to temporarily get a const T& from a simdjson_result<T> without throwing an exception
+   SIMDJSON_TRY( result.error() );
+-  const padded_string &buf = result.first;
++  const padded_string &buf = result.value_unsafe();
+   return iterate(buf);
+ }
+ 

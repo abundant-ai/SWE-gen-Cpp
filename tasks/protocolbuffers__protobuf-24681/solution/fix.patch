@@ -1,0 +1,339 @@
+diff --git a/src/google/protobuf/compiler/command_line_interface_unittest.cc b/src/google/protobuf/compiler/command_line_interface_unittest.cc
+index 0e6617d5b..9e321dba4 100644
+--- a/src/google/protobuf/compiler/command_line_interface_unittest.cc
++++ b/src/google/protobuf/compiler/command_line_interface_unittest.cc
+@@ -2631,8 +2631,7 @@ TEST_F(CommandLineInterfaceTest, JavaMultipleFilesEdition2024Invalid) {
+   Run("protocol_compiler --proto_path=$tmpdir "
+       "foo.proto --test_out=$tmpdir --experimental_editions");
+   ExpectErrorSubstring(
+-      "google.protobuf.FileOptions.java_multiple_files has been removed in edition "
+-      "2024: This behavior is enabled by default");
++      "The `java_multiple_files` behavior is enabled by default");
+ }
+ 
+ 
+@@ -2646,8 +2645,7 @@ TEST_F(CommandLineInterfaceTest, JavaNestInFileClassFor) {
+   Run("protocol_compiler --proto_path=$tmpdir "
+       "foo.proto --test_out=$tmpdir --experimental_editions");
+   ExpectErrorSubstring(
+-      "google.protobuf.FileOptions.java_multiple_files has been removed in edition "
+-      "2024: This behavior is enabled by default");
++      "The `java_multiple_files` behavior is enabled by default");
+ }
+ 
+ 
+diff --git a/src/google/protobuf/descriptor.cc b/src/google/protobuf/descriptor.cc
+index c7492a7f7..41ab957b8 100644
+--- a/src/google/protobuf/descriptor.cc
++++ b/src/google/protobuf/descriptor.cc
+@@ -1611,9 +1611,8 @@ class DescriptorPool::DeferredValidation {
+   }
+ 
+   struct LifetimesInfo {
+-    const Message* option_to_validate;  // features or options to validate
++    const FeatureSet* proto_features;
+     const Message* proto;
+-    bool is_feature;
+     absl::string_view full_name;
+     absl::string_view filename;
+   };
+@@ -1641,19 +1640,16 @@ class DescriptorPool::DeferredValidation {
+     if (lifetimes_info_map_.empty()) return true;
+ 
+     static absl::string_view feature_set_name = "google.protobuf.FeatureSet";
++    const Descriptor* feature_set =
++        pool_->FindMessageTypeByName(feature_set_name);
++
+     bool has_errors = false;
+     for (const auto& it : lifetimes_info_map_) {
+       const FileDescriptor* file = it.first;
+ 
+       for (const auto& info : it.second) {
+-        const Descriptor* feature_set_descriptor = nullptr;
+-        // TODO: Support custom options
+-        if (info.is_feature) {
+-          feature_set_descriptor =
+-              pool_->FindMessageTypeByName(feature_set_name);
+-        }
+         auto results = FeatureResolver::ValidateFeatureLifetimes(
+-            file->edition(), *info.option_to_validate, feature_set_descriptor);
++            file->edition(), *info.proto_features, feature_set);
+         for (const auto& error : results.errors) {
+           has_errors = true;
+           if (error_collector_ == nullptr) {
+@@ -6229,11 +6225,6 @@ static void PlanAllocationSize(const FileDescriptorProto& proto,
+   }
+ }
+ 
+-template <typename OptionT>
+-bool IsDefaultInstance(const OptionT& opt) {
+-  return &opt == &OptionT::default_instance();
+-}
+-
+ const FileDescriptor* DescriptorBuilder::BuildFile(
+     const FileDescriptorProto& proto) {
+   // Ensure the generated pool has been lazily initialized.  This is most
+@@ -6690,17 +6681,10 @@ FileDescriptor* DescriptorBuilder::BuildFileImpl(
+   if (!had_errors_ && !pool_->lazily_build_dependencies_) {
+     internal::VisitDescriptors(
+         *result, proto, [&](const auto& descriptor, const auto& desc_proto) {
+-          if (!IsDefaultInstance(*descriptor.proto_features_)) {
++          if (descriptor.proto_features_ != &FeatureSet::default_instance()) {
+             deferred_validation_.ValidateFeatureLifetimes(
+-                GetFile(descriptor),
+-                {descriptor.proto_features_, &desc_proto, /*is_feature=*/true,
+-                 GetFullName(descriptor), proto.name()});
+-          }
+-          if (!IsDefaultInstance(*descriptor.options_)) {
+-            deferred_validation_.ValidateFeatureLifetimes(
+-                GetFile(descriptor),
+-                {descriptor.options_, &desc_proto,
+-                 /*is_feature=*/false, GetFullName(descriptor), proto.name()});
++                GetFile(descriptor), {descriptor.proto_features_, &desc_proto,
++                                      GetFullName(descriptor), proto.name()});
+           }
+         });
+   }
+@@ -8406,6 +8390,13 @@ void DescriptorBuilder::ValidateOptions(const FileDescriptor* file,
+   }
+ 
+   if (file->edition() >= Edition::EDITION_2024) {
++    if (file->options().has_java_multiple_files()) {
++      AddError(file->name(), proto, DescriptorPool::ErrorCollector::OPTION_NAME,
++               "The `java_multiple_files` behavior is enabled by default in "
++               "editions 2024 and above.  To disable it, you can set "
++               "`features.(pb.java).nest_in_file_class = YES` on individual "
++               "messages, enums, or services.");
++    }
+     if (file->weak_dependency_count() > 0) {
+       AddError("weak", proto, DescriptorPool::ErrorCollector::IMPORT,
+                "weak imports are not allowed under edition 2024 and beyond.");
+diff --git a/src/google/protobuf/descriptor_unittest.cc b/src/google/protobuf/descriptor_unittest.cc
+index b15dd4575..7352ab1a2 100644
+--- a/src/google/protobuf/descriptor_unittest.cc
++++ b/src/google/protobuf/descriptor_unittest.cc
+@@ -12293,49 +12293,6 @@ TEST_F(FeaturesTest, RemovedFeature) {
+       "Custom feature removal error\n");
+ }
+ 
+-TEST_F(FeaturesTest, RemovedOption) {
+-  BuildDescriptorMessagesInTestPool();
+-  BuildFileWithErrors(
+-      R"pb(
+-        name: "foo.proto"
+-        syntax: "editions"
+-        edition: EDITION_2024
+-        options { java_multiple_files: true }
+-      )pb",
+-      "foo.proto: foo.proto: NAME: "
+-      "google.protobuf.FileOptions.java_multiple_files has been removed in edition "
+-      "2024: This behavior is enabled by default in "
+-      "editions 2024 and above. To disable it, you can set "
+-      "`features.(pb.java).nest_in_file_class = YES` on individual messages, "
+-      "enums, or services.\n");
+-}
+-
+-TEST_F(FeaturesTest, RemoveOptionAndFeature) {
+-  BuildDescriptorMessagesInTestPool();
+-  BuildFileInTestPool(pb::TestFeatures::descriptor()->file());
+-  BuildFileWithErrors(
+-      R"pb(
+-        name: "foo.proto"
+-        syntax: "editions"
+-        edition: EDITION_2024
+-        dependency: "google/protobuf/unittest_features.proto"
+-        options {
+-          java_multiple_files: true
+-          features {
+-            [pb.test] { removed_feature: VALUE9 }
+-          }
+-        }
+-      )pb",
+-      "foo.proto: foo.proto: NAME: "
+-      "pb.TestFeatures.removed_feature has been removed in edition 2024: "
+-      "Custom feature removal error\n"
+-      "foo.proto: foo.proto: NAME: google.protobuf.FileOptions.java_multiple_files has "
+-      "been removed in edition 2024: This behavior is enabled by default in "
+-      "editions 2024 and above. To disable it, you can set "
+-      "`features.(pb.java).nest_in_file_class = YES` on individual messages, "
+-      "enums, or services.\n");
+-}
+-
+ TEST_F(FeaturesTest, RemovedFeatureDefault) {
+   BuildDescriptorMessagesInTestPool();
+   BuildFileInTestPool(pb::TestFeatures::descriptor()->file());
+diff --git a/src/google/protobuf/feature_resolver.cc b/src/google/protobuf/feature_resolver.cc
+index a6d3e82e8..36de750b4 100644
+--- a/src/google/protobuf/feature_resolver.cc
++++ b/src/google/protobuf/feature_resolver.cc
+@@ -399,40 +399,32 @@ void ValidateSingleFeatureLifetimes(
+ }
+ 
+ void ValidateFeatureLifetimesImpl(Edition edition, const Message& message,
+-                                  FeatureResolver::ValidationResults& results,
+-                                  bool is_feature) {
++                                  FeatureResolver::ValidationResults& results) {
+   std::vector<const FieldDescriptor*> fields;
+   message.GetReflection()->ListFields(message, &fields);
+   for (const FieldDescriptor* field : fields) {
+-    // TODO: Support repeated option enum values and custom options
+-    // feature support
+-    if (is_feature) {
+-      // Recurse into message extension.
+-      if (field->is_extension() &&
+-          field->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
+-        ValidateFeatureLifetimesImpl(
+-            edition, message.GetReflection()->GetMessage(message, field),
+-            results, is_feature);
+-        continue;
+-      }
++    // Recurse into message extension.
++    if (field->is_extension() &&
++        field->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
++      ValidateFeatureLifetimesImpl(
++          edition, message.GetReflection()->GetMessage(message, field),
++          results);
++      continue;
++    }
+ 
+-      if (field->enum_type() != nullptr) {
+-        int number = message.GetReflection()->GetEnumValue(message, field);
+-        auto value = field->enum_type()->FindValueByNumber(number);
+-        if (value == nullptr) {
+-          results.errors.emplace_back(absl::StrCat(
+-              "Feature ", field->full_name(), " has no known value ", number));
+-          continue;
+-        }
+-        ValidateSingleFeatureLifetimes(edition, value->full_name(),
+-                                       value->options().feature_support(),
+-                                       results);
++    if (field->enum_type() != nullptr) {
++      int number = message.GetReflection()->GetEnumValue(message, field);
++      auto value = field->enum_type()->FindValueByNumber(number);
++      if (value == nullptr) {
++        results.errors.emplace_back(absl::StrCat(
++            "Feature ", field->full_name(), " has no known value ", number));
++        continue;
+       }
++      ValidateSingleFeatureLifetimes(edition, value->full_name(),
++                                     value->options().feature_support(),
++                                     results);
+     }
+-    // TODO: Support custom options
+-    if (field->is_extension()) {
+-      continue;
+-    }
++
+     ValidateSingleFeatureLifetimes(edition, field->full_name(),
+                                    field->options().feature_support(), results);
+   }
+@@ -564,33 +556,29 @@ absl::StatusOr<FeatureSet> FeatureResolver::MergeFeatures(
+ }
+ 
+ FeatureResolver::ValidationResults FeatureResolver::ValidateFeatureLifetimes(
+-    Edition edition, const Message& option, const Descriptor* pool_descriptor) {
+-  const Message* pool_option = nullptr;
++    Edition edition, const FeatureSet& features,
++    const Descriptor* pool_descriptor) {
++  const Message* pool_features = nullptr;
+   DynamicMessageFactory factory;
+-  std::unique_ptr<Message> message_storage;
+-  bool is_feature =
+-      option.GetDescriptor()->name() == FeatureSet::descriptor()->name();
+-  // TODO: Support custom options
+-  if (pool_descriptor != nullptr && is_feature) {
+-    // Move the messages back to the current pool so that we can reflect on
+-    // any extensions.
+-    message_storage =
+-        absl::WrapUnique(factory.GetPrototype(pool_descriptor)->New());
+-    message_storage->ParseFromString(option.SerializeAsString());
+-    pool_option = message_storage.get();
+-  } else {
+-    // The Message descriptor can be null if no custom extensions are
+-    // defined in any transitive dependency.  In this case, we can just use
+-    // the generated pool for validation, since there wouldn't be any feature
++  std::unique_ptr<Message> features_storage;
++  if (pool_descriptor == nullptr) {
++    // The FeatureSet descriptor can be null if no custom extensions are defined
++    // in any transitive dependency.  In this case, we can just use the
++    // generated pool for validation, since there wouldn't be any feature
+     // extensions defined anyway.
+-    pool_option = &option;
++    pool_features = &features;
++  } else {
++    // Move the features back to the current pool so that we can reflect on any
++    // extensions.
++    features_storage =
++        absl::WrapUnique(factory.GetPrototype(pool_descriptor)->New());
++    features_storage->ParseFromString(features.SerializeAsString());
++    pool_features = features_storage.get();
+   }
+-  ABSL_CHECK(pool_option != nullptr);
++  ABSL_CHECK(pool_features != nullptr);
+ 
+   ValidationResults results;
+-  // Validate feature support
+-  ValidateFeatureLifetimesImpl(edition, *pool_option, results, is_feature);
+-
++  ValidateFeatureLifetimesImpl(edition, *pool_features, results);
+   return results;
+ }
+ 
+diff --git a/src/google/protobuf/feature_resolver.h b/src/google/protobuf/feature_resolver.h
+index 985e0bf56..d66c156e2 100644
+--- a/src/google/protobuf/feature_resolver.h
++++ b/src/google/protobuf/feature_resolver.h
+@@ -70,7 +70,7 @@ class PROTOBUF_EXPORT FeatureResolver {
+     std::vector<std::string> warnings;
+   };
+   static ValidationResults ValidateFeatureLifetimes(
+-      Edition edition, const Message& option,
++      Edition edition, const FeatureSet& features,
+       const Descriptor* pool_descriptor);
+ 
+  private:
+@@ -91,3 +91,4 @@ absl::StatusOr<FeatureSet> PROTOBUF_EXPORT GetEditionFeatureSetDefaults(
+ #include "google/protobuf/port_undef.inc"
+ 
+ #endif  // GOOGLE_PROTOBUF_FEATURE_RESOLVER_H__
++
+diff --git a/src/google/protobuf/unittest_custom_options.proto b/src/google/protobuf/unittest_custom_options.proto
+index fa39a1c94..3ebb8e36a 100644
+--- a/src/google/protobuf/unittest_custom_options.proto
++++ b/src/google/protobuf/unittest_custom_options.proto
+@@ -71,35 +71,6 @@ extend google.protobuf.MethodOptions {
+   optional MethodOpt1 method_opt1 = 7890860;
+ }
+ 
+-// Custom options with feature support
+-extend google.protobuf.MessageOptions {
+-  optional bool removed_option = 7733026 [feature_support = {
+-    edition_removed: EDITION_2023
+-    removal_error: "Custom feature removal warning"
+-  }];
+-  optional bool deprecated_option = 7737036 [feature_support = {
+-    edition_deprecated: EDITION_2023
+-    deprecation_warning: "Custom feature deprecation warning"
+-  }];
+-  optional CustomOption custom_option = 7737026;
+-}
+-
+-message CustomOption {
+-  optional string removed_message_option = 7734026 [feature_support = {
+-    edition_removed: EDITION_2023
+-    removal_error: "Custom feature removal warning"
+-  }];
+-  optional string deprecated_message_option = 7734016 [feature_support = {
+-    edition_deprecated: EDITION_2023
+-    deprecation_warning: "Custom feature deprecation warning"
+-  }];
+-  message Nested {
+-    extend google.protobuf.MessageOptions {
+-      optional CustomOption nested_custom_option = 7732016;
+-    }
+-  }
+-}
+-
+ // A test message with custom options at all possible locations (and also some
+ // regular options, to make sure they interact nicely).
+ message TestMessageWithCustomOptions {

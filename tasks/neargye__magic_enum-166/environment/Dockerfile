@@ -26,12 +26,18 @@ RUN git clone https://github.com/Neargye/magic_enum.git src && \
 
 WORKDIR /app/src
 
+# Patch test/CMakeLists.txt to remove -pedantic-errors (incompatible with emoji lexing)
+RUN sed -i 's/-pedantic-errors//g' test/CMakeLists.txt
+
+# Configure CMake for building tests
+# Note: Extended identifiers and UTF-8 input are required even with NONASCII=OFF
+# because the test file contains emojis in #ifdef blocks and the lexer must process them
+RUN mkdir -p build && cd build && \
+    CXXFLAGS="-fextended-identifiers -finput-charset=UTF-8" cmake .. -DMAGIC_ENUM_OPT_BUILD_TESTS=ON -DMAGIC_ENUM_OPT_ENABLE_NONASCII=OFF
+
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
-
-# Create build directory (tests will be built in test.sh after copying specific test files)
-RUN mkdir build
 
 RUN rm -rf /app/src/.git
 

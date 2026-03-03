@@ -1,0 +1,189 @@
+diff --git a/include/simdjson/generic/ondemand/array-inl.h b/include/simdjson/generic/ondemand/array-inl.h
+index 1829b0eb..f71738ed 100644
+--- a/include/simdjson/generic/ondemand/array-inl.h
++++ b/include/simdjson/generic/ondemand/array-inl.h
+@@ -101,6 +101,17 @@ simdjson_really_inline simdjson_result<size_t> array::count_elements() & noexcep
+   return count;
+ }
+ 
++simdjson_really_inline simdjson_result<bool> array::is_empty() & noexcept {
++  bool is_not_empty;
++  auto error = iter.reset_array().get(is_not_empty);
++  if(error) { return error; }
++  return !is_not_empty;
++}
++
++inline simdjson_result<bool> array::reset() & noexcept {
++  return iter.reset_array();
++}
++
+ inline simdjson_result<value> array::at_pointer(std::string_view json_pointer) noexcept {
+   if (json_pointer[0] != '/') { return INVALID_JSON_POINTER; }
+   json_pointer = json_pointer.substr(1);
+@@ -179,6 +190,10 @@ simdjson_really_inline  simdjson_result<size_t> simdjson_result<SIMDJSON_IMPLEME
+   if (error()) { return error(); }
+   return first.count_elements();
+ }
++simdjson_really_inline  simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array>::is_empty() & noexcept {
++  if (error()) { return error(); }
++  return first.is_empty();
++}
+ simdjson_really_inline  simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array>::at(size_t index) noexcept {
+   if (error()) { return error(); }
+   return first.at(index);
+diff --git a/include/simdjson/generic/ondemand/array.h b/include/simdjson/generic/ondemand/array.h
+index 131df5a3..1a7a1cac 100644
+--- a/include/simdjson/generic/ondemand/array.h
++++ b/include/simdjson/generic/ondemand/array.h
+@@ -41,9 +41,32 @@ public:
+    * beginning as if it had never been accessed. If the JSON is malformed (e.g.,
+    * there is a missing comma), then an error is returned and it is no longer
+    * safe to continue.
++   *
++   * To check that an array is empty, it is more performant to use
++   * the is_empty() method.
+    */
+   simdjson_really_inline simdjson_result<size_t> count_elements() & noexcept;
+-
++  /**
++   * This method scans the beginning of the array and checks whether the
++   * array is empty.
++   * The runtime complexity is constant time. After
++   * calling this function, if successful, the array is 'rewinded' at its
++   * beginning as if it had never been accessed. If the JSON is malformed (e.g.,
++   * there is a missing comma), then an error is returned and it is no longer
++   * safe to continue.
++   */
++  simdjson_really_inline simdjson_result<bool> is_empty() & noexcept;
++  /**
++   * Reset the iterator so that we are pointing back at the
++   * beginning of the array. You should still consume values only once even if you
++   * can iterate through the array more than once. If you unescape a string
++   * within the array more than once, you have unsafe code. Note that rewinding
++   * an array means that you may need to reparse it anew: it is not a free
++   * operation.
++   *
++   * @returns true if the array contains some elements (not empty)
++   */
++  inline simdjson_result<bool> reset() & noexcept;
+   /**
+    * Get the value associated with the given JSON pointer.  We use the RFC 6901
+    * https://tools.ietf.org/html/rfc6901 standard, interpreting the current node
+@@ -159,7 +182,9 @@ public:
+ 
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterator> begin() noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterator> end() noexcept;
+-  simdjson_really_inline simdjson_result<size_t> count_elements() & noexcept;
++  inline simdjson_result<size_t> count_elements() & noexcept;
++  inline simdjson_result<bool> is_empty() & noexcept;
++  inline simdjson_result<bool> reset() & noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> at(size_t index) noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> at_pointer(std::string_view json_pointer) noexcept;
+ };
+diff --git a/include/simdjson/generic/ondemand/document-inl.h b/include/simdjson/generic/ondemand/document-inl.h
+index e8bbec0d..619004b8 100644
+--- a/include/simdjson/generic/ondemand/document-inl.h
++++ b/include/simdjson/generic/ondemand/document-inl.h
+@@ -38,20 +38,9 @@ simdjson_really_inline simdjson_result<value> document::get_value() noexcept {
+   // gets called.
+   iter.assert_at_document_depth();
+   switch (*iter.peek()) {
+-    case '[': {
+-      array result;
+-      SIMDJSON_TRY( get_array().get(result) );
+-      iter._depth = 1 ; /* undoing the potential increment so we go back at the doc depth.*/
+-      iter.assert_at_document_depth();
+-      return value(result.iter);
+-    }
+-    case '{': {
+-      object result;
+-      SIMDJSON_TRY( get_object().get(result) );
+-      iter._depth = 1 ; /* undoing the potential increment so we go back at the doc depth.*/
+-      iter.assert_at_document_depth();
+-      return value(result.iter);
+-    }
++    case '[':
++    case '{':
++      return value(get_root_value_iterator());
+     default:
+       // Unfortunately, scalar documents are a special case in simdjson and they cannot
+       // be safely converted to value instances.
+diff --git a/include/simdjson/generic/ondemand/object-inl.h b/include/simdjson/generic/ondemand/object-inl.h
+index 0bd49e11..aa788a6b 100644
+--- a/include/simdjson/generic/ondemand/object-inl.h
++++ b/include/simdjson/generic/ondemand/object-inl.h
+@@ -139,6 +139,18 @@ inline simdjson_result<value> object::at_pointer(std::string_view json_pointer)
+   return child;
+ }
+ 
++
++simdjson_really_inline simdjson_result<bool> object::is_empty() & noexcept {
++  bool is_not_empty;
++  auto error = iter.reset_object().get(is_not_empty);
++  if(error) { return error; }
++  return !is_not_empty;
++}
++
++simdjson_really_inline simdjson_result<bool> object::reset() & noexcept {
++  return iter.reset_object();
++}
++
+ } // namespace ondemand
+ } // namespace SIMDJSON_IMPLEMENTATION
+ } // namespace simdjson
+@@ -188,4 +200,14 @@ simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>
+   return first.at_pointer(json_pointer);
+ }
+ 
++inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::object>::reset() noexcept {
++  if (error()) { return error(); }
++  return first.reset();
++}
++
++inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::object>::is_empty() noexcept {
++  if (error()) { return error(); }
++  return first.is_empty();
++}
++
+ } // namespace simdjson
+diff --git a/include/simdjson/generic/ondemand/object.h b/include/simdjson/generic/ondemand/object.h
+index 8164646e..bac28867 100644
+--- a/include/simdjson/generic/ondemand/object.h
++++ b/include/simdjson/generic/ondemand/object.h
+@@ -110,6 +110,26 @@ public:
+    */
+   inline simdjson_result<value> at_pointer(std::string_view json_pointer) noexcept;
+ 
++  /**
++   * Reset the iterator so that we are pointing back at the
++   * beginning of the object. You should still consume values only once even if you
++   * can iterate through the object more than once. If you unescape a string within
++   * the object more than once, you have unsafe code. Note that rewinding an object
++   * means that you may need to reparse it anew: it is not a free operation.
++   *
++   * @returns true if the object contains some elements (not empty)
++   */
++  inline simdjson_result<bool> reset() & noexcept;
++  /**
++   * This method scans the beginning of the object and checks whether the
++   * object is empty.
++   * The runtime complexity is constant time. After
++   * calling this function, if successful, the object is 'rewinded' at its
++   * beginning as if it had never been accessed. If the JSON is malformed (e.g.,
++   * there is a missing comma), then an error is returned and it is no longer
++   * safe to continue.
++   */
++  inline simdjson_result<bool> is_empty() & noexcept;
+   /**
+    * Consumes the object and returns a string_view instance corresponding to the
+    * object as represented in JSON. It points inside the original byte array containg
+@@ -159,6 +179,9 @@ public:
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> operator[](std::string_view key) & noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> operator[](std::string_view key) && noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> at_pointer(std::string_view json_pointer) noexcept;
++  inline simdjson_result<bool> reset() noexcept;
++  inline simdjson_result<bool> is_empty() noexcept;
++
+ };
+ 
+ } // namespace simdjson

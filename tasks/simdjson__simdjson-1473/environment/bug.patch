@@ -1,0 +1,621 @@
+diff --git a/doc/ondemand.md b/doc/ondemand.md
+index 04258c51..88b4b8ff 100644
+--- a/doc/ondemand.md
++++ b/doc/ondemand.md
+@@ -71,15 +71,6 @@ auto json = "[1,2,3]"_padded; // The _padded suffix creates a simdjson::padded_s
+ ondemand::document doc = parser.iterate(json); // parse a string
+ ```
+ 
+-If you have a buffer of your own with enough padding already (SIMDJSON_PADDING extra bytes allocated), you can use `promise_padded` to pass it in:
+-
+-```c++
+-ondemand::parser parser;
+-char json[3+SIMDJSON_PADDING];
+-strcpy(json, "[1]");
+-ondemand::document doc = parser.iterate(json, strlen(json), sizeof(json));
+-```
+-
+ Documents Are Iterators
+ -----------------------
+ 
+diff --git a/include/simdjson.h b/include/simdjson.h
+index 2aa311ed..a1a9426a 100644
+--- a/include/simdjson.h
++++ b/include/simdjson.h
+@@ -45,16 +45,15 @@ SIMDJSON_DISABLE_UNDESIRED_WARNINGS
+ #include "simdjson/error.h"
+ #include "simdjson/minify.h"
+ #include "simdjson/padded_string.h"
+-#include "simdjson/padded_string_view.h"
+ #include "simdjson/implementation.h"
+ 
+ // Inline functions
+ #include "simdjson/error-inl.h"
+ #include "simdjson/padded_string-inl.h"
+-#include "simdjson/padded_string_view-inl.h"
+ 
+ // DOM
+ #include "simdjson/dom.h"
++
+ // Implementations
+ #include "simdjson/implementations.h"
+ 
+diff --git a/include/simdjson/error.h b/include/simdjson/error.h
+index 87ff34d8..94d4d3d5 100644
+--- a/include/simdjson/error.h
++++ b/include/simdjson/error.h
+@@ -36,7 +36,6 @@ enum error_code {
+   UNEXPECTED_ERROR,         ///< indicative of a bug in simdjson
+   PARSER_IN_USE,            ///< parser is already in use.
+   OUT_OF_ORDER_ITERATION,   ///< tried to iterate an array or object out of order
+-  INSUFFICIENT_PADDING,     ///< The JSON doesn't have enough padding for simdjson to safely parse it.
+   /** @private Number of error codes */
+   NUM_ERROR_CODES
+ };
+diff --git a/include/simdjson/generic/ondemand/parser-inl.h b/include/simdjson/generic/ondemand/parser-inl.h
+index 6fe2c00c..be19dc96 100644
+--- a/include/simdjson/generic/ondemand/parser-inl.h
++++ b/include/simdjson/generic/ondemand/parser-inl.h
+@@ -23,60 +23,33 @@ simdjson_warn_unused simdjson_really_inline error_code parser::allocate(size_t n
+   return SUCCESS;
+ }
+ 
+-simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
+-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+-
++simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::iterate(const padded_string &buf) & noexcept {
+   // Allocate if needed
+-  if (capacity() < json.length() || !string_buf) {
+-    SIMDJSON_TRY( allocate(json.length(), max_depth()) );
++  if (capacity() < buf.size() || !string_buf) {
++    SIMDJSON_TRY( allocate(buf.size(), max_depth()) );
+   }
+ 
+   // Run stage 1.
+-  SIMDJSON_TRY( implementation->stage1(reinterpret_cast<const uint8_t *>(json.data()), json.length(), false) );
+-  return document::start({ reinterpret_cast<const uint8_t *>(json.data()), this });
+-}
+-
+-simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::iterate(const char *json, size_t len, size_t allocated) & noexcept {
+-  return iterate(padded_string_view(json, len, allocated));
+-}
+-
+-simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::iterate(const uint8_t *json, size_t len, size_t allocated) & noexcept {
+-  return iterate(padded_string_view(json, len, allocated));
+-}
+-
+-simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::iterate(std::string_view json, size_t allocated) & noexcept {
+-  return iterate(padded_string_view(json, allocated));
+-}
+-
+-simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::iterate(const std::string &json) & noexcept {
+-  return iterate(padded_string_view(json));
+-}
+-
+-simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::iterate(const simdjson_result<padded_string_view> &result) & noexcept {
+-  // We don't presently have a way to temporarily get a const T& from a simdjson_result<T> without throwing an exception
+-  SIMDJSON_TRY( result.error() );
+-  padded_string_view json = result.value_unsafe();
+-  return iterate(json);
++  SIMDJSON_TRY( implementation->stage1(reinterpret_cast<const uint8_t *>(buf.data()), buf.size(), false) );
++  return document::start({ reinterpret_cast<const uint8_t *>(buf.data()), this });
+ }
+ 
+ simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::iterate(const simdjson_result<padded_string> &result) & noexcept {
+   // We don't presently have a way to temporarily get a const T& from a simdjson_result<T> without throwing an exception
+   SIMDJSON_TRY( result.error() );
+-  const padded_string &json = result.value_unsafe();
+-  return iterate(json);
++  const padded_string &buf = result.value_unsafe();
++  return iterate(buf);
+ }
+ 
+-simdjson_warn_unused simdjson_really_inline simdjson_result<json_iterator> parser::iterate_raw(padded_string_view json) & noexcept {
+-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+-
++simdjson_warn_unused simdjson_really_inline simdjson_result<json_iterator> parser::iterate_raw(const padded_string &buf) & noexcept {
+   // Allocate if needed
+-  if (capacity() < json.length()) {
+-    SIMDJSON_TRY( allocate(json.length(), max_depth()) );
++  if (capacity() < buf.size()) {
++    SIMDJSON_TRY( allocate(buf.size(), max_depth()) );
+   }
+ 
+   // Run stage 1.
+-  SIMDJSON_TRY( implementation->stage1(reinterpret_cast<const uint8_t *>(json.data()), json.length(), false) );
+-  return json_iterator(reinterpret_cast<const uint8_t *>(json.data()), this);
++  SIMDJSON_TRY( implementation->stage1(reinterpret_cast<const uint8_t *>(buf.data()), buf.size(), false) );
++  return json_iterator(reinterpret_cast<const uint8_t *>(buf.data()), this);
+ }
+ 
+ simdjson_really_inline size_t parser::capacity() const noexcept {
+diff --git a/include/simdjson/generic/ondemand/parser.h b/include/simdjson/generic/ondemand/parser.h
+index ec5a89a9..72c214e2 100644
+--- a/include/simdjson/generic/ondemand/parser.h
++++ b/include/simdjson/generic/ondemand/parser.h
+@@ -53,11 +53,8 @@ public:
+    * those bytes are initialized to, as long as they are allocated.
+    *
+    * @param json The JSON to parse.
+-   * @param len The length of the JSON.
+-   * @param capacity The number of bytes allocated in the JSON (must be at least len+SIMDJSON_PADDING).
+    *
+    * @return The document, or an error:
+-   *         - INSUFFICIENT_PADDING if the input has less than SIMDJSON_PADDING extra bytes.
+    *         - MEMALLOC if realloc_if_needed the parser does not have enough capacity, and memory
+    *           allocation fails.
+    *         - EMPTY if the document is all whitespace.
+@@ -65,22 +62,11 @@ public:
+    *         - UNESCAPED_CHARS if a string contains control characters that must be escaped
+    *         - UNCLOSED_STRING if there is an unclosed string in the document.
+    */
+-  simdjson_warn_unused simdjson_result<document> iterate(padded_string_view json) & noexcept;
+-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+-  simdjson_warn_unused simdjson_result<document> iterate(const char *json, size_t len, size_t capacity) & noexcept;
+-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+-  simdjson_warn_unused simdjson_result<document> iterate(const uint8_t *json, size_t len, size_t capacity) & noexcept;
+-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+-  simdjson_warn_unused simdjson_result<document> iterate(std::string_view json, size_t capacity) & noexcept;
+-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+-  simdjson_warn_unused simdjson_result<document> iterate(const std::string &json) & noexcept;
+-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
++  simdjson_warn_unused simdjson_result<document> iterate(const padded_string &json) & noexcept;
+   simdjson_warn_unused simdjson_result<document> iterate(const simdjson_result<padded_string> &json) & noexcept;
+-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+-  simdjson_warn_unused simdjson_result<document> iterate(const simdjson_result<padded_string_view> &json) & noexcept;
+-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+   simdjson_warn_unused simdjson_result<document> iterate(padded_string &&json) & noexcept = delete;
+-
++  simdjson_warn_unused simdjson_result<document> iterate(const std::string_view &json) & noexcept = delete;
++  simdjson_warn_unused simdjson_result<document> iterate(const std::string &json) & noexcept = delete;
+   /**
+    * @private
+    *
+@@ -106,11 +92,8 @@ public:
+    * those bytes are initialized to, as long as they are allocated.
+    *
+    * @param json The JSON to parse.
+-   * @param len The length of the JSON.
+-   * @param allocated The number of bytes allocated in the JSON (must be at least len+SIMDJSON_PADDING).
+    *
+    * @return The iterator, or an error:
+-   *         - INSUFFICIENT_PADDING if the input has less than SIMDJSON_PADDING extra bytes.
+    *         - MEMALLOC if realloc_if_needed the parser does not have enough capacity, and memory
+    *           allocation fails.
+    *         - EMPTY if the document is all whitespace.
+@@ -118,11 +101,9 @@ public:
+    *         - UNESCAPED_CHARS if a string contains control characters that must be escaped
+    *         - UNCLOSED_STRING if there is an unclosed string in the document.
+    */
+-  simdjson_warn_unused simdjson_result<json_iterator> iterate_raw(padded_string_view json) & noexcept;
++  simdjson_warn_unused simdjson_result<json_iterator> iterate_raw(const padded_string &json) & noexcept;
+ 
+-  /** The capacity of this parser (the largest document it can process). */
+   simdjson_really_inline size_t capacity() const noexcept;
+-  /** The maximum depth of this parser (the most deeply nested objects and arrays it can process). */
+   simdjson_really_inline size_t max_depth() const noexcept;
+ 
+ private:
+diff --git a/include/simdjson/padded_string-inl.h b/include/simdjson/padded_string-inl.h
+index 21dcf71b..9b407476 100644
+--- a/include/simdjson/padded_string-inl.h
++++ b/include/simdjson/padded_string-inl.h
+@@ -111,10 +111,6 @@ inline char *padded_string::data() noexcept { return data_ptr; }
+ 
+ inline padded_string::operator std::string_view() const { return std::string_view(data(), length()); }
+ 
+-inline padded_string::operator padded_string_view() const noexcept {
+-  return padded_string_view(data(), length(), length() + SIMDJSON_PADDING);
+-}
+-
+ inline simdjson_result<padded_string> padded_string::load(const std::string &filename) noexcept {
+   // Open the file
+   SIMDJSON_PUSH_DISABLE_WARNINGS
+diff --git a/include/simdjson/padded_string.h b/include/simdjson/padded_string.h
+index 85e796a6..31c107c9 100644
+--- a/include/simdjson/padded_string.h
++++ b/include/simdjson/padded_string.h
+@@ -4,6 +4,7 @@
+ #include "simdjson/portability.h"
+ #include "simdjson/common_defs.h" // for SIMDJSON_PADDING
+ #include "simdjson/error.h"
++
+ #include <cstring>
+ #include <memory>
+ #include <string>
+@@ -11,8 +12,6 @@
+ 
+ namespace simdjson {
+ 
+-class padded_string_view;
+-
+ /**
+  * String with extra allocation for ease of use with parser::parse()
+  *
+@@ -98,11 +97,6 @@ struct padded_string final {
+    */
+   operator std::string_view() const;
+ 
+-  /**
+-   * Create a padded_string_view with the same content.
+-   */
+-  operator padded_string_view() const noexcept;
+-
+   /**
+    * Load this padded string from a file.
+    *
+diff --git a/include/simdjson/padded_string_view-inl.h b/include/simdjson/padded_string_view-inl.h
+deleted file mode 100644
+index 41ab5f23..00000000
+--- a/include/simdjson/padded_string_view-inl.h
++++ /dev/null
+@@ -1,40 +0,0 @@
+-#ifndef SIMDJSON_PADDED_STRING_VIEW_INL_H
+-#define SIMDJSON_PADDED_STRING_VIEW_INL_H
+-
+-#include "simdjson/portability.h"
+-#include "simdjson/common_defs.h" // for SIMDJSON_PADDING
+-
+-#include <climits>
+-#include <cstring>
+-#include <memory>
+-#include <string>
+-
+-namespace simdjson {
+-
+-inline padded_string_view::padded_string_view(const char* s, size_t len, size_t capacity) noexcept
+-  : std::string_view(s, len), _capacity(capacity)
+-{
+-}
+-
+-inline padded_string_view::padded_string_view(const uint8_t* s, size_t len, size_t capacity) noexcept
+-  : padded_string_view(reinterpret_cast<const char*>(s), len, capacity)
+-{
+-}
+-
+-inline padded_string_view::padded_string_view(const std::string &s) noexcept
+-  : std::string_view(s), _capacity(s.capacity())
+-{
+-}
+-
+-inline padded_string_view::padded_string_view(std::string_view s, size_t capacity) noexcept
+-  : std::string_view(s), _capacity(capacity)
+-{
+-}
+-
+-inline size_t padded_string_view::capacity() const noexcept { return _capacity; }
+-
+-inline size_t padded_string_view::padding() const noexcept { return capacity() - length(); }
+-
+-} // namespace simdjson
+-
+-#endif // SIMDJSON_PADDED_STRING_VIEW_INL_H
+diff --git a/include/simdjson/padded_string_view.h b/include/simdjson/padded_string_view.h
+deleted file mode 100644
+index 1a7b649d..00000000
+--- a/include/simdjson/padded_string_view.h
++++ /dev/null
+@@ -1,77 +0,0 @@
+-#ifndef SIMDJSON_PADDED_STRING_VIEW_H
+-#define SIMDJSON_PADDED_STRING_VIEW_H
+-
+-#include "simdjson/portability.h"
+-#include "simdjson/common_defs.h" // for SIMDJSON_PADDING
+-#include "simdjson/error.h"
+-
+-#include <cstring>
+-#include <memory>
+-#include <string>
+-#include <ostream>
+-
+-namespace simdjson {
+-
+-/**
+- * User-provided string that promises it has extra padded bytes at the end for use with parser::parse().
+- */
+-class padded_string_view : public std::string_view {
+-private:
+-  size_t _capacity;
+-
+-public:
+-  /** Create an empty padded_string_view. */
+-  inline padded_string_view() noexcept = default;
+-
+-  /**
+-   * Promise the given buffer has at least SIMDJSON_PADDING extra bytes allocated to it.
+-   *
+-   * @param s The string.
+-   * @param len The length of the string (not including padding).
+-   * @param capacity The allocated length of the string, including padding.
+-   */
+-  explicit inline padded_string_view(const char* s, size_t len, size_t capacity) noexcept;
+-  /** overload explicit inline padded_string_view(const char* s, size_t len) noexcept */
+-  explicit inline padded_string_view(const uint8_t* s, size_t len, size_t capacity) noexcept;
+-
+-  /**
+-   * Promise the given string has at least SIMDJSON_PADDING extra bytes allocated to it.
+-   *
+-   * The capacity of the string will be used to determine its padding.
+-   *
+-   * @param s The string.
+-   */
+-  explicit inline padded_string_view(const std::string &s) noexcept;
+-
+-  /**
+-   * Promise the given string_view has at least SIMDJSON_PADDING extra bytes allocated to it.
+-   *
+-   * @param s The string.
+-   * @param capacity The allocated length of the string, including padding.
+-   */
+-  explicit inline padded_string_view(std::string_view s, size_t capacity) noexcept;
+-
+-  /** The number of allocated bytes. */
+-  inline size_t capacity() const noexcept;
+-
+-  /** The amount of padding on the string (capacity() - length()) */
+-  inline size_t padding() const noexcept;
+-
+-}; // padded_string_view
+-
+-#if SIMDJSON_EXCEPTIONS
+-/**
+- * Send padded_string instance to an output stream.
+- *
+- * @param out The output stream.
+- * @param s The padded_string_view.
+- * @throw simdjson_error if the result being printed has an error. If there is an error with the
+- *        underlying output stream, that error will be propagated (simdjson_error will not be
+- *        thrown).
+- */
+-inline std::ostream& operator<<(std::ostream& out, simdjson_result<padded_string_view> &s) noexcept(false) { return out << s.value(); }
+-#endif
+-
+-} // namespace simdjson
+-
+-#endif // SIMDJSON_PADDED_STRING_VIEW_H
+diff --git a/src/internal/error_tables.cpp b/src/internal/error_tables.cpp
+index ce7da7bc..f0d5e7b0 100644
+--- a/src/internal/error_tables.cpp
++++ b/src/internal/error_tables.cpp
+@@ -29,8 +29,7 @@ namespace internal {
+     { INVALID_URI_FRAGMENT, "Invalid URI fragment syntax." },
+     { UNEXPECTED_ERROR, "Unexpected error, consider reporting this problem as you may have found a bug in simdjson" },
+     { PARSER_IN_USE, "Cannot parse a new document while a document is still in use." },
+-    { OUT_OF_ORDER_ITERATION, "Objects and arrays can only be iterated when they are first encountered." },
+-    { INSUFFICIENT_PADDING, "simdjson requires the input JSON string to have at least SIMDJSON_PADDING extra bytes allocated, beyond the string's length." }
++    { OUT_OF_ORDER_ITERATION, "Objects and arrays can only be iterated when they are first encountered." }
+   }; // error_messages[]
+ 
+ } // namespace internal
+diff --git a/tests/ondemand/compilation_failure_tests/CMakeLists.txt b/tests/ondemand/compilation_failure_tests/CMakeLists.txt
+index 2d0959be..c79d41a3 100644
+--- a/tests/ondemand/compilation_failure_tests/CMakeLists.txt
++++ b/tests/ondemand/compilation_failure_tests/CMakeLists.txt
+@@ -8,12 +8,10 @@
+ # adds a compilation test. Two targets are created, one expected to
+ # succeed compilation and one that is expected to fail.
+ function(add_dual_compile_test TEST_NAME)
+-  add_cpp_test(${TEST_NAME}_should_compile SOURCES ${TEST_NAME}.cpp COMPILE_ONLY LABELS onedemand no_mingw)
+-  add_cpp_test(${TEST_NAME}_should_not_compile SOURCES ${TEST_NAME}.cpp COMPILE_ONLY WILL_FAIL LABELS ondemand acceptance no_mingw)
++  add_cpp_test(${TEST_NAME}_should_compile SOURCES ${TEST_NAME}.cpp COMPILE_ONLY LABELS no_mingw)
++  add_cpp_test(${TEST_NAME}_should_not_compile SOURCES ${TEST_NAME}.cpp COMPILE_ONLY WILL_FAIL LABELS acceptance no_mingw)
+   target_compile_definitions(${TEST_NAME}_should_not_compile PRIVATE COMPILATION_TEST_USE_FAILING_CODE=1)
+ endfunction(add_dual_compile_test)
+ 
+ 
+-add_dual_compile_test(iterate_char_star)
+-add_dual_compile_test(iterate_string_view)
+ add_dual_compile_test(iterate_temporary_buffer)
+diff --git a/tests/ondemand/compilation_failure_tests/iterate_char_star.cpp b/tests/ondemand/compilation_failure_tests/iterate_char_star.cpp
+deleted file mode 100644
+index 5a136a92..00000000
+--- a/tests/ondemand/compilation_failure_tests/iterate_char_star.cpp
++++ /dev/null
+@@ -1,19 +0,0 @@
+-#include <iostream>
+-#include "simdjson.h"
+-
+-using namespace simdjson;
+-
+-int main() {
+-    ondemand::parser parser;
+-#if COMPILATION_TEST_USE_FAILING_CODE
+-    const char* json;
+-    auto doc = parser.iterate(json, strlen(json));
+-#else
+-    auto json = "1"_padded;
+-    auto doc = parser.iterate(json);
+-#endif
+-    int64_t value;
+-    auto error = doc.get(value);
+-    if (error) { exit(1); }
+-    std::cout << value << std::endl;
+-}
+diff --git a/tests/ondemand/compilation_failure_tests/iterate_string_view.cpp b/tests/ondemand/compilation_failure_tests/iterate_string_view.cpp
+deleted file mode 100644
+index 71de7bad..00000000
+--- a/tests/ondemand/compilation_failure_tests/iterate_string_view.cpp
++++ /dev/null
+@@ -1,19 +0,0 @@
+-#include <iostream>
+-#include "simdjson.h"
+-
+-using namespace simdjson;
+-
+-int main() {
+-    ondemand::parser parser;
+-#if COMPILATION_TEST_USE_FAILING_CODE
+-    auto json = std::string_view("1");
+-    auto doc = parser.iterate(json);
+-#else
+-    auto json = "1"_padded;
+-    auto doc = parser.iterate(json);
+-#endif
+-    int64_t value;
+-    auto error = doc.get(value);
+-    if (error) { exit(1); }
+-    std::cout << value << std::endl;
+-}
+diff --git a/tests/ondemand/ondemand_parse_api_tests.cpp b/tests/ondemand/ondemand_parse_api_tests.cpp
+index d390d0f8..dd6e6021 100644
+--- a/tests/ondemand/ondemand_parse_api_tests.cpp
++++ b/tests/ondemand/ondemand_parse_api_tests.cpp
+@@ -18,133 +18,18 @@ namespace parse_api_tests {
+     return true;
+   }
+ 
+-  bool parser_iterate_padded() {
+-    TEST_START();
+-    ondemand::parser parser;
+-    const char json_str[] = "12\0                              "; // 32 padding
+-    ASSERT_EQUAL(sizeof(json_str), 34);
+-    ASSERT_EQUAL(strlen(json_str), 2);
+-
+-    {
+-      cout << "- char*" << endl;
+-      auto doc = parser.iterate(json_str, strlen(json_str), sizeof(json_str));
+-      ASSERT_SUCCESS( doc.get_double() );
+-    }
+-
+-    {
+-      cout << "- uint8_t*" << endl;
+-      const uint8_t* json = reinterpret_cast<const uint8_t*>(json_str);
+-      auto doc = parser.iterate(json, strlen(json_str), sizeof(json_str));
+-      ASSERT_SUCCESS( doc.get_double() );
+-    }
+-
+-    {
+-      cout << "- string_view" << endl;
+-      std::string_view json(json_str);
+-      auto doc = parser.iterate(json, sizeof(json_str));
+-      ASSERT_SUCCESS( doc.get_double() );
+-    }
+-
+-    {
+-      cout << "- string" << endl;
+-      std::string json = "12";
+-      json.reserve(json.length() + SIMDJSON_PADDING);
+-      auto doc = parser.iterate(json);
+-      ASSERT_SUCCESS( doc.get_double() );
+-    }
+-
+-    TEST_SUCCEED();
+-  }
+-
+-  bool parser_iterate_padded_string_view() {
+-    TEST_START();
+-    ondemand::parser parser;
+-    const char json_str[] = "12\0                              "; // 32 padding
+-    ASSERT_EQUAL(sizeof(json_str), 34);
+-    ASSERT_EQUAL(strlen(json_str), 2);
+-
+-    {
+-      cout << "- padded_string_view(string_view)" << endl;
+-      padded_string_view json(std::string_view(json_str), sizeof(json_str));
+-      auto doc = parser.iterate(json);
+-      ASSERT_SUCCESS( doc.get_double() );
+-    }
+-
+-    {
+-      cout << "- padded_string_view(char*)" << endl;
+-      auto doc = parser.iterate(padded_string_view(json_str, strlen(json_str), sizeof(json_str)));
+-      ASSERT_SUCCESS( doc.get_double() );
+-    }
+-
+-    {
+-      cout << "- padded_string_view(string)" << endl;
+-      std::string json = "12";
+-      json.reserve(json.length() + SIMDJSON_PADDING);
+-      auto doc = parser.iterate(padded_string_view(json));
+-      ASSERT_SUCCESS( doc.get_double() );
+-    }
+-
+-    {
+-      cout << "- padded_string_view(string_view(char*))" << endl;
+-      padded_string_view json(json_str, sizeof(json_str));
+-      auto doc = parser.iterate(json);
+-      ASSERT_SUCCESS( doc.get_double() );
+-    }
+-
+-    TEST_SUCCEED();
+-  }
+-
+-  bool parser_iterate_insufficient_padding() {
+-    TEST_START();
+-    ondemand::parser parser;
+-    constexpr char json_str[] = "12\0                             "; // 31 padding
+-    ASSERT_EQUAL(sizeof(json_str), 33);
+-    ASSERT_EQUAL(strlen(json_str), 2);
+-    ASSERT_EQUAL(padded_string_view(json_str, strlen(json_str), sizeof(json_str)).padding(), 31);
+-    ASSERT_EQUAL(SIMDJSON_PADDING, 32);
+-
+-    {
+-      cout << "- char*, 31 padding" << endl;
+-      ASSERT_ERROR( parser.iterate(json_str, strlen(json_str), sizeof(json_str)), INSUFFICIENT_PADDING );
+-      cout << "- char*, 0 padding" << endl;
+-      ASSERT_ERROR( parser.iterate(json_str, strlen(json_str), strlen(json_str)), INSUFFICIENT_PADDING );
+-    }
+-
+-    {
+-      std::string_view json(json_str);
+-      cout << "- string_view, 31 padding" << endl;
+-      ASSERT_ERROR( parser.iterate(json, sizeof(json_str)), INSUFFICIENT_PADDING );
+-      cout << "- string_view, 0 padding" << endl;
+-      ASSERT_ERROR( parser.iterate(json, strlen(json_str)), INSUFFICIENT_PADDING );
+-    }
+-
+-    {
+-      std::string json = "12";
+-      json.shrink_to_fit();
+-      cout << "- string, 0 padding" << endl;
+-      ASSERT_ERROR( parser.iterate(json), INSUFFICIENT_PADDING );
+-      // It's actually kind of hard to allocate "just enough" capacity, since the string tends
+-      // to grow more than you tell it to.
+-    }
+-
+-    TEST_SUCCEED();
+-  }
+-
+ #if SIMDJSON_EXCEPTIONS
+   bool parser_iterate_exception() {
+     TEST_START();
+     ondemand::parser parser;
+     auto doc = parser.iterate(BASIC_JSON);
+     simdjson_unused ondemand::array array = doc;
+-    TEST_SUCCEED();
++    return true;
+   }
+ #endif // SIMDJSON_EXCEPTIONS
+ 
+   bool run() {
+     return parser_iterate() &&
+-           parser_iterate_padded() &&
+-           parser_iterate_padded_string_view() &&
+-           parser_iterate_insufficient_padding() &&
+ #if SIMDJSON_EXCEPTIONS
+            parser_iterate_exception() &&
+ #endif // SIMDJSON_EXCEPTIONS
+diff --git a/tests/ondemand/ondemand_readme_examples.cpp b/tests/ondemand/ondemand_readme_examples.cpp
+index 5637fe46..c7b510a4 100644
+--- a/tests/ondemand/ondemand_readme_examples.cpp
++++ b/tests/ondemand/ondemand_readme_examples.cpp
+@@ -31,19 +31,6 @@ bool basics_2() {
+   TEST_SUCCEED();
+ }
+ 
+-bool basics_3() {
+-  TEST_START();
+-
+-  ondemand::parser parser;
+-  char json[3+SIMDJSON_PADDING];
+-  strcpy(json, "[1]");
+-  ondemand::document doc = parser.iterate(json, strlen(json), sizeof(json));
+-
+-  simdjson_unused auto unused_doc = doc.get_array();
+-
+-  TEST_SUCCEED();
+-}
+-
+ bool using_the_parsed_json_1() {
+   TEST_START();
+ 

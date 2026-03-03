@@ -10,29 +10,23 @@ cp "/tests/CMakeLists.txt" "test/CMakeLists.txt"
 mkdir -p "test"
 cp "/tests/spec_arg_test.cc" "test/spec_arg_test.cc"
 
-# This task tests the spec_arg feature for benchmarks
-# The buggy code has a bug in this feature, the fixed code has it corrected
-# We need to rebuild with the fixed test files and then run the test
+# Initialize test_status
+test_status=0
 
-echo "Rebuilding with fixed test files..."
-rm -rf build
-cmake -B build -G Ninja \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-    -DBENCHMARK_ENABLE_TESTING=ON \
-    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-    -DBENCHMARK_ENABLE_WERROR=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-
+# Rebuild the spec_arg_test with the fixed file
+cd /app/src
 cmake --build build --config Debug --target spec_arg_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build spec_arg_test"
+    test_status=1
+fi
 
-# Run the specific test with required argument
-echo "Running spec_arg_test..."
-./build/test/spec_arg_test --benchmark_filter=BM_NotChosen
-test_status=$?
+# Run the test only if it built successfully
+if [ $test_status -eq 0 ]; then
+    cd /app/src/build
+    ./test/spec_arg_test --benchmark_filter=BM_NotChosen
+    test_status=$?
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

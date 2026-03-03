@@ -6,27 +6,41 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/user_counters_test.cc" "test/user_counters_test.cc"
 
-# Rebuild with the fixed test files
-echo "Rebuilding with fixed test files..."
-rm -rf build
-cmake -B build -G Ninja \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-    -DBENCHMARK_ENABLE_TESTING=ON \
-    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-    -DBENCHMARK_ENABLE_WERROR=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# Initialize test_status
+test_status=0
 
-# Build the user_counters_test specifically
-cmake --build build --config Debug --target user_counters_test -j 1
+# Rebuild the benchmark library first to pick up any source changes from fix.patch
+cd /app/src
+cmake --build build --config Debug --target benchmark -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark library"
+    test_status=1
+fi
+
+# Rebuild benchmark_main library to pick up changes
+cmake --build build --config Debug --target benchmark_main -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark_main library"
+    test_status=1
+fi
+
+# Build the user_counters_test target specifically
+if [ $test_status -eq 0 ]; then
+    cmake --build build --config Debug --target user_counters_test -j 1
+    if [ $? -ne 0 ]; then
+        echo "Failed to build user_counters_test"
+        test_status=1
+    fi
+fi
 
 # Run the user_counters_test
-echo "Running user_counters_test..."
-./build/test/user_counters_test
-test_status=$?
+if [ $test_status -eq 0 ]; then
+    ./build/test/user_counters_test
+    if [ $? -ne 0 ]; then
+        echo "user_counters_test failed"
+        test_status=1
+    fi
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

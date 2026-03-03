@@ -1,0 +1,203 @@
+diff --git a/include/simdjson/inline/document.h b/include/simdjson/inline/document.h
+index 028aac77..ce4c9688 100644
+--- a/include/simdjson/inline/document.h
++++ b/include/simdjson/inline/document.h
+@@ -33,7 +33,7 @@ inline error_code document::allocate(size_t capacity) noexcept {
+   // worse with "[7,7,7,7,6,7,7,7,6,7,7,6,[7,7,7,7,6,7,7,7,6,7,7,6,7,7,7,7,7,7,6"
+   //where len + 1 tape elements are
+   // generated, see issue https://github.com/lemire/simdjson/issues/345
+-  size_t tape_capacity = ROUNDUP_N(capacity + 3, 64);
++  size_t tape_capacity = ROUNDUP_N(capacity + 2, 64);
+   // a document with only zero-length strings... could have len/3 string
+   // and we would need len/3 * 5 bytes on the string buffer
+   size_t string_capacity = ROUNDUP_N(5 * capacity / 3 + 32, 64);
+diff --git a/src/arm64/dom_parser_implementation.cpp b/src/arm64/dom_parser_implementation.cpp
+index e676bcbb..2e95cd68 100644
+--- a/src/arm64/dom_parser_implementation.cpp
++++ b/src/arm64/dom_parser_implementation.cpp
+@@ -112,8 +112,6 @@ namespace arm64 {
+ WARN_UNUSED error_code dom_parser_implementation::parse(const uint8_t *_buf, size_t _len, dom::document &_doc) noexcept {
+   error_code err = stage1(_buf, _len, false);
+   if (err) { return err; }
+-  err = check_for_unclosed_array();
+-  if (err) { return err; }
+   return stage2(_doc);
+ }
+ 
+diff --git a/src/fallback/dom_parser_implementation.cpp b/src/fallback/dom_parser_implementation.cpp
+index b472ec65..afc61c2e 100644
+--- a/src/fallback/dom_parser_implementation.cpp
++++ b/src/fallback/dom_parser_implementation.cpp
+@@ -133,10 +133,6 @@ really_inline error_code scan() {
+   }
+   *next_structural_index = len;
+   next_structural_index++;
+-  // We pad beyond.
+-  // https://github.com/simdjson/simdjson/issues/906
+-  next_structural_index[0] = len;
+-  next_structural_index[1] = 0;
+   parser.n_structural_indexes = uint32_t(next_structural_index - parser.structural_indexes.get());
+   return error;
+ }
+@@ -238,8 +234,6 @@ namespace fallback {
+ WARN_UNUSED error_code dom_parser_implementation::parse(const uint8_t *_buf, size_t _len, dom::document &_doc) noexcept {
+   error_code err = stage1(_buf, _len, false);
+   if (err) { return err; }
+-  err = check_for_unclosed_array();
+-  if (err) { return err; }
+   return stage2(_doc);
+ }
+ 
+diff --git a/src/generic/dom_parser_implementation.h b/src/generic/dom_parser_implementation.h
+index 9c63405b..4c8ec598 100644
+--- a/src/generic/dom_parser_implementation.h
++++ b/src/generic/dom_parser_implementation.h
+@@ -31,7 +31,6 @@ public:
+     
+   WARN_UNUSED error_code parse(const uint8_t *buf, size_t len, dom::document &doc) noexcept final;
+   WARN_UNUSED error_code stage1(const uint8_t *buf, size_t len, bool streaming) noexcept final;
+-  WARN_UNUSED error_code check_for_unclosed_array() noexcept;
+   WARN_UNUSED error_code stage2(dom::document &doc) noexcept final;
+   WARN_UNUSED error_code stage2(const uint8_t *buf, size_t len, dom::document &doc, size_t &next_json) noexcept final;
+   WARN_UNUSED error_code set_capacity(size_t capacity) noexcept final;
+@@ -57,22 +56,3 @@ WARN_UNUSED error_code dom_parser_implementation::set_max_depth(size_t max_depth
+   _max_depth = max_depth;
+   return SUCCESS;
+ }
+-
+-
+-WARN_UNUSED error_code dom_parser_implementation::check_for_unclosed_array() noexcept {
+-  // Before we engage stage 2, we want to make sure there is no risk that we could end with [ and
+-  // loop back at the start with [. That is, we want to make sure that if the first character is [, then
+-  // the last one is ].
+-  // See https://github.com/simdjson/simdjson/issues/906 for details.
+-  if(n_structural_indexes < 2) {
+-    return UNEXPECTED_ERROR;
+-  }
+-  const size_t first_index = structural_indexes[0];
+-  const size_t last_index = structural_indexes[n_structural_indexes - 2];
+-  const char first_character = char(buf[first_index]);
+-  const char last_character = char(buf[last_index]);
+-  if((first_character == '[') and (last_character != ']')) {
+-    return TAPE_ERROR;
+-  }
+-  return SUCCESS;
+-}
+\ No newline at end of file
+diff --git a/src/generic/stage1/json_structural_indexer.h b/src/generic/stage1/json_structural_indexer.h
+index 9814de89..13254619 100644
+--- a/src/generic/stage1/json_structural_indexer.h
++++ b/src/generic/stage1/json_structural_indexer.h
+@@ -109,22 +109,7 @@ really_inline error_code json_structural_indexer::finish(dom_parser_implementati
+     parser.structural_indexes[parser.n_structural_indexes++] = uint32_t(len);
+   }
+   /* make it safe to dereference one beyond this array */
+-  parser.structural_indexes[parser.n_structural_indexes] = uint32_t(len);
+-  parser.structural_indexes[parser.n_structural_indexes + 1] = 0;
+-  /***
+-   * This is related to https://github.com/simdjson/simdjson/issues/906
+-   * Basically, we want to make sure that if the parsing continues beyond the last (valid)
+-   * structural character, it quickly stops.
+-   * Only three structural characters can be repeated without triggering an error in JSON:  [,] and }.
+-   * We repeat the padding character (at 'len'). We don't know what it is, but if the parsing
+-   * continues, then it must be [,] or }.
+-   * Suppose it is ] or }. We backtrack to the first character, what could it be that would
+-   * not trigger an error? It could be ] or } but no, because you can't start a document that way.
+-   * It can't be a comma, a colon or any simple value. So the only way we could continue is
+-   * if the repeated character is [. But if so, the document must start with [. But if the document
+-   * starts with [, it should end with ]. If we enforce that rule, then we would get
+-   * ][[ which is invalid.
+-   **/
++  parser.structural_indexes[parser.n_structural_indexes] = 0;
+   return checker.errors();
+ }
+ 
+diff --git a/src/generic/stage2/logger.h b/src/generic/stage2/logger.h
+index bd2eac50..e8c0c051 100644
+--- a/src/generic/stage2/logger.h
++++ b/src/generic/stage2/logger.h
+@@ -7,7 +7,6 @@ namespace logger {
+   static constexpr const int LOG_EVENT_LEN = 30;
+   static constexpr const int LOG_BUFFER_LEN = 20;
+   static constexpr const int LOG_DETAIL_LEN = 50;
+-  static constexpr const int LOG_INDEX_LEN = 10;
+ 
+   static int log_depth; // Not threadsafe. Log only.
+ 
+@@ -25,8 +24,8 @@ namespace logger {
+     if (LOG_ENABLED) {
+       log_depth = 0;
+       printf("\n");
+-      printf("| %-*s | %-*s | %*s | %*s | %*s | %-*s | %-*s |\n", LOG_EVENT_LEN, "Event", LOG_BUFFER_LEN, "Buffer", 4, "Curr", 4, "Next", 5, "Next#", LOG_DETAIL_LEN, "Detail", LOG_INDEX_LEN, "index");
+-      printf("|%.*s|%.*s|%.*s|%.*s|%.*s|%.*s|%.*s|\n", LOG_EVENT_LEN+2, DASHES, LOG_BUFFER_LEN+2, DASHES, 4+2, DASHES, 4+2, DASHES, 5+2, DASHES, LOG_DETAIL_LEN+2, DASHES, LOG_INDEX_LEN+2, DASHES);
++      printf("| %-*s | %-*s | %*s | %*s | %*s | %-*s |\n", LOG_EVENT_LEN, "Event", LOG_BUFFER_LEN, "Buffer", 4, "Curr", 4, "Next", 5, "Next#", LOG_DETAIL_LEN, "Detail");
++      printf("|%.*s|%.*s|%.*s|%.*s|%.*s|%.*s|\n", LOG_EVENT_LEN+2, DASHES, LOG_BUFFER_LEN+2, DASHES, 4+2, DASHES, 4+2, DASHES, 5+2, DASHES, LOG_DETAIL_LEN+2, DASHES);
+     }
+   }
+ 
+@@ -58,7 +57,6 @@ namespace logger {
+       printf("|    %c ", printable_char(structurals.peek_char()));
+       printf("| %5zd ", structurals.next_structural);
+       printf("| %-*s ", LOG_DETAIL_LEN, detail);
+-      printf("| %*zu ", LOG_INDEX_LEN, structurals.idx);
+       printf("|\n");
+     }
+   }
+diff --git a/src/haswell/dom_parser_implementation.cpp b/src/haswell/dom_parser_implementation.cpp
+index 44638df5..5377f7eb 100644
+--- a/src/haswell/dom_parser_implementation.cpp
++++ b/src/haswell/dom_parser_implementation.cpp
+@@ -101,8 +101,6 @@ namespace haswell {
+ WARN_UNUSED error_code dom_parser_implementation::parse(const uint8_t *_buf, size_t _len, dom::document &_doc) noexcept {
+   error_code err = stage1(_buf, _len, false);
+   if (err) { return err; }
+-  err = check_for_unclosed_array();
+-  if (err) { return err; }
+   return stage2(_doc);
+ }
+ 
+diff --git a/src/westmere/dom_parser_implementation.cpp b/src/westmere/dom_parser_implementation.cpp
+index 56ac3888..7c5a5c85 100644
+--- a/src/westmere/dom_parser_implementation.cpp
++++ b/src/westmere/dom_parser_implementation.cpp
+@@ -102,8 +102,6 @@ namespace westmere {
+ WARN_UNUSED error_code dom_parser_implementation::parse(const uint8_t *_buf, size_t _len, dom::document &_doc) noexcept {
+   error_code err = stage1(_buf, _len, false);
+   if (err) { return err; }
+-  err = check_for_unclosed_array();
+-  if (err) { return err; }
+   return stage2(_doc);
+ }
+ 
+diff --git a/tests/basictests.cpp b/tests/basictests.cpp
+index cedbda4c..044c851e 100644
+--- a/tests/basictests.cpp
++++ b/tests/basictests.cpp
+@@ -233,17 +233,6 @@ namespace document_tests {
+     }
+     return true;
+   }
+-  bool padded_with_open_bracket() {
+-    std::cout << __func__ << std::endl;
+-    simdjson::dom::parser parser;
+-    // This is an invalid document padded with open braces.
+-    auto error1 = parser.parse("[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[", 2, false).error();
+-    if (!error1) { std::cerr << "We expected an error but got: " << error1 << std::endl; return false; }
+-    // This is a valid document padded with open braces.
+-    auto error2 = parser.parse("[][[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[", 2, false).error();
+-    if (error2) { std::cerr << "Error: " << error2 << std::endl; return false; }
+-    return true;
+-  }
+   // returns true if successful
+   bool stable_test() {
+     std::cout << __func__ << std::endl;
+@@ -351,8 +340,7 @@ namespace document_tests {
+     return true;
+   }
+   bool run() {
+-    return padded_with_open_bracket() &&
+-           bad_example() &&
++    return bad_example() &&
+            count_array_example() &&
+            count_object_example() &&
+            stable_test() &&

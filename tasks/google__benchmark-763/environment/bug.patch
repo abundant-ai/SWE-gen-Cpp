@@ -1,0 +1,441 @@
+diff --git a/README.md b/README.md
+index 11d7a8b..902915e 100644
+--- a/README.md
++++ b/README.md
+@@ -428,49 +428,6 @@ BENCHMARK(BM_test)->Range(8, 8<<10)->UseRealTime();
+ 
+ Without `UseRealTime`, CPU time is used by default.
+ 
+-## CPU timers
+-By default, the CPU timer only measures the time spent by the main thread.
+-If the benchmark itself uses threads internally, this measurement may not
+-be what you are looking for. Instead, there is a way to measure the total
+-CPU usage of the process, by all the threads.
+-
+-```c++
+-void callee(int i);
+-
+-static void MyMain(int size) {
+-#pragma omp parallel for
+-  for(int i = 0; i < size; i++)
+-    callee(i);
+-}
+-
+-static void BM_OpenMP(benchmark::State& state) {
+-  for (auto _ : state)
+-    MyMain(state.range(0);
+-}
+-
+-// Measure the time spent by the main thread, use it to decide for how long to
+-// run the benchmark loop. Depending on the internal implementation detail may
+-// measure to anywhere from near-zero (the overhead spent before/after work
+-// handoff to worker thread[s]) to the whole single-thread time.
+-BENCHMARK(BM_OpenMP)->Range(8, 8<<10);
+-
+-// Measure the user-visible time, the wall clock (literally, the time that
+-// has passed on the clock on the wall), use it to decide for how long to
+-// run the benchmark loop. This will always be meaningful, an will match the
+-// time spent by the main thread in single-threaded case, in general decreasing
+-// with the number of internal threads doing the work.
+-BENCHMARK(BM_OpenMP)->Range(8, 8<<10)->UseRealTime();
+-
+-// Measure the total CPU consumption, use it to decide for how long to
+-// run the benchmark loop. This will always measure to no less than the
+-// time spent by the main thread in single-threaded case.
+-BENCHMARK(BM_OpenMP)->Range(8, 8<<10)->MeasureProcessCPUTime();
+-
+-// A mixture of the last two. Measure the total CPU consumption, but use the
+-// wall clock to decide for how long to run the benchmark loop.
+-BENCHMARK(BM_OpenMP)->Range(8, 8<<10)->MeasureProcessCPUTime()->UseRealTime();
+-```
+-
+ ## Controlling timers
+ Normally, the entire duration of the work loop (`for (auto _ : state) {}`)
+ is measured. But sometimes, it is nessesary to do some work inside of
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 8329368..51e15dc 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -874,18 +874,11 @@ class Benchmark {
+   // Same as ReportAggregatesOnly(), but applies to display reporter only.
+   Benchmark* DisplayAggregatesOnly(bool value = true);
+ 
+-  // By default, the CPU time is measured only for the main thread, which may
+-  // be unrepresentative if the benchmark uses threads internally. If called,
+-  // the total CPU time spent by all the threads will be measured instead.
+-  // By default, the only the main thread CPU time will be measured.
+-  Benchmark* MeasureProcessCPUTime();
+-
+-  // If a particular benchmark should use the Wall clock instead of the CPU time
+-  // (be it either the CPU time of the main thread only (default), or the
+-  // total CPU usage of the benchmark), call this method. If called, the elapsed
+-  // (wall) time will be used to control how many iterations are run, and in the
+-  // printing of items/second or MB/seconds values.
+-  // If not called, the CPU time used by the benchmark will be used.
++  // If a particular benchmark is I/O bound, runs multiple threads internally or
++  // if for some reason CPU timings are not representative, call this method. If
++  // called, the elapsed time will be used to control how many iterations are
++  // run, and in the printing of items/second or MB/seconds values.  If not
++  // called, the cpu time used by the benchmark will be used.
+   Benchmark* UseRealTime();
+ 
+   // If a benchmark must measure time manually (e.g. if GPU execution time is
+@@ -959,7 +952,6 @@ class Benchmark {
+   double min_time_;
+   size_t iterations_;
+   int repetitions_;
+-  bool measure_process_cpu_time_;
+   bool use_real_time_;
+   bool use_manual_time_;
+   BigO complexity_;
+diff --git a/src/benchmark_api_internal.h b/src/benchmark_api_internal.h
+index 19c6d4f..b220fb0 100644
+--- a/src/benchmark_api_internal.h
++++ b/src/benchmark_api_internal.h
+@@ -22,7 +22,6 @@ struct BenchmarkInstance {
+   std::vector<int64_t> arg;
+   TimeUnit time_unit;
+   int range_multiplier;
+-  bool measure_process_cpu_time;
+   bool use_real_time;
+   bool use_manual_time;
+   BigO complexity;
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index 3ffd734..4e94b5a 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -165,7 +165,6 @@ bool BenchmarkFamilies::FindBenchmarks(
+         instance.min_time = family->min_time_;
+         instance.iterations = family->iterations_;
+         instance.repetitions = family->repetitions_;
+-        instance.measure_process_cpu_time = family->measure_process_cpu_time_;
+         instance.use_real_time = family->use_real_time_;
+         instance.use_manual_time = family->use_manual_time_;
+         instance.complexity = family->complexity_;
+@@ -203,20 +202,10 @@ bool BenchmarkFamilies::FindBenchmarks(
+           instance.name.repetitions =
+               StrFormat("repeats:%d", family->repetitions_);
+ 
+-        if (family->measure_process_cpu_time_) {
+-          instance.name.time_type = "process_time";
+-        }
+-
+         if (family->use_manual_time_) {
+-          if (!instance.name.time_type.empty()) {
+-            instance.name.time_type += '/';
+-          }
+-          instance.name.time_type += "manual_time";
++          instance.name.time_type = "manual_time";
+         } else if (family->use_real_time_) {
+-          if (!instance.name.time_type.empty()) {
+-            instance.name.time_type += '/';
+-          }
+-          instance.name.time_type += "real_time";
++          instance.name.time_type = "real_time";
+         }
+ 
+         // Add the number of threads used to the name
+@@ -263,7 +252,6 @@ Benchmark::Benchmark(const char* name)
+       min_time_(0),
+       iterations_(0),
+       repetitions_(0),
+-      measure_process_cpu_time_(false),
+       use_real_time_(false),
+       use_manual_time_(false),
+       complexity_(oNone),
+@@ -410,12 +398,6 @@ Benchmark* Benchmark::DisplayAggregatesOnly(bool value) {
+   return this;
+ }
+ 
+-Benchmark* Benchmark::MeasureProcessCPUTime() {
+-  // Can be used together with UseRealTime() / UseManualTime().
+-  measure_process_cpu_time_ = true;
+-  return this;
+-}
+-
+ Benchmark* Benchmark::UseRealTime() {
+   CHECK(!use_manual_time_)
+       << "Cannot set UseRealTime and UseManualTime simultaneously.";
+diff --git a/src/benchmark_runner.cc b/src/benchmark_runner.cc
+index b1c0b88..f4ea5f2 100644
+--- a/src/benchmark_runner.cc
++++ b/src/benchmark_runner.cc
+@@ -111,10 +111,7 @@ BenchmarkReporter::Run CreateRunReport(
+ // Adds the stats collected for the thread into *total.
+ void RunInThread(const BenchmarkInstance* b, size_t iters, int thread_id,
+                  ThreadManager* manager) {
+-  internal::ThreadTimer timer(
+-      b->measure_process_cpu_time
+-          ? internal::ThreadTimer::CreateProcessCpuTime()
+-          : internal::ThreadTimer::Create());
++  internal::ThreadTimer timer;
+   State st = b->Run(iters, thread_id, &timer, manager);
+   CHECK(st.iterations() >= st.max_iterations)
+       << "Benchmark returned before State::KeepRunning() returned false!";
+@@ -229,8 +226,6 @@ class BenchmarkRunner {
+     // Adjust real/manual time stats since they were reported per thread.
+     i.results.real_time_used /= b.threads;
+     i.results.manual_time_used /= b.threads;
+-    // If we were measuring whole-process CPU usage, adjust the CPU time too.
+-    if (b.measure_process_cpu_time) i.results.cpu_time_used /= b.threads;
+ 
+     VLOG(2) << "Ran in " << i.results.cpu_time_used << "/"
+             << i.results.real_time_used << "\n";
+diff --git a/src/thread_timer.h b/src/thread_timer.h
+index fbd298d..eaf108e 100644
+--- a/src/thread_timer.h
++++ b/src/thread_timer.h
+@@ -8,22 +8,14 @@ namespace benchmark {
+ namespace internal {
+ 
+ class ThreadTimer {
+-  explicit ThreadTimer(bool measure_process_cpu_time_)
+-      : measure_process_cpu_time(measure_process_cpu_time_) {}
+-
+  public:
+-  static ThreadTimer Create() {
+-    return ThreadTimer(/*measure_process_cpu_time_=*/false);
+-  }
+-  static ThreadTimer CreateProcessCpuTime() {
+-    return ThreadTimer(/*measure_process_cpu_time_=*/true);
+-  }
++  ThreadTimer() = default;
+ 
+   // Called by each thread
+   void StartTimer() {
+     running_ = true;
+     start_real_time_ = ChronoClockNow();
+-    start_cpu_time_ = ReadCpuTimerOfChoice();
++    start_cpu_time_ = ThreadCPUUsage();
+   }
+ 
+   // Called by each thread
+@@ -33,8 +25,7 @@ class ThreadTimer {
+     real_time_used_ += ChronoClockNow() - start_real_time_;
+     // Floating point error can result in the subtraction producing a negative
+     // time. Guard against that.
+-    cpu_time_used_ +=
+-        std::max<double>(ReadCpuTimerOfChoice() - start_cpu_time_, 0);
++    cpu_time_used_ += std::max<double>(ThreadCPUUsage() - start_cpu_time_, 0);
+   }
+ 
+   // Called by each thread
+@@ -61,14 +52,6 @@ class ThreadTimer {
+   }
+ 
+  private:
+-  double ReadCpuTimerOfChoice() const {
+-    if (measure_process_cpu_time) return ProcessCPUUsage();
+-    return ThreadCPUUsage();
+-  }
+-
+-  // should the thread, or the process, time be measured?
+-  const bool measure_process_cpu_time;
+-
+   bool running_ = false;        // Is the timer running
+   double start_real_time_ = 0;  // If running_
+   double start_cpu_time_ = 0;   // If running_
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 62370a5..e7373b4 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -125,9 +125,6 @@ add_test(templated_fixture_test templated_fixture_test --benchmark_min_time=0.01
+ compile_output_test(user_counters_test)
+ add_test(user_counters_test user_counters_test --benchmark_min_time=0.01)
+ 
+-compile_output_test(internal_threading_test)
+-add_test(internal_threading_test internal_threading_test --benchmark_min_time=0.01)
+-
+ compile_output_test(report_aggregates_only_test)
+ add_test(report_aggregates_only_test report_aggregates_only_test --benchmark_min_time=0.01)
+ 
+diff --git a/test/internal_threading_test.cc b/test/internal_threading_test.cc
+deleted file mode 100644
+index 039d7c1..0000000
+--- a/test/internal_threading_test.cc
++++ /dev/null
+@@ -1,184 +0,0 @@
+-
+-#undef NDEBUG
+-
+-#include <chrono>
+-#include <thread>
+-#include "../src/timers.h"
+-#include "benchmark/benchmark.h"
+-#include "output_test.h"
+-
+-static const std::chrono::duration<double, std::milli> time_frame(50);
+-static const double time_frame_in_sec(
+-    std::chrono::duration_cast<std::chrono::duration<double, std::ratio<1, 1>>>(
+-        time_frame)
+-        .count());
+-
+-void MyBusySpinwait() {
+-  const auto start = benchmark::ChronoClockNow();
+-
+-  while (true) {
+-    const auto now = benchmark::ChronoClockNow();
+-    const auto elapsed = now - start;
+-
+-    if (std::chrono::duration<double, std::chrono::seconds::period>(elapsed) >=
+-        time_frame)
+-      return;
+-  }
+-}
+-
+-// ========================================================================= //
+-// --------------------------- TEST CASES BEGIN ---------------------------- //
+-// ========================================================================= //
+-
+-// ========================================================================= //
+-// BM_MainThread
+-
+-void BM_MainThread(benchmark::State& state) {
+-  for (auto _ : state) {
+-    MyBusySpinwait();
+-    state.SetIterationTime(time_frame_in_sec);
+-  }
+-  state.counters["invtime"] =
+-      benchmark::Counter{1, benchmark::Counter::kIsRate};
+-}
+-
+-BENCHMARK(BM_MainThread)->Iterations(1)->Threads(1);
+-BENCHMARK(BM_MainThread)->Iterations(1)->Threads(1)->UseRealTime();
+-BENCHMARK(BM_MainThread)->Iterations(1)->Threads(1)->UseManualTime();
+-BENCHMARK(BM_MainThread)->Iterations(1)->Threads(1)->MeasureProcessCPUTime();
+-BENCHMARK(BM_MainThread)
+-    ->Iterations(1)
+-    ->Threads(1)
+-    ->MeasureProcessCPUTime()
+-    ->UseRealTime();
+-BENCHMARK(BM_MainThread)
+-    ->Iterations(1)
+-    ->Threads(1)
+-    ->MeasureProcessCPUTime()
+-    ->UseManualTime();
+-
+-BENCHMARK(BM_MainThread)->Iterations(1)->Threads(2);
+-BENCHMARK(BM_MainThread)->Iterations(1)->Threads(2)->UseRealTime();
+-BENCHMARK(BM_MainThread)->Iterations(1)->Threads(2)->UseManualTime();
+-BENCHMARK(BM_MainThread)->Iterations(1)->Threads(2)->MeasureProcessCPUTime();
+-BENCHMARK(BM_MainThread)
+-    ->Iterations(1)
+-    ->Threads(2)
+-    ->MeasureProcessCPUTime()
+-    ->UseRealTime();
+-BENCHMARK(BM_MainThread)
+-    ->Iterations(1)
+-    ->Threads(2)
+-    ->MeasureProcessCPUTime()
+-    ->UseManualTime();
+-
+-// ========================================================================= //
+-// BM_WorkerThread
+-
+-void BM_WorkerThread(benchmark::State& state) {
+-  for (auto _ : state) {
+-    std::thread Worker(&MyBusySpinwait);
+-    Worker.join();
+-    state.SetIterationTime(time_frame_in_sec);
+-  }
+-  state.counters["invtime"] =
+-      benchmark::Counter{1, benchmark::Counter::kIsRate};
+-}
+-
+-BENCHMARK(BM_WorkerThread)->Iterations(1)->Threads(1);
+-BENCHMARK(BM_WorkerThread)->Iterations(1)->Threads(1)->UseRealTime();
+-BENCHMARK(BM_WorkerThread)->Iterations(1)->Threads(1)->UseManualTime();
+-BENCHMARK(BM_WorkerThread)->Iterations(1)->Threads(1)->MeasureProcessCPUTime();
+-BENCHMARK(BM_WorkerThread)
+-    ->Iterations(1)
+-    ->Threads(1)
+-    ->MeasureProcessCPUTime()
+-    ->UseRealTime();
+-BENCHMARK(BM_WorkerThread)
+-    ->Iterations(1)
+-    ->Threads(1)
+-    ->MeasureProcessCPUTime()
+-    ->UseManualTime();
+-
+-BENCHMARK(BM_WorkerThread)->Iterations(1)->Threads(2);
+-BENCHMARK(BM_WorkerThread)->Iterations(1)->Threads(2)->UseRealTime();
+-BENCHMARK(BM_WorkerThread)->Iterations(1)->Threads(2)->UseManualTime();
+-BENCHMARK(BM_WorkerThread)->Iterations(1)->Threads(2)->MeasureProcessCPUTime();
+-BENCHMARK(BM_WorkerThread)
+-    ->Iterations(1)
+-    ->Threads(2)
+-    ->MeasureProcessCPUTime()
+-    ->UseRealTime();
+-BENCHMARK(BM_WorkerThread)
+-    ->Iterations(1)
+-    ->Threads(2)
+-    ->MeasureProcessCPUTime()
+-    ->UseManualTime();
+-
+-// ========================================================================= //
+-// BM_MainThreadAndWorkerThread
+-
+-void BM_MainThreadAndWorkerThread(benchmark::State& state) {
+-  for (auto _ : state) {
+-    std::thread Worker(&MyBusySpinwait);
+-    MyBusySpinwait();
+-    Worker.join();
+-    state.SetIterationTime(time_frame_in_sec);
+-  }
+-  state.counters["invtime"] =
+-      benchmark::Counter{1, benchmark::Counter::kIsRate};
+-}
+-
+-BENCHMARK(BM_MainThreadAndWorkerThread)->Iterations(1)->Threads(1);
+-BENCHMARK(BM_MainThreadAndWorkerThread)
+-    ->Iterations(1)
+-    ->Threads(1)
+-    ->UseRealTime();
+-BENCHMARK(BM_MainThreadAndWorkerThread)
+-    ->Iterations(1)
+-    ->Threads(1)
+-    ->UseManualTime();
+-BENCHMARK(BM_MainThreadAndWorkerThread)
+-    ->Iterations(1)
+-    ->Threads(1)
+-    ->MeasureProcessCPUTime();
+-BENCHMARK(BM_MainThreadAndWorkerThread)
+-    ->Iterations(1)
+-    ->Threads(1)
+-    ->MeasureProcessCPUTime()
+-    ->UseRealTime();
+-BENCHMARK(BM_MainThreadAndWorkerThread)
+-    ->Iterations(1)
+-    ->Threads(1)
+-    ->MeasureProcessCPUTime()
+-    ->UseManualTime();
+-
+-BENCHMARK(BM_MainThreadAndWorkerThread)->Iterations(1)->Threads(2);
+-BENCHMARK(BM_MainThreadAndWorkerThread)
+-    ->Iterations(1)
+-    ->Threads(2)
+-    ->UseRealTime();
+-BENCHMARK(BM_MainThreadAndWorkerThread)
+-    ->Iterations(1)
+-    ->Threads(2)
+-    ->UseManualTime();
+-BENCHMARK(BM_MainThreadAndWorkerThread)
+-    ->Iterations(1)
+-    ->Threads(2)
+-    ->MeasureProcessCPUTime();
+-BENCHMARK(BM_MainThreadAndWorkerThread)
+-    ->Iterations(1)
+-    ->Threads(2)
+-    ->MeasureProcessCPUTime()
+-    ->UseRealTime();
+-BENCHMARK(BM_MainThreadAndWorkerThread)
+-    ->Iterations(1)
+-    ->Threads(2)
+-    ->MeasureProcessCPUTime()
+-    ->UseManualTime();
+-
+-// ========================================================================= //
+-// ---------------------------- TEST CASES END ----------------------------- //
+-// ========================================================================= //
+-
+-int main(int argc, char* argv[]) { RunOutputTests(argc, argv); }

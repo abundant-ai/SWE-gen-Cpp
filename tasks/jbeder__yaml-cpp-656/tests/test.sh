@@ -2,18 +2,14 @@
 
 cd /app/src
 
+# Fix compilation issue: add const to less comparator
+sed -i 's/bool operator ()(const node\* l, const node\* r) {return l->m_index < r->m_index;}/bool operator ()(const node* l, const node* r) const {return l->m_index < r->m_index;}/' include/yaml-cpp/node/detail/node.h
+
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test/integration"
 cp "/tests/integration/error_messages_test.cpp" "test/integration/error_messages_test.cpp"
 
-# Rebuild yaml-cpp (oracle applies fix.patch before running this script,
-# so we need to rebuild to get the fixed version)
-
-# Fix GoogleTest 1.10.0 compilation with modern GCC
-# Remove -Werror flags from GoogleTest CMake cache
-sed -i 's/-Werror[^ ]*//g' build/test/prefix/googletest/CMakeFiles/gtest.dir/flags.make 2>/dev/null || true
-sed -i 's/-Werror[^ ]*//g' build/test/prefix/googletest/CMakeFiles/gtest_main.dir/flags.make 2>/dev/null || true
-
+# Rebuild the test executable with the updated test file
 cmake --build build --config Debug 2>&1
 rebuild_status=$?
 
@@ -23,8 +19,8 @@ if [ $rebuild_status -ne 0 ]; then
   exit $rebuild_status
 fi
 
-# Run the specific test for error_messages_test
-./build/test/run-tests --gtest_filter="ErrorMessageTest.*" 2>&1
+# Run only the ErrorMessageTest tests from error_messages_test.cpp
+./build/test/run-tests --gtest_filter=ErrorMessageTest.*
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

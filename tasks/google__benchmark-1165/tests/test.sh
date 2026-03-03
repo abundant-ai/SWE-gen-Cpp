@@ -18,45 +18,49 @@ cp "/tests/user_counters_test.cc" "test/user_counters_test.cc"
 mkdir -p "test"
 cp "/tests/user_counters_thousands_test.cc" "test/user_counters_thousands_test.cc"
 
-# Rebuild with the fixed test files
-echo "Rebuilding with fixed test files..."
-rm -rf build
-cmake -B build -G Ninja \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-    -DBENCHMARK_ENABLE_TESTING=ON \
-    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-    -DBENCHMARK_ENABLE_WERROR=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# Initialize test_status
+test_status=0
 
-# Build everything to ensure all dependencies are correct
-cmake --build build --config Debug -j 1
-
-# Run the specific tests
-./build/test/complexity_test --benchmark_min_time=0.01
-status1=$?
-
-./build/test/memory_manager_test --benchmark_min_time=0.01
-status2=$?
-
-./build/test/reporter_output_test --benchmark_min_time=0.01
-status3=$?
-
-./build/test/user_counters_test --benchmark_min_time=0.01
-status4=$?
-
-./build/test/user_counters_thousands_test --benchmark_min_time=0.01
-status5=$?
-
-# Check if all tests passed
-# Note: repetitions_test and user_counters_tabular_test are excluded as they have known issues with crash
-if [ $status1 -eq 0 ] && [ $status2 -eq 0 ] && [ $status3 -eq 0 ] && [ $status4 -eq 0 ] && [ $status5 -eq 0 ]; then
-    test_status=0
-else
+# Rebuild the benchmark library first to pick up any source changes from fix.patch
+cd /app/src
+cmake --build build --config Debug --target benchmark -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark library"
     test_status=1
+fi
+
+# Remove old test object files to force rebuild with new test files
+for test_name in complexity_test memory_manager_test repetitions_test reporter_output_test user_counters_tabular_test user_counters_test user_counters_thousands_test; do
+    rm -f build/test/CMakeFiles/${test_name}.dir/${test_name}.cc.o
+    rm -f build/test/${test_name}
+done
+
+# Build the specific test executables for the modified test files
+for test_name in complexity_test memory_manager_test reporter_output_test user_counters_test user_counters_thousands_test; do
+    cmake --build build --config Debug --target ${test_name} -j 1
+    if [ $? -ne 0 ]; then
+        echo "Failed to build ${test_name}"
+        test_status=1
+    fi
+done
+
+# Run the tests only if they built successfully
+if [ $test_status -eq 0 ]; then
+    cd /app/src/build
+
+    # Run each test executable
+    # Note: repetitions_test and user_counters_tabular_test are excluded as they have known issues
+    for test_name in complexity_test memory_manager_test reporter_output_test user_counters_test user_counters_thousands_test; do
+        echo "Running ${test_name}..."
+        ./test/${test_name} --benchmark_min_time=0.01
+        if [ $? -ne 0 ]; then
+            echo "${test_name} FAILED"
+            test_status=1
+            break
+        else
+            echo "${test_name} PASSED"
+        fi
+    done
 fi
 
 if [ $test_status -eq 0 ]; then

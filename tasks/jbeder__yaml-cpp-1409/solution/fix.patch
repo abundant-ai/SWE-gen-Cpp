@@ -1,0 +1,171 @@
+diff --git a/include/yaml-cpp/exceptions.h b/include/yaml-cpp/exceptions.h
+index 1c283a4..f5dd1cf 100644
+--- a/include/yaml-cpp/exceptions.h
++++ b/include/yaml-cpp/exceptions.h
+@@ -303,4 +303,19 @@ class YAML_CPP_API BadFile : public Exception {
+ };
+ }  // namespace YAML
+ 
++#if defined(_MSC_VER)
++#define YAML_ATTRIBUTE_NO_SANITIZE_ADDRESS __declspec(no_sanitize_address)
++#elif defined(__has_cpp_attribute) && __has_cpp_attribute(gnu::no_sanitize)
++#define YAML_ATTRIBUTE_NO_SANITIZE_ADDRESS [[gnu::no_sanitize("address")]]
++#elif defined(__has_cpp_attribute) && __has_cpp_attribute(clang::no_sanitize)
++#define YAML_ATTRIBUTE_NO_SANITIZE_ADDRESS [[clang::no_sanitize("address")]]
++#elif defined(__has_attribute) && __has_attribute(no_sanitize)
++#define YAML_ATTRIBUTE_NO_SANITIZE_ADDRESS \
++  __attribute__((no_sanitize("address")))
++#elif defined(__has_attribute) && __has_attribute(no_sanitize_address)
++#define YAML_ATTRIBUTE_NO_SANITIZE_ADDRESS __attribute__((no_sanitize_address))
++#else
++#define YAML_ATTRIBUTE_NO_SANITIZE_ADDRESS
++#endif
++
+ #endif  // EXCEPTIONS_H_62B23520_7C8E_11DE_8A39_0800200C9A66
+diff --git a/include/yaml-cpp/node/detail/iterator.h b/include/yaml-cpp/node/detail/iterator.h
+index 04d2da4..87469aa 100644
+--- a/include/yaml-cpp/node/detail/iterator.h
++++ b/include/yaml-cpp/node/detail/iterator.h
+@@ -30,8 +30,12 @@ class iterator_base {
+ 
+   struct proxy {
+     explicit proxy(const V& x) : m_ref(x) {}
+-    V* operator->() { return std::addressof(m_ref); }
+-    operator V*() { return std::addressof(m_ref); }
++    V* operator->() YAML_ATTRIBUTE_LIFETIME_BOUND {
++      return std::addressof(m_ref);
++    }
++    operator V*() YAML_ATTRIBUTE_LIFETIME_BOUND {
++      return std::addressof(m_ref);
++    }
+ 
+     V m_ref;
+   };
+@@ -75,7 +79,7 @@ class iterator_base {
+     return m_iterator != rhs.m_iterator;
+   }
+ 
+-  value_type operator*() const {
++  value_type operator*() const YAML_ATTRIBUTE_LIFETIME_BOUND {
+     const typename base_type::value_type& v = *m_iterator;
+     if (v.pNode)
+       return value_type(Node(*v, m_pMemory));
+@@ -84,7 +88,9 @@ class iterator_base {
+     return value_type();
+   }
+ 
+-  proxy operator->() const { return proxy(**this); }
++  proxy operator->() const YAML_ATTRIBUTE_LIFETIME_BOUND {
++    return proxy(**this);
++  }
+ 
+  private:
+   base_type m_iterator;
+diff --git a/include/yaml-cpp/node/detail/node_iterator.h b/include/yaml-cpp/node/detail/node_iterator.h
+index 6eb4ddc..49da911 100644
+--- a/include/yaml-cpp/node/detail/node_iterator.h
++++ b/include/yaml-cpp/node/detail/node_iterator.h
+@@ -58,8 +58,12 @@ class node_iterator_base {
+ 
+   struct proxy {
+     explicit proxy(const node_iterator_value<V>& x) : m_ref(x) {}
+-    node_iterator_value<V>* operator->() { return std::addressof(m_ref); }
+-    operator node_iterator_value<V>*() { return std::addressof(m_ref); }
++    node_iterator_value<V>* operator->() YAML_ATTRIBUTE_LIFETIME_BOUND {
++      return std::addressof(m_ref);
++    }
++    operator node_iterator_value<V>*() YAML_ATTRIBUTE_LIFETIME_BOUND {
++      return std::addressof(m_ref);
++    }
+ 
+     node_iterator_value<V> m_ref;
+   };
+diff --git a/include/yaml-cpp/node/impl.h b/include/yaml-cpp/node/impl.h
+index f5d622b..03bcbac 100644
+--- a/include/yaml-cpp/node/impl.h
++++ b/include/yaml-cpp/node/impl.h
+@@ -65,6 +65,12 @@ inline void Node::EnsureNodeExists() const {
+   }
+ }
+ 
++inline void Node::Invalidate() {
++  m_isValid = false;
++  m_pNode = nullptr;
++  m_pMemory = nullptr;
++}
++
+ inline bool Node::IsDefined() const {
+   if (!m_isValid) {
+     return false;
+@@ -171,6 +177,14 @@ inline const std::string& Node::Scalar() const {
+   return m_pNode ? m_pNode->scalar() : detail::node_data::empty_scalar();
+ }
+ 
++YAML_ATTRIBUTE_NO_SANITIZE_ADDRESS
++inline const std::string& Node::UninstrumentedScalarForTesting() const {
++  if (m_isValid && m_pMemory != nullptr && m_pNode != nullptr)
++    throw InvalidNode("use-after-free");
++  else
++    throw BadDereference();
++}
++
+ inline const std::string& Node::Tag() const {
+   if (!m_isValid)
+     throw InvalidNode(m_invalidKey);
+diff --git a/include/yaml-cpp/node/iterator.h b/include/yaml-cpp/node/iterator.h
+index 1fcf6e4..c00ca9f 100644
+--- a/include/yaml-cpp/node/iterator.h
++++ b/include/yaml-cpp/node/iterator.h
+@@ -27,6 +27,11 @@ struct iterator_value : public Node, std::pair<Node, Node> {
+         std::pair<Node, Node>(Node(Node::ZombieNode), Node(Node::ZombieNode)) {}
+   explicit iterator_value(const Node& key, const Node& value)
+       : Node(Node::ZombieNode), std::pair<Node, Node>(key, value) {}
++  ~iterator_value() noexcept {
++    this->Node::Invalidate();
++    first.Invalidate();
++    second.Invalidate();
++  }
+ };
+ }
+ }
+diff --git a/include/yaml-cpp/node/node.h b/include/yaml-cpp/node/node.h
+index c9e9a0a..df55f58 100644
+--- a/include/yaml-cpp/node/node.h
++++ b/include/yaml-cpp/node/node.h
+@@ -67,6 +67,7 @@ class YAML_CPP_API Node {
+   template <typename T, typename S>
+   T as(const S& fallback) const;
+   const std::string& Scalar() const;
++  const std::string& UninstrumentedScalarForTesting() const;
+ 
+   const std::string& Tag() const;
+   void SetTag(const std::string& tag);
+@@ -120,6 +121,7 @@ class YAML_CPP_API Node {
+   explicit Node(detail::node& node, detail::shared_memory_holder pMemory);
+ 
+   void EnsureNodeExists() const;
++  void Invalidate();
+ 
+   template <typename T>
+   void Assign(const T& rhs);
+diff --git a/include/yaml-cpp/node/ptr.h b/include/yaml-cpp/node/ptr.h
+index f55d95e..8cbe2ab 100644
+--- a/include/yaml-cpp/node/ptr.h
++++ b/include/yaml-cpp/node/ptr.h
+@@ -25,4 +25,16 @@ using shared_memory = std::shared_ptr<memory>;
+ }
+ }
+ 
++#if defined(__has_cpp_attribute) && __has_cpp_attribute(msvc::lifetimebound)
++#define YAML_ATTRIBUTE_LIFETIME_BOUND [[msvc::lifetimebound]]
++#elif defined(__has_cpp_attribute) && __has_cpp_attribute(gnu::lifetimebound)
++#define YAML_ATTRIBUTE_LIFETIME_BOUND [[gnu::lifetimebound]]
++#elif defined(__has_cpp_attribute) && __has_cpp_attribute(clang::lifetimebound)
++#define YAML_ATTRIBUTE_LIFETIME_BOUND [[clang::lifetimebound]]
++#elif defined(__has_attribute) && __has_attribute(lifetimebound)
++#define YAML_ATTRIBUTE_LIFETIME_BOUND __attribute__((lifetimebound))
++#else
++#define YAML_ATTRIBUTE_LIFETIME_BOUND
++#endif
++
+ #endif  // VALUE_PTR_H_62B23520_7C8E_11DE_8A39_0800200C9A66

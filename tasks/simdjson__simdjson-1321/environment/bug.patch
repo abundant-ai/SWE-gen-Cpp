@@ -1,0 +1,218 @@
+diff --git a/.github/workflows/alpine.yml b/.github/workflows/alpine.yml
+index a24f7e10..b1ea7a92 100644
+--- a/.github/workflows/alpine.yml
++++ b/.github/workflows/alpine.yml
+@@ -34,4 +34,4 @@ jobs:
+           ./alpine.sh cmake --build build_for_alpine
+       - name: test
+         run: |
+-          ./alpine.sh bash -c "cd build_for_alpine && ctest  -E checkperf"
++          ./alpine.sh bash -c "cd build_for_alpine && ctest"
+diff --git a/src/fallback/dom_parser_implementation.cpp b/src/fallback/dom_parser_implementation.cpp
+index a0374963..7e40d280 100644
+--- a/src/fallback/dom_parser_implementation.cpp
++++ b/src/fallback/dom_parser_implementation.cpp
+@@ -91,8 +91,7 @@ simdjson_really_inline void validate_utf8_character() {
+   idx += 4;
+ }
+ 
+-// Returns true if the string is unclosed.
+-simdjson_really_inline bool validate_string() {
++simdjson_really_inline void validate_string() {
+   idx++; // skip first quote
+   while (idx < len && buf[idx] != '"') {
+     if (buf[idx] == '\\') {
+@@ -104,8 +103,7 @@ simdjson_really_inline bool validate_string() {
+       idx++;
+     }
+   }
+-  if (idx >= len) { return true; }
+-  return false;
++  if (idx >= len && !partial) { error = UNCLOSED_STRING; }
+ }
+ 
+ simdjson_really_inline bool is_whitespace_or_operator(uint8_t c) {
+@@ -122,13 +120,12 @@ simdjson_really_inline bool is_whitespace_or_operator(uint8_t c) {
+ // Parse the entire input in STEP_SIZE-byte chunks.
+ //
+ simdjson_really_inline error_code scan() {
+-  bool unclosed_string = false;
+   for (;idx<len;idx++) {
+     switch (buf[idx]) {
+       // String
+       case '"':
+         add_structural();
+-        unclosed_string |= validate_string();
++        validate_string();
+         break;
+       // Operator
+       case '{': case '}': case '[': case ']': case ',': case ':':
+@@ -153,19 +150,20 @@ simdjson_really_inline error_code scan() {
+   next_structural_index[1] = len;
+   next_structural_index[2] = 0;
+   parser.n_structural_indexes = uint32_t(next_structural_index - parser.structural_indexes.get());
+-  if (simdjson_unlikely(parser.n_structural_indexes == 0)) { return EMPTY; }
+   parser.next_structural_index = 0;
++
++  if (simdjson_unlikely(parser.n_structural_indexes == 0)) {
++    return EMPTY;
++  }
++
+   if (partial) {
+-    if(unclosed_string) {
+-      parser.n_structural_indexes--;
+-      if (simdjson_unlikely(parser.n_structural_indexes == 0)) { return CAPACITY; }
+-    }
+     auto new_structural_indexes = find_next_document_index(parser);
+     if (new_structural_indexes == 0 && parser.n_structural_indexes > 0) {
+       return CAPACITY; // If the buffer is partial but the document is incomplete, it's too big to parse.
+     }
+     parser.n_structural_indexes = new_structural_indexes;
+-  } else if(unclosed_string) { error = UNCLOSED_STRING; }
++  }
++
+   return error;
+ }
+ 
+diff --git a/src/generic/stage1/json_minifier.h b/src/generic/stage1/json_minifier.h
+index 97fb07de..054f02f0 100644
+--- a/src/generic/stage1/json_minifier.h
++++ b/src/generic/stage1/json_minifier.h
+@@ -32,7 +32,7 @@ simdjson_really_inline void json_minifier::next(const simd::simd8x64<uint8_t>& i
+ }
+ 
+ simdjson_really_inline error_code json_minifier::finish(uint8_t *dst_start, size_t &dst_len) {
+-  error_code error = scanner.finish();
++  error_code error = scanner.finish(false);
+   if (error) { dst_len = 0; return error; }
+   dst_len = dst - dst_start;
+   return SUCCESS;
+diff --git a/src/generic/stage1/json_scanner.h b/src/generic/stage1/json_scanner.h
+index 0715f3d3..2c03b532 100644
+--- a/src/generic/stage1/json_scanner.h
++++ b/src/generic/stage1/json_scanner.h
+@@ -92,8 +92,7 @@ class json_scanner {
+ public:
+   json_scanner() {}
+   simdjson_really_inline json_block next(const simd::simd8x64<uint8_t>& in);
+-  // Returns either UNCLOSED_STRING or SUCCESS
+-  simdjson_really_inline error_code finish();
++  simdjson_really_inline error_code finish(bool streaming);
+ 
+ private:
+   // Whether the last character of the previous iteration is part of a scalar token
+@@ -139,8 +138,8 @@ simdjson_really_inline json_block json_scanner::next(const simd::simd8x64<uint8_
+   };
+ }
+ 
+-simdjson_really_inline error_code json_scanner::finish() {
+-  return string_scanner.finish();
++simdjson_really_inline error_code json_scanner::finish(bool streaming) {
++  return string_scanner.finish(streaming);
+ }
+ 
+ } // namespace stage1
+diff --git a/src/generic/stage1/json_string_scanner.h b/src/generic/stage1/json_string_scanner.h
+index 813770cd..e47051b2 100644
+--- a/src/generic/stage1/json_string_scanner.h
++++ b/src/generic/stage1/json_string_scanner.h
+@@ -37,8 +37,7 @@ struct json_string_block {
+ class json_string_scanner {
+ public:
+   simdjson_really_inline json_string_block next(const simd::simd8x64<uint8_t>& in);
+-  // Returns either UNCLOSED_STRING or SUCCESS
+-  simdjson_really_inline error_code finish();
++  simdjson_really_inline error_code finish(bool streaming);
+ 
+ private:
+   // Intended to be defined by the implementation
+@@ -133,8 +132,8 @@ simdjson_really_inline json_string_block json_string_scanner::next(const simd::s
+   };
+ }
+ 
+-simdjson_really_inline error_code json_string_scanner::finish() {
+-  if (prev_in_string) {
++simdjson_really_inline error_code json_string_scanner::finish(bool streaming) {
++  if (prev_in_string and (not streaming)) {
+     return UNCLOSED_STRING;
+   }
+   return SUCCESS;
+diff --git a/src/generic/stage1/json_structural_indexer.h b/src/generic/stage1/json_structural_indexer.h
+index 756cbcdc..e731642e 100644
+--- a/src/generic/stage1/json_structural_indexer.h
++++ b/src/generic/stage1/json_structural_indexer.h
+@@ -182,14 +182,8 @@ simdjson_really_inline error_code json_structural_indexer::finish(dom_parser_imp
+   // Write out the final iteration's structurals
+   indexer.write(uint32_t(idx-64), prev_structurals);
+ 
+-  error_code error = scanner.finish();
+-  // We deliberately break down the next expression so that it is
+-  // human readable.
+-  const bool should_we_exit =  partial ?
+-    ((error != SUCCESS) && (error != UNCLOSED_STRING)) // when partial we tolerate UNCLOSED_STRING
+-    : (error != SUCCESS); // if partial is false, we must have SUCCESS
+-  const bool have_unclosed_string = (error == UNCLOSED_STRING);
+-  if (simdjson_unlikely(should_we_exit)) { return error; }
++  error_code error = scanner.finish(partial);
++  if (simdjson_unlikely(error != SUCCESS)) { return error; }
+ 
+   if (unescaped_chars_error) {
+     return UNESCAPED_CHARS;
+@@ -222,13 +216,6 @@ simdjson_really_inline error_code json_structural_indexer::finish(dom_parser_imp
+     return UNEXPECTED_ERROR;
+   }
+   if (partial) {
+-    // If we have an unclosed string, then the last structural
+-    // will be the quote and we want to make sure to omit it.
+-    if(have_unclosed_string) {
+-      parser.n_structural_indexes--;
+-      // a valid JSON file cannot have zero structural indexes - we should have found something
+-      if (simdjson_unlikely(parser.n_structural_indexes == 0u)) { return CAPACITY; }
+-    }
+     auto new_structural_indexes = find_next_document_index(parser);
+     if (new_structural_indexes == 0 && parser.n_structural_indexes > 0) {
+       return CAPACITY; // If the buffer is partial but the document is incomplete, it's too big to parse.
+diff --git a/tests/document_stream_tests.cpp b/tests/document_stream_tests.cpp
+index 328b6260..2e88fed9 100644
+--- a/tests/document_stream_tests.cpp
++++ b/tests/document_stream_tests.cpp
+@@ -143,33 +143,21 @@ namespace document_stream_tests {
+ 
+   bool issue1310() {
+     std::cout << "Running " << __func__ << std::endl;
+-    // hex  : 20 20 5B 20 33 2C 31 5D 20 22 22 22 22 22 22 22 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20
+-    // ascii:  __ __[__ __3__,__1__]__ __"__"__"__"__"__"__"__ __ __ __ __ __ __ __ __ __ __ __ __ __ __ __ __ __
+-    // We have four full documents followed by an unclosed string.
+-    const simdjson::padded_string input = decode_base64("ICBbIDMsMV0gIiIiIiIiIiAgICAgICAgICAgICAgICAg");
++    const simdjson::padded_string input = decode_base64("AwA5ICIg");
+     print_hex(input);
+     for(size_t window = 0; window <= 100; window++) {
+       simdjson::dom::parser parser;
+       simdjson::dom::document_stream stream;
+       ASSERT_SUCCESS(parser.parse_many(input, window).get(stream));
+-      size_t count{0};
+       for(auto doc: stream) {
+         auto error = doc.error();
+-        count++;
+-        if(count <= 4) {
+-          if(window < input.size() && error) {
+-            std::cout << "Expected no error but got " << error << std::endl;
+-            std::cout << "Window = " << window << std::endl;
+-            return false;
+-          }
+-        } else {
+-          if(!error) {
+-            std::cout << "Expected an error but got " << error << std::endl;
+-            std::cout << "Window = " << window << std::endl;
+-            return false;
+-          }
++        if(!error) {
++          std::cout << "Expected an error but got " << error << std::endl;
++          std::cout << "Window = " << window << std::endl;
++          return false;
+         }
+       }
++
+     }
+     return true;
+   }

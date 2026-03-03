@@ -1,0 +1,309 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0de496a7..3d6fc0c0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -13,8 +13,8 @@ set(SIMDJSON_LIB_SOVERSION "1" CACHE STRING "simdjson library soversion")
+ set(SIMDJSON_GITHUB_REPOSITORY https://github.com/simdjson/simdjson)
+ 
+ include(GNUInstallDirs)
+-include(simdjson-flags.cmake)
+-include(simdjson-user-cmakecache.cmake)
++include(cmake/simdjson-flags.cmake)
++include(cmake/simdjson-user-cmakecache.cmake)
+ 
+ if(SIMDJSON_JUST_LIBRARY)
+   MESSAGE( STATUS "Building just the library, omitting all tests, tools and benchmarks." )
+diff --git a/cmake/add_cpp_test.cmake b/cmake/add_cpp_test.cmake
+new file mode 100644
+index 00000000..b41087fa
+--- /dev/null
++++ b/cmake/add_cpp_test.cmake
+@@ -0,0 +1,49 @@
++# Helper so we don't have to repeat ourselves so much
++# Usage: add_cpp_test(testname [COMPILE_ONLY] [SOURCES a.cpp b.cpp ...] [LABELS acceptance per_implementation ...])
++# SOURCES defaults to testname.cpp if not specified.
++function(add_cpp_test TEST_NAME)
++  # Parse arguments
++  cmake_parse_arguments(PARSE_ARGV 1 ARGS "COMPILE_ONLY;LIBRARY;WILL_FAIL" "" "SOURCES;LABELS")
++  if (NOT ARGS_SOURCES)
++    list(APPEND ARGS_SOURCES ${TEST_NAME}.cpp)
++  endif()
++  if (ARGS_COMPILE_ONLY)
++    list(APPEND ${ARGS_LABELS} compile)
++  endif()
++
++  # Add the compile target
++  if (ARGS_LIBRARY)
++    add_library(${TEST_NAME} STATIC ${ARGS_SOURCES})
++  else(ARGS_LIBRARY)
++    add_executable(${TEST_NAME} ${ARGS_SOURCES})
++  endif(ARGS_LIBRARY)
++
++  # Add test
++  if (ARGS_COMPILE_ONLY OR ARGS_LIBRARY)
++    add_test(
++      NAME ${TEST_NAME}
++      COMMAND ${CMAKE_COMMAND} --build . --target ${TEST_NAME} --config $<CONFIGURATION>
++      WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
++    )
++    set_target_properties(${TEST_NAME} PROPERTIES EXCLUDE_FROM_ALL TRUE EXCLUDE_FROM_DEFAULT_BUILD TRUE)
++  else()
++    add_test(${TEST_NAME} ${TEST_NAME})
++  endif()
++
++  if (ARGS_LABELS)
++    set_property(TEST ${TEST_NAME} APPEND PROPERTY LABELS ${ARGS_LABELS})
++  endif()
++
++  if (ARGS_WILL_FAIL)
++    set_property(TEST ${TEST_NAME} PROPERTY WILL_FAIL TRUE)
++  endif()
++endfunction()
++
++function(add_compile_only_test TEST_NAME)
++  add_test(
++    NAME ${TEST_NAME}
++    COMMAND ${CMAKE_COMMAND} --build . --target ${TEST_NAME} --config $<CONFIGURATION>
++    WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
++  )
++  set_target_properties(${TEST_NAME} PROPERTIES EXCLUDE_FROM_ALL TRUE EXCLUDE_FROM_DEFAULT_BUILD TRUE)
++endfunction()
+\ No newline at end of file
+diff --git a/cmake/simdjson-flags.cmake b/cmake/simdjson-flags.cmake
+new file mode 100644
+index 00000000..0ea36b1e
+--- /dev/null
++++ b/cmake/simdjson-flags.cmake
+@@ -0,0 +1,118 @@
++option(SIMDJSON_JUST_LIBRARY "Build just the library, omit tests, tools and benchmarks" OFF)
++
++#
++# Flags used by exes and by the simdjson library (project-wide flags)
++#
++add_library(simdjson-flags INTERFACE)
++add_library(simdjson-internal-flags INTERFACE)
++target_link_libraries(simdjson-internal-flags INTERFACE simdjson-flags)
++
++option(SIMDJSON_SANITIZE "Sanitize addresses" OFF)
++if(SIMDJSON_SANITIZE)
++  target_compile_options(simdjson-flags INTERFACE -fsanitize=address -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=all)
++  target_link_libraries(simdjson-flags INTERFACE -fsanitize=address -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=all)
++
++  # Ubuntu bug for GCC 5.0+ (safe for all versions)
++  if (CMAKE_COMPILER_IS_GNUCC)
++    target_link_libraries(simdjson-flags INTERFACE -fuse-ld=gold)
++  endif()
++endif()
++
++
++if (NOT CMAKE_BUILD_TYPE)
++  message(STATUS "No build type selected, default to Release")
++  set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
++  if(SIMDJSON_SANITIZE)
++    message(WARNING "No build type selected and you have enabled the sanitizer. Consider setting CMAKE_BUILD_TYPE to Debug to help identify the eventual problems.")
++  endif()
++endif()
++
++if(MSVC)
++  option(SIMDJSON_BUILD_STATIC "Build a static library" ON) # turning it on disables the production of a dynamic library
++else()
++  option(SIMDJSON_BUILD_STATIC "Build a static library" OFF) # turning it on disables the production of a dynamic library
++  option(SIMDJSON_USE_LIBCPP "Use the libc++ library" OFF)
++endif()
++option(SIMDJSON_COMPETITION "Compile competitive benchmarks" ON)
++
++option(SIMDJSON_GOOGLE_BENCHMARKS "compile the Google Benchmark benchmarks" ON)
++
++set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/tools/cmake")
++
++# We compile tools, tests, etc. with C++ 17. Override yourself if you need on a target.
++set(CMAKE_CXX_STANDARD 17)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++set(CMAKE_CXX_EXTENSIONS OFF)
++set(CMAKE_MACOSX_RPATH OFF)
++set(CMAKE_THREAD_PREFER_PTHREAD ON)
++set(THREADS_PREFER_PTHREAD_FLAG ON)
++
++# LTO seems to create all sorts of fun problems. Let us
++# disable temporarily.
++#include(CheckIPOSupported)
++#check_ipo_supported(RESULT ltoresult)
++#if(ltoresult)
++#  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
++#endif()
++
++
++if(MSVC)
++  target_compile_options(simdjson-internal-flags INTERFACE /WX /W3 /sdl)
++else()
++  target_compile_options(simdjson-internal-flags INTERFACE -fPIC)
++  target_compile_options(simdjson-internal-flags INTERFACE -Werror -Wall -Wextra -Weffc++)
++  target_compile_options(simdjson-internal-flags INTERFACE -Wsign-compare -Wshadow -Wwrite-strings -Wpointer-arith -Winit-self -Wconversion -Wno-sign-conversion)
++endif()
++
++# Optional flags
++option(SIMDJSON_IMPLEMENTATION_HASWELL "Include the haswell implementation" ON)
++if(NOT SIMDJSON_IMPLEMENTATION_HASWELL)
++  target_compile_definitions(simdjson-internal-flags INTERFACE SIMDJSON_IMPLEMENTATION_HASWELL=0)
++endif()
++option(SIMDJSON_IMPLEMENTATION_WESTMERE "Include the westmere implementation" ON)
++if(NOT SIMDJSON_IMPLEMENTATION_WESTMERE)
++  target_compile_definitions(simdjson-internal-flags INTERFACE SIMDJSON_IMPLEMENTATION_WESTMERE=0)
++endif()
++option(SIMDJSON_IMPLEMENTATION_ARM64 "Include the arm64 implementation" ON)
++if(NOT SIMDJSON_IMPLEMENTATION_ARM64)
++  target_compile_definitions(simdjson-internal-flags INTERFACE SIMDJSON_IMPLEMENTATION_ARM64=0)
++endif()
++option(SIMDJSON_IMPLEMENTATION_FALLBACK "Include the fallback implementation" ON)
++if(NOT SIMDJSON_IMPLEMENTATION_FALLBACK)
++  target_compile_definitions(simdjson-internal-flags INTERFACE SIMDJSON_IMPLEMENTATION_FALLBACK=0)
++endif()
++
++option(SIMDJSON_EXCEPTIONS "Enable simdjson's exception-throwing interface" ON)
++if(NOT SIMDJSON_EXCEPTIONS)
++  message(STATUS "simdjson exception interface turned off. Code that does not check error codes will not compile.")
++  target_compile_definitions(simdjson-internal-flags INTERFACE SIMDJSON_EXCEPTIONS=0)
++endif()
++
++option(SIMDJSON_ENABLE_THREADS "Enable threaded operation" ON)
++if(SIMDJSON_ENABLE_THREADS)
++  set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
++  set(THREADS_PREFER_PTHREAD_FLAG TRUE)
++  find_package(Threads REQUIRED)
++  target_link_libraries(simdjson-flags INTERFACE Threads::Threads)
++  target_link_libraries(simdjson-flags INTERFACE ${CMAKE_THREAD_LIBS_INIT})
++  target_compile_options(simdjson-flags INTERFACE ${CMAKE_THREAD_LIBS_INIT})
++  target_compile_definitions(simdjson-flags INTERFACE SIMDJSON_THREADS_ENABLED=1)
++endif()
++
++if(SIMDJSON_USE_LIBCPP)
++  target_link_libraries(simdjson-flags INTERFACE -stdlib=libc++ -lc++abi)
++  # instead of the above line, we could have used
++  # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -stdlib=libc++  -lc++abi")
++  # The next line is needed empirically.
++  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
++  # we update CMAKE_SHARED_LINKER_FLAGS, this gets updated later as well
++  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -lc++abi")
++endif(SIMDJSON_USE_LIBCPP)
++
++# prevent shared libraries from depending on Intel provided libraries
++if(${CMAKE_C_COMPILER_ID} MATCHES "Intel") # icc / icpc
++  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -static-intel")
++endif()
++
++install(TARGETS simdjson-flags EXPORT simdjson-config)
++install(TARGETS simdjson-internal-flags EXPORT simdjson-config)
+diff --git a/cmake/simdjson-user-cmakecache.cmake b/cmake/simdjson-user-cmakecache.cmake
+new file mode 100644
+index 00000000..582e6df0
+--- /dev/null
++++ b/cmake/simdjson-user-cmakecache.cmake
+@@ -0,0 +1,24 @@
++#
++# ${SIMDJSON_USER_CMAKECACHE} contains the *user-specified* simdjson options so you can call cmake on
++# another branch or repository with the same options.
++#
++# Not supported on Windows at present, because the only thing that uses it is checkperf, which we
++# don't run on Windows.
++#
++set(SIMDJSON_USER_CMAKECACHE ${CMAKE_CURRENT_BINARY_DIR}/.simdjson-user-CMakeCache.txt)
++if (MSVC)
++  add_custom_command(
++    OUTPUT ${SIMDJSON_USER_CMAKECACHE}
++    COMMAND findstr SIMDJSON_ ${PROJECT_BINARY_DIR}/CMakeCache.txt > ${SIMDJSON_USER_CMAKECACHE}.tmp
++    COMMAND findstr /v SIMDJSON_LIB_ ${SIMDJSON_USER_CMAKECACHE}.tmp > ${SIMDJSON_USER_CMAKECACHE}
++    VERBATIM # Makes it not do weird escaping with the command
++  )
++else()
++  add_custom_command(
++    OUTPUT ${SIMDJSON_USER_CMAKECACHE}
++    COMMAND grep SIMDJSON_ ${PROJECT_BINARY_DIR}/CMakeCache.txt > ${SIMDJSON_USER_CMAKECACHE}.tmp
++    COMMAND grep -v SIMDJSON_LIB_ ${SIMDJSON_USER_CMAKECACHE}.tmp > ${SIMDJSON_USER_CMAKECACHE}
++    VERBATIM # Makes it not do weird escaping with the command
++  )
++endif()
++add_custom_target(simdjson-user-cmakecache DEPENDS ${SIMDJSON_USER_CMAKECACHE})
+diff --git a/include/simdjson/common_defs.h b/include/simdjson/common_defs.h
+index 7f5417f9..c6c2b7f9 100644
+--- a/include/simdjson/common_defs.h
++++ b/include/simdjson/common_defs.h
+@@ -117,6 +117,7 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
+     SIMDJSON_DISABLE_GCC_WARNING(-Wextra) \
+     SIMDJSON_DISABLE_GCC_WARNING(-Wattributes) \
+     SIMDJSON_DISABLE_GCC_WARNING(-Wimplicit-fallthrough) \
++    SIMDJSON_DISABLE_GCC_WARNING(-Wnon-virtual-dtor) \
+     SIMDJSON_DISABLE_GCC_WARNING(-Wreturn-type) \
+     SIMDJSON_DISABLE_GCC_WARNING(-Wshadow) \
+     SIMDJSON_DISABLE_GCC_WARNING(-Wunused-parameter) \
+diff --git a/singleheader/CMakeLists.txt b/singleheader/CMakeLists.txt
+index c7e9de0c..f2015939 100644
+--- a/singleheader/CMakeLists.txt
++++ b/singleheader/CMakeLists.txt
+@@ -1,3 +1,5 @@
++include(${PROJECT_SOURCE_DIR}/cmake/add_cpp_test.cmake)
++
+ #
+ # Amalgamation
+ #
+@@ -122,6 +124,7 @@ install(FILES simdjson.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+ 
+ add_library(simdjson-singleheader STATIC "")
+ target_link_libraries(simdjson-singleheader simdjson-singleheader-source simdjson-internal-flags)
++add_compile_only_test(simdjson-singleheader)
+ 
+ #
+ # Test the existing simdjson.cpp/simdjson.h using the existing amalgamate_demo.cpp, using
+diff --git a/tools/json2json.cpp b/tools/json2json.cpp
+index 084ad3ca..8b62299f 100644
+--- a/tools/json2json.cpp
++++ b/tools/json2json.cpp
+@@ -1,10 +1,13 @@
+ #include <iostream>
+ #include <unistd.h>
+ #include "simdjson.h"
++
++SIMDJSON_PUSH_DISABLE_ALL_WARNINGS
+ #ifndef __cpp_exceptions
+ #define CXXOPTS_NO_EXCEPTIONS
+ #endif
+ #include "cxxopts.hpp"
++SIMDJSON_POP_DISABLE_WARNINGS
+ 
+ int main(int argc, char *argv[]) {
+ #ifdef __cpp_exceptions
+diff --git a/tools/jsonstats.cpp b/tools/jsonstats.cpp
+index 977d6a48..b7b27a27 100644
+--- a/tools/jsonstats.cpp
++++ b/tools/jsonstats.cpp
+@@ -2,10 +2,13 @@
+ #include <set>
+ 
+ #include "simdjson.h"
++
++SIMDJSON_PUSH_DISABLE_ALL_WARNINGS
+ #ifndef __cpp_exceptions
+ #define CXXOPTS_NO_EXCEPTIONS
+ #endif
+ #include "cxxopts.hpp"
++SIMDJSON_POP_DISABLE_WARNINGS
+ 
+ size_t count_nonasciibytes(const uint8_t *input, size_t length) {
+   size_t count = 0;
+diff --git a/tools/minify.cpp b/tools/minify.cpp
+index 2e2acebd..458a9ac2 100644
+--- a/tools/minify.cpp
++++ b/tools/minify.cpp
+@@ -5,10 +5,13 @@
+ #include <unistd.h>
+ 
+ #include "simdjson.h"
++
++SIMDJSON_PUSH_DISABLE_ALL_WARNINGS
+ #ifndef __cpp_exceptions
+ #define CXXOPTS_NO_EXCEPTIONS
+ #endif
+ #include "cxxopts.hpp"
++SIMDJSON_POP_DISABLE_WARNINGS
+ 
+ cxxopts::Options options("minify", "Runs the parser against the given json files in a loop, measuring speed and other statistics.");
+ 

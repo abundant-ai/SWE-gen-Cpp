@@ -9,10 +9,10 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install C++ compiler and CMake
+# Install C++ compiler and CMake for building and testing
 RUN apt-get update && apt-get install -y \
-    cmake \
     g++ \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -28,10 +28,10 @@ WORKDIR /app/src
 
 # Build the project with CMake
 RUN mkdir -p build && cd build && \
-    cmake .. -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build . -j 4
+    cmake .. -DMAGIC_ENUM_OPT_BUILD_TESTS=ON && \
+    cmake --build .
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
@@ -39,9 +39,7 @@ COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
 # Rebuild after applying bug.patch
-RUN mkdir -p build && cd build && \
-    cmake .. -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build . -j 4
+RUN cd build && cmake --build .
 
 RUN rm -rf /app/src/.git
 

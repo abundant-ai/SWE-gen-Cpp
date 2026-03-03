@@ -1,0 +1,494 @@
+diff --git a/include/simdjson/dom/document_stream.h b/include/simdjson/dom/document_stream.h
+index 308f20e2..b07ac2b5 100644
+--- a/include/simdjson/dom/document_stream.h
++++ b/include/simdjson/dom/document_stream.h
+@@ -224,7 +224,8 @@ private:
+    * Parse the next document found in the buffer previously given to document_stream.
+    *
+    * The content should be a valid JSON document encoded as UTF-8. If there is a
+-   * UTF-8 BOM, the parser skips it.
++   * UTF-8 BOM, the caller is responsible for omitting it, UTF-8 BOM are
++   * discouraged.
+    *
+    * You do NOT need to pre-allocate a parser.  This function takes care of
+    * pre-allocating a capacity defined by the batch_size defined when creating the
+diff --git a/include/simdjson/dom/parser-inl.h b/include/simdjson/dom/parser-inl.h
+index 251e785e..e5f660b1 100644
+--- a/include/simdjson/dom/parser-inl.h
++++ b/include/simdjson/dom/parser-inl.h
+@@ -12,7 +12,6 @@
+ #include "simdjson/dom/element-inl.h"
+ 
+ #include <climits>
+-#include <cstring> /* memcmp */
+ 
+ namespace simdjson {
+ namespace dom {
+@@ -121,14 +120,8 @@ inline simdjson_result<element> parser::parse_into_document(document& provided_d
+       _loaded_bytes_capacity = len;
+     }
+     std::memcpy(static_cast<void *>(loaded_bytes.get()), buf, len);
+-    buf = reinterpret_cast<const uint8_t*>(loaded_bytes.get());
+   }
+-
+-  if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
+-    buf += 3;
+-    len -= 3;
+-  }
+-  _error = implementation->parse(buf, len, provided_doc);
++  _error = implementation->parse(realloc_if_needed ? reinterpret_cast<const uint8_t*>(loaded_bytes.get()): buf, len, provided_doc);
+ 
+   if (_error) { return _error; }
+ 
+@@ -165,10 +158,6 @@ simdjson_inline simdjson_result<element> parser::parse(const padded_string_view
+ 
+ inline simdjson_result<document_stream> parser::parse_many(const uint8_t *buf, size_t len, size_t batch_size) noexcept {
+   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
+-  if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
+-    buf += 3;
+-    len -= 3;
+-  }
+   return document_stream(*this, buf, len, batch_size);
+ }
+ inline simdjson_result<document_stream> parser::parse_many(const char *buf, size_t len, size_t batch_size) noexcept {
+diff --git a/include/simdjson/dom/parser.h b/include/simdjson/dom/parser.h
+index db0aadbc..e13f5c3a 100644
+--- a/include/simdjson/dom/parser.h
++++ b/include/simdjson/dom/parser.h
+@@ -254,8 +254,6 @@ public:
+    * And, possibly, no document many have been parsed when the `parser.load_many(path)` function
+    * returned.
+    *
+-   * If there is a UTF-8 BOM, the parser skips it.
+-   *
+    * ### Format
+    *
+    * The file must contain a series of one or more JSON documents, concatenated into a single
+@@ -348,8 +346,6 @@ public:
+    *     cout << std::string(doc["title"]) << endl;
+    *   }
+    *
+-   * If there is a UTF-8 BOM, the parser skips it.
+-   *
+    * ### Format
+    *
+    * The buffer must contain a series of one or more JSON documents, concatenated into a single
+diff --git a/include/simdjson/generic/ondemand/document_stream.h b/include/simdjson/generic/ondemand/document_stream.h
+index d63534e1..fa2b1a66 100644
+--- a/include/simdjson/generic/ondemand/document_stream.h
++++ b/include/simdjson/generic/ondemand/document_stream.h
+@@ -241,7 +241,8 @@ private:
+    * Parse the next document found in the buffer previously given to document_stream.
+    *
+    * The content should be a valid JSON document encoded as UTF-8. If there is a
+-   * UTF-8 BOM, the parser skips it.
++   * UTF-8 BOM, the caller is responsible for omitting it, UTF-8 BOM are
++   * discouraged.
+    *
+    * You do NOT need to pre-allocate a parser.  This function takes care of
+    * pre-allocating a capacity defined by the batch_size defined when creating the
+diff --git a/include/simdjson/generic/ondemand/parser-inl.h b/include/simdjson/generic/ondemand/parser-inl.h
+index b166e60b..2913b1d9 100644
+--- a/include/simdjson/generic/ondemand/parser-inl.h
++++ b/include/simdjson/generic/ondemand/parser-inl.h
+@@ -46,8 +46,6 @@ simdjson_warn_unused simdjson_inline error_code parser::allocate(size_t new_capa
+ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
+   if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+ 
+-  json.remove_utf8_bom();
+-
+   // Allocate if needed
+   if (capacity() < json.length() || !string_buf) {
+     SIMDJSON_TRY( allocate(json.length(), max_depth()) );
+@@ -98,8 +96,6 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(c
+ simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iterate_raw(padded_string_view json) & noexcept {
+   if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+ 
+-  json.remove_utf8_bom();
+-
+   // Allocate if needed
+   if (capacity() < json.length()) {
+     SIMDJSON_TRY( allocate(json.length(), max_depth()) );
+@@ -112,10 +108,6 @@ simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iter
+ 
+ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
+-  if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
+-    buf += 3;
+-    len -= 3;
+-  }
+   if(allow_comma_separated && batch_size < len) { batch_size = len; }
+   return document_stream(*this, buf, len, batch_size, allow_comma_separated);
+ }
+diff --git a/include/simdjson/generic/ondemand/parser.h b/include/simdjson/generic/ondemand/parser.h
+index da0e3ee7..31484b68 100644
+--- a/include/simdjson/generic/ondemand/parser.h
++++ b/include/simdjson/generic/ondemand/parser.h
+@@ -59,7 +59,7 @@ public:
+    * It is expected that the content is a valid UTF-8 file, containing a valid JSON document.
+    * Otherwise the iterate method may return an error. In particular, the whole input should be
+    * valid: we do not attempt to tolerate incorrect content either before or after a JSON
+-   * document. If there is a UTF-8 BOM, the parser skips it.
++   * document.
+    *
+    * ### IMPORTANT: Validate what you use
+    *
+@@ -188,7 +188,6 @@ public:
+    * arrays or objects) MUST be separated with ASCII whitespace.
+    *
+    * The characters inside a JSON document, and between JSON documents, must be valid Unicode (UTF-8).
+-   * If there is a UTF-8 BOM, the parser skips it.
+    *
+    * The documents must not exceed batch_size bytes (by default 1MB) or they will fail to parse.
+    * Setting batch_size to excessively large or excessively small values may impact negatively the
+diff --git a/include/simdjson/padded_string_view-inl.h b/include/simdjson/padded_string_view-inl.h
+index c0a34702..5e0f2ddf 100644
+--- a/include/simdjson/padded_string_view-inl.h
++++ b/include/simdjson/padded_string_view-inl.h
+@@ -2,9 +2,8 @@
+ #define SIMDJSON_PADDED_STRING_VIEW_INL_H
+ 
+ #include "simdjson/padded_string_view.h"
+-#include "simdjson/error-inl.h"
+ 
+-#include <cstring> /* memcmp */
++#include "simdjson/error-inl.h"
+ 
+ namespace simdjson {
+ 
+@@ -32,16 +31,6 @@ inline size_t padded_string_view::capacity() const noexcept { return _capacity;
+ 
+ inline size_t padded_string_view::padding() const noexcept { return capacity() - length(); }
+ 
+-inline bool padded_string_view::remove_utf8_bom() noexcept {
+-  if(length() < 3) { return false; }
+-  if (std::memcmp(data(), "\xEF\xBB\xBF", 3) == 0) {
+-    remove_prefix(3);
+-    _capacity -= 3;
+-    return true;
+-  }
+-  return false;
+-}
+-
+ #if SIMDJSON_EXCEPTIONS
+ inline std::ostream& operator<<(std::ostream& out, simdjson_result<padded_string_view> &s) noexcept(false) { return out << s.value(); }
+ #endif
+diff --git a/include/simdjson/padded_string_view.h b/include/simdjson/padded_string_view.h
+index a5ed2817..bb8e8545 100644
+--- a/include/simdjson/padded_string_view.h
++++ b/include/simdjson/padded_string_view.h
+@@ -54,13 +54,6 @@ public:
+   /** The number of allocated bytes. */
+   inline size_t capacity() const noexcept;
+ 
+-  /**
+-   * Remove the UTF-8 Byte Order Mark (BOM) if it exists.
+-   *
+-   * @return whether a BOM was found and removed
+-   */
+-  inline bool remove_utf8_bom() noexcept;
+-
+   /** The amount of padding on the string (capacity() - length()) */
+   inline size_t padding() const noexcept;
+ 
+diff --git a/tests/dom/basictests.cpp b/tests/dom/basictests.cpp
+index 2a371fc6..b1f4bf4e 100644
+--- a/tests/dom/basictests.cpp
++++ b/tests/dom/basictests.cpp
+@@ -66,16 +66,6 @@ namespace number_tests {
+     return true;
+   }
+ 
+-  bool bomskip() {
+-    TEST_START();
+-    simdjson::dom::parser parser;
+-    simdjson::padded_string docdata = "\xEF\xBB\xBF{\"score\":0.8825149536132812}"_padded;
+-    double score;
+-    ASSERT_SUCCESS(parser.parse(docdata)["score"].get_double().get(score));
+-    ASSERT_EQUAL(score, 0.8825149536132812);
+-    TEST_SUCCEED();
+-  }
+-
+   bool issue2017() {
+     TEST_START();
+     simdjson::dom::parser parser;
+@@ -396,8 +386,7 @@ namespace number_tests {
+   }
+ 
+   bool run() {
+-    return bomskip() &&
+-           issue2017() &&
++    return issue2017() &&
+            truncated_borderline() &&
+            specific_tests() &&
+            ground_truth() &&
+@@ -1669,7 +1658,6 @@ namespace validate_tests {
+     }
+     return true;
+   }
+-
+   bool test_validate() {
+     std::cout << "Running " << __func__ << std::endl;
+     const std::string test = R"({ "foo" : 1, "bar" : [ 1, 2, 3 ], "baz": { "a": 1, "b": 2, "c": 3 } })";
+@@ -1678,7 +1666,6 @@ namespace validate_tests {
+     }
+     return true;
+   }
+-
+   bool test_range() {
+     std::cout << "Running " << __func__ << std::endl;
+     for(size_t len = 0; len <= 128; len++) {
+@@ -1696,7 +1683,6 @@ namespace validate_tests {
+     }
+     return true;
+   }
+-
+   bool test_issue1169() {
+     std::cout << "Running " << __func__ << std::endl;
+     std::vector<uint8_t> source(64,' ');
+@@ -1707,7 +1693,6 @@ namespace validate_tests {
+     }
+     return true;
+   }
+-
+   bool test_issue1169_long() {
+     std::cout << "Running " << __func__ << std::endl;
+     for(size_t len = 1; len <= 128; len++) {
+@@ -1717,7 +1702,6 @@ namespace validate_tests {
+     }
+     return true;
+   }
+-
+   bool test_random() {
+     std::cout << "Running " << __func__ << std::endl;
+     std::vector<uint8_t> source(64,' ');
+@@ -1779,7 +1763,6 @@ namespace minify_tests {
+     }
+     return true;
+   }
+-
+   // this is meant to test buffer overflows.
+   bool test_various_lengths2() {
+     std::cout << "Running " << __func__ << std::endl;
+@@ -1798,7 +1781,6 @@ namespace minify_tests {
+     }
+     return true;
+   }
+-
+   bool test_single_quote() {
+     std::cout << "Running " << __func__ << std::endl;
+     const std::string test = "\"";
+@@ -1819,14 +1801,12 @@ namespace minify_tests {
+     const std::string minified(R"({"foo":1,"bar":[1,2,0.11111111111111113],"baz":{"a":3.1415926535897936,"b":2,"c":3.141592653589794}})");
+     return check_minification(test.c_str(), test.size(), minified.c_str(), minified.size());
+   }
+-
+   bool test_minify_array() {
+     std::cout << "Running " << __func__ << std::endl;
+     std::string test("[ 1,    2,    3]");
+     std::string minified("[1,2,3]");
+     return check_minification(test.c_str(), test.size(), minified.c_str(), minified.size());
+   }
+-
+   bool test_minify_object() {
+     std::cout << "Running " << __func__ << std::endl;
+     std::string test(R"({ "foo   " : 1, "b  ar" : [ 1, 2, 3 ], "baz": { "a": 1, "b": 2, "c": 3 } })");
+@@ -1869,7 +1849,6 @@ namespace format_tests {
+     s << doc;
+     return assert_minified(s);
+   }
+-
+   bool print_minify_parser_parse() {
+     std::cout << "Running " << __func__ << std::endl;
+     dom::parser parser;
+@@ -1889,7 +1868,6 @@ namespace format_tests {
+     s << value;
+     return assert_minified(s, "1");
+   }
+-
+   bool print_minify_element() {
+     std::cout << "Running " << __func__ << std::endl;
+     dom::parser parser;
+@@ -1909,7 +1887,6 @@ namespace format_tests {
+     s << array;
+     return assert_minified(s, "[1,2,0.11111111111111113]");
+   }
+-
+   bool print_minify_array() {
+     std::cout << "Running " << __func__ << std::endl;
+     dom::parser parser;
+@@ -1929,7 +1906,6 @@ namespace format_tests {
+     s << object;
+     return assert_minified(s, R"({"a":3.1415926535897936,"b":2,"c":3.141592653589794})");
+   }
+-
+   bool print_minify_object() {
+     std::cout << "Running " << __func__ << std::endl;
+     dom::parser parser;
+@@ -1949,7 +1925,6 @@ namespace format_tests {
+     s << parser.parse(DOCUMENT);
+     return assert_minified(s);
+   }
+-
+   bool print_minify_parser_parse_exception() {
+     std::cout << "Running " << __func__ << std::endl;
+     dom::parser parser;
+@@ -1965,7 +1940,6 @@ namespace format_tests {
+     s << parser.parse(DOCUMENT)["foo"];
+     return assert_minified(s, "1");
+   }
+-
+   bool print_minify_element_result_exception() {
+     std::cout << "Running " << __func__ << std::endl;
+     dom::parser parser;
+@@ -1982,7 +1956,6 @@ namespace format_tests {
+     s << value;
+     return assert_minified(s, "1");
+   }
+-
+   bool print_minify_element_exception() {
+     std::cout << "Running " << __func__ << std::endl;
+     dom::parser parser;
+@@ -1999,7 +1972,6 @@ namespace format_tests {
+     s << parser.parse(DOCUMENT)["bar"].get_array();
+     return assert_minified(s, "[1,2,0.11111111111111113]");
+   }
+-
+   bool print_minify_array_result_exception() {
+     std::cout << "Running " << __func__ << std::endl;
+     dom::parser parser;
+diff --git a/tests/dom/document_stream_tests.cpp b/tests/dom/document_stream_tests.cpp
+index cd42b2e1..9a06fc9b 100644
+--- a/tests/dom/document_stream_tests.cpp
++++ b/tests/dom/document_stream_tests.cpp
+@@ -397,33 +397,6 @@ namespace document_stream_tests {
+     std::cout << "number of documents " << count << std::endl;
+     return count == 1;
+   }
+-
+-  bool skipbom() {
+-    std::cout << "Running " << __func__ << std::endl;
+-    simdjson::dom::parser parser;
+-    auto json = "\xEF\xBB\xBF{\"hello\": \"world\"}"_padded;
+-    simdjson::dom::document_stream stream;
+-    ASSERT_SUCCESS(parser.parse_many(json).get(stream));
+-    size_t count = 0;
+-    for (auto doc : stream) {
+-        if(doc.error()) {
+-          std::cerr << "Unexpected error: " << doc.error() << std::endl;
+-          return false;
+-        }
+-        std::string expected = R"({"hello":"world"})";
+-        simdjson::dom::element this_document;
+-        ASSERT_SUCCESS(doc.get(this_document));
+-
+-        std::string answer = simdjson::minify(this_document);
+-        if(answer != expected) {
+-          std::cout << this_document << std::endl;
+-          return false;
+-        }
+-        count += 1;
+-    }
+-    std::cout << "number of documents " << count << std::endl;
+-    return count == 1;
+-  }
+ #if SIMDJSON_EXCEPTIONS
+   bool single_document_exceptions() {
+     std::cout << "Running " << __func__ << std::endl;
+@@ -940,8 +913,7 @@ namespace document_stream_tests {
+   }
+ 
+   bool run() {
+-    return skipbom() &&
+-           fuzzaccess() &&
++    return fuzzaccess() &&
+            baby_fuzzer() &&
+            issue1649() &&
+            adversarial_single_document_array() &&
+diff --git a/tests/ondemand/ondemand_document_stream_tests.cpp b/tests/ondemand/ondemand_document_stream_tests.cpp
+index 712aed68..0f4b6224 100644
+--- a/tests/ondemand/ondemand_document_stream_tests.cpp
++++ b/tests/ondemand/ondemand_document_stream_tests.cpp
+@@ -322,43 +322,6 @@ namespace document_stream_tests {
+         TEST_SUCCEED();
+     }
+ 
+-    bool skipbom() {
+-        TEST_START();
+-        auto json = "\xEF\xBB\xBF[1,[1,2]] {\"a\":1,\"b\":2} {\"o\":{\"1\":1,\"2\":2}} [1,2,3]"_padded;
+-        ondemand::parser parser;
+-        ondemand::document_stream stream;
+-        ASSERT_SUCCESS(parser.iterate_many(json).get(stream));
+-        std::string_view expected[4] = {"[1,[1,2]]", "{\"a\":1,\"b\":2}", "{\"o\":{\"1\":1,\"2\":2}}", "[1,2,3]"};
+-        size_t counter{0};
+-        auto i = stream.begin();
+-        int64_t x;
+-
+-        ASSERT_EQUAL(i.source(),expected[counter++]);
+-        ASSERT_SUCCESS( (*i).at_pointer("/1/1").get(x) );
+-        ASSERT_EQUAL(x,2);
+-        ++i;
+-
+-        ASSERT_EQUAL(i.source(),expected[counter++]);
+-        simdjson_result<ondemand::document_reference> xxx = *i;
+-        ASSERT_SUCCESS( xxx.find_field("a").get(x) );
+-        ASSERT_EQUAL(x,1);
+-        ++i;
+-
+-        ASSERT_EQUAL(i.source(),expected[counter++]);
+-        ASSERT_SUCCESS( (*i).at_pointer("/o/2").get(x) );
+-        ASSERT_EQUAL(x,2);
+-        ++i;
+-
+-        ASSERT_EQUAL(i.source(),expected[counter++]);
+-        ASSERT_SUCCESS( (*i).at_pointer("/2").get(x) );
+-        ASSERT_EQUAL(x,3);
+-        ++i;
+-
+-        if (i != stream.end()) { return false; }
+-
+-        TEST_SUCCEED();
+-    }
+-
+     bool atoms_json() {
+         TEST_START();
+         auto json = R"(5 true 20.3 "string" )"_padded;
+@@ -840,7 +803,6 @@ namespace document_stream_tests {
+ 
+     bool run() {
+         return
+-            skipbom() &&
+             issue1977() &&
+             string_with_trailing() &&
+             uint64_with_trailing() &&
+diff --git a/tests/ondemand/ondemand_misc_tests.cpp b/tests/ondemand/ondemand_misc_tests.cpp
+index 545cc748..224eca73 100644
+--- a/tests/ondemand/ondemand_misc_tests.cpp
++++ b/tests/ondemand/ondemand_misc_tests.cpp
+@@ -16,18 +16,6 @@ namespace misc_tests {
+     ASSERT_FALSE(b);
+     TEST_SUCCEED();
+   }
+-  bool skipbom() {
+-    auto error_phrase = "\xEF\xBB\xBF false"_padded;
+-    TEST_START();
+-    ondemand::parser parser;
+-    ondemand::document doc;
+-    ASSERT_SUCCESS(parser.iterate(error_phrase).get(doc));
+-    bool b;
+-    ASSERT_SUCCESS( doc.get_bool().get(b));
+-    ASSERT_FALSE(b);
+-    TEST_SUCCEED();
+-  }
+-
+ 
+   bool issue1981_failure() {
+     auto error_phrase = R"(falseA)"_padded;
+@@ -605,7 +593,6 @@ namespace misc_tests {
+ 
+   bool run() {
+     return
+-           skipbom() &&
+            issue1981_success() &&
+            issue1981_failure() &&
+            replacement_char() &&

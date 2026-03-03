@@ -6,8 +6,7 @@ cd /app/src
 mkdir -p "test/integration"
 cp "/tests/integration/emitter_test.cpp" "test/integration/emitter_test.cpp"
 
-# Rebuild yaml-cpp (oracle applies fix.patch before running this script,
-# so we need to rebuild to get the fixed version)
+# Rebuild the test executable with the updated test file
 cmake --build build --config Debug 2>&1
 rebuild_status=$?
 
@@ -17,8 +16,8 @@ if [ $rebuild_status -ne 0 ]; then
   exit $rebuild_status
 fi
 
-# Run the specific test for emitter_test
-./build/test/yaml-cpp-tests --gtest_filter="*Emitter*" 2>&1
+# Run only the EmitterTest tests from emitter_test.cpp
+./build/test/yaml-cpp-tests --gtest_filter=EmitterTest.*
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

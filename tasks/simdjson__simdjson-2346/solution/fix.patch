@@ -1,0 +1,650 @@
+diff --git a/dependencies/CMakeLists.txt b/dependencies/CMakeLists.txt
+index e2226008..5aac85fd 100644
+--- a/dependencies/CMakeLists.txt
++++ b/dependencies/CMakeLists.txt
+@@ -93,7 +93,7 @@ int main() {}
+ 
+   CPMAddPackage(
+       NAME nlohmann_json
+-      URL https://github.com/nlohmann/json/archive/refs/tags/v3.10.5.zip
++      URL https://github.com/nlohmann/json/archive/refs/tags/v3.12.0.zip
+   )
+ 
+   set_property(TARGET nlohmann_json APPEND PROPERTY INTERFACE_COMPILE_DEFINITIONS SIMDJSON_COMPETITION_NLOHMANN_JSON)
+diff --git a/doc/dom.md b/doc/dom.md
+index 0c9272a8..3cd8818a 100644
+--- a/doc/dom.md
++++ b/doc/dom.md
+@@ -323,6 +323,74 @@ if(error) { /*won't happen*/ }
+ ```
+ 
+ 
++## Using `at_path_with_wildcard` for JSONPath Queries
++
++The `at_path_with_wildcard` function in simdjson extends the JSONPath querying capabilities by supporting wildcard expressions (`*`) in JSON paths. This allows users to retrieve multiple elements from a JSON document in a single query. For example, you can use `$.address.*` to fetch all fields within the `address` object or `$.phoneNumbers[*].numbers[*]` to retrieve all phone numbers across multiple objects in an array.
++
++The `*` wildcard matches all elements at a specific level. For instance, `$.address.*` retrieves all key-value pairs in the `address` object, while `$.*.streetAddress` fetches all `streetAddress` fields across objects at the root level.  You can combine wildcards with array indexing. For example, `$.phoneNumbers[*].numbers[1]` retrieves the second number from each `numbers` array in the `phoneNumbers` array. If no elements match the wildcard query, the function returns an empty result. For instance, querying `$.empty_object.*` or `$.empty_array.*` will yield an empty set.
++
++### Example Usage
++
++Here is an example demonstrating the use of `at_path_with_wildcard`:
++
++```cpp
++simdjson::padded_string json_string = R"(
++{
++  "firstName": "John",
++  "lastName": "doe",
++  "age": 26,
++  "address": {
++    "streetAddress": "naist street",
++    "city": "Nara",
++    "postalCode": "630-0192"
++  },
++  "phoneNumbers": [
++    {
++      "type": "iPhone",
++      "numbers": ["0123-4567-8888", "0123-4567-8788"]
++    },
++    {
++      "type": "home",
++      "numbers": ["0123-4567-8910"]
++    }
++  ]
++})"_padded;
++
++dom::parser parser;
++dom::element parsed_json = parser.parse(json_string);
++std::vector<dom::element> values;
++
++// Fetch all fields in the address object
++auto error = parsed_json.at_path_with_wildcard("$.address.*").get(values);
++if(error) {
++  // do something
++}
++for (auto &value : values) {
++  std::string_view field;
++  error = value.get(field);
++  if(error) {
++    // do something
++  }
++  std::cout << field << std::endl;
++}
++
++// Fetch all phone numbers
++error = parsed_json.at_path_with_wildcard("$.phoneNumbers[*].numbers[*]").get(values);
++if(error) {
++  // do something
++}
++for (auto &value : values) {
++  std::string_view number;
++  error = value.get(number);
++  if(error) {
++    // do something
++  }
++  std::cout << number << std::endl;
++}
++```
++
++This function is particularly useful for extracting data from complex JSON structures with nested arrays and objects. By leveraging wildcards, you can simplify your queries and reduce the need for multiple iterations.
++
+ Error Handling
+ --------------
+ 
+diff --git a/include/simdjson/dom/array-inl.h b/include/simdjson/dom/array-inl.h
+index f0b587dc..32828274 100644
+--- a/include/simdjson/dom/array-inl.h
++++ b/include/simdjson/dom/array-inl.h
+@@ -52,11 +52,22 @@ inline simdjson_result<dom::element> simdjson_result<dom::array>::at_pointer(std
+   return at_pointer(json_pointer);
+  }
+ 
++inline simdjson_result<std::vector<dom::element>> simdjson_result<dom::array>::at_path_with_wildcard(std::string_view json_path) const noexcept {
++  if (error()) {
++    return error();
++  }
++  return first.at_path_with_wildcard(json_path);
++}
++
+ inline simdjson_result<dom::element> simdjson_result<dom::array>::at(size_t index) const noexcept {
+   if (error()) { return error(); }
+   return first.at(index);
+ }
+ 
++inline std::vector<dom::element>& simdjson_result<dom::array>::get_values(std::vector<dom::element>& out) const noexcept {
++  return first.get_values(out);
++}
++
+ namespace dom {
+ 
+ //
+@@ -127,6 +138,93 @@ inline simdjson_result<element> array::at_path(std::string_view json_path) const
+   return at_pointer(json_pointer);
+ }
+ 
++inline void array::process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept {
++  if (current == end) {
++    return;
++  }
++
++  simdjson_result<std::vector<element>> result;
++
++
++  for (auto it = current; it != end; ++it) {
++    std::vector<element> child_result;
++    auto error = it->at_path_with_wildcard(path_suffix).get(child_result);
++    if(error) {
++      continue;
++    }
++    accumulator.reserve(accumulator.size() + child_result.size());
++    accumulator.insert(accumulator.end(),
++                        std::make_move_iterator(child_result.begin()),
++                        std::make_move_iterator(child_result.end()));
++  }
++}
++
++inline simdjson_result<std::vector<element>> array::at_path_with_wildcard(std::string_view json_path) const noexcept {
++  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
++
++  size_t i = 0;
++   // json_path.starts_with('$') requires C++20.
++  if (!json_path.empty() && json_path.front() == '$') {
++    i = 1;
++  }
++
++  if (i >= json_path.size() || (json_path[i] != '.' && json_path[i] != '[')) {
++    return INVALID_JSON_POINTER;
++  }
++
++  if (json_path.find("*") != std::string::npos) {
++    std::vector<element> child_values;
++
++    if (
++      (json_path.compare(i, 3, "[*]") == 0 && json_path.size() == i + 3) ||
++      (json_path.compare(i, 2,".*") == 0 && json_path.size() == i + 2)
++    ) {
++      get_values(child_values);
++      return child_values;
++    }
++
++    std::pair<std::string_view, std::string_view> key_and_json_path = get_next_key_and_json_path(json_path);
++
++    std::string_view key = key_and_json_path.first;
++    json_path = key_and_json_path.second;
++
++    if (key.size() > 0) {
++      if (key == "*") {
++        get_values(child_values);
++      } else {
++        element pointer_result;
++        std::string json_pointer = "/" + std::string(key);
++        auto error = at_pointer(json_pointer).get(pointer_result);
++
++        if (!error) {
++          child_values.emplace_back(pointer_result);
++        }
++      }
++
++      std::vector<element> result = {};
++
++      if (child_values.size() > 0) {
++        std::vector<element>::iterator child_values_begin = child_values.begin();
++        std::vector<element>::iterator child_values_end = child_values.end();
++
++        process_json_path_of_child_elements(child_values_begin, child_values_end, json_path, result);
++      }
++
++      return result;
++    } else {
++      return INVALID_JSON_POINTER;
++    }
++  } else {
++    element result;
++    auto error = at_path(json_path).get(result);
++    if (error) {
++      return error;
++    }
++
++    return std::vector<element>{std::move(result)};
++  }
++}
++
+ inline simdjson_result<element> array::at(size_t index) const noexcept {
+   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
+   size_t i=0;
+@@ -137,6 +235,15 @@ inline simdjson_result<element> array::at(size_t index) const noexcept {
+   return INDEX_OUT_OF_BOUNDS;
+ }
+ 
++inline std::vector<element>& array::get_values(std::vector<element>& out) const noexcept {
++  out.reserve(this->size());
++  for (auto element : *this) {
++    out.emplace_back(element);
++  }
++
++  return out;
++}
++
+ inline array::operator element() const noexcept {
+ 	return element(tape);
+ }
+diff --git a/include/simdjson/dom/array.h b/include/simdjson/dom/array.h
+index f54e3bc1..290c5d7f 100644
+--- a/include/simdjson/dom/array.h
++++ b/include/simdjson/dom/array.h
+@@ -1,6 +1,8 @@
+ #ifndef SIMDJSON_DOM_ARRAY_H
+ #define SIMDJSON_DOM_ARRAY_H
+ 
++#include <vector>
++
+ #include "simdjson/dom/base.h"
+ #include "simdjson/internal/tape_ref.h"
+ 
+@@ -108,6 +110,17 @@ public:
+    */
+   inline simdjson_result<element> at_pointer(std::string_view json_pointer) const noexcept;
+ 
++  /**
++   * Recursive function which processes the json path of each child element
++   */
++  inline void process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept;
++
++
++  /**
++   * Adds support for JSONPath expression with wildcards '*'
++   */
++  inline simdjson_result<std::vector<element>> at_path_with_wildcard(std::string_view json_path) const noexcept;
++
+   /**
+    * Get the value associated with the given JSONPath expression. We only support
+    * JSONPath queries that trivially convertible to JSON Pointer queries: key
+@@ -141,6 +154,15 @@ public:
+    */
+   inline simdjson_result<element> at(size_t index) const noexcept;
+ 
++  /**
++   * Gets the values of items in an array element
++   * This function has linear-time complexity: the values are checked one by one.
++   *
++   * @return The child elements of an array
++   */
++
++  inline std::vector<element>& get_values(std::vector<element>& out) const noexcept;
++
+   /**
+    * Implicitly convert object to element
+    */
+@@ -167,8 +189,11 @@ public:
+   simdjson_inline simdjson_result(error_code error) noexcept; ///< @private
+ 
+   inline simdjson_result<dom::element> at_pointer(std::string_view json_pointer) const noexcept;
++  inline void process_json_path_of_child_elements(std::vector<dom::element>::iterator& current, std::vector<dom::element>::iterator& end, const std::string_view& path_suffix, std::vector<dom::element>& accumulator) const noexcept;
++  inline simdjson_result<std::vector<dom::element>> at_path_with_wildcard(std::string_view json_path) const noexcept;
+   inline simdjson_result<dom::element> at_path(std::string_view json_path) const noexcept;
+   inline simdjson_result<dom::element> at(size_t index) const noexcept;
++  inline std::vector<dom::element>& get_values(std::vector<dom::element>& out) const noexcept;
+ 
+ #if SIMDJSON_EXCEPTIONS
+   inline dom::array::iterator begin() const noexcept(false);
+diff --git a/include/simdjson/dom/element-inl.h b/include/simdjson/dom/element-inl.h
+index 1466609c..f5f9ed5b 100644
+--- a/include/simdjson/dom/element-inl.h
++++ b/include/simdjson/dom/element-inl.h
+@@ -128,6 +128,12 @@ simdjson_inline simdjson_result<dom::element> simdjson_result<dom::element>::at_
+   if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
+   return at_pointer(json_pointer);
+ }
++
++simdjson_inline simdjson_result<std::vector<dom::element>> simdjson_result<dom::element>::at_path_with_wildcard(const std::string_view json_path) const noexcept {
++  if (error()) { return error(); }
++  return first.at_path_with_wildcard(json_path);
++}
++
+ #ifndef SIMDJSON_DISABLE_DEPRECATED_API
+ [[deprecated("For standard compliance, use at_pointer instead, and prefix your pointers with a slash '/', see RFC6901 ")]]
+ simdjson_inline simdjson_result<dom::element> simdjson_result<dom::element>::at(const std::string_view json_pointer) const noexcept {
+@@ -418,6 +424,20 @@ inline simdjson_result<element> element::at_pointer(std::string_view json_pointe
+     }
+   }
+ }
++
++inline simdjson_result<std::vector<element>> element::at_path_with_wildcard(std::string_view json_path) const noexcept {
++  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
++
++  switch (tape.tape_ref_type()) {
++    case internal::tape_type::START_OBJECT:
++      return object(tape).at_path_with_wildcard(json_path);
++    case internal::tape_type::START_ARRAY:
++      return array(tape).at_path_with_wildcard(json_path);
++    default:
++      return std::vector<element>{};
++  }
++}
++
+ inline simdjson_result<element> element::at_path(std::string_view json_path) const noexcept {
+   auto json_pointer = json_path_to_pointer_conversion(json_path);
+   if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
+diff --git a/include/simdjson/dom/element.h b/include/simdjson/dom/element.h
+index d39c8357..3f1b42c8 100644
+--- a/include/simdjson/dom/element.h
++++ b/include/simdjson/dom/element.h
+@@ -1,6 +1,8 @@
+ #ifndef SIMDJSON_DOM_ELEMENT_H
+ #define SIMDJSON_DOM_ELEMENT_H
+ 
++#include <vector>
++
+ #include "simdjson/dom/base.h"
+ #include "simdjson/dom/array.h"
+ 
+@@ -399,6 +401,8 @@ public:
+    */
+   inline simdjson_result<element> at_pointer(const std::string_view json_pointer) const noexcept;
+ 
++  inline simdjson_result<std::vector<element>> at_path_with_wildcard(const std::string_view json_path) const noexcept;
++
+   /**
+    * Get the value associated with the given JSONPath expression. We only support
+    * JSONPath queries that trivially convertible to JSON Pointer queries: key
+@@ -544,6 +548,7 @@ public:
+   simdjson_inline simdjson_result<dom::element> operator[](const char *key) const noexcept;
+   simdjson_result<dom::element> operator[](int) const noexcept = delete;
+   simdjson_inline simdjson_result<dom::element> at_pointer(const std::string_view json_pointer) const noexcept;
++  simdjson_inline simdjson_result<std::vector<dom::element>> at_path_with_wildcard(const std::string_view json_path) const noexcept;
+   simdjson_inline simdjson_result<dom::element> at_path(const std::string_view json_path) const noexcept;
+   [[deprecated("For standard compliance, use at_pointer instead, and prefix your pointers with a slash '/', see RFC6901 ")]]
+   simdjson_inline simdjson_result<dom::element> at(const std::string_view json_pointer) const noexcept;
+diff --git a/include/simdjson/dom/object-inl.h b/include/simdjson/dom/object-inl.h
+index 3bfd7a05..b2e9d190 100644
+--- a/include/simdjson/dom/object-inl.h
++++ b/include/simdjson/dom/object-inl.h
+@@ -40,10 +40,19 @@ inline simdjson_result<dom::element> simdjson_result<dom::object>::at_path(std::
+   if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
+   return at_pointer(json_pointer);
+ }
++inline simdjson_result<std::vector<dom::element>> simdjson_result<dom::object>::at_path_with_wildcard(std::string_view json_path) const noexcept {
++  if (error()) {
++    return error();
++  }
++  return first.at_path_with_wildcard(json_path);
++}
+ inline simdjson_result<dom::element> simdjson_result<dom::object>::at_key(std::string_view key) const noexcept {
+   if (error()) { return error(); }
+   return first.at_key(key);
+ }
++inline std::vector<dom::element>& simdjson_result<dom::object>::get_values(std::vector<dom::element>& out) const noexcept {
++  return first.get_values(out);
++}
+ inline simdjson_result<dom::element> simdjson_result<dom::object>::at_key_case_insensitive(std::string_view key) const noexcept {
+   if (error()) { return error(); }
+   return first.at_key_case_insensitive(key);
+@@ -143,6 +152,97 @@ inline simdjson_result<element> object::at_path(std::string_view json_path) cons
+   return at_pointer(json_pointer);
+ }
+ 
++inline void object::process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept {
++  if (current == end) {
++    return;
++  }
++
++  simdjson_result<std::vector<element>> result;
++
++  for (auto it = current; it != end; ++it) {
++    std::vector<element> child_result;
++    auto error = it->at_path_with_wildcard(path_suffix).get(child_result);
++    if(error) {
++      continue;
++    }
++    accumulator.reserve(accumulator.size() + child_result.size());
++    accumulator.insert(accumulator.end(),
++                        std::make_move_iterator(child_result.begin()),
++                        std::make_move_iterator(child_result.end()));
++  }
++}
++
++inline simdjson_result<std::vector<element>> object::at_path_with_wildcard(std::string_view json_path) const noexcept {
++  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
++
++  size_t i = 0;
++  if (json_path.empty()) {
++    return INVALID_JSON_POINTER;
++  }
++  // if JSONPath starts with $, skip it
++  // json_path.starts_with('$') requires C++20.
++  if (json_path.front() == '$') {
++    i = 1;
++  }
++
++  if (i >= json_path.size() || (json_path[i] != '.' && json_path[i] != '[')) {
++    // expect json path to always start with $ but this isn't currently
++    // expected in jsonpathutil.h.
++    return INVALID_JSON_POINTER;
++  }
++
++  if (json_path.find("*") != std::string::npos) {
++
++    std::vector<element> child_values;
++
++    if (
++      (json_path.compare(i, 3, "[*]") == 0 && json_path.size() == i + 3) ||
++      (json_path.compare(i, 2,".*") == 0 && json_path.size() == i + 2)
++    ) {
++      get_values(child_values);
++      return child_values;
++    }
++
++    std::pair<std::string_view, std::string_view> key_and_json_path = get_next_key_and_json_path(json_path);
++
++    std::string_view key = key_and_json_path.first;
++    json_path = key_and_json_path.second;
++
++    if (key.size() > 0) {
++      if (key == "*") {
++        get_values(child_values);
++      } else {
++        element pointer_result;
++        auto error = at_pointer("/" + std::string(key)).get(pointer_result);
++
++        if (!error) {
++          child_values.emplace_back(pointer_result);
++        }
++      }
++
++      std::vector<element> result = {};
++      if (child_values.size() > 0) {
++
++        std::vector<element>::iterator child_values_begin = child_values.begin();
++        std::vector<element>::iterator child_values_end = child_values.end();
++
++        process_json_path_of_child_elements(child_values_begin, child_values_end, json_path, result);
++      }
++
++      return result;
++    } else {
++      return INVALID_JSON_POINTER;
++    }
++  } else {
++    element result;
++    auto error = this->at_path(json_path).get(result);
++    if (error) {
++      return error;
++    }
++    return std::vector<element>{std::move(result)};
++  }
++}
++
+ inline simdjson_result<element> object::at_key(std::string_view key) const noexcept {
+   iterator end_field = end();
+   for (iterator field = begin(); field != end_field; ++field) {
+@@ -152,6 +252,18 @@ inline simdjson_result<element> object::at_key(std::string_view key) const noexc
+   }
+   return NO_SUCH_FIELD;
+ }
++
++inline std::vector<element>& object::get_values(std::vector<element>& out) const noexcept {
++  iterator end_field = end();
++  iterator begin_field = begin();
++
++  out.reserve(std::distance(begin_field, end_field));
++  for (iterator field = begin_field; field != end_field; ++field) {
++    out.emplace_back(field.value());
++  }
++
++  return out;
++}
+ // In case you wonder why we need this, please see
+ // https://github.com/simdjson/simdjson/issues/323
+ // People do seek keys in a case-insensitive manner.
+diff --git a/include/simdjson/dom/object.h b/include/simdjson/dom/object.h
+index 83f1392d..edea3bc5 100644
+--- a/include/simdjson/dom/object.h
++++ b/include/simdjson/dom/object.h
+@@ -1,6 +1,8 @@
+ #ifndef SIMDJSON_DOM_OBJECT_H
+ #define SIMDJSON_DOM_OBJECT_H
+ 
++#include <vector>
++
+ #include "simdjson/dom/base.h"
+ #include "simdjson/dom/element.h"
+ #include "simdjson/internal/tape_ref.h"
+@@ -172,6 +174,16 @@ public:
+    */
+   inline simdjson_result<element> at_pointer(std::string_view json_pointer) const noexcept;
+ 
++  /**
++   * Recursive function which processes the json path of each child element
++   */
++  inline void process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept;
++
++  /**
++   * Adds support for JSONPath expression with wildcards '*'
++   */
++  inline simdjson_result<std::vector<element>> at_path_with_wildcard(std::string_view json_path) const noexcept;
++
+   /**
+    * Get the value associated with the given JSONPath expression. We only support
+    * JSONPath queries that trivially convertible to JSON Pointer queries: key
+@@ -203,6 +215,14 @@ public:
+    */
+   inline simdjson_result<element> at_key(std::string_view key) const noexcept;
+ 
++  /**
++   * Gets the values associated with keys of an object
++   * This function has linear-time complexity: the keys are checked one by one.
++   *
++   * @return the values associated with each key of an object
++   */
++  inline std::vector<element>& get_values(std::vector<element>& out) const noexcept;
++
+   /**
+    * Get the value associated with the given key in a case-insensitive manner.
+    * It is only guaranteed to work over ASCII inputs.
+@@ -261,8 +281,11 @@ public:
+   inline simdjson_result<dom::element> operator[](const char *key) const noexcept;
+   simdjson_result<dom::element> operator[](int) const noexcept = delete;
+   inline simdjson_result<dom::element> at_pointer(std::string_view json_pointer) const noexcept;
++  inline void process_json_path_of_child_elements(std::vector<dom::element>::iterator& current, std::vector<dom::element>::iterator& end, const std::string_view& path_suffix, std::vector<dom::element>& accumulator) const noexcept;
++  inline simdjson_result<std::vector<dom::element>> at_path_with_wildcard(std::string_view json_path_new) const noexcept;
+   inline simdjson_result<dom::element> at_path(std::string_view json_path) const noexcept;
+   inline simdjson_result<dom::element> at_key(std::string_view key) const noexcept;
++  inline std::vector<dom::element>& get_values(std::vector<dom::element>& out) const noexcept;
+   inline simdjson_result<dom::element> at_key_case_insensitive(std::string_view key) const noexcept;
+ 
+ #if SIMDJSON_EXCEPTIONS
+diff --git a/include/simdjson/jsonpathutil.h b/include/simdjson/jsonpathutil.h
+index afcc74cc..ad93ab3a 100644
+--- a/include/simdjson/jsonpathutil.h
++++ b/include/simdjson/jsonpathutil.h
+@@ -4,6 +4,8 @@
+ #include <string>
+ #include <string_view>
+ 
++#include <utility>
++
+ namespace simdjson {
+ /**
+  * Converts JSONPath to JSON Pointer.
+@@ -12,12 +14,12 @@ namespace simdjson {
+  */
+ inline std::string json_path_to_pointer_conversion(std::string_view json_path) {
+   size_t i = 0;
+-
+   // if JSONPath starts with $, skip it
++   // json_path.starts_with('$') requires C++20.
+   if (!json_path.empty() && json_path.front() == '$') {
+     i = 1;
+   }
+-  if (json_path.empty() || (json_path[i] != '.' &&
++  if (i >= json_path.size() || (json_path[i] != '.' &&
+       json_path[i] != '[')) {
+     return "-1"; // This is just a sentinel value, the caller should check for this and return an error.
+   }
+@@ -60,5 +62,48 @@ inline std::string json_path_to_pointer_conversion(std::string_view json_path) {
+ 
+   return result;
+ }
++
++inline std::pair<std::string_view, std::string_view> get_next_key_and_json_path(std::string_view& json_path) {
++  std::string_view key;
++
++  if (json_path.empty()) {
++    return {key, json_path};
++  }
++  size_t i = 0;
++
++  // if JSONPath starts with $, skip it
++  if (json_path.front() == '$') {
++    i = 1;
++  }
++
++
++  if (i < json_path.length() && json_path[i] == '.') {
++    i += 1;
++    size_t key_start = i;
++
++    while (i < json_path.length() && json_path[i] != '[' && json_path[i] != '.') {
++      ++i;
++    }
++
++    key = json_path.substr(key_start, i - key_start);
++  } else if ((i+1 < json_path.size()) && json_path[i] == '[' && (json_path[i+1] == '\'' || json_path[i+1] == '"')) {
++    i += 2;
++    size_t key_start = i;
++    while (i < json_path.length() && json_path[i] != '\'' && json_path[i] != '"') {
++      ++i;
++    }
++
++    key = json_path.substr(key_start, i - key_start);
++
++    i += 2;
++  } else if ((i+2 < json_path.size()) && json_path[i] == '[' && json_path[i+1] == '*' && json_path[i+2] == ']') { // i.e [*].additional_keys or [*]["additional_keys"]
++    key = "*";
++    i += 3;
++  }
++
++
++  return std::make_pair(key, json_path.substr(i));
++}
++
+ } // namespace simdjson
+-#endif // SIMDJSON_JSONPATHUTIL_H
+\ No newline at end of file
++#endif // SIMDJSON_JSONPATHUTIL_H
+diff --git a/singleheader/simdjson.h b/singleheader/simdjson.h
+index 7a0f92ed..4502d6c5 100644
+--- a/singleheader/simdjson.h
++++ b/singleheader/simdjson.h
+@@ -6826,10 +6826,11 @@ inline std::string json_path_to_pointer_conversion(std::string_view json_path) {
+   size_t i = 0;
+ 
+   // if JSONPath starts with $, skip it
++   // json_path.starts_with('$') requires C++20.
+   if (!json_path.empty() && json_path.front() == '$') {
+     i = 1;
+   }
+-  if (json_path.empty() || (json_path[i] != '.' &&
++  if (i >= json_path.size() || (json_path[i] != '.' &&
+       json_path[i] != '[')) {
+     return "-1"; // This is just a sentinel value, the caller should check for this and return an error.
+   }

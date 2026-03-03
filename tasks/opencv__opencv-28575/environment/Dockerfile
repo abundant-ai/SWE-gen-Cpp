@@ -9,10 +9,11 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install C++ build tools and CMake
+# Install C++ build tools, CMake, and Python (needed for some OpenCV scripts)
 RUN apt-get update && apt-get install -y \
     cmake \
     ninja-build \
+    g++ \
     python3 \
     python3-numpy \
     && rm -rf /var/lib/apt/lists/*
@@ -26,35 +27,41 @@ RUN git clone https://github.com/opencv/opencv.git src && \
     git checkout --detach FETCH_HEAD && \
     git submodule update --init --recursive
 
-# Clone opencv_extra for test data (matching 5.x branch)
-RUN git clone --depth 1 --branch 5.x https://github.com/opencv/opencv_extra.git /app/opencv_extra
+WORKDIR /app/src
+
+# Download opencv_extra repository for test data
+WORKDIR /app
+RUN git clone --depth 1 https://github.com/opencv/opencv_extra.git extra
 
 WORKDIR /app/src
 
-# Build OpenCV with minimal configuration (DNN module + dependencies for tests)
-RUN mkdir -p /app/build && cd /app/build && \
-    cmake -GNinja \
-    -DCMAKE_BUILD_TYPE=Release \
+# Set environment variable for test data path
+ENV OPENCV_TEST_DATA_PATH=/app/extra/testdata
+
+# Configure and build OpenCV with CMake
+# We need to enable the DNN module and build tests
+RUN cmake -Bbuild -H. \
+    -DCMAKE_BUILD_TYPE=Debug \
     -DBUILD_TESTS=ON \
     -DBUILD_PERF_TESTS=OFF \
-    -DBUILD_EXAMPLES=OFF \
-    -DBUILD_opencv_apps=OFF \
-    -DBUILD_DOCS=OFF \
-    -DWITH_CUDA=OFF \
-    -DWITH_OPENCL=OFF \
-    /app/src && \
-    ninja opencv_test_dnn
+    -DBUILD_opencv_dnn=ON \
+    -DWITH_PROTOBUF=ON \
+    -DBUILD_PROTOBUF=ON \
+    -DOPENCV_DNN_OPENCL=OFF \
+    -G Ninja
 
-# Reset source files before applying bug.patch
-WORKDIR /app/src
+# Build OpenCV
+RUN cmake --build build
+
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Rebuild after applying bug.patch (required for C++)
-RUN cd /app/build && ninja opencv_test_dnn
+# Rebuild after applying bug.patch (C++ is a compiled language)
+RUN cmake --build build
 
 RUN rm -rf /app/src/.git
 

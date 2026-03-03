@@ -1,42 +1,38 @@
-Error reporting from yaml-cpp when accessing missing keys is currently too generic to debug in real configurations. When a user subscripts into a YAML::Node with a key that doesn’t exist and then either continues subscripting or converts to a concrete type, the library throws exceptions like YAML::InvalidNode or YAML::BadSubscript with messages that do not identify which key caused the failure (e.g., messages like "invalid node; this may result from using a map iterator as a sequence iterator, or vice-versa").
+When accessing YAML nodes with operator[] and then converting via .as<T>(), the library throws exceptions like YAML::InvalidNode or YAML::BadSubscript with messages that are too generic to debug. In particular, when a map lookup fails due to a missing key (often caused by typos), the thrown YAML::InvalidNode currently reports a generic message like:
 
-Improve YAML::InvalidNode and YAML::BadSubscript exception messages so that, when the first invalid key used in an operator[] access is printable (e.g., a string key or an integer index), the exception message includes that key. The goal is that users can immediately see which missing/incorrect key triggered the error without needing a debugger.
+"invalid node; this may result from using a map iterator as a sequence iterator, or vice-versa"
 
-Reproduction scenarios that should produce improved messages:
+This message does not reveal which key lookup failed, making it difficult to diagnose configuration issues without a debugger.
 
-1) BadSubscript should include the key when operator[] is called on a scalar.
+Update error reporting so that YAML::InvalidNode and YAML::BadSubscript include the first invalid key/index in the exception message when that key is printable (e.g., string keys and numeric indices). The message should still fall back to the existing generic wording when the key is not printable (for example, complex types used as a key).
+
+Concrete expected behavior:
+
+1) BadSubscript message should include the printable key/index when operator[] is invoked on a scalar.
 Example YAML:
 first:
   second: 1
   third: 2
 
-If code attempts further subscripting into a scalar node, e.g.:
-YAML::Node doc = YAML::Load(yaml_text);
-auto n = doc["first"]["second"]["fourth"];
-then the thrown YAML::BadSubscript message should be:
-operator[] call on a scalar (key: "fourth")
+- Evaluating doc["first"]["second"]["fourth"] should throw YAML::BadSubscript with message:
+  operator[] call on a scalar (key: "fourth")
 
-Similarly, for an integer index key:
-auto n = doc["first"]["second"][37];
-message should be:
-operator[] call on a scalar (key: "37")
+- Evaluating doc["first"]["second"][37] should throw YAML::BadSubscript with message:
+  operator[] call on a scalar (key: "37")
 
-If the key is not printable (e.g., complex types), the message should remain the generic form without a key suffix:
-operator[] call on a scalar
+- If the key is not printable (e.g., a complex object or an empty/unspecified key), the message should remain:
+  operator[] call on a scalar
 
-2) InvalidNode should include the first invalid key when converting a missing node via as<T>().
-With the same YAML and a const node:
-const YAML::Node doc = YAML::Load(yaml_text);
-int x = doc["first"]["fourth"].as<int>();
-then YAML::InvalidNode should have message:
-invalid node; first invalid key: "fourth"
+2) InvalidNode message should include the first invalid key/index when a lookup fails and then .as<T>() is called.
+Using the same YAML as above:
 
-Similarly for an integer index:
-int x = doc["first"][37].as<int>();
-message should be:
-invalid node; first invalid key: "37"
+- Evaluating doc["first"]["fourth"].as<int>() should throw YAML::InvalidNode with message:
+  invalid node; first invalid key: "fourth"
 
-If the key is not printable (e.g., a vector<int> used as a key), the YAML::InvalidNode message should remain the existing generic guidance:
-invalid node; this may result from using a map iterator as a sequence iterator, or vice-versa
+- Evaluating doc["first"][37].as<int>() should throw YAML::InvalidNode with message:
+  invalid node; first invalid key: "37"
 
-These changes should affect the exception message content (the stored message string, e.g., the msg field used by the exception), without changing the exception types thrown or the semantics of operator[] / as<T>() beyond improved diagnostics.
+- If the key is not printable, YAML::InvalidNode should keep the existing generic message:
+  invalid node; this may result from using a map iterator as a sequence iterator, or vice-versa
+
+The goal is that common configuration mistakes (like misspelled keys) surface the failing key directly in the exception string, without changing the behavior for non-printable keys.

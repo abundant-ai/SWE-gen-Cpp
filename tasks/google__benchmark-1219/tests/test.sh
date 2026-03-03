@@ -14,45 +14,81 @@ cp "/tests/user_counters_tabular_test.cc" "test/user_counters_tabular_test.cc"
 mkdir -p "test"
 cp "/tests/user_counters_thousands_test.cc" "test/user_counters_thousands_test.cc"
 
-# Rebuild with the fixed test files
-echo "Rebuilding with fixed test files..."
-rm -rf build
-cmake -B build -G Ninja \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-    -DBENCHMARK_ENABLE_TESTING=ON \
-    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-    -DBENCHMARK_ENABLE_WERROR=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# Initialize test_status
+test_status=0
 
-# Build everything to ensure all dependencies are correct
-cmake --build build --config Debug -j 1
-
-# Run the specific tests
-./build/test/complexity_test --benchmark_min_time=0.01
-status1=$?
-
-# Pipe repetitions_test through tail to prevent output overflow
-./build/test/repetitions_test --benchmark_min_time=0.01 2>&1 | tail -100
-status2=$?
-
-./build/test/reporter_output_test --benchmark_min_time=0.01
-status3=$?
-
-./build/test/user_counters_tabular_test --benchmark_counters_tabular=true --benchmark_min_time=0.01
-status4=$?
-
-./build/test/user_counters_thousands_test --benchmark_min_time=0.01
-status5=$?
-
-# Check if all tests passed
-if [ $status1 -eq 0 ] && [ $status2 -eq 0 ] && [ $status3 -eq 0 ] && [ $status4 -eq 0 ] && [ $status5 -eq 0 ]; then
-    test_status=0
-else
+# Rebuild the benchmark library first to pick up any source changes from fix.patch
+cd /app/src
+cmake --build build --config Debug --target benchmark -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark library"
     test_status=1
+fi
+
+# Rebuild the test targets with the fixed files
+cmake --build build --config Debug --target complexity_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build complexity_test"
+    test_status=1
+fi
+
+cmake --build build --config Debug --target repetitions_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build repetitions_test"
+    test_status=1
+fi
+
+cmake --build build --config Debug --target reporter_output_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build reporter_output_test"
+    test_status=1
+fi
+
+cmake --build build --config Debug --target user_counters_tabular_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build user_counters_tabular_test"
+    test_status=1
+fi
+
+cmake --build build --config Debug --target user_counters_thousands_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build user_counters_thousands_test"
+    test_status=1
+fi
+
+# Run the tests only if they built successfully
+if [ $test_status -eq 0 ]; then
+    cd /app/src/build
+
+    ./test/complexity_test --benchmark_min_time=0.01
+    if [ $? -ne 0 ]; then
+        echo "complexity_test failed"
+        test_status=1
+    fi
+
+    ./test/repetitions_test --benchmark_min_time=0.01 --benchmark_repetitions=3
+    if [ $? -ne 0 ]; then
+        echo "repetitions_test failed"
+        test_status=1
+    fi
+
+    ./test/reporter_output_test --benchmark_min_time=0.01
+    if [ $? -ne 0 ]; then
+        echo "reporter_output_test failed"
+        test_status=1
+    fi
+
+    ./test/user_counters_tabular_test --benchmark_counters_tabular=true --benchmark_min_time=0.01
+    if [ $? -ne 0 ]; then
+        echo "user_counters_tabular_test failed"
+        test_status=1
+    fi
+
+    ./test/user_counters_thousands_test --benchmark_min_time=0.01
+    if [ $? -ne 0 ]; then
+        echo "user_counters_thousands_test failed"
+        test_status=1
+    fi
 fi
 
 if [ $test_status -eq 0 ]; then

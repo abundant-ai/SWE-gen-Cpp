@@ -1,0 +1,345 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 04fa202..7aa6487 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -548,21 +548,24 @@ class State {
+ 
+   // Set the number of bytes processed by the current benchmark
+   // execution.  This routine is typically called once at the end of a
+-  // throughput oriented benchmark.
++  // throughput oriented benchmark.  If this routine is called with a
++  // value > 0, the report is printed in MB/sec instead of nanoseconds
++  // per iteration.
+   //
+   // REQUIRES: a benchmark has exited its benchmarking loop.
+   BENCHMARK_ALWAYS_INLINE
+-  void SetBytesProcessed(int64_t bytes) {
+-    counters["bytes_per_second"] =
+-        Counter(bytes, Counter::kIsRate, Counter::kIs1024);
+-  }
++  BENCHMARK_DEPRECATED_MSG(
++      "The SetItemsProcessed()/items_processed()/SetBytesProcessed()/"
++      "bytes_processed() will be removed in a future release. "
++      "Please use custom user counters.")
++  void SetBytesProcessed(int64_t bytes) { bytes_processed_ = bytes; }
+ 
+   BENCHMARK_ALWAYS_INLINE
+-  int64_t bytes_processed() const {
+-    if (counters.find("bytes_per_second") != counters.end())
+-      return counters.at("bytes_per_second");
+-    return 0;
+-  }
++  BENCHMARK_DEPRECATED_MSG(
++      "The SetItemsProcessed()/items_processed()/SetBytesProcessed()/"
++      "bytes_processed() will be removed in a future release. "
++      "Please use custom user counters.")
++  int64_t bytes_processed() const { return bytes_processed_; }
+ 
+   // If this routine is called with complexity_n > 0 and complexity report is
+   // requested for the
+@@ -582,16 +585,18 @@ class State {
+   //
+   // REQUIRES: a benchmark has exited its benchmarking loop.
+   BENCHMARK_ALWAYS_INLINE
+-  void SetItemsProcessed(int64_t items) {
+-    counters["items_per_second"] = Counter(items, benchmark::Counter::kIsRate);
+-  }
++  BENCHMARK_DEPRECATED_MSG(
++      "The SetItemsProcessed()/items_processed()/SetBytesProcessed()/"
++      "bytes_processed() will be removed in a future release. "
++      "Please use custom user counters.")
++  void SetItemsProcessed(int64_t items) { items_processed_ = items; }
+ 
+   BENCHMARK_ALWAYS_INLINE
+-  int64_t items_processed() const {
+-    if (counters.find("items_per_second") != counters.end())
+-      return counters.at("items_per_second");
+-    return 0;
+-  }
++  BENCHMARK_DEPRECATED_MSG(
++      "The SetItemsProcessed()/items_processed()/SetBytesProcessed()/"
++      "bytes_processed() will be removed in a future release. "
++      "Please use custom user counters.")
++  int64_t items_processed() const { return items_processed_; }
+ 
+   // If this routine is called, the specified label is printed at the
+   // end of the benchmark report line for the currently executing
+@@ -654,6 +659,9 @@ class State {
+  private:  // items we don't need on the first cache line
+   std::vector<int64_t> range_;
+ 
++  int64_t bytes_processed_;
++  int64_t items_processed_;
++
+   int64_t complexity_n_;
+ 
+  public:
+@@ -1318,6 +1326,8 @@ class BenchmarkReporter {
+           time_unit(kNanosecond),
+           real_accumulated_time(0),
+           cpu_accumulated_time(0),
++          bytes_per_second(0),
++          items_per_second(0),
+           max_heapbytes_used(0),
+           complexity(oNone),
+           complexity_lambda(),
+@@ -1354,6 +1364,10 @@ class BenchmarkReporter {
+     // accumulated time.
+     double GetAdjustedCPUTime() const;
+ 
++    // Zero if not set by benchmark.
++    double bytes_per_second;
++    double items_per_second;
++
+     // This is set to 0.0 if memory tracing is not enabled.
+     double max_heapbytes_used;
+ 
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index dcdd23f..4d3001a 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -141,12 +141,23 @@ BenchmarkReporter::Run CreateRunReport(
+   report.time_unit = b.time_unit;
+ 
+   if (!report.error_occurred) {
++    double bytes_per_second = 0;
++    if (results.bytes_processed > 0 && seconds > 0.0) {
++      bytes_per_second = (results.bytes_processed / seconds);
++    }
++    double items_per_second = 0;
++    if (results.items_processed > 0 && seconds > 0.0) {
++      items_per_second = (results.items_processed / seconds);
++    }
++
+     if (b.use_manual_time) {
+       report.real_accumulated_time = results.manual_time_used;
+     } else {
+       report.real_accumulated_time = results.real_time_used;
+     }
+     report.cpu_accumulated_time = results.cpu_time_used;
++    report.bytes_per_second = bytes_per_second;
++    report.items_per_second = items_per_second;
+     report.complexity_n = results.complexity_n;
+     report.complexity = b.complexity;
+     report.complexity_lambda = b.complexity_lambda;
+@@ -184,6 +195,8 @@ void RunInThread(const benchmark::internal::Benchmark::Instance* b,
+     results.cpu_time_used += timer.cpu_time_used();
+     results.real_time_used += timer.real_time_used();
+     results.manual_time_used += timer.manual_time_used();
++    results.bytes_processed += st.bytes_processed();
++    results.items_processed += st.items_processed();
+     results.complexity_n += st.complexity_length_n();
+     internal::Increment(&results.counters, st.counters);
+   }
+@@ -347,6 +360,8 @@ State::State(size_t max_iters, const std::vector<int64_t>& ranges, int thread_i,
+       finished_(false),
+       error_occurred_(false),
+       range_(ranges),
++      bytes_processed_(0),
++      items_processed_(0),
+       complexity_n_(0),
+       counters(),
+       thread_index(thread_i),
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index 7de7138..f1d872a 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -114,6 +114,18 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+     printer(Out, COLOR_DEFAULT, "\n");
+     return;
+   }
++  // Format bytes per second
++  std::string rate;
++  if (result.bytes_per_second > 0) {
++    rate = StrCat(" ", HumanReadableNumber(result.bytes_per_second), "B/s");
++  }
++
++  // Format items per second
++  std::string items;
++  if (result.items_per_second > 0) {
++    items =
++        StrCat(" ", HumanReadableNumber(result.items_per_second), " items/s");
++  }
+ 
+   const double real_time = result.GetAdjustedRealTime();
+   const double cpu_time = result.GetAdjustedCPUTime();
+@@ -152,6 +164,14 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+     }
+   }
+ 
++  if (!rate.empty()) {
++    printer(Out, COLOR_DEFAULT, " %*s", 13, rate.c_str());
++  }
++
++  if (!items.empty()) {
++    printer(Out, COLOR_DEFAULT, " %*s", 18, items.c_str());
++  }
++
+   if (!result.report_label.empty()) {
+     printer(Out, COLOR_DEFAULT, " %s", result.report_label.c_str());
+   }
+diff --git a/src/csv_reporter.cc b/src/csv_reporter.cc
+index d2f1d27..dc370de 100644
+--- a/src/csv_reporter.cc
++++ b/src/csv_reporter.cc
+@@ -49,8 +49,6 @@ void CSVReporter::ReportRuns(const std::vector<Run>& reports) {
+     // save the names of all the user counters
+     for (const auto& run : reports) {
+       for (const auto& cnt : run.counters) {
+-        if (cnt.first == "bytes_per_second" || cnt.first == "items_per_second")
+-          continue;
+         user_counter_names_.insert(cnt.first);
+       }
+     }
+@@ -71,8 +69,6 @@ void CSVReporter::ReportRuns(const std::vector<Run>& reports) {
+     // check that all the current counters are saved in the name set
+     for (const auto& run : reports) {
+       for (const auto& cnt : run.counters) {
+-        if (cnt.first == "bytes_per_second" || cnt.first == "items_per_second")
+-          continue;
+         CHECK(user_counter_names_.find(cnt.first) != user_counter_names_.end())
+             << "All counters must be present in each run. "
+             << "Counter named \"" << cnt.first
+@@ -121,12 +117,12 @@ void CSVReporter::PrintRunData(const Run& run) {
+   }
+   Out << ",";
+ 
+-  if (run.counters.find("bytes_per_second") != run.counters.end()) {
+-    Out << run.counters.at("bytes_per_second");
++  if (run.bytes_per_second > 0.0) {
++    Out << run.bytes_per_second;
+   }
+   Out << ",";
+-  if (run.counters.find("items_per_second") != run.counters.end()) {
+-    Out << run.counters.at("items_per_second");
++  if (run.items_per_second > 0.0) {
++    Out << run.items_per_second;
+   }
+   Out << ",";
+   if (!run.report_label.empty()) {
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index 6866c71..475cf0a 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -193,7 +193,14 @@ void JSONReporter::PrintRunData(Run const& run) {
+   } else if (run.report_rms) {
+     out << indent << FormatKV("rms", run.GetAdjustedCPUTime());
+   }
+-
++  if (run.bytes_per_second > 0.0) {
++    out << ",\n"
++        << indent << FormatKV("bytes_per_second", run.bytes_per_second);
++  }
++  if (run.items_per_second > 0.0) {
++    out << ",\n"
++        << indent << FormatKV("items_per_second", run.items_per_second);
++  }
+   for (auto& c : run.counters) {
+     out << ",\n" << indent << FormatKV(c.first, c.second);
+   }
+diff --git a/src/statistics.cc b/src/statistics.cc
+index 8c90a44..b5fec52 100644
+--- a/src/statistics.cc
++++ b/src/statistics.cc
+@@ -91,9 +91,13 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+   // Accumulators.
+   std::vector<double> real_accumulated_time_stat;
+   std::vector<double> cpu_accumulated_time_stat;
++  std::vector<double> bytes_per_second_stat;
++  std::vector<double> items_per_second_stat;
+ 
+   real_accumulated_time_stat.reserve(reports.size());
+   cpu_accumulated_time_stat.reserve(reports.size());
++  bytes_per_second_stat.reserve(reports.size());
++  items_per_second_stat.reserve(reports.size());
+ 
+   // All repetitions should be run with the same number of iterations so we
+   // can take this information from the first benchmark.
+@@ -124,6 +128,8 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+     if (run.error_occurred) continue;
+     real_accumulated_time_stat.emplace_back(run.real_accumulated_time);
+     cpu_accumulated_time_stat.emplace_back(run.cpu_accumulated_time);
++    items_per_second_stat.emplace_back(run.items_per_second);
++    bytes_per_second_stat.emplace_back(run.bytes_per_second);
+     // user counters
+     for (auto const& cnt : run.counters) {
+       auto it = counter_stats.find(cnt.first);
+@@ -152,6 +158,8 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+ 
+     data.real_accumulated_time = Stat.compute_(real_accumulated_time_stat);
+     data.cpu_accumulated_time = Stat.compute_(cpu_accumulated_time_stat);
++    data.bytes_per_second = Stat.compute_(bytes_per_second_stat);
++    data.items_per_second = Stat.compute_(items_per_second_stat);
+ 
+     data.time_unit = reports[0].time_unit;
+ 
+diff --git a/src/thread_manager.h b/src/thread_manager.h
+index 6e274c7..82b4d72 100644
+--- a/src/thread_manager.h
++++ b/src/thread_manager.h
+@@ -42,6 +42,8 @@ class ThreadManager {
+     double real_time_used = 0;
+     double cpu_time_used = 0;
+     double manual_time_used = 0;
++    int64_t bytes_processed = 0;
++    int64_t items_processed = 0;
+     int64_t complexity_n = 0;
+     std::string report_label_;
+     std::string error_message_;
+diff --git a/test/reporter_output_test.cc b/test/reporter_output_test.cc
+index 50c1f75..91e505d 100644
+--- a/test/reporter_output_test.cc
++++ b/test/reporter_output_test.cc
+@@ -85,8 +85,8 @@ void BM_bytes_per_second(benchmark::State& state) {
+ }
+ BENCHMARK(BM_bytes_per_second);
+ 
+-ADD_CASES(TC_ConsoleOut, {{"^BM_bytes_per_second %console_report "
+-                           "bytes_per_second=%float[kM]{0,1}/s$"}});
++ADD_CASES(TC_ConsoleOut,
++          {{"^BM_bytes_per_second %console_report +%float[kM]{0,1}B/s$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_bytes_per_second\",$"},
+                        {"\"run_name\": \"BM_bytes_per_second\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+@@ -109,8 +109,8 @@ void BM_items_per_second(benchmark::State& state) {
+ }
+ BENCHMARK(BM_items_per_second);
+ 
+-ADD_CASES(TC_ConsoleOut, {{"^BM_items_per_second %console_report "
+-                           "items_per_second=%float[kM]{0,1}/s$"}});
++ADD_CASES(TC_ConsoleOut,
++          {{"^BM_items_per_second %console_report +%float[kM]{0,1} items/s$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_items_per_second\",$"},
+                        {"\"run_name\": \"BM_items_per_second\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+diff --git a/test/user_counters_test.cc b/test/user_counters_test.cc
+index bb0d6b4..57d07d9 100644
+--- a/test/user_counters_test.cc
++++ b/test/user_counters_test.cc
+@@ -68,9 +68,9 @@ void BM_Counters_WithBytesAndItemsPSec(benchmark::State& state) {
+   state.SetItemsProcessed(150);
+ }
+ BENCHMARK(BM_Counters_WithBytesAndItemsPSec);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_WithBytesAndItemsPSec %console_report "
+-                           "bar=%hrfloat bytes_per_second=%hrfloat/s "
+-                           "foo=%hrfloat items_per_second=%hrfloat/s$"}});
++ADD_CASES(TC_ConsoleOut,
++          {{"^BM_Counters_WithBytesAndItemsPSec %console_report "
++            "bar=%hrfloat foo=%hrfloat +%hrfloatB/s +%hrfloat items/s$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_WithBytesAndItemsPSec\",$"},
+            {"\"run_name\": \"BM_Counters_WithBytesAndItemsPSec\",$", MR_Next},
+@@ -79,10 +79,10 @@ ADD_CASES(TC_JSONOut,
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+            {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"bar\": %float,$", MR_Next},
+            {"\"bytes_per_second\": %float,$", MR_Next},
+-           {"\"foo\": %float,$", MR_Next},
+-           {"\"items_per_second\": %float$", MR_Next},
++           {"\"items_per_second\": %float,$", MR_Next},
++           {"\"bar\": %float,$", MR_Next},
++           {"\"foo\": %float$", MR_Next},
+            {"}", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_WithBytesAndItemsPSec\","
+                        "%csv_bytes_items_report,%float,%float$"}});

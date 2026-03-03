@@ -9,59 +9,59 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# TODO: Install language runtime
-# Analyze the repo to determine what's needed. Examples:
-#   Python: apt-get install python3 python3-pip python3-venv python3-dev
-#   Node.js: curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
-#   Go: Download from golang.org/dl or use apt
-#   Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-#   Ruby: apt-get install ruby ruby-dev
-#   Java: apt-get install openjdk-17-jdk
-# Check .nvmrc, .python-version, .ruby-version, go.mod, rust-toolchain.toml, etc.
+# Install Go
+RUN curl -fsSL https://go.dev/dl/go1.19.13.linux-amd64.tar.gz | tar -C /usr/local -xzf - && \
+    ln -s /usr/local/go/bin/go /usr/local/bin/go && \
+    ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 
-# TODO: Install additional system packages if needed
-# Check CI config (.github/workflows/*.yml) for hints about required packages
-# Examples: python3-dev, libssl-dev, pkg-config, cmake, etc.
+# Install Python and unzip (required for protoc)
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
 
-# TODO: Set up package manager if needed
-# For Python: PREFER uv (much faster than pip)
-#   curl -LsSf https://astral.sh/uv/install.sh | sh && mv /root/.local/bin/uv /usr/local/bin/uv
-# For Node.js: corepack enable (for yarn/pnpm) or npm is built-in
-# For Ruby: gem install bundler
+ENV GOPATH="/root/go"
+ENV PATH="/root/go/bin:${PATH}"
+ENV GO111MODULE=off
 
-WORKDIR /app
+WORKDIR /root/go/src/github.com/lyft
 
 # Clone repo at HEAD commit (with fix applied)
-RUN git clone https://github.com/bufbuild/protoc-gen-validate.git src && \
-    cd src && \
+RUN git clone https://github.com/bufbuild/protoc-gen-validate.git protoc-gen-validate && \
+    cd protoc-gen-validate && \
     (git fetch --depth 1 origin ed7e8617110fedc6160d5e32258f5f46f5d3ff83 || git fetch --depth 1 origin "+refs/pull/3/head:refs/remotes/origin/pr/3") && \
     git checkout --detach FETCH_HEAD && \
     git submodule update --init --recursive
 
-WORKDIR /app/src
+WORKDIR /root/go/src/github.com/lyft/protoc-gen-validate
 
-# TODO: Set environment variables if needed
-# Check CI config and README for required env vars
-# Examples: CI=true, NODE_ENV=test, CARGO_TERM_COLOR=never
+# Install protoc (required for protobuf code generation) - version 3.6.1 as per project Dockerfile
+RUN mkdir -p /tmp/protoc && \
+    curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v3.6.1/protoc-3.6.1-linux-x86_64.zip -o /tmp/protoc.zip && \
+    unzip -q /tmp/protoc.zip -d /tmp/protoc && \
+    mv /tmp/protoc/bin/protoc /usr/local/bin/protoc && \
+    mv /tmp/protoc/include/* /usr/local/include/ && \
+    rm -rf /tmp/protoc /tmp/protoc.zip
 
-# TODO: Install dependencies
-# For Python: PREFER uv (much faster). Create venv and install:
-#   uv venv /opt/venv
-#   uv pip install --python /opt/venv/bin/python -e ".[dev,test]"
-#   # Or: uv pip install --python /opt/venv/bin/python -r requirements.txt
-#   # Then add to PATH: ENV PATH="/opt/venv/bin:${PATH}"
-# For Node.js: npm ci, yarn install --frozen-lockfile, pnpm install --frozen-lockfile
-# For Go: go mod download
-# For Rust: cargo fetch
-# For Ruby: bundle install
-# For Java: mvn dependency:resolve or gradle dependencies
+# Install Python dependencies (required for code generation)
+RUN if [ -f requirements.txt ]; then pip3 install --break-system-packages --ignore-installed -r requirements.txt; fi
 
-# TODO: Build if needed (check if it's a compiled language or has build step)
-# Examples:
-#   TypeScript: npm run build, tsc
-#   Rust: cargo build
-#   Go: go build ./...
-#   Java: mvn compile, gradle build
+# Install Python package dependencies
+RUN pip3 install --break-system-packages setuptools Jinja2>=2.11.1 protobuf==3.20.2 astunparse>=1.6.3 validate_email 2>/dev/null || \
+    pip3 install --break-system-packages setuptools Jinja2>=2.11.1 protobuf==3.20.2 astunparse>=1.6.3 py3-validate-email
+
+# Build protoc-gen-go from vendored version (compatible with this project)
+RUN cd vendor/github.com/golang/protobuf/protoc-gen-go && \
+    go build -o /usr/local/bin/protoc-gen-go .
+
+# Fix vendor issue: outErr variable is declared but not used in Go 1.19
+RUN sed -i '266a\        _ = outErr' vendor/github.com/lyft/protoc-gen-star/workflow_multipackage.go
+
+# Build the protoc-gen-validate plugin (using GOPATH/vendor mode)
+RUN GO111MODULE=off make build
+
+ENV CI=true
 
 # If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
@@ -70,9 +70,12 @@ RUN git reset --hard
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# TODO: Rebuild after applying bug.patch if needed
-# For compiled languages (TypeScript, Rust, Go, Java), you MUST rebuild after patching
+# Fix vendor issue again after git reset (outErr variable is declared but not used in Go 1.19)
+RUN sed -i '266a\        _ = outErr' vendor/github.com/lyft/protoc-gen-star/workflow_multipackage.go
 
-RUN rm -rf /app/src/.git
+# Rebuild the protoc-gen-validate plugin after applying bug.patch
+RUN GO111MODULE=off make build
 
-WORKDIR /app/src
+RUN rm -rf .git
+
+WORKDIR /root/go/src/github.com/lyft/protoc-gen-validate

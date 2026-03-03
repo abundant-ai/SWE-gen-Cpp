@@ -1,0 +1,333 @@
+diff --git a/python/convert.c b/python/convert.c
+index 4aeb6548f..63ae5dff9 100644
+--- a/python/convert.c
++++ b/python/convert.c
+@@ -61,21 +61,12 @@ PyObject* PyUpb_UpbToPy(upb_MessageValue val, const upb_FieldDef* f,
+   }
+ }
+ 
+-// TODO: raise error in 2026 Q1 release
+-static void WarnBool(const upb_FieldDef* f) {
+-  static int bool_warning_count = 100;
+-  if (bool_warning_count > 0) {
+-    --bool_warning_count;
+-    PyErr_WarnFormat(PyExc_DeprecationWarning, 3,
+-                     "Field %s: Expected an int, got a boolean. This "
+-                     "will be rejected in 7.34.0, please fix it before that",
+-                     upb_FieldDef_FullName(f));
+-  }
+-}
+-
+ static bool PyUpb_GetInt64(PyObject* obj, const upb_FieldDef* f, int64_t* val) {
+   if (PyBool_Check(obj)) {
+-    WarnBool(f);
++    PyErr_Format(PyExc_TypeError,
++                 "Field %s: Expected an int, got a boolean.",
++                 upb_FieldDef_FullName(f));
++    return false;
+   }
+   // We require that the value is either an integer or has an __index__
+   // conversion.
+@@ -98,7 +89,10 @@ static bool PyUpb_GetInt64(PyObject* obj, const upb_FieldDef* f, int64_t* val) {
+ static bool PyUpb_GetUint64(PyObject* obj, const upb_FieldDef* f,
+                             uint64_t* val) {
+   if (PyBool_Check(obj)) {
+-    WarnBool(f);
++    PyErr_Format(PyExc_TypeError,
++                 "Field %s: Expected an int, got a boolean.",
++                 upb_FieldDef_FullName(f));
++    return false;
+   }
+   // We require that the value is either an integer or has an __index__
+   // conversion.
+@@ -199,7 +193,10 @@ static bool PyUpb_PyToUpbEnum(PyObject* obj, const upb_FieldDef* f,
+     return true;
+   } else {
+     if (PyBool_Check(obj)) {
+-      WarnBool(f);
++      PyErr_Format(PyExc_TypeError,
++                   "Field %s: Expected an int, got a boolean.",
++                   upb_FieldDef_FullName(f));
++      return false;
+     }
+     int32_t i32;
+     if (!PyUpb_GetInt32(obj, f, &i32)) return false;
+diff --git a/python/google/protobuf/internal/type_checkers.py b/python/google/protobuf/internal/type_checkers.py
+index 17e814ed9..1d318e289 100755
+--- a/python/google/protobuf/internal/type_checkers.py
++++ b/python/google/protobuf/internal/type_checkers.py
+@@ -32,10 +32,6 @@ from google.protobuf.internal import encoder
+ from google.protobuf.internal import wire_format
+ 
+ _FieldDescriptor = descriptor.FieldDescriptor
+-# TODO: Remove this warning count after 34.0
+-# Assign bool to int/enum warnings will print 100 times at most which should
+-# be enough for users to notice and do not cause timeout.
+-_BoolWarningCount = 100
+ 
+ def TruncateToFourByteFloat(original):
+   return struct.unpack('<f', struct.pack('<f', original))[0]
+@@ -145,20 +141,15 @@ class IntValueChecker(object):
+   """Checker used for integer fields.  Performs type-check and range check."""
+ 
+   def CheckValue(self, proposed_value):
+-    global _BoolWarningCount
+-    if type(proposed_value) == bool and _BoolWarningCount > 0:
+-      _BoolWarningCount -= 1
++    if type(proposed_value) == bool:
+       message = (
+-          '%.1024r has type %s, but expected one of: %s. This warning '
+-          'will turn into error in 7.34.0, please fix it before that.'
++          '%.1024r has type %s, but expected one of: (int).'
+           % (
+               proposed_value,
+               type(proposed_value),
+-              (int,),
+           )
+       )
+-      # TODO: Raise errors in 2026 Q1 release
+-      warnings.warn(message)
++      raise TypeError(message)
+ 
+     if not hasattr(proposed_value, '__index__') or (
+         type(proposed_value).__module__ == 'numpy' and
+@@ -186,20 +177,16 @@ class EnumValueChecker(object):
+     self._enum_type = enum_type
+ 
+   def CheckValue(self, proposed_value):
+-    global _BoolWarningCount
+-    if type(proposed_value) == bool and _BoolWarningCount > 0:
+-      _BoolWarningCount -= 1
++    if type(proposed_value) == bool:
+       message = (
+-          '%.1024r has type %s, but expected one of: %s. This warning '
+-          'will turn into error in 7.34.0, please fix it before that.'
++          '%.1024r has type %s, but expected one of: (int).'
+           % (
+               proposed_value,
+               type(proposed_value),
+-              (int,),
+           )
+       )
+-      # TODO: Raise errors in 2026 Q1 release
+-      warnings.warn(message)
++      raise TypeError(message)
++
+     if not isinstance(proposed_value, numbers.Integral):
+       message = ('%.1024r has type %s, but expected one of: %s' %
+                  (proposed_value, type(proposed_value), (int,)))
+diff --git a/python/google/protobuf/pyext/map_container.cc b/python/google/protobuf/pyext/map_container.cc
+index d6483b368..3748c0af1 100644
+--- a/python/google/protobuf/pyext/map_container.cc
++++ b/python/google/protobuf/pyext/map_container.cc
+@@ -108,25 +108,21 @@ static bool PythonToMapKey(MapContainer* self, PyObject* obj, MapKey* key,
+   switch (field_descriptor->cpp_type()) {
+     case FieldDescriptor::CPPTYPE_INT32: {
+       PROTOBUF_CHECK_GET_INT32(obj, value, false);
+-      CheckIntegerWithBool(obj, field_descriptor);
+       key->SetInt32Value(value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_INT64: {
+       PROTOBUF_CHECK_GET_INT64(obj, value, false);
+-      CheckIntegerWithBool(obj, field_descriptor);
+       key->SetInt64Value(value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT32: {
+       PROTOBUF_CHECK_GET_UINT32(obj, value, false);
+-      CheckIntegerWithBool(obj, field_descriptor);
+       key->SetUInt32Value(value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT64: {
+       PROTOBUF_CHECK_GET_UINT64(obj, value, false);
+-      CheckIntegerWithBool(obj, field_descriptor);
+       key->SetUInt64Value(value);
+       break;
+     }
+@@ -214,25 +210,21 @@ static bool PythonToMapValueRef(MapContainer* self, PyObject* obj,
+   switch (field_descriptor->cpp_type()) {
+     case FieldDescriptor::CPPTYPE_INT32: {
+       PROTOBUF_CHECK_GET_INT32(obj, value, false);
+-      CheckIntegerWithBool(obj, field_descriptor);
+       value_ref->SetInt32Value(value);
+       return true;
+     }
+     case FieldDescriptor::CPPTYPE_INT64: {
+       PROTOBUF_CHECK_GET_INT64(obj, value, false);
+-      CheckIntegerWithBool(obj, field_descriptor);
+       value_ref->SetInt64Value(value);
+       return true;
+     }
+     case FieldDescriptor::CPPTYPE_UINT32: {
+       PROTOBUF_CHECK_GET_UINT32(obj, value, false);
+-      CheckIntegerWithBool(obj, field_descriptor);
+       value_ref->SetUInt32Value(value);
+       return true;
+     }
+     case FieldDescriptor::CPPTYPE_UINT64: {
+       PROTOBUF_CHECK_GET_UINT64(obj, value, false);
+-      CheckIntegerWithBool(obj, field_descriptor);
+       value_ref->SetUInt64Value(value);
+       return true;
+     }
+@@ -261,7 +253,6 @@ static bool PythonToMapValueRef(MapContainer* self, PyObject* obj,
+     }
+     case FieldDescriptor::CPPTYPE_ENUM: {
+       PROTOBUF_CHECK_GET_INT32(obj, value, false);
+-      CheckIntegerWithBool(obj, field_descriptor);
+       if (allow_unknown_enum_values) {
+         value_ref->SetEnumValue(value);
+         return true;
+diff --git a/python/google/protobuf/pyext/message.cc b/python/google/protobuf/pyext/message.cc
+index 11dbd1b62..9c62ae324 100644
+--- a/python/google/protobuf/pyext/message.cc
++++ b/python/google/protobuf/pyext/message.cc
+@@ -515,6 +515,7 @@ bool CheckAndGetInteger(PyObject* arg, T* value) {
+   // This definition includes everything with a valid __index__() implementation
+   // and shouldn't cast the net too wide.
+   if (!strcmp(Py_TYPE(arg)->tp_name, "numpy.ndarray") ||
++      (!strcmp(Py_TYPE(arg)->tp_name, "bool")) ||
+       ABSL_PREDICT_FALSE(!PyIndex_Check(arg))) {
+     FormatTypeError(arg, "int");
+     return false;
+@@ -599,18 +600,6 @@ bool CheckAndGetBool(PyObject* arg, bool* value) {
+   return true;
+ }
+ 
+-void CheckIntegerWithBool(PyObject* arg, const FieldDescriptor* field_des) {
+-  static int bool_warning_count = 100;
+-  if (bool_warning_count > 0 && (!strcmp(Py_TYPE(arg)->tp_name, "bool"))) {
+-    --bool_warning_count;
+-    std::string error_msg =
+-        absl::StrCat(field_des->full_name(),
+-                     ": Expected an int, got a boolean. This "
+-                     "will be rejected in 7.34.0, please fix it before that");
+-    PyErr_WarnEx(PyExc_DeprecationWarning, error_msg.c_str(), 3);
+-  }
+-}
+-
+ // Checks whether the given object (which must be "bytes" or "unicode") contains
+ // valid UTF-8.
+ bool IsValidUTF8(PyObject* obj) {
+@@ -2333,25 +2322,21 @@ int InternalSetNonOneofScalar(Message* message,
+   switch (field_descriptor->cpp_type()) {
+     case FieldDescriptor::CPPTYPE_INT32: {
+       PROTOBUF_CHECK_GET_INT32(arg, value, -1);
+-      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetInt32(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_INT64: {
+       PROTOBUF_CHECK_GET_INT64(arg, value, -1);
+-      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetInt64(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT32: {
+       PROTOBUF_CHECK_GET_UINT32(arg, value, -1);
+-      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetUInt32(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT64: {
+       PROTOBUF_CHECK_GET_UINT64(arg, value, -1);
+-      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetUInt64(message, field_descriptor, value);
+       break;
+     }
+@@ -2379,7 +2364,6 @@ int InternalSetNonOneofScalar(Message* message,
+     }
+     case FieldDescriptor::CPPTYPE_ENUM: {
+       PROTOBUF_CHECK_GET_INT32(arg, value, -1);
+-      CheckIntegerWithBool(arg, field_descriptor);
+       if (!field_descriptor->legacy_enum_field_treated_as_closed()) {
+         reflection->SetEnumValue(message, field_descriptor, value);
+       } else {
+diff --git a/python/google/protobuf/pyext/message.h b/python/google/protobuf/pyext/message.h
+index 0a5f907d8..85e2b33ce 100644
+--- a/python/google/protobuf/pyext/message.h
++++ b/python/google/protobuf/pyext/message.h
+@@ -313,9 +313,6 @@ PyObject* CheckString(PyObject* arg, const FieldDescriptor* descriptor);
+ bool CheckAndSetString(PyObject* arg, Message* message,
+                        const FieldDescriptor* descriptor,
+                        const Reflection* reflection, bool append, int index);
+-// TODO: raise error in 2026 Q1 release
+-// FormatTypeError(arg, "int");
+-void CheckIntegerWithBool(PyObject* arg, const FieldDescriptor* field_des);
+ PyObject* ToStringObject(const FieldDescriptor* descriptor,
+                          absl::string_view value);
+ 
+diff --git a/python/google/protobuf/pyext/repeated_scalar_container.cc b/python/google/protobuf/pyext/repeated_scalar_container.cc
+index 3fcfe4145..aa82734ad 100644
+--- a/python/google/protobuf/pyext/repeated_scalar_container.cc
++++ b/python/google/protobuf/pyext/repeated_scalar_container.cc
+@@ -88,25 +88,21 @@ static int AssignItem(PyObject* pself, Py_ssize_t index, PyObject* arg) {
+   switch (field_descriptor->cpp_type()) {
+     case FieldDescriptor::CPPTYPE_INT32: {
+       PROTOBUF_CHECK_GET_INT32(arg, value, -1);
+-      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetRepeatedInt32(message, field_descriptor, index, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_INT64: {
+       PROTOBUF_CHECK_GET_INT64(arg, value, -1);
+-      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetRepeatedInt64(message, field_descriptor, index, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT32: {
+       PROTOBUF_CHECK_GET_UINT32(arg, value, -1);
+-      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetRepeatedUInt32(message, field_descriptor, index, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT64: {
+       PROTOBUF_CHECK_GET_UINT64(arg, value, -1);
+-      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetRepeatedUInt64(message, field_descriptor, index, value);
+       break;
+     }
+@@ -134,7 +130,6 @@ static int AssignItem(PyObject* pself, Py_ssize_t index, PyObject* arg) {
+     }
+     case FieldDescriptor::CPPTYPE_ENUM: {
+       PROTOBUF_CHECK_GET_INT32(arg, value, -1);
+-      CheckIntegerWithBool(arg, field_descriptor);
+       if (!field_descriptor->legacy_enum_field_treated_as_closed()) {
+         reflection->SetRepeatedEnumValue(message, field_descriptor, index,
+                                          value);
+@@ -318,25 +313,21 @@ PyObject* Append(RepeatedScalarContainer* self, PyObject* item) {
+   switch (field_descriptor->cpp_type()) {
+     case FieldDescriptor::CPPTYPE_INT32: {
+       PROTOBUF_CHECK_GET_INT32(item, value, nullptr);
+-      CheckIntegerWithBool(item, field_descriptor);
+       reflection->AddInt32(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_INT64: {
+       PROTOBUF_CHECK_GET_INT64(item, value, nullptr);
+-      CheckIntegerWithBool(item, field_descriptor);
+       reflection->AddInt64(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT32: {
+       PROTOBUF_CHECK_GET_UINT32(item, value, nullptr);
+-      CheckIntegerWithBool(item, field_descriptor);
+       reflection->AddUInt32(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT64: {
+       PROTOBUF_CHECK_GET_UINT64(item, value, nullptr);
+-      CheckIntegerWithBool(item, field_descriptor);
+       reflection->AddUInt64(message, field_descriptor, value);
+       break;
+     }
+@@ -364,7 +355,6 @@ PyObject* Append(RepeatedScalarContainer* self, PyObject* item) {
+     }
+     case FieldDescriptor::CPPTYPE_ENUM: {
+       PROTOBUF_CHECK_GET_INT32(item, value, nullptr);
+-      CheckIntegerWithBool(item, field_descriptor);
+       if (!field_descriptor->legacy_enum_field_treated_as_closed()) {
+         reflection->AddEnumValue(message, field_descriptor, value);
+       } else {

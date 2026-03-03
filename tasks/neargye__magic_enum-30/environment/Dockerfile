@@ -30,8 +30,17 @@ WORKDIR /app/src
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Create build directory (tests will be built in test.sh after copying specific test files)
-RUN mkdir build
+# Patch test/CMakeLists.txt to remove -pedantic-errors (incompatible with emoji lexing)
+RUN sed -i 's/-pedantic-errors//g' test/CMakeLists.txt
+
+# Patch Catch2 to fix MINSIGSTKSZ compilation error with modern glibc
+RUN sed -i 's/static constexpr std::size_t sigStackSize/static const std::size_t sigStackSize/' test/3rdparty/Catch2/catch.hpp && \
+    sed -i 's/char FatalConditionHandler::altStackMem\[sigStackSize\]/char FatalConditionHandler::altStackMem[1024 * 32]/' test/3rdparty/Catch2/catch.hpp
+
+# Configure CMake for building tests
+# Note: Extended identifiers and UTF-8 input are required because the test uses non-ASCII enum identifiers
+RUN mkdir -p build && cd build && \
+    CXXFLAGS="-fextended-identifiers -finput-charset=UTF-8" cmake .. -DMAGIC_ENUM_OPT_BUILD_TESTS=ON -DMAGIC_ENUM_OPT_ENABLE_NONASCII=ON
 
 RUN rm -rf /app/src/.git
 

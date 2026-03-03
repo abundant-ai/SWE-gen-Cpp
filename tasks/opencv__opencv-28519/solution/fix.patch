@@ -1,0 +1,233 @@
+diff --git a/modules/imgcodecs/include/opencv2/imgcodecs.hpp b/modules/imgcodecs/include/opencv2/imgcodecs.hpp
+index bad9f006b5..6c59d55ec3 100644
+--- a/modules/imgcodecs/include/opencv2/imgcodecs.hpp
++++ b/modules/imgcodecs/include/opencv2/imgcodecs.hpp
+@@ -102,7 +102,8 @@ enum ImwriteFlags {
+        IMWRITE_EXR_TYPE            = (3 << 4) + 0 /* 48 */, //!< override EXR storage type (FLOAT (FP32) is default)
+        IMWRITE_EXR_COMPRESSION     = (3 << 4) + 1 /* 49 */, //!< override EXR compression type (ZIP_COMPRESSION = 3 is default)
+        IMWRITE_EXR_DWA_COMPRESSION_LEVEL = (3 << 4) + 2 /* 50 */, //!< override EXR DWA compression level (45 is default)
+-       IMWRITE_WEBP_QUALITY        = 64, //!< For WEBP, it can be a quality from 1 to 100 (the higher is the better). By default (without any parameter) and for quality above 100 the lossless compression is used.
++       IMWRITE_WEBP_QUALITY        = 64, //!< For WEBP, it can be a lossy quality from 1 to 100 (the higher is the better) for IMWRITE_WEBP_LOSSLESS_OFF. By default (without this parameter) or if quality > 100, IMWRITE_WEBP_LOSSLESS_ON is used instead.
++       IMWRITE_WEBP_LOSSLESS_MODE  = 65, //!< For WEBP, it can be a lossless compression strategy. See cv::ImwriteWEBPLosslessMode. Default is IMWRITE_WEBP_LOSSLESS_OFF. For Animated WEBP, it is not supported.
+        IMWRITE_HDR_COMPRESSION     = (5 << 4) + 0 /* 80 */, //!< specify HDR compression
+        IMWRITE_PAM_TUPLETYPE       = 128,//!< For PAM, sets the TUPLETYPE field to the corresponding string value that is defined for the format
+        IMWRITE_TIFF_RESUNIT        = 256,//!< For TIFF, use to specify which DPI resolution unit to set. See ImwriteTiffResolutionUnitFlags. Default is IMWRITE_TIFF_RESOLUTION_UNIT_INCH.
+@@ -240,6 +241,14 @@ enum ImwritePAMFlags {
+        IMWRITE_PAM_FORMAT_RGB_ALPHA       = 5
+      };
+ 
++//! Imwrite WEBP specific values for IMWRITE_WEBP_LOSSLESS_MODE parameter key.
++enum ImwriteWEBPLosslessMode {
++    IMWRITE_WEBP_LOSSLESS_OFF            = 0, //!< Lossy compression mode. Uses IMWRITE_WEBP_QUALITY to control compression. (Default)
++                                              //!< @note If IMWRITE_WEBP_QUALITY is not specified, it falls back to IMWRITE_WEBP_LOSSLESS_ON to maintain backward compatibility.
++    IMWRITE_WEBP_LOSSLESS_ON             = 1, //!< Standard lossless compression. May modify or discard RGB values of fully transparent pixels to improve compression ratio.
++    IMWRITE_WEBP_LOSSLESS_PRESERVE_COLOR = 2, //!< Exact lossless compression. Preserves all RGB data even for pixels with 0 alpha (equivalent to WebP's exact flag).
++};
++
+ //! Imwrite HDR specific values for IMWRITE_HDR_COMPRESSION parameter key
+ enum ImwriteHDRCompressionFlags {
+     IMWRITE_HDR_COMPRESSION_NONE = 0,
+diff --git a/modules/imgcodecs/src/grfmt_webp.cpp b/modules/imgcodecs/src/grfmt_webp.cpp
+index 068be52b8b..a37bbfca54 100644
+--- a/modules/imgcodecs/src/grfmt_webp.cpp
++++ b/modules/imgcodecs/src/grfmt_webp.cpp
+@@ -338,7 +338,7 @@ WebPEncoder::WebPEncoder()
+     m_support_metadata[IMAGE_METADATA_EXIF] = true;
+     m_support_metadata[IMAGE_METADATA_XMP] = true;
+     m_support_metadata[IMAGE_METADATA_ICCP] = true;
+-    m_supported_encode_key = {IMWRITE_WEBP_QUALITY};
++    m_supported_encode_key = {IMWRITE_WEBP_QUALITY, IMWRITE_WEBP_LOSSLESS_MODE};
+ }
+ 
+ WebPEncoder::~WebPEncoder() { }
+@@ -348,34 +348,123 @@ ImageEncoder WebPEncoder::newEncoder() const
+     return makePtr<WebPEncoder>();
+ }
+ 
++// Simple API style
++static size_t cvEncodeLosslessExactBGRA(const uint8_t* rgba, int width, int height, int stride, uint8_t** output)
++{
++    WebPConfig config;
++    WebPPicture pic;
++    WebPMemoryWriter wrt;
++
++    // 6 is the default value for speed/compression balance in lossless mode.
++    // It doesn't affect visual quality, only file size and encoding time.
++    if (!WebPConfigInit(&config) || !WebPConfigLosslessPreset(&config, 6))
++    {
++        return 0;
++    }
++    config.exact = 1;
++
++    if (!WebPPictureInit(&pic))
++    {
++        return 0;
++    }
++    pic.width = width;
++    pic.height = height;
++    pic.use_argb = 1; // BGRA
++    if (!WebPPictureImportBGRA(&pic, rgba, stride))
++    {
++        return 0;
++    }
++
++    WebPMemoryWriterInit(&wrt);
++    pic.writer = WebPMemoryWrite;
++    pic.custom_ptr = &wrt;
++
++    if (!WebPEncode(&config, &pic))
++    {
++        WebPMemoryWriterClear(&wrt);
++        WebPPictureFree(&pic);
++        return 0;
++    }
++
++    *output = wrt.mem;
++    size_t size = wrt.size;
++    WebPPictureFree(&pic);
++    return size;
++}
++
+ bool WebPEncoder::write(const Mat& img, const std::vector<int>& params)
+ {
+     CV_CheckDepthEQ(img.depth(), CV_8U, "WebP codec supports 8U images only");
+ 
+     const int width = img.cols, height = img.rows;
+ 
+-    bool comp_lossless = true;
+-    float quality = 100.0f;
++    int lossless_mode = -1; // not specified
++    float quality = 0.0f; // not specified
+ 
+     for(size_t i = 0; i < params.size(); i += 2)
+     {
+         const int value = params[i+1];
++        if (params[i] == IMWRITE_WEBP_LOSSLESS_MODE)
++        {
++            switch(value)
++            {
++                case IMWRITE_WEBP_LOSSLESS_ON:
++                case IMWRITE_WEBP_LOSSLESS_OFF:
++                case IMWRITE_WEBP_LOSSLESS_PRESERVE_COLOR:
++                    lossless_mode = value;
++                    break;
++                default:
++                    CV_LOG_WARNING(nullptr, cv::format("The value(%d) for IMWRITE_WEBP_LOSSLESS_MODE must be one of ImwriteWEBPLosslessMode. It is ignored", value));
++                    break;
++            }
++        }
+         if (params[i] == IMWRITE_WEBP_QUALITY)
+         {
+-            comp_lossless = false;
+-            quality = static_cast<float>(value);
+-            if (quality < 1.0f)
++            if (value < 1)
+             {
+-                quality = 1.0f;
+                 CV_LOG_WARNING(nullptr, cv::format("The value(%d) for IMWRITE_WEBP_QUALITY must be between 1 to 100(lossy) or more(lossless). It is fallbacked to 1", value));
++                quality = 1.0f;
+             }
+-            if (quality > 100.0f)
++            else if (value > 100)
+             {
+-                comp_lossless = true;
++                quality = 101.0f;
++            }
++            else // value is 1 to 100
++            {
++                quality = static_cast<float>(value);
+             }
+         }
+     }
+ 
++    switch(lossless_mode)
++    {
++        case -1: // not specified by user
++        case IMWRITE_WEBP_LOSSLESS_OFF:
++            // Fallback to lossless if quality is not specified (-1.0f) or out of lossy range (>100.0f).
++            // This maintains backward compatibility where WebP defaults to lossless.
++            if ((quality < 1.0f) || (quality > 100.0f))
++            {
++                lossless_mode = IMWRITE_WEBP_LOSSLESS_ON;
++                quality = 101.0f;
++            }
++            else
++            {
++                lossless_mode = IMWRITE_WEBP_LOSSLESS_OFF;
++                // Use specified quality for lossy compression.
++            }
++            break;
++
++        case IMWRITE_WEBP_LOSSLESS_ON:
++        case IMWRITE_WEBP_LOSSLESS_PRESERVE_COLOR:
++            // Force quality value to lossless range when explicit lossless mode is selected.
++            quality = 101.0f;
++            break;
++
++        default:
++            CV_Error(Error::StsError, cv::format("Unexpected lossless_mode(%d)", lossless_mode));
++            break;
++    }
++
+     int channels = img.channels();
+     CV_Check(channels, channels == 1 || channels == 3 || channels == 4, "");
+ 
+@@ -391,29 +480,45 @@ bool WebPEncoder::write(const Mat& img, const std::vector<int>& params)
+ 
+     uint8_t *encoder_out = NULL;
+     size_t size = 0;
+-    if (comp_lossless)
++    if (channels == 3)
+     {
+-        if (channels == 3)
++        switch(lossless_mode)
+         {
+-            size = WebPEncodeLosslessBGR(image->ptr(), width, height, (int)image->step, &encoder_out);
+-        }
+-        else if (channels == 4)
+-        {
+-            size = WebPEncodeLosslessBGRA(image->ptr(), width, height, (int)image->step, &encoder_out);
++            case IMWRITE_WEBP_LOSSLESS_OFF:
++                size = WebPEncodeBGR(image->ptr(), width, height, (int)image->step, quality, &encoder_out);
++                break;
++            case IMWRITE_WEBP_LOSSLESS_ON:
++            case IMWRITE_WEBP_LOSSLESS_PRESERVE_COLOR:
++                size = WebPEncodeLosslessBGR(image->ptr(), width, height, (int)image->step, &encoder_out);
++                break;
++            default:
++                CV_Error(Error::StsError, cv::format("Unexcepted lossless_mode(%d)", lossless_mode));
++                break;
+         }
+     }
+     else
+     {
+-        if (channels == 3)
++        CV_CheckEQ(channels, 4, "Unexpected channels is used");
++        switch(lossless_mode)
+         {
+-            size = WebPEncodeBGR(image->ptr(), width, height, (int)image->step, quality, &encoder_out);
+-        }
+-        else if (channels == 4)
+-        {
+-            size = WebPEncodeBGRA(image->ptr(), width, height, (int)image->step, quality, &encoder_out);
++            case IMWRITE_WEBP_LOSSLESS_OFF:
++                size = WebPEncodeBGRA(image->ptr(), width, height, (int)image->step, quality, &encoder_out);
++                break;
++            case IMWRITE_WEBP_LOSSLESS_ON:
++                size = WebPEncodeLosslessBGRA(image->ptr(), width, height, (int)image->step, &encoder_out);
++                break;
++            case IMWRITE_WEBP_LOSSLESS_PRESERVE_COLOR:
++                size = cvEncodeLosslessExactBGRA(image->ptr(), width, height, (int)image->step, &encoder_out);
++                break;
+         }
+     }
+ 
++    if (size == 0)
++    {
++        CV_LOG_ERROR(NULL, cv::format("WebP encoding failed with lossless_mode=%d", lossless_mode));
++        return false;
++    }
++
+ #if WEBP_DECODER_ABI_VERSION >= 0x0206
+     Ptr<uint8_t> out_cleaner(encoder_out, WebPFree);
+ #else

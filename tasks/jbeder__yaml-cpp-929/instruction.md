@@ -1,32 +1,17 @@
-YAML::Emitter produces invalid/ambiguous YAML when an alias is used as a mapping key. When emitting a map entry whose key is an alias (e.g., Key << Alias("i") << Value << Alias("v0")), the emitter currently outputs the alias key immediately followed by a colon, like:
+When emitting YAML, aliases used as mapping keys are currently serialized in a way that produces YAML that yaml-cpp’s own parser (and common validators) reject. Specifically, when a map key is an alias created with Alias("name") (e.g., *i), the emitter outputs the key directly followed by a colon with no separating space, like:
 
-  *i: *v0
+    *i: *v0
 
-This output can fail to parse when fed back into yaml-cpp’s own Parser (and is rejected by some YAML validators), because the colon can be interpreted as part of the plain scalar unless it is separated correctly. The emitter should instead emit a space before the colon when the key is an alias, producing:
+This is ambiguous because “:” can be interpreted as part of a plain scalar, and the produced YAML is not accepted by the parser. The expected output when an alias is used as a key is to include a space before the colon, i.e.:
 
-  *i : *v0
+    *i : *v0
 
-The same spacing rule must hold in both block and flow styles.
+This must work both for block mappings and for flow contexts where mappings are embedded in sequences. For example, emitting a flow sequence of maps that use aliases as both keys and values should serialize entries like:
 
-Reproduction examples that should work after the fix:
+    k: [{*i : *v0}, {*i : *v1}]
 
-1) Emitting a document with anchored scalars and then using aliases as keys and values inside a flow sequence of maps should produce:
+Additionally, a flow sequence that contains map entries directly should also serialize with the same spacing rule:
 
-Aliases:
- - {&i i: &v0 0}
- - {&i i: &v1 1}
-NodeA:
-  k: [{*i : *v0}, {*i : *v1}]
+    k: [*i : *v0, *i : *v1]
 
-Here, each flow map entry must use "*i : *v0" (space before colon) rather than "*i: *v0".
-
-2) Emitting a flow sequence that contains mapping entries directly (still using alias keys) should produce:
-
-NodeB:
-  k: [*i : *v0, *i : *v1]
-
-Again, alias keys must be followed by " :" rather than ":".
-
-Expected behavior: the emitted YAML round-trips through yaml-cpp (Dump/Emitter output can be parsed back by Parser without exceptions), and alias keys are emitted with correct spacing before the colon in all supported styles.
-
-Actual behavior: alias keys are emitted as "*alias: value" without the required spacing, leading to parse errors / validator failures even though normal scalar keys ("key: value") work.
+The failure currently manifests as an output mismatch (missing space before ":") and, more importantly, as yaml-cpp failing to parse YAML that it emitted. After the fix, YAML::Emitter should always emit alias keys with a space before the colon so that round-tripping through the parser succeeds, while leaving normal scalar keys unchanged (e.g., "key: value" should remain as-is).

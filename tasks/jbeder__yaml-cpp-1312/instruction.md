@@ -1,21 +1,23 @@
-YAML parsing currently treats only '\n' as a line break when scanning input, which breaks parsing for content that uses standalone carriage returns ('\r') as the line ending (classic Mac-style text). As a result, sequences and other multi-line structures can be parsed as if they were on a single line.
+YAML parsing incorrectly handles inputs that use carriage return ("\r") as the sole line-break character. When a YAML document uses old-Mac style line endings (CR-only), the loader does not treat "\r" as a newline, causing multiple physical lines to be read as a single logical line and producing incorrect parse results.
 
-For example, loading a document like:
+Reproduction example:
 
 ```cpp
-auto node = YAML::Load(
-  "channels:\r"
-  "- my_channel\r"
-  "- my_second_channel\r"
+YAML::Node config = YAML::Load(
+    "channels:\r"
+    "- my_channel\r"
+    "- my_second_channel\r"
 );
+size_t size = config["channels"].size();
 ```
 
-and then evaluating:
+Expected behavior: `size` should be `2` because `channels` is a sequence with two items.
 
-```cpp
-size_t size = node["channels"].size();
-```
+Actual behavior: `size` is `1` because the parser fails to recognize CR-only line breaks.
 
-should yield `2`, because there are two sequence entries. Currently it yields `1` (or otherwise mis-parses the sequence) because '\r' is not recognized as a newline delimiter.
+`YAML::Load(...)` should accept YAML content where line breaks are any of the YAML-spec line break characters, including:
+- LF ("\n")
+- CRLF ("\r\n")
+- CR ("\r")
 
-Update the YAML input handling so that a stream using '\r' as its line break character is parsed correctly, treating '\r' as a valid line break character per YAML 1.2 line break rules. This must work for inputs using only '\r' line endings, and must not break existing behavior for inputs using '\n' or Windows-style '\r\n'.
+After the fix, parsing should behave consistently regardless of whether the input uses LF, CRLF, or CR line endings, so that sequences and mappings separated by CR-only line breaks are tokenized into distinct lines and parsed into the correct node structure.

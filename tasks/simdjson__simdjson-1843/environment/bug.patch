@@ -1,0 +1,146 @@
+diff --git a/include/simdjson/generic/ondemand/json_iterator-inl.h b/include/simdjson/generic/ondemand/json_iterator-inl.h
+index 8af8624c..97d91064 100644
+--- a/include/simdjson/generic/ondemand/json_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/json_iterator-inl.h
+@@ -47,27 +47,6 @@ inline void json_iterator::rewind() noexcept {
+   _depth = 1;
+ }
+ 
+-inline bool json_iterator::balanced() const noexcept {
+-  token_iterator ti(token);
+-  int32_t count{0};
+-  ti.set_position( root_position() );
+-  while(ti.peek() <= peek_last()) {
+-    switch (*ti.return_current_and_advance())
+-    {
+-    case '[': case '{':
+-      count++;
+-      break;
+-    case ']': case '}':
+-      count--;
+-      break;
+-    default:
+-      break;
+-    }
+-  }
+-  return count == 0;
+-}
+-
+-
+ // GCC 7 warns when the first line of this function is inlined away into oblivion due to the caller
+ // relating depth and parent_depth, which is a desired effect. The warning does not show up if the
+ // skip_child() function is not marked inline).
+diff --git a/include/simdjson/generic/ondemand/json_iterator.h b/include/simdjson/generic/ondemand/json_iterator.h
+index fd8ea303..949519db 100644
+--- a/include/simdjson/generic/ondemand/json_iterator.h
++++ b/include/simdjson/generic/ondemand/json_iterator.h
+@@ -251,13 +251,6 @@ public:
+    * as if it had just been created.
+    */
+   inline void rewind() noexcept;
+-  /**
+-   * This checks whether the {,},[,] are balanced so that the document
+-   * ends with proper zero depth. This requires scanning the whole document
+-   * and it may be expensive. It is expected that it will be rarely called.
+-   * It does not attempt to match { with } and [ with ].
+-   */
+-  inline bool balanced() const noexcept;
+ protected:
+   simdjson_really_inline json_iterator(const uint8_t *buf, ondemand::parser *parser) noexcept;
+   /// The last token before the end
+diff --git a/include/simdjson/generic/ondemand/value_iterator-inl.h b/include/simdjson/generic/ondemand/value_iterator-inl.h
+index 6335ab06..a37151db 100644
+--- a/include/simdjson/generic/ondemand/value_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/value_iterator-inl.h
+@@ -39,22 +39,9 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator
+   // current document. It only works in the normal mode where we have indexed a single document.
+   // Note that adding a check for 'streaming' is not expensive since we only have at most
+   // one root element.
+-  if ( ! _json_iter->streaming() ) {
+-    if (*_json_iter->peek_last() != '}') {
+-      _json_iter->abandon();
+-      return report_error(INCOMPLETE_ARRAY_OR_OBJECT, "missing } at end");
+-    }
+-    // If the last character is } *and* the first gibberish character is also '}'
+-    // then on-demand could accidentally go over. So we need additional checks.
+-    // https://github.com/simdjson/simdjson/issues/1834
+-    // Checking that the document is balanced requires a full scan which is potentially
+-    // expensive, but it only happens in edge cases where the first padding character is
+-    // a closing bracket.
+-    if ((*_json_iter->peek(_json_iter->end_position()) == '}') && (!_json_iter->balanced())) {
+-      _json_iter->abandon();
+-      // The exact error would require more work. It will typically be an unclosed object.
+-      return report_error(INCOMPLETE_ARRAY_OR_OBJECT, "the document is unbalanced");
+-    }
++  if (! _json_iter->streaming() && (*_json_iter->peek_last() != '}')) {
++    _json_iter->abandon();
++    return report_error(INCOMPLETE_ARRAY_OR_OBJECT, "missing } at end");
+   }
+   return started_object();
+ }
+@@ -421,22 +408,9 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator
+   // current document. It only works in the normal mode where we have indexed a single document.
+   // Note that adding a check for 'streaming' is not expensive since we only have at most
+   // one root element.
+-  if ( ! _json_iter->streaming() ) {
+-    if (*_json_iter->peek_last() != ']') {
+-      _json_iter->abandon();
+-      return report_error(INCOMPLETE_ARRAY_OR_OBJECT, "missing ] at end");
+-    }
+-    // If the last character is ] *and* the first gibberish character is also ']'
+-    // then on-demand could accidentally go over. So we need additional checks.
+-    // https://github.com/simdjson/simdjson/issues/1834
+-    // Checking that the document is balanced requires a full scan which is potentially
+-    // expensive, but it only happens in edge cases where the first padding character is
+-    // a closing bracket.
+-    if ((*_json_iter->peek(_json_iter->end_position()) == ']') && (!_json_iter->balanced())) {
+-      _json_iter->abandon();
+-      // The exact error would require more work. It will typically be an unclosed array.
+-      return report_error(INCOMPLETE_ARRAY_OR_OBJECT, "the document is unbalanced");
+-    }
++  if ( ! _json_iter->streaming() && (*_json_iter->peek_last() != ']')) {
++    _json_iter->abandon();
++    return report_error(INCOMPLETE_ARRAY_OR_OBJECT, "missing ] at end");
+   }
+   return started_array();
+ }
+diff --git a/tests/ondemand/ondemand_error_tests.cpp b/tests/ondemand/ondemand_error_tests.cpp
+index 6234ffa1..fb4ee86f 100644
+--- a/tests/ondemand/ondemand_error_tests.cpp
++++ b/tests/ondemand/ondemand_error_tests.cpp
+@@ -6,26 +6,6 @@ using namespace simdjson;
+ namespace error_tests {
+   using namespace std;
+ 
+-  bool issue1834() {
+-    TEST_START();
+-    ondemand::parser parser;
+-    auto json = "[[]"_padded;
+-    json.data()[json.size()] = ']';
+-    auto doc = parser.iterate(json);
+-    size_t cnt{};
+-    auto error = doc.count_elements().get(cnt);
+-    return error != simdjson::SUCCESS;
+-  }
+-  bool issue1834_2() {
+-    TEST_START();
+-    ondemand::parser parser;
+-    auto json = "{\"a\":{}"_padded;
+-    json.data()[json.size()] = '}';
+-    auto doc = parser.iterate(json);
+-    size_t cnt{};
+-    auto error = doc.count_fields().get(cnt);
+-    return error != simdjson::SUCCESS;
+-  }
+   bool empty_document_error() {
+     TEST_START();
+     ondemand::parser parser;
+@@ -292,8 +272,6 @@ namespace error_tests {
+ 
+   bool run() {
+     return
+-           issue1834() &&
+-           issue1834_2() &&
+ #if SIMDJSON_EXCEPTIONS
+            raw_json_string_except() &&
+            raw_json_string_except_with_io() &&

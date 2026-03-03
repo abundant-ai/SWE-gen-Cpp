@@ -26,12 +26,13 @@ RUN git clone https://github.com/Neargye/magic_enum.git src && \
 
 WORKDIR /app/src
 
+# Configure CMake for building tests (disable NONASCII to avoid emoji compilation issues)
+RUN mkdir -p build && cd build && \
+    cmake .. -DMAGIC_ENUM_OPT_BUILD_TESTS=ON -DMAGIC_ENUM_OPT_ENABLE_NONASCII=OFF
+
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
-
-# Create build directory (tests will be built in test.sh after copying specific test files)
-RUN mkdir build
 
 RUN rm -rf /app/src/.git
 

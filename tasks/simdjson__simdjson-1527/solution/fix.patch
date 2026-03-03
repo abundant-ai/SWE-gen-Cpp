@@ -1,0 +1,532 @@
+diff --git a/doc/basics.md b/doc/basics.md
+index 719853a9..844eb800 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -202,6 +202,7 @@ support for users who avoid exceptions. See [the simdjson error handling documen
+   - `field.value()` will get you the value, which you can then use all these other methods on.
+ * **Array Index:** Because it is forward-only, you cannot look up an array element by index. Instead,
+   you will need to iterate through the array and keep an index yourself.
++* **Output to sstrings:** Given a document or an element (or node) out of a JSON document, you can output a string version: `simdjson::to_string(element)` returns a `simdjson::simdjson_result<std::string>` instance. You can cast it to `std::string` and it will throw when an error was encountered (`std::string(simdjson::to_string(element))`). Or else you can do `std::string s; if(simdjson::to_string(element).get(s) == simdjson::SUCCESS) { ... }`. This consumes fully the element: if you apply it on a document, the JSON pointer is advanced to the end of the document.
+ 
+ ### Examples
+ 
+diff --git a/doc/dom.md b/doc/dom.md
+index 2c3d8f08..35a5421c 100644
+--- a/doc/dom.md
++++ b/doc/dom.md
+@@ -89,7 +89,7 @@ Once you have an element, you can navigate it with idiomatic C++ iterators, oper
+   with the `size()` method.
+ * **Checking an Element Type:** You can check an element's type with `element.type()`. It
+   returns an `element_type` with values such as `simdjson::dom::element_type::ARRAY`, `simdjson::dom::element_type::OBJECT`, `simdjson::dom::element_type::INT64`,  `simdjson::dom::element_type::UINT64`,`simdjson::dom::element_type::DOUBLE`, `simdjson::dom::element_type::BOOL` or, `simdjson::dom::element_type::NULL_VALUE`.
+-* **Output to streams and strings:** Given a document or an element (or node) out of a JSON document, you can output a minified string version using the C++ stream idiom (`out << element`). You can also request the construction of a minified string version (`simdjson::minify(element)`).
++* **Output to streams and strings:** Given a document or an element (or node) out of a JSON document, you can output a minified string version using the C++ stream idiom (`out << element`). You can also request the construction of a minified string version (`simdjson::minify(element)`). Numbers are serialized as 64-bit floating-point numbers (`double`).
+ 
+ ### Examples
+ 
+diff --git a/include/simdjson/generic/ondemand-inl.h b/include/simdjson/generic/ondemand-inl.h
+index 814b97f6..f0f06409 100644
+--- a/include/simdjson/generic/ondemand-inl.h
++++ b/include/simdjson/generic/ondemand-inl.h
+@@ -12,3 +12,4 @@
+ #include "simdjson/generic/ondemand/field-inl.h"
+ #include "simdjson/generic/ondemand/object-inl.h"
+ #include "simdjson/generic/ondemand/parser-inl.h"
++#include "simdjson/generic/ondemand/serialization-inl.h"
+diff --git a/include/simdjson/generic/ondemand.h b/include/simdjson/generic/ondemand.h
+index 8ed29e0a..4b2a43ff 100644
+--- a/include/simdjson/generic/ondemand.h
++++ b/include/simdjson/generic/ondemand.h
+@@ -29,3 +29,4 @@ using depth_t = int32_t;
+ #include "simdjson/generic/ondemand/field.h"
+ #include "simdjson/generic/ondemand/object.h"
+ #include "simdjson/generic/ondemand/parser.h"
++#include "simdjson/generic/ondemand/serialization.h"
+diff --git a/include/simdjson/generic/ondemand/serialization-inl.h b/include/simdjson/generic/ondemand/serialization-inl.h
+new file mode 100644
+index 00000000..9a9d6d67
+--- /dev/null
++++ b/include/simdjson/generic/ondemand/serialization-inl.h
+@@ -0,0 +1,184 @@
++
++
++namespace simdjson {
++namespace SIMDJSON_IMPLEMENTATION {
++namespace ondemand {
++
++
++
++template <class serializer>
++inline simdjson::error_code string_builder<serializer>::append(document& element) noexcept {
++  json_type t;
++  auto e = element.type().get(t);
++  if(e != simdjson::SUCCESS) { return e; }
++  switch (t) {
++    case ondemand::json_type::array:
++      {
++        array x;
++        simdjson::error_code error = element.get_array().get(x);
++        if(error == simdjson::SUCCESS) {
++          append(x);
++        }
++        return error;
++      }
++    case ondemand::json_type::object:
++      {
++        object x;
++        simdjson::error_code error = element.get_object().get(x);
++        if(error == simdjson::SUCCESS) {
++          append(x);
++        }
++        return error;
++      }
++    case ondemand::json_type::number:
++      // Assume it fits in a double. We do not detect integer types. This could be improved.
++      {
++        double x;
++        simdjson::error_code error = element.get_double().get(x);
++        if(error == simdjson::SUCCESS) {
++          format.number(x);
++        }
++        return error;
++      }
++    case ondemand::json_type::string:
++      {
++        std::string_view x;
++        simdjson::error_code error = element.get_string().get(x);
++        if(error == simdjson::SUCCESS) {
++          format.string(x);
++        }
++        return error;
++      }
++    case ondemand::json_type::boolean:
++      {
++        bool x;
++        simdjson::error_code error = element.get_bool().get(x);
++        if(error == simdjson::SUCCESS) {
++          x ? format.true_atom() : format.false_atom();
++        }
++        return error;
++      }
++    case ondemand::json_type::null:
++      format.null_atom();
++      return simdjson::SUCCESS;
++  }
++  return simdjson::INCORRECT_TYPE;
++}
++
++template <class serializer>
++inline simdjson::error_code string_builder<serializer>::append(value element) noexcept {
++  json_type t;
++  auto e = element.type().get(t);
++  if(e != simdjson::SUCCESS) { return e; }
++  switch (t) {
++    case ondemand::json_type::array:
++      {
++        array x;
++        simdjson::error_code error = element.get_array().get(x);
++        if(error == simdjson::SUCCESS) {
++          append(x);
++        }
++        return error;
++      }
++    case ondemand::json_type::object:
++      {
++        object x;
++        simdjson::error_code error = element.get_object().get(x);
++        if(error == simdjson::SUCCESS) {
++          append(x);
++        }
++        return error;
++      }
++    case ondemand::json_type::number:
++      // Assume it fits in a double. We do not detect integer types. This could be improved.
++      {
++        double x;
++        simdjson::error_code error = element.get_double().get(x);
++        if(error == simdjson::SUCCESS) {
++          format.number(x);
++        }
++        return error;
++      }
++    case ondemand::json_type::string:
++      {
++        std::string_view x;
++        simdjson::error_code error = element.get_string().get(x);
++        if(error == simdjson::SUCCESS) {
++          format.string(x);
++        }
++        return error;
++      }
++      break;
++    case ondemand::json_type::boolean:
++      {
++        bool x;
++        simdjson::error_code error = element.get_bool().get(x);
++        if(error == simdjson::SUCCESS) {
++          x ? format.true_atom() : format.false_atom();
++        }
++        return error;
++      }
++    case ondemand::json_type::null:
++      format.null_atom();
++      return simdjson::SUCCESS;
++  }
++  return simdjson::INCORRECT_TYPE;
++}
++
++template <class serializer>
++inline simdjson::error_code string_builder<serializer>::append(simdjson::SIMDJSON_IMPLEMENTATION::ondemand::field x) noexcept {
++  // Performance note: There is a sizeable performance opportunity here to avoid unescaping
++  // and the re-escaping the key!!!!
++  std::string_view v;
++  auto error = x.unescaped_key().get(v);
++  if (error) { return error; }
++  format.key(v);
++  return append(x.value());
++}
++
++
++template <class serializer>
++inline simdjson::error_code string_builder<serializer>::append(simdjson::SIMDJSON_IMPLEMENTATION::ondemand::array x) noexcept {
++  format.start_array();
++  bool first{true};
++  for(simdjson::simdjson_result<simdjson::SIMDJSON_IMPLEMENTATION::ondemand::value> v: x) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::value element;
++    simdjson::error_code error = std::move(v).get(element);
++    if(error != simdjson::SUCCESS) { return error; }
++    if(first) { first = false; }  else { format.comma(); };
++    error = append(element);
++    if(error != simdjson::SUCCESS) { return error; }
++  }
++  format.end_array();
++  return simdjson::SUCCESS;
++}
++
++template <class serializer>
++inline simdjson::error_code string_builder<serializer>::append(simdjson::SIMDJSON_IMPLEMENTATION::ondemand::object x) noexcept {
++  format.start_object();
++  bool first{true};
++  for(simdjson::simdjson_result<simdjson::SIMDJSON_IMPLEMENTATION::ondemand::field> r: x) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::field element;
++    simdjson::error_code error = std::move(r).get(element);
++    if(error != simdjson::SUCCESS) { return error; }
++    if(first) { first = false; }  else { format.comma(); };
++    error = append(element);
++    if(error != simdjson::SUCCESS) { return error; }
++  }
++  format.end_object();
++  return simdjson::SUCCESS;
++}
++
++template <class serializer>
++simdjson_really_inline void string_builder<serializer>::clear() {
++  format.clear();
++}
++
++template <class serializer>
++simdjson_really_inline std::string_view string_builder<serializer>::str() const {
++  return format.str();
++}
++
++} // namespace ondemand
++} // namespace SIMDJSON_IMPLEMENTATION
++} // namespace simdjson
+diff --git a/include/simdjson/generic/ondemand/serialization.h b/include/simdjson/generic/ondemand/serialization.h
+new file mode 100644
+index 00000000..b2b14e77
+--- /dev/null
++++ b/include/simdjson/generic/ondemand/serialization.h
+@@ -0,0 +1,204 @@
++#include "simdjson/dom/serialization.h"
++#include "simdjson/error.h"
++
++namespace simdjson {
++namespace SIMDJSON_IMPLEMENTATION {
++namespace ondemand {
++
++template <class formatter = simdjson::internal::mini_formatter>
++class string_builder {
++public:
++  /** Append an document to the builder (to be printed), numbers are
++   * assumed to be 64-bit floating-point numbers.
++   **/
++  inline simdjson::error_code append(document& value) noexcept;
++  /** Append an element to the builder (to be printed) **/
++  inline simdjson::error_code append(value element) noexcept;
++  /** Append an array to the builder (to be printed) **/
++  inline simdjson::error_code append(array value) noexcept;
++  /** Append an objet to the builder (to be printed) **/
++  inline simdjson::error_code append(object value) noexcept;
++  /** Append a field to the builder (to be printed) **/
++  inline simdjson::error_code append(field value) noexcept;
++  /** Reset the builder (so that it would print the empty string) **/
++  simdjson_really_inline void clear();
++  /**
++   * Get access to the string. The string_view is owned by the builder
++   * and it is invalid to use it after the string_builder has been
++   * destroyed.
++   * However you can make a copy of the string_view on memory that you
++   * own.
++   */
++  simdjson_really_inline std::string_view str() const;
++private:
++  formatter format{};
++};
++
++/**
++ * Print JSON to an output stream.
++ *
++ * @param out The output stream.
++ * @param value The element.
++ * @throw if there is an error with the underlying output stream. simdjson itself will not throw.
++ */
++#if SIMDJSON_EXCEPTIONS
++inline std::ostream& operator<<(std::ostream& out, value x) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto err = sb.append(x);
++    if(err == simdjson::SUCCESS) {
++      return (out << sb.str());
++    } else {
++      throw simdjson::simdjson_error(err);
++    }
++}
++inline std::ostream& operator<<(std::ostream& out, simdjson::simdjson_result<value> x) {
++    if (x.error()) { throw simdjson::simdjson_error(x.error()); }
++    return (out << x.value());
++}
++#else
++inline std::ostream& operator<<(std::ostream& out, value x) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto error = sb.append(x);
++    if(error == simdjson::SUCCESS) {
++      return (out << sb.str());
++    } else {
++      return (out << error);
++    }
++}
++#endif
++/**
++ * Print JSON to an output stream.
++ *
++ * @param out The output stream.
++ * @param value The array.
++ * @throw if there is an error with the underlying output stream. simdjson itself will not throw.
++ */
++#if SIMDJSON_EXCEPTIONS
++inline std::ostream& operator<<(std::ostream& out, array value) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto err = sb.append(value);
++    if(err == simdjson::SUCCESS) {
++      return (out << sb.str());
++    } else {
++      throw simdjson::simdjson_error(err);
++    }
++}
++inline std::ostream& operator<<(std::ostream& out, simdjson::simdjson_result<array> x) {
++    if (x.error()) { throw simdjson::simdjson_error(x.error()); }
++    return (out << x.value());
++}
++#else
++inline std::ostream& operator<<(std::ostream& out, array value) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto error = sb.append(value);
++    if(error == simdjson::SUCCESS) {
++      return (out << sb.str());
++    } else {
++      return (out << error);
++    }
++}
++#endif
++/**
++ * Print JSON to an output stream.
++ *
++ * @param out The output stream.
++ * @param value The array.
++ * @throw if there is an error with the underlying output stream. simdjson itself will not throw.
++ */
++#if SIMDJSON_EXCEPTIONS
++inline std::ostream& operator<<(std::ostream& out, document& value)  {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto err = sb.append(value);
++    if(err == simdjson::SUCCESS) {
++      return (out << sb.str());
++    } else {
++      throw simdjson::simdjson_error(err);
++    }
++}
++inline std::ostream& operator<<(std::ostream& out, simdjson::simdjson_result<document> x) {
++    if (x.error()) { throw simdjson::simdjson_error(x.error()); }
++    return (out << x.value());
++}
++#else
++inline std::ostream& operator<<(std::ostream& out, document& value)  {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto error = sb.append(value);
++    if(error == simdjson::SUCCESS) {
++      return (out << sb.str());
++    } else {
++      return (out << error);
++    }
++}
++#endif
++/**
++ * Print JSON to an output stream.
++ *
++ * @param out The output stream.
++ * @param value The objet.
++ * @throw if there is an error with the underlying output stream. simdjson itself will not throw.
++ */
++#if SIMDJSON_EXCEPTIONS
++inline std::ostream& operator<<(std::ostream& out, object value) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto err = sb.append(value);
++    if(err == simdjson::SUCCESS) {
++      return (out << sb.str());
++    } else {
++       throw simdjson::simdjson_error(err);
++    }
++}
++inline std::ostream& operator<<(std::ostream& out,  simdjson::simdjson_result<object> x) {
++    if (x.error()) { throw  simdjson::simdjson_error(x.error()); }
++    return (out << x.value());
++}
++#else
++inline std::ostream& operator<<(std::ostream& out, object value) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto error = sb.append(value);
++    if(error == simdjson::SUCCESS) {
++      return (out << sb.str());
++    } else {
++      return (out << error);
++    }
++}
++#endif
++
++} // namespace ondemand
++} // namespace SIMDJSON_IMPLEMENTATION
++} // namespace simdjson
++
++namespace simdjson {
++
++inline simdjson::simdjson_result<std::string> to_string(simdjson::SIMDJSON_IMPLEMENTATION::ondemand::document& x) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto error = sb.append(x);
++    if(error != simdjson::SUCCESS) { return error; }
++    std::string_view answer = sb.str();
++    return std::string(answer.data(), answer.size());
++}
++
++inline simdjson::simdjson_result<std::string> to_string(simdjson::SIMDJSON_IMPLEMENTATION::ondemand::value& x) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto error = sb.append(x);
++    if(error != simdjson::SUCCESS) { return error; }
++    std::string_view answer = sb.str();
++    return std::string(answer.data(), answer.size());
++}
++
++inline simdjson::simdjson_result<std::string> to_string(simdjson::SIMDJSON_IMPLEMENTATION::ondemand::object& x) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto error = sb.append(x);
++    if(error != simdjson::SUCCESS) { return error; }
++    std::string_view answer = sb.str();
++    return std::string(answer.data(), answer.size());
++}
++
++inline simdjson::simdjson_result<std::string> to_string(simdjson::SIMDJSON_IMPLEMENTATION::ondemand::array& x) {
++    simdjson::SIMDJSON_IMPLEMENTATION::ondemand::string_builder<> sb;
++    auto error = sb.append(x);
++    if(error != simdjson::SUCCESS) { return error; }
++    std::string_view answer = sb.str();
++    return std::string(answer.data(), answer.size());
++}
++
++} // namespace simdjson
+diff --git a/src/to_chars.cpp b/src/to_chars.cpp
+index 1cff55ff..a9a1cfa1 100644
+--- a/src/to_chars.cpp
++++ b/src/to_chars.cpp
+@@ -1,6 +1,8 @@
+ #include <cstring>
+ #include <cstdint>
+ #include <array>
++#include <cmath>
++
+ namespace simdjson {
+ namespace internal {
+ /*!
+@@ -858,9 +860,9 @@ inline char *format_buffer(char *buf, int len, int decimal_exponent,
+ 
+     std::memset(buf + k, '0', static_cast<size_t>(n) - static_cast<size_t>(k));
+     // Make it look like a floating-point number (#362, #378)
+-    buf[n + 0] = '.';
+-    buf[n + 1] = '0';
+-    return buf + (static_cast<size_t>(n) + 2);
++    // buf[n + 0] = '.';
++    // buf[n + 1] = '0';
++    return buf + (static_cast<size_t>(n));
+   }
+ 
+   if (0 < n && n <= max_exp) {
+@@ -913,7 +915,8 @@ format. Returns an iterator pointing past-the-end of the decimal representation.
+ */
+ char *to_chars(char *first, const char *last, double value) {
+   static_cast<void>(last); // maybe unused - fix warning
+-  if (value <= -0) {
++  bool negative = std::signbit(value);
++  if (negative) {
+     value = -value;
+     *first++ = '-';
+   }
+@@ -922,8 +925,10 @@ char *to_chars(char *first, const char *last, double value) {
+   {
+     *first++ = '0';
+     // Make it look like a floating-point number (#362, #378)
+-    *first++ = '.';
+-    *first++ = '0';
++    if(negative) {
++      *first++ = '.';
++      *first++ = '0';
++    }
+     return first;
+   }
+   // Compute v = buffer * 10^decimal_exponent.
+diff --git a/tools/json2json.cpp b/tools/json2json.cpp
+index 39f5cc41..6b94c9d8 100644
+--- a/tools/json2json.cpp
++++ b/tools/json2json.cpp
+@@ -31,6 +31,7 @@ int main(int argc, const char *argv[]) {
+   cxxopts::Options options(progName, progUsage);
+ 
+   options.add_options()
++    ("z,ondemand", "Use On Demand front-end.", cxxopts::value<bool>()->default_value("false"))
+   	("d,rawdump", "Dumps the raw content of the tape.", cxxopts::value<bool>()->default_value("false"))
+   	("f,file", "File name.", cxxopts::value<std::string>())
+   	("h,help", "Print usage.")
+@@ -44,7 +45,7 @@ int main(int argc, const char *argv[]) {
+   	std::cerr << options.help() << std::endl;
+   	return EXIT_SUCCESS;
+   }
+-
++  bool ondemand = result["ondemand"].as<bool>();
+   bool rawdump = result["rawdump"].as<bool>();
+ 
+   if(!result.count("file")) {
+@@ -54,7 +55,17 @@ int main(int argc, const char *argv[]) {
+   }
+ 
+   const char *filename = result["file"].as<std::string>().c_str();
+-
++  if(ondemand) {
++    simdjson::ondemand::parser parser;
++    simdjson::padded_string docdata;
++    auto error = simdjson::padded_string::load(filename).get(docdata);
++    if(error != simdjson::SUCCESS) { std::cout << error << std::endl; return EXIT_FAILURE; }
++    simdjson::ondemand::document doc;
++    error = parser.iterate(docdata).get(doc);
++    if(error != simdjson::SUCCESS) { std::cout << error << std::endl; return EXIT_FAILURE; }
++    std::cout << doc;
++    return EXIT_SUCCESS;
++  }
+   simdjson::dom::parser parser;
+   simdjson::dom::element doc;
+   auto error = parser.load(filename).get(doc); // do the parsing, return false on error

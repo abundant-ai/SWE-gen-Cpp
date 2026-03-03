@@ -8,26 +8,32 @@ cp "/tests/test.cpp" "test/test.cpp"
 mkdir -p "test"
 cp "/tests/test_flags.cpp" "test/test_flags.cpp"
 
-# Remove emoji character from Language enum definition to avoid compilation errors
-# Emojis are not valid identifiers in C++ even with NONASCII flag due to lexical analysis limitations
-sed -i 's/, 😃 = 40//' test/test.cpp
-sed -i '/😃/d' test/test.cpp
-sed -i 's/, 😃 = 1 << 4//' test/test_flags.cpp
-sed -i '/😃/d' test/test_flags.cpp
+# Patch test/CMakeLists.txt to remove -pedantic-errors (incompatible with emoji lexing)
+sed -i 's/-pedantic-errors//g' test/CMakeLists.txt
 
-# Rebuild tests with updated test files
+# Clean and reconfigure build to pick up new test files and header changes
 cd build
-cmake .. -DMAGIC_ENUM_OPT_BUILD_TESTS=ON -DMAGIC_ENUM_OPT_ENABLE_NONASCII=OFF
+rm -rf CMakeCache.txt CMakeFiles test/CMakeFiles
+CXXFLAGS="-fextended-identifiers -finput-charset=UTF-8" cmake .. -DMAGIC_ENUM_OPT_BUILD_TESTS=ON -DMAGIC_ENUM_OPT_ENABLE_NONASCII=OFF
+cmake --build . --target test-cpp17 --target test_flags-cpp17
+build_status=$?
 
-# Build only the test targets for test.cpp and test_flags.cpp
-cmake --build . --target test-cpp17 2>&1 | head -100
-cmake --build . --target test-cpp20 2>&1 | head -100
-cmake --build . --target test_flags-cpp17 2>&1 | head -100
-cmake --build . --target test_flags-cpp20 2>&1 | head -100
+# If build fails, the test fails
+if [ $build_status -ne 0 ]; then
+  test_status=1
+else
+  # Run the specific test executables for both test.cpp and test_flags.cpp
+  # The tests are built for multiple C++ standards, we'll run the C++17 version
+  cd test
+  ./test-cpp17
+  test_status=$?
 
-# Run only the test targets for the specific tests for this PR (test.cpp and test_flags.cpp)
-ctest -R "^test" -V
-test_status=$?
+  # Only run test_flags if test.cpp passed
+  if [ $test_status -eq 0 ]; then
+    ./test_flags-cpp17
+    test_status=$?
+  fi
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

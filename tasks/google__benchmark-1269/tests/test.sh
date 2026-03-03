@@ -8,29 +8,23 @@ cp "/tests/CMakeLists.txt" "test/CMakeLists.txt"
 mkdir -p "test"
 cp "/tests/benchmark_setup_teardown_test.cc" "test/benchmark_setup_teardown_test.cc"
 
-# This task tests the Setup/Teardown feature for benchmarks
-# The buggy code has this feature removed, the fixed code has it added back
-# We need to rebuild with the fixed test files and then run the test
+# Initialize test_status
+test_status=0
 
-echo "Rebuilding with fixed test files..."
-rm -rf build
-cmake -B build -G Ninja \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-    -DBENCHMARK_ENABLE_TESTING=ON \
-    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-    -DBENCHMARK_ENABLE_WERROR=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-
+# Rebuild tests with the fixed test files
+cd /app/src
 cmake --build build --config Debug --target benchmark_setup_teardown_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark_setup_teardown_test"
+    test_status=1
+fi
 
-# Run the specific test
-echo "Running benchmark_setup_teardown_test..."
-./build/test/benchmark_setup_teardown_test
-test_status=$?
+# Run the specific test for this PR only if it built successfully
+if [ $test_status -eq 0 ]; then
+    cd /app/src/build
+    ./test/benchmark_setup_teardown_test
+    test_status=$?
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

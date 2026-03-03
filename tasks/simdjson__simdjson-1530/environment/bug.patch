@@ -1,0 +1,186 @@
+diff --git a/include/simdjson/common_defs.h b/include/simdjson/common_defs.h
+index e3ec5f34..a471bd7e 100644
+--- a/include/simdjson/common_defs.h
++++ b/include/simdjson/common_defs.h
+@@ -251,20 +251,4 @@ namespace std {
+ #endif
+ #endif
+ 
+-#if SIMDJSON_CPLUSPLUS17
+-// if we have C++, then fallthrough is a default attribute
+-# define simdjson_fallthrough [[fallthrough]]
+-// check if we have __attribute__ support
+-#elif defined(__has_attribute)
+-// check if we have the __fallthrough__ attribute
+-#if __has_attribute(__fallthrough__)
+-// we are good to go:
+-# define simdjson_fallthrough                    __attribute__((__fallthrough__))
+-#endif
+-#endif
+-// on some systems, we simply do not have support for fallthrough, so use a default:
+-#ifndef simdjson_fallthrough
+-# define simdjson_fallthrough do {} while (0)  /* fallthrough */
+-#endif
+-
+ #endif // SIMDJSON_COMMON_DEFS_H
+diff --git a/include/simdjson/generic/ondemand/json_iterator-inl.h b/include/simdjson/generic/ondemand/json_iterator-inl.h
+index f93fba48..2bab349c 100644
+--- a/include/simdjson/generic/ondemand/json_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/json_iterator-inl.h
+@@ -58,16 +58,6 @@ simdjson_warn_unused simdjson_really_inline error_code json_iterator::skip_child
+       _depth--;
+       if (depth() <= parent_depth) { return SUCCESS; }
+       break;
+-    case '"':
+-      if(*peek() == ':') {
+-        // we are at a key!!! This is
+-        // only possible if someone searched
+-        // for a key and the key was not found.
+-        logger::log_value(*this, "key");
+-        advance(); // eat up the ':'
+-        break; // important!!!
+-      }
+-      simdjson_fallthrough;
+     // Anything else must be a scalar value
+     default:
+       // For the first scalar, we will have incremented depth already, so we decrement it here.
+diff --git a/tests/ondemand/ondemand_object_tests.cpp b/tests/ondemand/ondemand_object_tests.cpp
+index d68630b0..a175c3af 100644
+--- a/tests/ondemand/ondemand_object_tests.cpp
++++ b/tests/ondemand/ondemand_object_tests.cpp
+@@ -6,121 +6,6 @@ using namespace simdjson;
+ namespace object_tests {
+   using namespace std;
+   using simdjson::ondemand::json_type;
+-  // In this test, no non-trivial object in an array have a missing key
+-  bool no_missing_keys() {
+-    TEST_START();
+-    simdjson::ondemand::parser parser;
+-    simdjson::padded_string docdata =  R"([{"a":"a"},{}])"_padded;
+-    simdjson::ondemand::document doc;
+-    auto error = parser.iterate(docdata).get(doc);
+-    if(error != simdjson::SUCCESS) { return false; }
+-    simdjson::ondemand::array a;
+-    error = doc.get_array().get(a);
+-    if(error != simdjson::SUCCESS) { return false; }
+-    size_t counter{0};
+-    for(auto elem : a) {
+-      error = elem.find_field_unordered("a").error();
+-      if(counter == 0) {
+-        ASSERT_EQUAL( error, simdjson::SUCCESS);
+-      } else {
+-        ASSERT_EQUAL( error, simdjson::NO_SUCH_FIELD);
+-      }
+-      counter++;
+-    }
+-    return true;
+-  }
+-
+-
+-  bool missing_keys() {
+-    TEST_START();
+-    simdjson::ondemand::parser parser;
+-    simdjson::padded_string docdata =  R"([{"a":"a"},{}])"_padded;
+-    simdjson::ondemand::document doc;
+-    auto error = parser.iterate(docdata).get(doc);
+-    if(error != simdjson::SUCCESS) { return false; }
+-    simdjson::ondemand::array a;
+-    error = doc.get_array().get(a);
+-    if(error != simdjson::SUCCESS) { return false; }
+-    for(auto elem : a) {
+-      error = elem.find_field_unordered("keynotfound").error();
+-      if(error != simdjson::NO_SUCH_FIELD) {
+-        std::cout << error << std::endl;
+-        return false;
+-      }
+-    }
+-    return true;
+-  }
+-
+-#if SIMDJSON_EXCEPTIONS
+-  // used in issue_1521
+-  // difficult to use as a lambda because it is recursive.
+-  void broken_descend(ondemand::object node) {
+-    if(auto type = node.find_field_unordered("type"); type.error() == SUCCESS && type == "child") {
+-      auto n = node.find_field_unordered("name");
+-      if(n.error() == simdjson::SUCCESS) {
+-          std::cout << std::string_view(n) << std::endl;
+-      }
+-    } else {
+-     for (ondemand::object child_node : node["nodes"]) { broken_descend(child_node); }
+-    }
+-  }
+-
+-  bool broken_issue_1521() {
+-    TEST_START();
+-    ondemand::parser parser;
+-    padded_string json = R"({"type":"root","nodes":[{"type":"child","nodes":[]},{"type":"child","name":"child-name","nodes":[]}]})"_padded;
+-    ondemand::document file_tree = parser.iterate(json);
+-    try {
+-      broken_descend(file_tree);
+-    } catch(simdjson::simdjson_error& e) {
+-      std::cout << "The document is valid JSON: " << json << std::endl;
+-      TEST_FAIL(e.error());
+-    }
+-    TEST_SUCCEED();
+-  }
+-
+-  bool fixed_broken_issue_1521() {
+-    TEST_START();
+-    ondemand::parser parser;
+-    // We omit the ',"nodes":[]'
+-    padded_string json = R"({"type":"root","nodes":[{"type":"child"},{"type":"child","name":"child-name","nodes":[]}]})"_padded;
+-    ondemand::document file_tree = parser.iterate(json);
+-    try {
+-      broken_descend(file_tree);
+-    } catch(simdjson::simdjson_error& e) {
+-      std::cout << "The document is valid JSON: " << json << std::endl;
+-      TEST_FAIL(e.error());
+-    }
+-    TEST_SUCCEED();
+-  }
+-
+-  // used in issue_1521
+-  // difficult to use as a lambda because it is recursive.
+-  void descend(ondemand::object node) {
+-    auto n = node.find_field_unordered("name");
+-    if(auto type = node.find_field_unordered("type"); type.error() == SUCCESS && type == "child") {
+-      if(n.error() == simdjson::SUCCESS) {
+-          std::cout << std::string_view(n) << std::endl;
+-      }
+-    } else {
+-     for (ondemand::object child_node : node["nodes"]) { descend(child_node); }
+-    }
+-  }
+-
+-  bool issue_1521() {
+-    TEST_START();
+-    ondemand::parser parser;
+-    padded_string json = R"({"type":"root","nodes":[{"type":"child","nodes":[]},{"type":"child","name":"child-name","nodes":[]}]})"_padded;
+-    ondemand::document file_tree = parser.iterate(json);
+-    try {
+-      descend(file_tree);
+-    } catch(simdjson::simdjson_error& e) {
+-      std::cout << "The document is valid JSON: " << json << std::endl;
+-      TEST_FAIL(e.error());
+-    }
+-    TEST_SUCCEED();
+-  }
+-#endif
+ 
+   bool iterate_object() {
+     TEST_START();
+@@ -1008,13 +893,6 @@ namespace object_tests {
+ 
+   bool run() {
+     return
+-           no_missing_keys() &&
+-           missing_keys() &&
+-#if SIMDJSON_EXCEPTIONS
+-           fixed_broken_issue_1521() &&
+-           issue_1521() &&
+-           broken_issue_1521() &&
+-#endif
+            iterate_object() &&
+            iterate_empty_object() &&
+            object_index() &&

@@ -1,42 +1,21 @@
-yaml-cpp currently loses correctness when emitting floating-point scalars (float/double) to YAML and then parsing them back, because the emitted textual representation does not preserve enough precision for a reliable round trip.
+Floating-point scalars written by yaml-cpp do not reliably round-trip through YAML text back into the same in-memory float/double value. This shows up in several ways:
 
-Reproduction examples:
+When a float/double is serialized (for example by inserting it into a YAML::Node and emitting it, or by streaming a node/emitter to an output stream) and then later parsed back (for example via YAML::Load/YAML::LoadFile and converted using node.as<float>() / node.as<double>()), the parsed numeric value can differ from the original, even when the scalar is intended to represent the same value. A common reproduction is writing a value like 1 + epsilon, or values near float precision boundaries such as 0.12345679f, which can serialize to a decimal string that parses back to a neighboring representable value.
 
-1) Round-trip mismatch due to insufficient precision
+Additionally, certain large values that should be representable fail to parse back at all. In particular, serializing numeric_limits<double>::max() and then reading it back can cause node.as<double>() to throw a conversion error (commonly surfaced as a “bad conversion” when converting the scalar to double), while the analogous max float round-trips successfully.
 
-```cpp
-YAML::Node n;
-double x = 1.0 + std::numeric_limits<double>::epsilon();
-n["x"] = x;
-std::stringstream ss;
-ss << n;                 // serialize
-YAML::Node m = YAML::Load(ss.str());
-double y = m["x"].as<double>();
-```
+The library should ensure that emitted YAML for float and double uses enough significant digits so that a parse of the emitted scalar yields the exact same floating-point value that was originally serialized (round-trip guarantee). This applies at least to the following flows:
 
-Expected behavior: `y` must equal `x` exactly (same IEEE-754 value) for typical finite values when a node is serialized and read back.
+- Writing a float/double into a YAML::Node (e.g., node["x"] = some_double) and emitting it, then reading it back and calling node["x"].as<float>() / as<double>().
+- Emitting floating-point values via YAML::Emitter so that the resulting YAML scalar can be parsed back with no value change.
 
-Actual behavior: `y` can differ from `x` because the string form is truncated (commonly due to using `std::numeric_limits<T>::digits10`-level precision), so parsing produces a neighboring representable value.
+Expected behavior:
+- For float: serializing a value like 0.12345679f and reading it back should produce a float that is bitwise-identical (or at minimum within < 1 ULP) to the original value; it must not deterministically round to a different adjacent float.
+- For double: serializing numeric_limits<double>::max() and reading it back should not throw; node.as<double>() should succeed and return the original value.
+- In general: float/double scalars should be emitted with sufficient precision such that YAML::Load(...)[key].as<T>() returns the same T value that was originally emitted.
 
-2) Reading maximum double can fail after writing it
+Actual behavior:
+- Emitted float/double strings can be too short (insufficient precision), causing the parsed value to differ from the original.
+- Extremely large doubles (e.g., numeric_limits<double>::max()) may emit in a form that cannot be converted back by node.as<double>(), resulting in a thrown conversion/representation error.
 
-```cpp
-YAML::Node w;
-w["double"] = std::numeric_limits<double>::max();
-std::stringstream ss;
-ss << w;
-YAML::Node r = YAML::Load(ss.str());
-double d = r["double"].as<double>();
-```
-
-Expected behavior: converting the scalar back via `Node::as<double>()` succeeds and returns `std::numeric_limits<double>::max()`.
-
-Actual behavior: the conversion can throw a `bad conversion` error when attempting `as<double>()` for the max double value.
-
-3) Float precision regression example
-
-Serializing a float like `0.12345679f` and reading it back can produce a different float (e.g., serialized as `0.12345678`), meaning the round trip changes the stored value.
-
-The library should emit floats/doubles with sufficient precision so that parsing the emitted scalar yields the same original floating-point value (round-trip guarantee) for finite values. This should apply consistently whether the value is emitted via `YAML::Emitter` or streamed out from a `YAML::Node`, and the result must be parseable by `YAML::Load(...)` / `YAML::LoadFile(...)` and convertible via `Node::as<float>()` and `Node::as<double>()` without throwing for representable values such as `numeric_limits<double>::max()`.
-
-Additionally, unit-level expectations that compare emitted YAML strings should not rely on unstable decimal renderings of non-exactly representable floats; emitted representations must be stable and correct for values that can be represented exactly, and floating-point round-tripping must be validated by comparing the recovered numeric value with the original.
+Fix the float/double emission and conversion behavior so that round-tripping through YAML text preserves values and does not throw for valid finite values at the extremes of representable ranges.

@@ -1,0 +1,519 @@
+diff --git a/python/google/protobuf/internal/containers.py b/python/google/protobuf/internal/containers.py
+index 7298bc5c7..e1c233cbf 100755
+--- a/python/google/protobuf/internal/containers.py
++++ b/python/google/protobuf/internal/containers.py
+@@ -40,6 +40,7 @@ _T = TypeVar('_T')
+ _K = TypeVar('_K')
+ _V = TypeVar('_V')
+ 
++from google.protobuf.descriptor import FieldDescriptor
+ 
+ class BaseContainer(Sequence[_T]):
+   """Base container class."""
+@@ -104,12 +105,13 @@ class RepeatedScalarFieldContainer(BaseContainer[_T], MutableSequence[_T]):
+   """Simple, type-checked, list-like container for holding repeated scalars."""
+ 
+   # Disallows assignment to other attributes.
+-  __slots__ = ['_type_checker']
++  __slots__ = ['_type_checker', '_field']
+ 
+   def __init__(
+       self,
+       message_listener: Any,
+       type_checker: Any,
++      field: Any = None,
+   ) -> None:
+     """Args:
+ 
+@@ -121,6 +123,7 @@ class RepeatedScalarFieldContainer(BaseContainer[_T], MutableSequence[_T]):
+     """
+     super().__init__(message_listener)
+     self._type_checker = type_checker
++    self._field = field
+ 
+   def append(self, value: _T) -> None:
+     """Appends an item to the list. Similar to list.append()."""
+@@ -202,7 +205,8 @@ class RepeatedScalarFieldContainer(BaseContainer[_T], MutableSequence[_T]):
+       unused_memo: Any = None,
+   ) -> 'RepeatedScalarFieldContainer[_T]':
+     clone = RepeatedScalarFieldContainer(
+-        copy.deepcopy(self._message_listener), self._type_checker)
++        copy.deepcopy(self._message_listener), self._type_checker, self._field
++    )
+     clone.MergeFrom(self)
+     return clone
+ 
+@@ -210,6 +214,38 @@ class RepeatedScalarFieldContainer(BaseContainer[_T], MutableSequence[_T]):
+     raise pickle.PickleError(
+         "Can't pickle repeated scalar fields, convert to list first")
+ 
++  def __array__(self, dtype=None, copy=None):
++    import numpy as np
++
++    if dtype is None:
++      cpp_type = self._field.cpp_type
++      if cpp_type == FieldDescriptor.CPPTYPE_INT32:
++        dtype = np.int32
++      elif cpp_type == FieldDescriptor.CPPTYPE_INT64:
++        dtype = np.int64
++      elif cpp_type == FieldDescriptor.CPPTYPE_UINT32:
++        dtype = np.uint32
++      elif cpp_type == FieldDescriptor.CPPTYPE_UINT64:
++        dtype = np.uint64
++      elif cpp_type == FieldDescriptor.CPPTYPE_DOUBLE:
++        dtype = np.float64
++      elif cpp_type == FieldDescriptor.CPPTYPE_FLOAT:
++        dtype = np.float32
++      elif cpp_type == FieldDescriptor.CPPTYPE_BOOL:
++        dtype = np.bool
++      elif cpp_type == FieldDescriptor.CPPTYPE_ENUM:
++        dtype = np.int32
++      elif self._field.type == FieldDescriptor.TYPE_BYTES:
++        dtype = 'S'
++      elif self._field.type == FieldDescriptor.TYPE_STRING:
++        dtype = str
++      else:
++        raise SystemError(
++            'Code should never reach here: message type detected in'
++            ' RepeatedScalarFieldContainer'
++        )
++    return np.array(self._values, dtype=dtype, copy=True)
++
+ 
+ # TODO: Constrain T to be a subtype of Message.
+ class RepeatedCompositeFieldContainer(BaseContainer[_T], MutableSequence[_T]):
+diff --git a/python/google/protobuf/internal/python_message.py b/python/google/protobuf/internal/python_message.py
+index ba79963dd..38f807b81 100755
+--- a/python/google/protobuf/internal/python_message.py
++++ b/python/google/protobuf/internal/python_message.py
+@@ -443,7 +443,8 @@ def _DefaultValueConstructorForField(field):
+       type_checker = type_checkers.GetTypeChecker(field)
+       def MakeRepeatedScalarDefault(message):
+         return containers.RepeatedScalarFieldContainer(
+-            message._listener_for_children, type_checker)
++            message._listener_for_children, type_checker, field
++        )
+       return MakeRepeatedScalarDefault
+ 
+   if field.cpp_type == _FieldDescriptor.CPPTYPE_MESSAGE:
+diff --git a/python/google/protobuf/pyext/repeated_scalar_container.cc b/python/google/protobuf/pyext/repeated_scalar_container.cc
+index 934addc6a..3fcfe4145 100644
+--- a/python/google/protobuf/pyext/repeated_scalar_container.cc
++++ b/python/google/protobuf/pyext/repeated_scalar_container.cc
+@@ -10,6 +10,7 @@
+ 
+ #include "google/protobuf/pyext/repeated_scalar_container.h"
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <memory>
+ #include <string>
+@@ -542,6 +543,191 @@ static PyObject* RichCompare(PyObject* pself, PyObject* other, int opid) {
+   return PyObject_RichCompare(list.get(), other, opid);
+ }
+ 
++// CPython equivalent of nparray.astype(dtype_requested, copy=copy) in python.
++PyObject* NpArrayAsType(PyObject* nparray, PyObject* dtype_requested,
++                        bool copy) {
++  ScopedPyObjectPtr astype_args(Py_BuildValue("(O)", dtype_requested));
++  ScopedPyObjectPtr keywords(PyDict_New());
++  PyDict_SetItemString(keywords.get(), "copy", copy ? Py_True : Py_False);
++  ScopedPyObjectPtr np_array_astype(PyObject_GetAttrString(nparray, "astype"));
++
++  return PyObject_Call(np_array_astype.get(), astype_args.get(),
++                       keywords.get());
++}
++
++// Takes in an iterable[str], and returns the length (in bytes) of the
++// largest str in the iterable.
++Py_ssize_t CalculateMaxLengthOfStrObjects(PyObject* pself) {
++  ScopedPyObjectPtr iter(PyObject_GetIter(pself));
++  if (iter.get() == nullptr) {
++    PyErr_SetString(PyExc_TypeError, "Unable to get an iterator.");
++    return -1;
++  }
++  ScopedPyObjectPtr next;
++
++  // Default to 1 since empty byte arrays are expected to be represented with
++  // length of 1.
++  Py_ssize_t max_length_of_str = 1;
++  while (next.reset(PyIter_Next(iter.get())) != nullptr) {
++    Py_ssize_t length_of_str = 0;
++    PyUnicode_AsUTF8AndSize(next.get(), &length_of_str);
++    // Previous statement has some basic error checking, so check if
++    // an error occurred via PyErr_Occurred().
++    if (PyErr_Occurred()) {
++      return -1;
++    }
++
++    max_length_of_str = std::max<Py_ssize_t>(length_of_str, max_length_of_str);
++  }
++  return max_length_of_str;
++}
++
++// Note: Returns a new reference.
++PyObject* ConstructArrayByIteration(PyObject* pself, PyObject* np_module) {
++  Py_ssize_t array_length = Len(pself);
++  ScopedPyObjectPtr nparray(
++      PyObject_CallMethod(np_module, "empty", "is", array_length, "O"));
++
++  for (Py_ssize_t i = 0; i != array_length; ++i) {
++    ScopedPyObjectPtr item(Item(pself, i));
++    PySequence_SetItem(nparray.as_pyobject(), i, item.as_pyobject());
++  }
++
++  return nparray.release();
++}
++
++std::string GetDefaultDTypeStr(FieldDescriptor::CppType cpp_type) {
++  switch (cpp_type) {
++    case FieldDescriptor::CPPTYPE_FLOAT:
++      return "f4";
++    case FieldDescriptor::CPPTYPE_INT32:
++      return "i4";
++    case FieldDescriptor::CPPTYPE_INT64:
++      return "i8";
++    case FieldDescriptor::CPPTYPE_UINT32:
++      return "u4";
++    case FieldDescriptor::CPPTYPE_UINT64:
++      return "u8";
++    case FieldDescriptor::CPPTYPE_DOUBLE:
++      return "f8";
++    case FieldDescriptor::CPPTYPE_BOOL:
++      return "?";  // Boolean is '?' per official docs.
++    case FieldDescriptor::CPPTYPE_ENUM:
++      return "i4";
++    case FieldDescriptor::CPPTYPE_STRING:
++    case FieldDescriptor::CPPTYPE_MESSAGE:
++      return "";
++  }
++  return "";
++}
++
++PyObject* CreateArrayFromView(PyObject* pself, PyObject* np_module) {
++  RepeatedScalarContainer* self =
++      reinterpret_cast<RepeatedScalarContainer*>(pself);
++  Message* message = self->parent->message;
++  const FieldDescriptor* field_descriptor = self->parent_field_descriptor;
++  const Reflection* reflection = message->GetReflection();
++  std::string out_dtype = GetDefaultDTypeStr(field_descriptor->cpp_type());
++  const void* out_ptr;
++  Py_ssize_t out_buffer_size_bytes;
++
++  switch (field_descriptor->cpp_type()) {
++#define HANDLE_TYPE(TYPE, type)                                         \
++  case FieldDescriptor::CPPTYPE_##TYPE: {                               \
++    const auto& rf =                                                    \
++        reflection->GetRepeatedField<type>(*message, field_descriptor); \
++    out_ptr = reinterpret_cast<const void*>(rf.data());                 \
++    out_buffer_size_bytes = static_cast<Py_ssize_t>(sizeof(type)) *     \
++                            static_cast<Py_ssize_t>(rf.size());         \
++    break;                                                              \
++  }
++    HANDLE_TYPE(FLOAT, float)
++    HANDLE_TYPE(INT32, int)
++    HANDLE_TYPE(INT64, int64_t)
++    HANDLE_TYPE(UINT32, uint32_t)
++    HANDLE_TYPE(UINT64, uint64_t)
++    HANDLE_TYPE(DOUBLE, double)
++    HANDLE_TYPE(BOOL, bool)
++    HANDLE_TYPE(ENUM, int32_t)
++#undef HANDLE_TYPE
++    case FieldDescriptor::CPPTYPE_MESSAGE:
++    case FieldDescriptor::CPPTYPE_STRING: {
++      PyErr_Format(PyExc_SystemError,
++                   "Code should never reach here: cpp type should never be "
++                   "string nor message in GetDTypeAndBuffer().");
++      return nullptr;
++    }
++  }
++  if (out_buffer_size_bytes == 0) {
++    return PyObject_CallMethod(np_module, "empty", "is", 0, out_dtype.c_str());
++  }
++  ScopedPyObjectPtr view(PyMemoryView_FromMemory(
++      const_cast<char*>(reinterpret_cast<const char*>(out_ptr)),
++      out_buffer_size_bytes, PyBUF_READ));
++  return PyObject_CallMethod(np_module, "frombuffer", "Os", view.as_pyobject(),
++                             out_dtype.c_str());
++}
++
++PyObject* AsNpArray(PyObject* pself, PyObject* args, PyObject* kwargs) {
++  static const char* kwlist[] = {"dtype", "copy", nullptr};
++  PyObject* dtype_requested = nullptr;
++  PyObject* copy = nullptr;
++  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OO",
++                                   const_cast<char**>(kwlist), &dtype_requested,
++                                   &copy)) {
++    return nullptr;
++  }
++
++  ScopedPyObjectPtr np_module(PyImport_ImportModule("numpy"));
++  if (np_module.get() == nullptr) {
++    PyErr_Format(PyExc_ImportError, "Unable to import numpy.");
++    return nullptr;
++  }
++
++  RepeatedScalarContainer* self =
++      reinterpret_cast<RepeatedScalarContainer*>(pself);
++  const FieldDescriptor* field_descriptor = self->parent_field_descriptor;
++  FieldDescriptor::CppType cpp_type = field_descriptor->cpp_type();
++  ScopedPyObjectPtr default_dtype;
++  if (cpp_type == FieldDescriptor::CPPTYPE_STRING) {
++    ScopedPyObjectPtr nparray(
++        ConstructArrayByIteration(pself, np_module.get()));
++    if (dtype_requested == nullptr) {
++      if (field_descriptor->type() == FieldDescriptor::TYPE_STRING) {
++        dtype_requested =
++            PyObject_CallMethod(np_module.get(), "dtype", "s", "str");
++      } else {
++        dtype_requested =
++            PyObject_CallMethod(np_module.get(), "dtype", "s", "S");
++      }
++      // For ref-counting
++      default_dtype.reset(dtype_requested);
++    }
++    return NpArrayAsType(nparray.get(), dtype_requested, false);
++  }
++
++  // For non string repeated scalar
++  if (dtype_requested == nullptr) {
++    std::string returned_dtype = GetDefaultDTypeStr(cpp_type);
++    if (Len(pself) == 0) {
++      return PyObject_CallMethod(np_module.get(), "empty", "is", 0,
++                                 returned_dtype.c_str());
++    }
++    // Get default dtype for the current field.
++    dtype_requested = PyObject_CallMethod(np_module.get(), "dtype", "s",
++                                          returned_dtype.c_str());
++    // For ref-counting.
++    default_dtype.reset(dtype_requested);
++  }
++  // Create an np array from a memoryview.
++  ScopedPyObjectPtr nparray_nocopy(CreateArrayFromView(pself, np_module.get()));
++  if (nparray_nocopy.get() == nullptr) {
++    return nullptr;
++  }
++  // Return using astype(). This will copy.
++  return NpArrayAsType(nparray_nocopy.as_pyobject(), dtype_requested, true);
++}
++
+ PyObject* Reduce(PyObject* unused_self, PyObject* unused_other) {
+   PyErr_Format(PickleError_class,
+                "can't pickle repeated message fields, convert to list first");
+@@ -698,6 +884,8 @@ static PyMappingMethods MpMethods = {
+ 
+ static PyMethodDef Methods[] = {
+     {"__deepcopy__", DeepCopy, METH_VARARGS, "Makes a deep copy of the class."},
++    {"__array__", (PyCFunction)AsNpArray, METH_VARARGS | METH_KEYWORDS,
++     "Returns a np.array."},
+     {"__reduce__", Reduce, METH_NOARGS,
+      "Outputs picklable representation of the repeated field."},
+     {"append", AppendMethod, METH_O,
+diff --git a/python/repeated.c b/python/repeated.c
+index 3ce18b5ae..1599ae7bf 100644
+--- a/python/repeated.c
++++ b/python/repeated.c
+@@ -729,9 +729,203 @@ static PyObject* PyUpb_RepeatedScalarContainer_Reduce(PyObject* unused_self,
+   return NULL;
+ }
+ 
++char* GetDefaultDTypeStr(upb_CType cpp_type) {
++  switch (cpp_type) {
++    case kUpb_CType_Float:
++      return "f4";
++    case kUpb_CType_Int32:
++      return "i4";
++    case kUpb_CType_Int64:
++      return "i8";
++    case kUpb_CType_UInt32:
++      return "u4";
++    case kUpb_CType_UInt64:
++      return "u8";
++    case kUpb_CType_Double:
++      return "f8";
++    case kUpb_CType_Bool:
++      return "?";  // Boolean is '?' per official docs.
++    case kUpb_CType_Enum:
++      return "i4";
++    case kUpb_CType_String:
++    case kUpb_CType_Bytes:
++    case kUpb_CType_Message:
++      return NULL;
++  }
++  return NULL;
++}
++
++PyObject* CreateArrayFromView(PyObject* _self, PyObject* np_module) {
++  PyUpb_RepeatedContainer* self = (PyUpb_RepeatedContainer*)(_self);
++  upb_Array* arr = PyUpb_RepeatedContainer_GetIfReified(self);
++  size_t size = arr ? upb_Array_Size(arr) : 0;
++  const upb_FieldDef* f = PyUpb_RepeatedContainer_GetField(self);
++  Py_ssize_t out_buffer_size_bytes;
++  const char* out_dtype = GetDefaultDTypeStr(upb_FieldDef_CType(f));
++  switch (upb_FieldDef_CType(f)) {
++    case kUpb_CType_Float: {
++      out_buffer_size_bytes = sizeof(float) * size;
++      break;
++    }
++    case kUpb_CType_Int32: {
++      out_buffer_size_bytes = 4 * size;
++      break;
++    }
++    case kUpb_CType_Int64: {
++      out_buffer_size_bytes = 8 * size;
++      break;
++    }
++    case kUpb_CType_UInt32: {
++      out_buffer_size_bytes = 4 * size;
++      break;
++    }
++    case kUpb_CType_UInt64: {
++      out_buffer_size_bytes = 8 * size;
++      break;
++    }
++    case kUpb_CType_Double: {
++      out_buffer_size_bytes = sizeof(double) * size;
++      break;
++    }
++    case kUpb_CType_Bool: {
++      out_buffer_size_bytes = sizeof(bool) * size;
++      break;
++    }
++    case kUpb_CType_Enum: {
++      out_buffer_size_bytes = 4 * size;
++      break;
++    }
++    case kUpb_CType_Message:
++    case kUpb_CType_Bytes:
++    case kUpb_CType_String: {
++      PyErr_Format(PyExc_SystemError,
++                   "Code should never reach here: cpp type "
++                   "should not be message nor string in CreateArrayFromView.");
++      return NULL;
++    }
++  }
++  if (out_buffer_size_bytes == 0) {
++    return PyObject_CallMethod(np_module, "empty", "is", 0, out_dtype);
++  }
++  const void* out_ptr = upb_Array_DataPtr(arr);
++  PyObject* view = PyMemoryView_FromMemory(
++      (char*)(const char*)out_ptr, out_buffer_size_bytes, 0x100 /*PyBUF_READ*/);
++  PyObject* return_value =
++      PyObject_CallMethod(np_module, "frombuffer", "Os", view, out_dtype);
++  Py_DECREF(view);
++  return return_value;
++}
++
++// CPython equivalent of nparray.astype(dtype_requested, copy=copy).
++PyObject* NpArrayAsType(PyObject* nparray, PyObject* dtype_requested,
++                        bool copy) {
++  PyObject* astype_args = Py_BuildValue("(O)", dtype_requested);
++  PyObject* keywords = PyDict_New();
++  PyDict_SetItemString(keywords, "copy", copy ? Py_True : Py_False);
++  PyObject* np_array_astype = PyObject_GetAttrString(nparray, "astype");
++
++  PyObject* return_value =
++      PyObject_Call(np_array_astype, astype_args, keywords);
++  Py_DECREF(np_array_astype);
++  Py_DECREF(keywords);
++  Py_DECREF(astype_args);
++  return return_value;
++}
++
++PyObject* ConstructArrayByIteration(PyObject* _self, PyObject* np_module) {
++  PyUpb_RepeatedContainer* self = (PyUpb_RepeatedContainer*)_self;
++  upb_Array* arr = PyUpb_RepeatedContainer_GetIfReified(self);
++  Py_ssize_t array_length = PyUpb_RepeatedContainer_Length(_self);
++  const upb_FieldDef* f = PyUpb_RepeatedContainer_GetField(self);
++  PyObject* nparray =
++      PyObject_CallMethod(np_module, "empty", "is", array_length, "O");
++  PyObject* arena = self->arena;
++  for (Py_ssize_t i = 0; i < array_length; ++i) {
++    upb_MessageValue msgval = upb_Array_Get(arr, i);
++    PyObject* item = PyUpb_UpbToPy(msgval, f, arena);
++    PySequence_SetItem(nparray, i, item);
++    Py_DECREF(item);
++  }
++  return nparray;
++}
++
++static PyObject* PyUpb_RepeatedScalarContainer_AsNpArray(PyObject* _self,
++                                                         PyObject* args,
++                                                         PyObject* kwargs) {
++  static const char* kwlist[] = {"dtype", "copy", NULL};
++  PyObject* dtype_requested = NULL;
++  PyObject* copy = NULL;
++  PyObject* return_value = NULL;
++  PyObject* default_dtype = NULL;
++  PyObject* nparray = NULL;
++  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OO", (char**)kwlist,
++                                   &dtype_requested, &copy)) {
++    return NULL;
++  }
++
++  PyObject* np_module = PyImport_ImportModule("numpy");
++  if (np_module == NULL) {
++    PyErr_Format(PyExc_ImportError, "Unable to import numpy.");
++    return NULL;
++  }
++  PyUpb_RepeatedContainer* self = (PyUpb_RepeatedContainer*)(_self);
++  const upb_FieldDef* f = PyUpb_RepeatedContainer_GetField(self);
++  upb_CType c_type = upb_FieldDef_CType(f);
++
++  // string repeated
++  if (c_type == kUpb_CType_String || c_type == kUpb_CType_Bytes) {
++    nparray = ConstructArrayByIteration(_self, np_module);
++    if (dtype_requested == NULL) {
++      if (c_type == kUpb_CType_String) {
++        dtype_requested = PyObject_CallMethod(np_module, "dtype", "s", "str");
++      } else {
++        dtype_requested = PyObject_CallMethod(np_module, "dtype", "s", "S");
++      }
++      default_dtype = dtype_requested;
++    }
++    return_value = NpArrayAsType(nparray, dtype_requested, false);
++    goto ret;
++  }
++
++  // non-string scalar repeated
++  if (dtype_requested == NULL) {
++    char* returned_dtype = GetDefaultDTypeStr(c_type);
++    if (returned_dtype == NULL) {
++      PyErr_SetString(PyExc_SystemError,
++                      "Implementation error: Unhandled case in AsNpArray.");
++      return NULL;
++    }
++    if (PyUpb_RepeatedContainer_Length(_self) == 0) {
++      return_value =
++          PyObject_CallMethod(np_module, "empty", "is", 0, returned_dtype);
++      goto ret;
++    }
++
++    dtype_requested =
++        PyObject_CallMethod(np_module, "dtype", "s", returned_dtype);
++    // For ref-counting.
++    default_dtype = dtype_requested;
++  }
++  nparray = CreateArrayFromView(_self, np_module);
++  if (nparray == NULL) {
++    goto ret;
++  }
++
++  return_value = NpArrayAsType(nparray, dtype_requested, true);
++
++ret:
++  Py_XDECREF(default_dtype);
++  Py_XDECREF(nparray);
++  Py_DECREF(np_module);
++  assert(!PyErr_Occurred());
++  return return_value;
++}
++
+ static PyMethodDef PyUpb_RepeatedScalarContainer_Methods[] = {
+     {"__deepcopy__", PyUpb_RepeatedContainer_DeepCopy, METH_VARARGS,
+      "Makes a deep copy of the class."},
++    {"__array__", (PyCFunction)PyUpb_RepeatedScalarContainer_AsNpArray,
++     METH_VARARGS | METH_KEYWORDS, "Returns a np.array."},
+     {"__reduce__", PyUpb_RepeatedScalarContainer_Reduce, METH_NOARGS,
+      "Outputs picklable representation of the repeated field."},
+     {"append", PyUpb_RepeatedScalarContainer_Append, METH_O,

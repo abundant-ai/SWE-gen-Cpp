@@ -1,0 +1,455 @@
+diff --git a/doc/ondemand_design.md b/doc/ondemand_design.md
+index 174fb4e8..b69e4971 100644
+--- a/doc/ondemand_design.md
++++ b/doc/ondemand_design.md
+@@ -632,7 +632,12 @@ We iterate through object instances using `field` instances which represent key-
+ is accessible by the `value()` method whereas the key is accessible by the `key()` method.
+ The keys are treated differently than values are made available as as special type `raw_json_string`
+ which is a lightweight type that is meant to be used on a temporary basis, amost solely for
+-direct raw ASCII comparisons (`field.key() == "mykey"`). If you occasionally need to access and store the
++direct raw ASCII comparisons: `key().raw()` provides direct access to the unescaped string.
++You can compare `key()` with unescaped C strings (e.g., `key()=="test"`). It is expected
++that the provided string is a valid JSON string. Importantly,
++the C string must not contain an unescaped quote character (`"`). For speed, the comparison is done byte-by-byte
++without handling the escaped caracters.
++If you occasionally need to access and store the
+ unescaped key values, you may use the `unescaped_key()` method. Once you have called `unescaped_key()` method,
+ neither the `key()` nor the `unescaped_key()` methods should be called: the current field instance
+ has no longer a key (that is by design). Like other strings, the resulting `std::string_view` generated
+@@ -775,4 +780,4 @@ Instead of specifying a specific microarchitecture, you can let your compiler do
+ 
+ Passing `-march=native` to the compiler may make On Demand faster by allowing it to use optimizations specific to your machine. You cannot do this, however, if you are compiling code	that might be run on less advanced machines. That is, be mindful that when compiling with the `-march=native` flag, the resulting binary will run on the current system but may not run on other systems (e.g., on an old processor).
+ 
+-If you are compiling on an ARM or POWER system, you do not need to be concerned with CPU selection during compilation. The `-march=native` flag useful for best performance on x64 (e.g., Intel) systems but it is generally unsupported on some platforms such as ARM (aarch64) or POWER.
+\ No newline at end of file
++If you are compiling on an ARM or POWER system, you do not need to be concerned with CPU selection during compilation. The `-march=native` flag useful for best performance on x64 (e.g., Intel) systems but it is generally unsupported on some platforms such as ARM (aarch64) or POWER.
+diff --git a/include/simdjson/generic/ondemand/field.h b/include/simdjson/generic/ondemand/field.h
+index b29711d4..680eea6a 100644
+--- a/include/simdjson/generic/ondemand/field.h
++++ b/include/simdjson/generic/ondemand/field.h
+@@ -30,8 +30,8 @@ public:
+    */
+   simdjson_really_inline simdjson_warn_unused simdjson_result<std::string_view> unescaped_key() noexcept;
+   /**
+-   * Get the key as a raw_json_string: this is fast and allows straight comparisons.
+-   * We want this to be the default for most users.
++   * Get the key as a raw_json_string. Can be used for direct comparison with
++   * an unescaped C string: e.g., key() == "test".
+    */
+   simdjson_really_inline raw_json_string key() const noexcept;
+   /**
+diff --git a/include/simdjson/generic/ondemand/object.h b/include/simdjson/generic/ondemand/object.h
+index 1233bff5..0b0244e0 100644
+--- a/include/simdjson/generic/ondemand/object.h
++++ b/include/simdjson/generic/ondemand/object.h
+@@ -32,6 +32,8 @@ public:
+    * double y = obj.find_field("y");
+    * double x = obj.find_field("x");
+    * ```
++   * If you have multiple fields with a matching key ({"x": 1,  "x": 1}) be mindful
++   * that only one field is returned.
+    *
+    * **Raw Keys:** The lookup will be done against the *raw* key, and will not unescape keys.
+    * e.g. `object["a"]` will match `{ "a": 1 }`, but will *not* match `{ "\u0061": 1 }`.
+@@ -59,6 +61,9 @@ public:
+    * Use find_field() if you are sure fields will be in order (or are willing to treat it as if the
+    * field wasn't there when they aren't).
+    *
++   * If you have multiple fields with a matching key ({"x": 1,  "x": 1}) be mindful
++   * that only one field is returned.
++   *
+    * @param key The key to look up.
+    * @returns The value of the field, or NO_SUCH_FIELD if the field is not in the object.
+    */
+diff --git a/include/simdjson/generic/ondemand/raw_json_string-inl.h b/include/simdjson/generic/ondemand/raw_json_string-inl.h
+index 2635c308..3e87f737 100644
+--- a/include/simdjson/generic/ondemand/raw_json_string-inl.h
++++ b/include/simdjson/generic/ondemand/raw_json_string-inl.h
+@@ -1,4 +1,5 @@
+ namespace simdjson {
++
+ namespace SIMDJSON_IMPLEMENTATION {
+ namespace ondemand {
+ 
+@@ -13,26 +14,146 @@ simdjson_really_inline simdjson_warn_unused simdjson_result<std::string_view> ra
+   return result;
+ }
+ 
+-simdjson_really_inline simdjson_warn_unused simdjson_result<std::string_view> raw_json_string::unescape(json_iterator &iter) const noexcept {
+-  return unescape(iter.string_buf_loc());
++simdjson_really_inline bool raw_json_string::is_free_from_unescaped_quote(std::string_view target) noexcept {
++  size_t pos{0};
++  // if the content has no escape character, just scan through it quickly!
++  for(;pos < target.size() && target[pos] != '\\';pos++) {}
++  // slow path may begin.
++  bool escaping{false};
++  for(;pos < target.size();pos++) {
++    if((target[pos] == '"') && !escaping) {
++      return false;
++    } else if(target[pos] == '\\') {
++      escaping = !escaping;
++    } else {
++      escaping = false;
++    }
++  }
++  return true;
++}
++
++simdjson_really_inline bool raw_json_string::is_free_from_unescaped_quote(const char* target) noexcept {
++  size_t pos{0};
++  // if the content has no escape character, just scan through it quickly!
++  for(;target[pos] && target[pos] != '\\';pos++) {}
++  // slow path may begin.
++  bool escaping{false};
++  for(;target[pos];pos++) {
++    if((target[pos] == '"') && !escaping) {
++      return false;
++    } else if(target[pos] == '\\') {
++      escaping = !escaping;
++    } else {
++      escaping = false;
++    }
++  }
++  return true;
++}
++
++
++simdjson_really_inline bool raw_json_string::unsafe_is_equal(size_t length, std::string_view target) const noexcept {
++  // If we are going to call memcmp, then we must know something about the length of the raw_json_string.
++  return (length >= target.size()) && (raw()[target.size()] == '"') && !memcmp(raw(), target.data(), target.size());
++}
++
++simdjson_really_inline bool raw_json_string::unsafe_is_equal(std::string_view target) const noexcept {
++  // Assumptions: does not contain unescaped quote characters, and
++  // the raw content is quote terminated within a valid JSON string.
++  if(target.size() <= SIMDJSON_PADDING) {
++    return (raw()[target.size()] == '"') && !memcmp(raw(), target.data(), target.size());
++  }
++  const char * r{raw()};
++  size_t pos{0};
++  for(;pos < target.size();pos++) {
++    if(r[pos] != target[pos]) { return false; }
++  }
++  if(r[pos] != '"') { return false; }
++  return true;
++}
++
++simdjson_really_inline bool raw_json_string::is_equal(std::string_view target) const noexcept {
++  const char * r{raw()};
++  size_t pos{0};
++  bool escaping{false};
++  for(;pos < target.size();pos++) {
++    if(r[pos] != target[pos]) { return false; }
++    // if target is a compile-time constant and it is free from
++    // quotes, then the next part could get optimized away through
++    // inlining.
++    if((target[pos] == '"') && !escaping) {
++      // We have reached the end of the raw_json_string but
++      // the target is not done.
++      return false;
++    } else if(target[pos] == '\\') {
++      escaping = !escaping;
++    } else {
++      escaping = false;
++    }
++  }
++  if(r[pos] != '"') { return false; }
++  return true;
+ }
+ 
+-simdjson_unused simdjson_really_inline bool operator==(const raw_json_string &a, std::string_view b) noexcept {
+-  return !memcmp(a.raw(), b.data(), b.size());
++
++simdjson_really_inline bool raw_json_string::unsafe_is_equal(const char * target) const noexcept {
++  // Assumptions: 'target' does not contain unescaped quote characters, is null terminated and
++  // the raw content is quote terminated within a valid JSON string.
++  const char * r{raw()};
++  size_t pos{0};
++  for(;target[pos];pos++) {
++    if(r[pos] != target[pos]) { return false; }
++  }
++  if(r[pos] != '"') { return false; }
++  return true;
++}
++
++simdjson_really_inline bool raw_json_string::is_equal(const char* target) const noexcept {
++  // Assumptions: does not contain unescaped quote characters, and
++  // the raw content is quote terminated within a valid JSON string.
++  const char * r{raw()};
++  size_t pos{0};
++  bool escaping{false};
++  for(;target[pos];pos++) {
++    if(r[pos] != target[pos]) { return false; }
++    // if target is a compile-time constant and it is free from
++    // quotes, then the next part could get optimized away through
++    // inlining.
++    if((target[pos] == '"') && !escaping) {
++      // We have reached the end of the raw_json_string but
++      // the target is not done.
++      return false;
++    } else if(target[pos] == '\\') {
++      escaping = !escaping;
++    } else {
++      escaping = false;
++    }
++  }
++  if(r[pos] != '"') { return false; }
++  return true;
+ }
+ 
+-simdjson_unused simdjson_really_inline bool operator==(std::string_view a, const raw_json_string &b) noexcept {
+-  return b == a;
++simdjson_unused simdjson_really_inline bool operator==(const raw_json_string &a, std::string_view c) noexcept {
++  return a.unsafe_is_equal(c);
+ }
+ 
+-simdjson_unused simdjson_really_inline bool operator!=(const raw_json_string &a, std::string_view b) noexcept {
+-  return !(a == b);
++simdjson_unused simdjson_really_inline bool operator==(std::string_view c, const raw_json_string &a) noexcept {
++  return a == c;
+ }
+ 
+-simdjson_unused simdjson_really_inline bool operator!=(std::string_view a, const raw_json_string &b) noexcept {
+-  return !(a == b);
++simdjson_unused simdjson_really_inline bool operator!=(const raw_json_string &a, std::string_view c) noexcept {
++  return !(a == c);
+ }
+ 
++simdjson_unused simdjson_really_inline bool operator!=(std::string_view c, const raw_json_string &a) noexcept {
++  return !(a == c);
++}
++
++
++simdjson_really_inline simdjson_warn_unused simdjson_result<std::string_view> raw_json_string::unescape(json_iterator &iter) const noexcept {
++  return unescape(iter.string_buf_loc());
++}
++
++
+ simdjson_unused simdjson_really_inline std::ostream &operator<<(std::ostream &out, const raw_json_string &str) noexcept {
+   bool in_escape = false;
+   const char *s = str.raw();
+diff --git a/include/simdjson/generic/ondemand/raw_json_string.h b/include/simdjson/generic/ondemand/raw_json_string.h
+index d6066af2..edb3b177 100644
+--- a/include/simdjson/generic/ondemand/raw_json_string.h
++++ b/include/simdjson/generic/ondemand/raw_json_string.h
+@@ -16,7 +16,7 @@ class json_iterator;
+  * JSON file.)
+  *
+  * This class is deliberately simplistic and has little functionality. You can
+- * compare two raw_json_string instances, or compare a raw_json_string with a string_view, but
++ * compare a raw_json_string instance with an unescaped C string, but
+  * that is pretty much all you can do.
+  *
+  * They originate typically from field instance which in turn represent key-value pairs from
+@@ -49,7 +49,76 @@ public:
+    */
+   simdjson_really_inline const char * raw() const noexcept;
+ 
++  /**
++   * This compares the current instance to the std::string_view target: returns true if
++   * they are byte-by-byte equal (no escaping is done) on target.size() characters,
++   * and if the raw_json_string instance has a quote character at byte index target.size().
++   * We never read more than length + 1 bytes in the raw_json_string instance.
++   * If length is smaller than target.size(), this will return false.
++   *
++   * The std::string_view instance may contain any characters. However, the caller
++   * is responsible for setting length so that length bytes may be read in the
++   * raw_json_string.
++   *
++   * Performance: the comparison may be done using memcmp which may be efficient
++   * for long strings.
++   */
++  simdjson_really_inline bool unsafe_is_equal(size_t length, std::string_view target) const noexcept;
++
++  /**
++   * This compares the current instance to the std::string_view target: returns true if
++   * they are byte-by-byte equal (no escaping is done).
++   * The std::string_view instance should not contain unescaped quote characters:
++   * the caller is responsible for this check. See is_free_from_unescaped_quote.
++   *
++   * Performance: the comparison is done byte-by-byte which might be inefficient for
++   * long strings.
++   *
++   * If target is a compile-time constant, and your compiler likes you,
++   * you should be able to do the following without performance penatly...
++   *
++   *   static_assert(raw_json_string::is_free_from_unescaped_quote(target), "");
++   *   s.unsafe_is_equal(target);
++   */
++  simdjson_really_inline bool unsafe_is_equal(std::string_view target) const noexcept;
++
++  /**
++   * This compares the current instance to the C string target: returns true if
++   * they are byte-by-byte equal (no escaping is done).
++   * The provided C string should not contain an unescaped quote character:
++   * the caller is responsible for this check. See is_free_from_unescaped_quote.
++   *
++   * If target is a compile-time constant, and your compiler likes you,
++   * you should be able to do the following without performance penatly...
++   *
++   *   static_assert(raw_json_string::is_free_from_unescaped_quote(target), "");
++   *   s.unsafe_is_equal(target);
++   */
++  simdjson_really_inline bool unsafe_is_equal(const char* target) const noexcept;
++
++  /**
++   * This compares the current instance to the std::string_view target: returns true if
++   * they are byte-by-byte equal (no escaping is done).
++   */
++  simdjson_really_inline bool is_equal(std::string_view target) const noexcept;
++
++  /**
++   * This compares the current instance to the C string target: returns true if
++   * they are byte-by-byte equal (no escaping is done).
++   */
++  simdjson_really_inline bool is_equal(const char* target) const noexcept;
++
++  /**
++   * Returns true if target is free from unescaped quote. If target is known at
++   * compile-time, we might expect the computation to happen at compile time with
++   * many compilers (not all!).
++   */
++  static simdjson_really_inline bool is_free_from_unescaped_quote(std::string_view target) noexcept;
++  static simdjson_really_inline bool is_free_from_unescaped_quote(const char* target) noexcept;
++
+ private:
++
++
+   /**
+    * This will set the inner pointer to zero, effectively making
+    * this instance unusable.
+@@ -92,13 +161,18 @@ private:
+   friend struct simdjson_result<raw_json_string>;
+ };
+ 
+-simdjson_unused simdjson_really_inline bool operator==(const raw_json_string &a, std::string_view b) noexcept;
+-simdjson_unused simdjson_really_inline bool operator==(std::string_view a, const raw_json_string &b) noexcept;
+-simdjson_unused simdjson_really_inline bool operator!=(const raw_json_string &a, std::string_view b) noexcept;
+-simdjson_unused simdjson_really_inline bool operator!=(std::string_view a, const raw_json_string &b) noexcept;
+-
+ simdjson_unused simdjson_really_inline std::ostream &operator<<(std::ostream &, const raw_json_string &) noexcept;
+ 
++/**
++ * Comparisons between raw_json_string and std::string_view instances are potentially unsafe: the user is responsible
++ * for providing a string with no unescaped quote. Note that unescaped quotes cannot be present in valid JSON strings.
++ */
++simdjson_unused simdjson_really_inline bool operator==(const raw_json_string &a, std::string_view c) noexcept;
++simdjson_unused simdjson_really_inline bool operator==(std::string_view c, const raw_json_string &a) noexcept;
++simdjson_unused simdjson_really_inline bool operator!=(const raw_json_string &a, std::string_view c) noexcept;
++simdjson_unused simdjson_really_inline bool operator!=(std::string_view c, const raw_json_string &a) noexcept;
++
++
+ } // namespace ondemand
+ } // namespace SIMDJSON_IMPLEMENTATION
+ } // namespace simdjson
+diff --git a/include/simdjson/generic/ondemand/value.h b/include/simdjson/generic/ondemand/value.h
+index c092dccc..4531d574 100644
+--- a/include/simdjson/generic/ondemand/value.h
++++ b/include/simdjson/generic/ondemand/value.h
+@@ -222,7 +222,9 @@ public:
+    * double y = obj.find_field("y");
+    * double x = obj.find_field("x");
+    * ```
+-   *
++   * If you have multiple fields with a matching key ({"x": 1,  "x": 1}) be mindful
++   * that only one field is returned.
++
+    * **Raw Keys:** The lookup will be done against the *raw* key, and will not unescape keys.
+    * e.g. `object["a"]` will match `{ "a": 1 }`, but will *not* match `{ "\u0061": 1 }`.
+    *
+@@ -246,6 +248,9 @@ public:
+    * default behavior failed to look up a field just because it was in the wrong order--and many
+    * APIs assume this. Therefore, you must be explicit if you want to treat objects as out of order.
+    *
++   * If you have multiple fields with a matching key ({"x": 1,  "x": 1}) be mindful
++   * that only one field is returned.
++   *
+    * Use find_field() if you are sure fields will be in order (or are willing to treat it as if the
+    * field wasn't there when they aren't).
+    *
+diff --git a/include/simdjson/generic/ondemand/value_iterator-inl.h b/include/simdjson/generic/ondemand/value_iterator-inl.h
+index 409ca6fa..cbadda85 100644
+--- a/include/simdjson/generic/ondemand/value_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/value_iterator-inl.h
+@@ -56,7 +56,6 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator
+ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator::find_field_raw(const std::string_view key) noexcept {
+   error_code error;
+   bool has_value;
+-
+   //
+   // Initially, the object can be in one of a few different places:
+   //
+@@ -113,11 +112,19 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator
+   while (has_value) {
+     // Get the key and colon, stopping at the value.
+     raw_json_string actual_key;
++    // size_t max_key_length = _json_iter->peek_length() - 2; // -2 for the two quotes
+     if ((error = field_key().get(actual_key) )) { abandon(); return error; };
+-    if ((error = field_value() )) { abandon(); return error; }
+ 
++    if ((error = field_value() )) { abandon(); return error; }
+     // If it matches, stop and return
+-    if (actual_key == key) {
++    // We could do it this way if we wanted to allow arbitrary
++    // key content (including escaped quotes).
++    //if (actual_key.unsafe_is_equal(max_key_length, key)) {
++    // Instead we do the following which may trigger buffer overruns if the
++    // user provides an adversarial key (containing a well placed unescaped quote
++    // character and being longer than the number of bytes remaining in the JSON
++    // input).
++    if (actual_key.unsafe_is_equal(key)) {
+       logger::log_event(*this, "match", key, -2);
+       return true;
+     }
+@@ -135,7 +142,6 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator
+ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator::find_field_unordered_raw(const std::string_view key) noexcept {
+   error_code error;
+   bool has_value;
+-
+   //
+   // Initially, the object can be in one of a few different places:
+   //
+@@ -215,11 +221,20 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator
+ 
+     // Get the key and colon, stopping at the value.
+     raw_json_string actual_key;
++    // size_t max_key_length = _json_iter->peek_length() - 2; // -2 for the two quotes
++
+     if ((error = field_key().get(actual_key) )) { abandon(); return error; };
+     if ((error = field_value() )) { abandon(); return error; }
+ 
+     // If it matches, stop and return
+-    if (actual_key == key) {
++    // We could do it this way if we wanted to allow arbitrary
++    // key content (including escaped quotes).
++    // if (actual_key.unsafe_is_equal(max_key_length, key)) {
++    // Instead we do the following which may trigger buffer overruns if the
++    // user provides an adversarial key (containing a well placed unescaped quote
++    // character and being longer than the number of bytes remaining in the JSON
++    // input).
++    if (actual_key.unsafe_is_equal(key)) {
+       logger::log_event(*this, "match", key, -2);
+       return true;
+     }
+@@ -243,11 +258,20 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator
+ 
+     // Get the key and colon, stopping at the value.
+     raw_json_string actual_key;
++    // size_t max_key_length = _json_iter->peek_length() - 2; // -2 for the two quotes
++
+     error = field_key().get(actual_key); SIMDJSON_ASSUME(!error);
+     error = field_value(); SIMDJSON_ASSUME(!error);
+ 
+     // If it matches, stop and return
+-    if (actual_key == key) {
++    // We could do it this way if we wanted to allow arbitrary
++    // key content (including escaped quotes).
++    // if (actual_key.unsafe_is_equal(max_key_length, key)) {
++    // Instead we do the following which may trigger buffer overruns if the
++    // user provides an adversarial key (containing a well placed unescaped quote
++    // character and being longer than the number of bytes remaining in the JSON
++    // input).
++    if (actual_key.unsafe_is_equal(key)) {
+       logger::log_event(*this, "match", key, -2);
+       return true;
+     }

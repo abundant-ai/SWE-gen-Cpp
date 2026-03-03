@@ -33,24 +33,19 @@ RUN git clone https://github.com/protocolbuffers/protobuf.git src && \
 
 WORKDIR /app/src
 
-# Pin Bazel version to 9.0.0 (needed for option_deps support in proto_library)
-RUN echo "9.0.0" > .bazelversion
+# Pin Bazel version to 7.6.1 (version used by protobuf CI)
+RUN echo "7.6.1" > .bazelversion
 
 # Bazel needs these env vars for reproducible builds
 ENV CI=true
-
-# Clean Bazel cache before applying patches
-RUN bazel clean --expunge || true
-
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
-RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Clean Bazel cache again after applying bug patch
-RUN bazel clean --expunge || true
+# Workaround: Comment out option_deps in editions_test_proto which isn't supported in Bazel 7
+# This target is not related to our test but gets analyzed because we depend on //upb/test:parse_text_proto
+RUN sed -i '/option_deps = \[/,/\],/s/^/#/' upb/test/BUILD
 
 RUN rm -rf /app/src/.git
 

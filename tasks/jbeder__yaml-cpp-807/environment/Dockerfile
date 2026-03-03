@@ -12,11 +12,7 @@ RUN apt-get update && apt-get install -y \
 # Install additional system packages needed for yaml-cpp
 RUN apt-get update && apt-get install -y \
     cmake \
-    locales \
     && rm -rf /var/lib/apt/lists/*
-
-# Generate locales for testing (de_DE uses comma as decimal separator)
-RUN locale-gen de_DE.UTF-8
 
 WORKDIR /app
 
@@ -29,30 +25,26 @@ RUN git clone https://github.com/jbeder/yaml-cpp.git src && \
 
 WORKDIR /app/src
 
-ENV LANG=de_DE.UTF-8
-ENV LC_ALL=de_DE.UTF-8
-
-# Configure the build (but don't build yet - the code at HEAD has compilation issues)
+# Configure the build
 RUN cmake -B build \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_CXX_STANDARD=17 \
     -DYAML_CPP_BUILD_TESTS=ON \
-    -DYAML_BUILD_SHARED_LIBS=OFF
+    -DYAML_BUILD_SHARED_LIBS=OFF \
+    -DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized"
 
-# Note: We skip building here because HEAD has the 'less' const bug that prevents compilation
-# The bug.patch will remove depthguard files, which also breaks compilation
-# The test.sh script will build after applying fix.patch (for oracle agent)
+# Fix compilation issue: add const to less comparator
+RUN sed -i 's/bool operator ()(const node\* l, const node\* r) {return l->m_index < r->m_index;}/bool operator ()(const node* l, const node* r) const {return l->m_index < r->m_index;}/' include/yaml-cpp/node/detail/node.h
 
-# Fix the 'less' const issue that prevents compilation
-# This is needed because PR #807 was created before PR #846 was merged
-RUN sed -i 's/bool operator ()(const node\* l, const node\* r) {/bool operator ()(const node* l, const node* r) const {/' include/yaml-cpp/node/detail/node.h
+# Build the project initially
+RUN cmake --build build --config Debug
+
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
-RUN (patch -p1 < /tmp/bug.patch || true) && rm /tmp/bug.patch
-
-# Note: We don't rebuild here because the buggy code has compilation errors (missing depthguard).
-# The test.sh script will rebuild after applying fix.patch (for oracle agent).
+RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
 RUN rm -rf /app/src/.git
 

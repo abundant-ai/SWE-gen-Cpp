@@ -1,9 +1,21 @@
-When emitting YAML with auto-quoting enabled, mapping keys that contain an ampersand (`&`) are not being quoted, which can produce invalid or misleading YAML because `&` is interpreted as the beginning of an anchor. As a result, a plain key like `a&b` may be emitted without quotes, even though it should be quoted/escaped to ensure the output is parsed as a single scalar key rather than YAML syntax.
+When using the YAML emitter with auto-quoting enabled, mapping keys that contain an ampersand ('&') are emitted without quotes, which makes the output ambiguous/invalid because '&' introduces an anchor in YAML. As a result, a key like "a&b" can be emitted as `a&b: value` instead of being quoted, and YAML parsers may interpret the `&b` portion as an anchor rather than part of the key.
 
-Reproduction scenario: create a mapping where the key string contains `&` (for example, a key equal to `"a&b"`) and emit it using `YAML::Emitter` with the emitter configured to auto-quote scalars/keys when needed. The emitted YAML should quote that key (e.g., `"a&b": value` or `'a&b': value`, depending on the chosen quoting style) so that parsing the emitted YAML round-trips back to the same key string.
+The emitter should treat an ampersand in a plain (unquoted) key as requiring escaping/quoting when auto-quoting is enabled, so that the emitted YAML round-trips correctly through parsing.
 
-Current behavior: the emitter outputs the key in plain style (unquoted) even though it contains `&`.
+Reproduction example:
+```cpp
+YAML::Emitter out;
+out << YAML::BeginMap;
+out << YAML::Key << "a&b";
+out << YAML::Value << "v";
+out << YAML::EndMap;
 
-Expected behavior: the emitter must treat `&` in keys as requiring quoting when auto-quoting is enabled, so that emitted YAML is unambiguous and parses back correctly. This should apply specifically when the scalar is being emitted as a map key (not just as a value), and should not incorrectly trigger anchor/alias emission for the key text.
+// With auto-quoting enabled, the output should quote the key so it is not
+// interpreted as an anchor.
+```
 
-Fix the emitter’s scalar/key quoting decision so that keys containing `&` are quoted/escaped appropriately under auto-quoting, ensuring the output can be parsed back into the same structure without interpreting `&` as YAML anchor syntax.
+Expected behavior: the emitted YAML quotes (or otherwise escapes) the key so the ampersand is preserved literally (e.g. `"a&b": v`), and the output is parseable and represents a map with a single key exactly equal to `a&b`.
+
+Actual behavior: the emitter outputs the key without quotes (e.g. `a&b: v`), which causes incorrect YAML semantics (the `&` is treated as anchor syntax) and breaks round-trip parsing/meaning.
+
+Fix the emitter’s scalar/key handling so that when emitting mapping keys in plain style under auto-quoting rules, the presence of `&` triggers quoting/escaping in the same way other YAML-reserved indicator characters do.

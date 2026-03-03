@@ -1,0 +1,521 @@
+diff --git a/include/simdjson/concepts.h b/include/simdjson/concepts.h
+index 494d2d29..2824a9ea 100644
+--- a/include/simdjson/concepts.h
++++ b/include/simdjson/concepts.h
+@@ -3,111 +3,22 @@
+ #if SIMDJSON_SUPPORTS_DESERIALIZATION
+ 
+ #include <concepts>
+-#include <type_traits>
++#include <string>
++#include <string_view>
+ 
+ namespace simdjson {
+ namespace concepts {
+ 
+-namespace details {
+-#define SIMDJSON_IMPL_CONCEPT(name, method)                                    \
+-  template <typename T>                                                        \
+-  concept supports_##name = !std::is_const_v<T> && requires {                  \
+-    typename std::remove_cvref_t<T>::value_type;                               \
+-    requires requires(typename std::remove_cvref_t<T>::value_type &&val,       \
+-                      T obj) {                                                 \
+-      obj.method(std::move(val));                                              \
+-      requires !requires { obj = std::move(val); };                            \
+-    };                                                                         \
+-  };
+-
+-SIMDJSON_IMPL_CONCEPT(emplace_back, emplace_back);
+-SIMDJSON_IMPL_CONCEPT(emplace, emplace);
+-SIMDJSON_IMPL_CONCEPT(push_back, push_back);
+-SIMDJSON_IMPL_CONCEPT(add, add);
+-SIMDJSON_IMPL_CONCEPT(push, push);
+-SIMDJSON_IMPL_CONCEPT(append, append);
+-SIMDJSON_IMPL_CONCEPT(insert, insert);
+-SIMDJSON_IMPL_CONCEPT(op_append, operator+=);
+-
+-#undef SIMDJSON_IMPL_CONCEPT
+-} // namespace details
+-
+-/// Check if T is a container that we can append to, including:
+-///   std::vector, std::deque, std::list, std::string, ...
+-template <typename T>
+-concept appendable_containers =
+-    details::supports_emplace_back<T> || details::supports_emplace<T> ||
+-    details::supports_push_back<T> || details::supports_push<T> ||
+-    details::supports_add<T> || details::supports_append<T> ||
+-    details::supports_insert<T>;
+-
+-/// Insert into the container however possible
+-template <appendable_containers T, typename... Args>
+-constexpr decltype(auto) emplace_one(T &vec, Args &&...args) {
+-  if constexpr (details::supports_emplace_back<T>) {
+-    return vec.emplace_back(std::forward<Args>(args)...);
+-  } else if constexpr (details::supports_emplace<T>) {
+-    return vec.emplace(std::forward<Args>(args)...);
+-  } else if constexpr (details::supports_push_back<T>) {
+-    return vec.push_back(std::forward<Args>(args)...);
+-  } else if constexpr (details::supports_push<T>) {
+-    return vec.push(std::forward<Args>(args)...);
+-  } else if constexpr (details::supports_add<T>) {
+-    return vec.add(std::forward<Args>(args)...);
+-  } else if constexpr (details::supports_append<T>) {
+-    return vec.append(std::forward<Args>(args)...);
+-  } else if constexpr (details::supports_insert<T>) {
+-    return vec.insert(std::forward<Args>(args)...);
+-  } else if constexpr (details::supports_op_append<T> && sizeof...(Args) == 1) {
+-    return vec.operator+=(std::forward<Args>(args)...);
+-  } else {
+-    static_assert(!sizeof(T *),
+-                  "We don't know how to add things to this container");
+-  }
+-}
+-
+-/// This checks if the container will return a reference to the newly added
+-/// element after an insert which for example `std::vector::emplace_back` does
+-/// since C++17; this will allow some optimizations.
+-template <typename T>
+-concept returns_reference = appendable_containers<T> && requires {
+-  typename std::remove_cvref_t<T>::reference;
+-  requires requires(typename std::remove_cvref_t<T>::value_type &&val, T obj) {
+-    {
+-      emplace_one(obj, std::move(val))
+-    } -> std::same_as<typename std::remove_cvref_t<T>::reference>;
+-  };
+-};
+-
+-template <typename T>
+-concept smart_pointer = requires(std::remove_cvref_t<T> ptr) {
+-  // Check if T has a member type named element_type
+-  typename std::remove_cvref_t<T>::element_type;
+-
+-  // Check if T has a get() member function
+-  {
+-    ptr.get()
+-  } -> std::same_as<typename std::remove_cvref_t<T>::element_type *>;
+-
+-  // Check if T can be dereferenced
+-  { *ptr } -> std::same_as<typename std::remove_cvref_t<T>::element_type &>;
+-};
+-
++// std::vector and std::deque are pushable containers
+ template <typename T>
+-concept optional_type = requires(std::remove_cvref_t<T> obj) {
+-  typename std::remove_cvref_t<T>::value_type;
+-  { obj.value() } -> std::same_as<typename std::remove_cvref_t<T>::value_type&>;
+-  requires requires(typename std::remove_cvref_t<T>::value_type &&val) {
+-    obj.emplace(std::move(val));
+-    obj = std::move(val);
+-    {
+-      obj.value_or(val)
+-    } -> std::convertible_to<typename std::remove_cvref_t<T>::value_type>;
+-  };
+-  { static_cast<bool>(obj) } -> std::same_as<bool>; // convertible to bool
+-};
++concept pushable_container =
++    requires(T a, typename T::value_type val) {
++      a.push_back(val);
++    } && !std::is_same_v<T, std::string> &&
++    !std::is_same_v<T, std::string_view> &&
++    !std::is_same_v<T, const char*>;
+ 
+ } // namespace concepts
+ } // namespace simdjson
+ #endif // SIMDJSON_SUPPORTS_DESERIALIZATION
+-#endif // SIMDJSON_CONCEPTS_H
++#endif //SIMDJSON_CONCEPTS_H
+diff --git a/include/simdjson/generic/ondemand/std_deserialize.h b/include/simdjson/generic/ondemand/std_deserialize.h
+index ce8b9fa3..86707654 100644
+--- a/include/simdjson/generic/ondemand/std_deserialize.h
++++ b/include/simdjson/generic/ondemand/std_deserialize.h
+@@ -3,12 +3,13 @@
+ #ifndef SIMDJSON_ONDEMAND_DESERIALIZE_H
+ #ifndef SIMDJSON_CONDITIONAL_INCLUDE
+ #define SIMDJSON_ONDEMAND_DESERIALIZE_H
+-#include "simdjson/generic/ondemand/array.h"
+ #include "simdjson/generic/ondemand/base.h"
++#include "simdjson/generic/ondemand/array.h"
+ #endif // SIMDJSON_CONDITIONAL_INCLUDE
+ 
+ #include <concepts>
+ #include <limits>
++#include <string>
+ 
+ namespace simdjson {
+ template <typename T>
+@@ -19,7 +20,6 @@ constexpr bool require_custom_serialization = false;
+ //////////////////////////////
+ 
+ template <std::unsigned_integral T>
+-  requires(!require_custom_serialization<T>)
+ error_code tag_invoke(deserialize_tag, auto &val, T &out) noexcept {
+   using limits = std::numeric_limits<T>;
+ 
+@@ -33,7 +33,6 @@ error_code tag_invoke(deserialize_tag, auto &val, T &out) noexcept {
+ }
+ 
+ template <std::floating_point T>
+-  requires(!require_custom_serialization<T>)
+ error_code tag_invoke(deserialize_tag, auto &val, T &out) noexcept {
+   double x;
+   SIMDJSON_TRY(val.get_double().get(x));
+@@ -42,7 +41,6 @@ error_code tag_invoke(deserialize_tag, auto &val, T &out) noexcept {
+ }
+ 
+ template <std::signed_integral T>
+-  requires(!require_custom_serialization<T>)
+ error_code tag_invoke(deserialize_tag, auto &val, T &out) noexcept {
+   using limits = std::numeric_limits<T>;
+ 
+@@ -54,6 +52,10 @@ error_code tag_invoke(deserialize_tag, auto &val, T &out) noexcept {
+   out = static_cast<T>(x);
+   return SUCCESS;
+ }
++//template <typename>
++//struct is_deserialization_enabled : std::true_type {};
++//template <typename>
++//consteval bool allows_automated_serialization() { return true; }
+ 
+ /**
+  * STL containers have several constructors including one that takes a single
+@@ -62,10 +64,14 @@ error_code tag_invoke(deserialize_tag, auto &val, T &out) noexcept {
+  * explicitly specify the type of the container as needed: e.g.,
+  * doc.get<std::vector<int>>().
+  */
+-template <concepts::appendable_containers T, typename ValT>
+-  requires(!require_custom_serialization<T>)
+-error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept(false) {
+-  using value_type = typename std::remove_cvref_t<T>::value_type;
++template <typename T, typename ValT>
++  requires simdjson::concepts::pushable_container<T>
++error_code tag_invoke(deserialize_tag, ValT &val,
++                      T &out) noexcept(false) {
++  using value_type = typename T::value_type;
++  static_assert(
++      !require_custom_serialization<T>,
++      "You have overridden require_custom_serialization<T> and it returns false. ");
+   static_assert(
+       deserializable<value_type, ValT>,
+       "The specified type inside the container must itself be deserializable");
+@@ -76,90 +82,14 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept(false) {
+   SIMDJSON_IMPLEMENTATION::ondemand::array arr;
+   SIMDJSON_TRY(val.get_array().get(arr));
+   for (auto v : arr) {
+-    if constexpr (concepts::returns_reference<T>) {
+-      if (auto const err = v.get<value_type>().get(concepts::emplace_one(out));
+-          err) {
+-        // If an error occurs, the empty element that we just inserted gets
+-        // removed. We're not using a temp variable because if T is a heavy
+-        // type, we want the valid path to be the fast path and the slow path be
+-        // the path that has errors in it.
+-        if constexpr (requires { out.pop_back(); }) {
+-          static_cast<void>(out.pop_back());
+-        }
+-        return err;
+-      }
+-    } else {
+-      value_type temp;
+-      if (auto const err = v.get<value_type>().get(temp); err) {
+-        return err;
+-      }
+-      concepts::emplace_one(out, std::move(temp));
++    value_type temp;
++    if (auto const err = v.get<value_type>().get(temp); err) {
++      return err;
+     }
++    out.push_back(temp); // note that this can be done with emplace_back for better performance
+   }
+   return SUCCESS;
+ }
+-
+-
+-
+-/**
+- * This CPO (Customization Point Object) will help deserialize into
+- * smart pointers.
+- *
+- * If constructing T is nothrow, this conversion should be nothrow as well since
+- * we return MEMALLOC if we're not able to allocate memory instead of throwing
+- * the error message.
+- *
+- * @tparam T The type inside the smart pointer
+- * @tparam ValT document/value type
+- * @param val document/value
+- * @param out a reference to the smart pointer
+- * @return status of the conversion
+- */
+-template <concepts::smart_pointer T, typename ValT>
+-  requires(!require_custom_serialization<T>)
+-error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept(nothrow_deserializable<typename std::remove_cvref_t<T>::element_type, ValT>) {
+-  using element_type = typename std::remove_cvref_t<T>::element_type;
+-
+-  // For better error messages, don't use these as constraints on
+-  // the tag_invoke CPO.
+-  static_assert(
+-      deserializable<element_type, ValT>,
+-      "The specified type inside the unique_ptr must itself be deserializable");
+-  static_assert(
+-      std::is_default_constructible_v<element_type>,
+-      "The specified type inside the unique_ptr must default constructible.");
+-
+-  auto ptr = new (std::nothrow) element_type();
+-  if (ptr == nullptr) {
+-    return MEMALLOC;
+-  }
+-  SIMDJSON_TRY(val.template get<element_type>(*ptr));
+-  out.reset(ptr);
+-  return SUCCESS;
+-}
+-
+-/**
+- * This CPO (Customization Point Object) will help deserialize into optional types.
+- */
+-template <concepts::optional_type T, typename ValT>
+-  requires(!require_custom_serialization<T>)
+-error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept(nothrow_deserializable<typename std::remove_cvref_t<T>::value_type, ValT>) {
+-  using value_type = typename std::remove_cvref_t<T>::value_type;
+-
+-  static_assert(
+-      deserializable<value_type, ValT>,
+-      "The specified type inside the unique_ptr must itself be deserializable");
+-  static_assert(
+-      std::is_default_constructible_v<value_type>,
+-      "The specified type inside the unique_ptr must default constructible.");
+-
+-  if (!out) {
+-    out.emplace();
+-  }
+-  SIMDJSON_TRY(val.template get<value_type>(out.value()));
+-  return SUCCESS;
+-}
+-
+ } // namespace simdjson
+ 
+ #endif // SIMDJSON_ONDEMAND_DESERIALIZE_H
+diff --git a/tests/ondemand/ondemand_custom_types_tests.cpp b/tests/ondemand/ondemand_custom_types_tests.cpp
+index 32d61f56..bc313d1c 100644
+--- a/tests/ondemand/ondemand_custom_types_tests.cpp
++++ b/tests/ondemand/ondemand_custom_types_tests.cpp
+@@ -6,13 +6,30 @@
+ 
+ #if SIMDJSON_SUPPORTS_DESERIALIZATION
+ 
++template <typename T>
++struct is_unique_ptr : std::false_type {
++};
++
++
++template <typename T>
++struct is_unique_ptr<std::unique_ptr<T>> : std::true_type {
++};
++
++template <typename T>
++concept is_unique_ptr_v = is_unique_ptr<T>::value;
++
+ 
+ namespace simdjson {
+ 
++// this is to demonstrate that we can use concept; otherwise a simple
++// type_identity<unique_ptr<T>> as the second argument would have done the job.
++//
+ // This tag_invoke MUST be inside simdjson namespace
+ template <typename T>
+-auto tag_invoke(deserialize_tag, auto &val, std::unique_ptr<T>& out) {
+-  out = std::make_unique<T>(val.template get<T>());
++  requires is_unique_ptr_v<T>
++auto tag_invoke(deserialize_tag, auto &val, T& out) {
++  using type = typename T::element_type;
++  out = std::make_unique<type>(val.template get<type>());
+   return SUCCESS;
+ }
+ 
+diff --git a/tests/ondemand/ondemand_stl_types_tests.cpp b/tests/ondemand/ondemand_stl_types_tests.cpp
+index 874dc481..6c1960de 100644
+--- a/tests/ondemand/ondemand_stl_types_tests.cpp
++++ b/tests/ondemand/ondemand_stl_types_tests.cpp
+@@ -4,36 +4,33 @@
+ #include <string>
+ #include <vector>
+ #include <list>
+-#include <set>
+-#include <stack>
+-#include <queue>
+-#include <deque>
+-#include <unordered_set>
+-#include <optional>
+ 
+ #if SIMDJSON_SUPPORTS_DESERIALIZATION
+ 
+-class Array : public std::vector<float> {
++class Array : public std::vector<float> {};
+ 
+-public:
+-  template <typename ValT>
+-  friend error_code tag_invoke(simdjson::deserialize_tag, ValT &val,
+-                        Array &out) noexcept(false) {
++namespace simdjson {
++template <>
++constexpr bool require_custom_serialization<Array> = true;
+ 
+-    simdjson::ondemand::array arr;
+-    SIMDJSON_TRY(val.get_array().get(arr));
+-    for (auto v : arr) {
+-      float temp;
+-      if (auto const err = v.get<float>().get(temp); err) {
+-        return err;
+-      }
+-      out.push_back(temp);
+-      out.push_back(temp); // adding it twice
++
++template <typename ValT>
++error_code tag_invoke(deserialize_tag, ValT &val,
++                      Array &out) noexcept(false) {
++
++  ondemand::array arr;
++  SIMDJSON_TRY(val.get_array().get(arr));
++  for (auto v : arr) {
++    float temp;
++    if (auto const err = v.get<float>().get(temp); err) {
++      return err;
+     }
+-    return error_code::SUCCESS;
++    out.push_back(temp);
++    out.push_back(temp); // adding it twice
+   }
+-};
+-
++  return SUCCESS;
++}
++}
+ #endif // SIMDJSON_SUPPORTS_DESERIALIZATION
+ 
+ namespace stl_types {
+@@ -139,55 +136,6 @@ bool basic_general_madness_Array() {
+ }
+ 
+ 
+-template <template <typename...> typename Container, typename ValT = float>
+-bool basic_general_madness_container() {
+-  TYPED_TEST_START(Container<ValT>);
+-
+-  simdjson::padded_string json =
+-      R"( [ { "codes": [1.0, 3.4, 5.6, 7.8, 9.0] },
+-            { "codes": [2.2, 4.4, 6.6, 8.8, 10.0] } ])"_padded;
+-
+-  simdjson::ondemand::parser parser;
+-  simdjson::ondemand::document doc = parser.iterate(json);
+-  Container<ValT> codes;
+-  for (auto val : doc) {
+-    simdjson::ondemand::object obj;
+-    SIMDJSON_TRY(val.get_object().get(obj));
+-    obj["codes"].get(codes); // append to it
+-  }
+-
+-  if (codes.size() != 10) {
+-    return false;
+-  }
+-
+-
+-  if constexpr (requires {codes.front();}) {
+-    if constexpr (requires {*codes.front();}) {
+-      if (*codes.front() != 1.0) {
+-        return false;
+-      }
+-    } else {
+-      if (codes.front() != 1.0) {
+-        return false;
+-      }
+-    }
+-  }
+-  if constexpr (requires {codes.back();} ) {
+-    if constexpr (requires {*codes.back();}) {
+-      if (*codes.back() != 10.0) {
+-        return false;
+-      }
+-    } else {
+-      if (codes.back() != 10.0) {
+-        return false;
+-      }
+-    }
+-  }
+-
+-  TEST_SUCCEED();
+-}
+-
+-
+ #endif // SIMDJSON_EXCEPTIONS
+ bool run() {
+   return
+@@ -196,60 +144,6 @@ bool run() {
+       basic_general_madness_vector() &&
+       basic_general_madness_list() &&
+       basic_general_madness_Array() &&
+-      basic_general_madness_container<std::vector>() &&
+-      basic_general_madness_container<std::list>() &&
+-      basic_general_madness_container<std::set>() &&
+-      basic_general_madness_container<std::stack>() &&
+-      basic_general_madness_container<std::queue>() &&
+-      basic_general_madness_container<std::deque>() &&
+-      basic_general_madness_container<std::priority_queue>() &&
+-      basic_general_madness_container<std::unordered_set>() &&
+-      basic_general_madness_container<std::multiset>() &&
+-      basic_general_madness_container<std::unordered_multiset>() &&
+-        // double:
+-      basic_general_madness_container<std::vector, double>() &&
+-      basic_general_madness_container<std::list, double>() &&
+-      basic_general_madness_container<std::set, double>() &&
+-      basic_general_madness_container<std::stack, double>() &&
+-      basic_general_madness_container<std::queue, double>() &&
+-      basic_general_madness_container<std::deque, double>() &&
+-      basic_general_madness_container<std::priority_queue, double>() &&
+-      basic_general_madness_container<std::unordered_set, double>() &&
+-      basic_general_madness_container<std::multiset, double>() &&
+-      basic_general_madness_container<std::unordered_multiset, double>() &&
+-        // unique_ptr<double>:
+-      basic_general_madness_container<std::vector, std::unique_ptr<double>>() &&
+-      basic_general_madness_container<std::list, std::unique_ptr<double>>() &&
+-      basic_general_madness_container<std::set, std::unique_ptr<double>>() &&
+-      basic_general_madness_container<std::stack, std::unique_ptr<double>>() &&
+-      basic_general_madness_container<std::deque, std::unique_ptr<double>>() &&
+-      basic_general_madness_container<std::queue, std::unique_ptr<double>>() &&
+-      basic_general_madness_container<std::priority_queue, std::unique_ptr<double>>() &&
+-      basic_general_madness_container<std::unordered_set, std::unique_ptr<double>>() &&
+-      basic_general_madness_container<std::multiset, std::unique_ptr<double>>() &&
+-      basic_general_madness_container<std::unordered_multiset, std::unique_ptr<double>>() &&
+-        // shared_ptr<double>:
+-      basic_general_madness_container<std::vector, std::shared_ptr<double>>() &&
+-      basic_general_madness_container<std::list, std::shared_ptr<double>>() &&
+-      basic_general_madness_container<std::set, std::shared_ptr<double>>() &&
+-      basic_general_madness_container<std::stack, std::shared_ptr<double>>() &&
+-      basic_general_madness_container<std::deque, std::shared_ptr<double>>() &&
+-      basic_general_madness_container<std::queue, std::shared_ptr<double>>() &&
+-      basic_general_madness_container<std::priority_queue, std::shared_ptr<double>>() &&
+-      basic_general_madness_container<std::unordered_set, std::shared_ptr<double>>() &&
+-      basic_general_madness_container<std::multiset, std::shared_ptr<double>>() &&
+-      basic_general_madness_container<std::unordered_multiset, std::shared_ptr<double>>() &&
+-        // optional<double>:
+-      basic_general_madness_container<std::vector, std::optional<double>>() &&
+-      basic_general_madness_container<std::list, std::optional<double>>() &&
+-      basic_general_madness_container<std::set, std::optional<double>>() &&
+-      basic_general_madness_container<std::stack, std::optional<double>>() &&
+-      basic_general_madness_container<std::deque, std::optional<double>>() &&
+-      basic_general_madness_container<std::queue, std::optional<double>>() &&
+-      basic_general_madness_container<std::priority_queue, std::optional<double>>() &&
+-      basic_general_madness_container<std::unordered_set, std::optional<double>>() &&
+-      basic_general_madness_container<std::multiset, std::optional<double>>() &&
+-      basic_general_madness_container<std::unordered_multiset, std::optional<double>>() &&
+ #endif // SIMDJSON_EXCEPTIONS
+       true;
+ }
+diff --git a/tests/test_macros.h b/tests/test_macros.h
+index e05d04a1..7df60dc0 100644
+--- a/tests/test_macros.h
++++ b/tests/test_macros.h
+@@ -110,7 +110,6 @@ simdjson_inline bool assert_iterate_error(T &arr, simdjson::error_code expected,
+   return assert_equal( count, 1, operation );
+ }
+ #define TEST_START()                    do { std::cout << "> Running " << __func__ << " ..." << std::endl; } while(0);
+-#define TYPED_TEST_START(T)             do { std::cout << "> Running " << __func__ << "<" << typeid(T).name() << "> ..." << std::endl; } while(0);
+ #define SUBTEST(NAME, TEST)             do { std::cout << " - Subtest " << (NAME) << " ..." << std::endl; if (!(TEST)) { return false; } } while (0);
+ #define ASSERT_EQUAL(ACTUAL, EXPECTED)  do { if (!::assert_equal  ((ACTUAL), (EXPECTED), #ACTUAL)) { return false; } } while (0);
+ #define ASSERT_RESULT(ACTUAL, EXPECTED) do { if (!::assert_result ((ACTUAL), (EXPECTED), #ACTUAL)) { return false; } } while (0);

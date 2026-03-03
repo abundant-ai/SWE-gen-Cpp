@@ -1,12 +1,22 @@
-When emitting YAML scalars from floating-point values, yaml-cpp currently may output a value with no decimal point when the formatted result is an integer (for example, emitting 1.0 may produce `1` depending on precision/formatting). This makes it impossible for callers to force a YAML representation that visibly remains a floating-point number.
+The YAML emitter currently does not provide a way to force floating-point scalars to include an explicit fractional part when the formatted value would otherwise look like an integer (e.g., emitting `1.0` may produce `1` depending on formatting/precision). This causes round-tripping/consumer ambiguity where a value intended to be a float is serialized as an integer-like scalar.
 
-Add a new public emitter setting `Emitter::SetEnforceFloatDot(bool b)` that controls this behavior. When this setting is enabled, emitting any floating-point value (float/double/long double as applicable) must ensure the serialized scalar contains a decimal point; if the formatted output would otherwise contain no `.` (and no other decimal-point representation), append `.0` to the emitted scalar. Examples of expected output when enforcement is enabled:
+Add a new public API on `YAML::Emitter`:
 
-- Emitting `1.0` should produce `1.0` (not `1`).
-- Emitting `0.0` should produce `0.0`.
-- Emitting `-2.0` should produce `-2.0`.
-- Emitting `3.14` should remain `3.14` (no extra `.0`).
+```cpp
+Emitter& SetEnforceFloatDot(bool b);
+```
 
-When the setting is disabled (the default), existing emission behavior must remain unchanged.
+When `SetEnforceFloatDot(true)` is enabled, any emitted floating-point value (float/double/long double as supported by the library) must contain a decimal dot in its scalar representation. If the normal formatting would produce no `'.'` character (for example `1`, `-2`, or `3e5` depending on formatting), the emitter must append `.0` to ensure a dot is present (e.g., `1` becomes `1.0`). When `SetEnforceFloatDot(false)` (the default), existing behavior must remain unchanged.
 
-The setting must interact correctly with existing emitter numeric formatting controls such as `SetFloatPrecision(...)` / `SetDoublePrecision(...)` (i.e., enforcement applies after the normal precision/formatting rules have produced their string form, and only adds `.0` when the resulting representation would otherwise contain no dot). The emitter output must remain valid YAML scalars, and `Emitter::good()` should remain true for these operations (no new emitter errors).
+This setting must integrate correctly with existing emitter formatting controls such as `SetFloatPrecision(...)` / `SetDoublePrecision(...)` and any float styling logic already present. It should apply only to floating-point emissions (not integers), and it should not break emitting special float values (e.g., NaN/inf) or quoted/explicit string scalars.
+
+Example expected behavior:
+
+```cpp
+YAML::Emitter out;
+out.SetEnforceFloatDot(true);
+out << 1.0;
+// expected output: "1.0" (not "1")
+```
+
+The change should be covered by emitter integration behavior so that enabling/disabling the setting clearly affects output, while the default output for existing code remains the same.

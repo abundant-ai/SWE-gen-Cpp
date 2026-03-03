@@ -1,0 +1,86 @@
+diff --git a/include/simdjson/generic/numberparsing.h b/include/simdjson/generic/numberparsing.h
+index b6f50ae7..0c3fe26a 100644
+--- a/include/simdjson/generic/numberparsing.h
++++ b/include/simdjson/generic/numberparsing.h
+@@ -446,8 +446,11 @@ simdjson_inline size_t significant_digits(const uint8_t * start_digits, size_t d
+ } // unnamed namespace
+ 
+ /** @private */
+-static error_code slow_float_parsing(simdjson_unused const uint8_t * src, double* answer) {
+-  if (parse_float_fallback(src, answer)) {
++template<typename W>
++error_code slow_float_parsing(simdjson_unused const uint8_t * src, W writer) {
++  double d;
++  if (parse_float_fallback(src, &d)) {
++    writer.append_double(d);
+     return SUCCESS;
+   }
+   return INVALID_NUMBER(src);
+@@ -471,13 +474,13 @@ simdjson_inline error_code write_float(const uint8_t *const src, bool negative,
+     // 10000000000000000000000000000000000000000000e+308
+     // 3.1415926535897932384626433832795028841971693993751
+     //
+-    // NOTE: We do not pass a reference to the to slow_float_parsing. If we passed our writer
+-    // reference to it, it would force it to be stored in memory, preventing the compiler from
+-    // picking it apart and putting into registers. i.e. if we pass it as reference,
+-    // it gets slow.
+-    double d;
+-    error_code error = slow_float_parsing(src, &d);
+-    writer.append_double(d);
++    // NOTE: This makes a *copy* of the writer and passes it to slow_float_parsing. This happens
++    // because slow_float_parsing is a non-inlined function. If we passed our writer reference to
++    // it, it would force it to be stored in memory, preventing the compiler from picking it apart
++    // and putting into registers. i.e. if we pass it as reference, it gets slow.
++    // This is what forces the skip_double, as well.
++    error_code error = slow_float_parsing(src, writer);
++    writer.skip_double();
+     return error;
+   }
+   // NOTE: it's weird that the simdjson_unlikely() only wraps half the if, but it seems to get slower any other
+diff --git a/include/simdjson/generic/ondemand/json_type.h b/include/simdjson/generic/ondemand/json_type.h
+index b5a97043..d0cde165 100644
+--- a/include/simdjson/generic/ondemand/json_type.h
++++ b/include/simdjson/generic/ondemand/json_type.h
+@@ -92,6 +92,8 @@ protected:
+    */
+   friend class value_iterator;
+   template<typename W>
++  friend error_code numberparsing::slow_float_parsing(simdjson_unused const uint8_t * src, W writer);
++  template<typename W>
+   friend error_code numberparsing::write_float(const uint8_t *const src, bool negative, uint64_t i, const uint8_t * start_digits, size_t digit_count, int64_t exponent, W &writer);
+   template<typename W>
+   friend error_code numberparsing::parse_number(const uint8_t *const src, W &writer);
+diff --git a/tests/ondemand/ondemand_number_tests.cpp b/tests/ondemand/ondemand_number_tests.cpp
+index d0017815..de97a9b2 100644
+--- a/tests/ondemand/ondemand_number_tests.cpp
++++ b/tests/ondemand/ondemand_number_tests.cpp
+@@ -278,19 +278,6 @@ namespace number_tests {
+     TEST_SUCCEED();
+   }
+ 
+-  bool issue2099() {
+-    TEST_START();
+-    ondemand::parser parser;
+-    auto json = "1000000000.000000001"_padded;
+-    ondemand::document doc;
+-    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-    ondemand::number number;
+-    ASSERT_SUCCESS(doc.get_number().get(number));
+-    ASSERT_EQUAL(number.get_number_type(), ondemand::number_type::floating_point_number);
+-    ASSERT_EQUAL(number.get_double(), 1e9);
+-    TEST_SUCCEED();
+-}
+-
+   bool issue1878() {
+     TEST_START();
+     ondemand::parser parser;
+@@ -442,8 +429,7 @@ namespace number_tests {
+   }
+ 
+   bool run() {
+-    return issue2099() &&
+-           issue2093() &&
++    return issue2093() &&
+            issue2045() &&
+            issue2017() &&
+            issue_1898() &&

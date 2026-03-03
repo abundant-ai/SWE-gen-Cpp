@@ -1,0 +1,208 @@
+diff --git a/include/simdjson/error.h b/include/simdjson/error.h
+index e4792c08..6030cbcc 100644
+--- a/include/simdjson/error.h
++++ b/include/simdjson/error.h
+@@ -35,6 +35,7 @@ enum error_code {
+   INVALID_URI_FRAGMENT,     ///< Invalid URI fragment
+   UNEXPECTED_ERROR,         ///< indicative of a bug in simdjson
+   PARSER_IN_USE,            ///< parser is already in use.
++  OUT_OF_ORDER_ITERATION,   ///< tried to iterate an array or object out of order
+   /** @private Number of error codes */
+   NUM_ERROR_CODES
+ };
+diff --git a/include/simdjson/generic/ondemand/array-inl.h b/include/simdjson/generic/ondemand/array-inl.h
+index f366e3bd..3d11c527 100644
+--- a/include/simdjson/generic/ondemand/array-inl.h
++++ b/include/simdjson/generic/ondemand/array-inl.h
+@@ -55,11 +55,12 @@ simdjson_really_inline array array::started(value_iterator &iter) noexcept {
+   return array(iter);
+ }
+ 
+-simdjson_really_inline array_iterator array::begin() noexcept {
+-  return iter;
++simdjson_really_inline simdjson_result<array_iterator> array::begin() noexcept {
++  if (!iter.is_at_container_start()) { return OUT_OF_ORDER_ITERATION; }
++  return array_iterator(iter);
+ }
+-simdjson_really_inline array_iterator array::end() noexcept {
+-  return {};
++simdjson_really_inline simdjson_result<array_iterator> array::end() noexcept {
++  return array_iterator();
+ }
+ 
+ } // namespace ondemand
+diff --git a/include/simdjson/generic/ondemand/array.h b/include/simdjson/generic/ondemand/array.h
+index 60f39852..867d93af 100644
+--- a/include/simdjson/generic/ondemand/array.h
++++ b/include/simdjson/generic/ondemand/array.h
+@@ -24,13 +24,13 @@ public:
+    *
+    * Part of the std::iterable interface.
+    */
+-  simdjson_really_inline array_iterator begin() noexcept;
++  simdjson_really_inline simdjson_result<array_iterator> begin() noexcept;
+   /**
+    * Sentinel representing the end of the array.
+    *
+    * Part of the std::iterable interface.
+    */
+-  simdjson_really_inline array_iterator end() noexcept;
++  simdjson_really_inline simdjson_result<array_iterator> end() noexcept;
+ 
+ protected:
+   /**
+diff --git a/include/simdjson/generic/ondemand/object-inl.h b/include/simdjson/generic/ondemand/object-inl.h
+index 8e5785ba..77954281 100644
+--- a/include/simdjson/generic/ondemand/object-inl.h
++++ b/include/simdjson/generic/ondemand/object-inl.h
+@@ -51,13 +51,12 @@ simdjson_really_inline object::object(const value_iterator &_iter) noexcept
+ {
+ }
+ 
+-simdjson_really_inline object_iterator object::begin() noexcept {
+-  // Expanded version of SIMDJSON_ASSUME( iter.at_field_start() || !iter.is_open() )
+-  SIMDJSON_ASSUME( (iter._json_iter->token.index == iter._start_position + 1) || (iter._json_iter->_depth < iter._depth) );
+-  return iter;
++simdjson_really_inline simdjson_result<object_iterator> object::begin() noexcept {
++  if (!iter.is_at_container_start()) { return OUT_OF_ORDER_ITERATION; }
++  return object_iterator(iter);
+ }
+-simdjson_really_inline object_iterator object::end() noexcept {
+-  return {};
++simdjson_really_inline simdjson_result<object_iterator> object::end() noexcept {
++  return object_iterator();
+ }
+ 
+ } // namespace ondemand
+diff --git a/include/simdjson/generic/ondemand/object.h b/include/simdjson/generic/ondemand/object.h
+index f4a57db3..23e49090 100644
+--- a/include/simdjson/generic/ondemand/object.h
++++ b/include/simdjson/generic/ondemand/object.h
+@@ -16,8 +16,8 @@ public:
+    */
+   simdjson_really_inline object() noexcept = default;
+ 
+-  simdjson_really_inline object_iterator begin() noexcept;
+-  simdjson_really_inline object_iterator end() noexcept;
++  simdjson_really_inline simdjson_result<object_iterator> begin() noexcept;
++  simdjson_really_inline simdjson_result<object_iterator> end() noexcept;
+ 
+   /**
+    * Look up a field by name on an object (order-sensitive).
+diff --git a/include/simdjson/generic/ondemand/value_iterator-inl.h b/include/simdjson/generic/ondemand/value_iterator-inl.h
+index fd21ea0b..d16819b1 100644
+--- a/include/simdjson/generic/ondemand/value_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/value_iterator-inl.h
+@@ -10,7 +10,9 @@ simdjson_really_inline value_iterator::value_iterator(json_iterator *json_iter,
+ }
+ 
+ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator::start_object() noexcept {
+-  if (*advance_container_start("object") != '{') { return incorrect_type_error("Not an object"); }
++  const uint8_t *json;
++  SIMDJSON_TRY( advance_container_start("object", json) );
++  if (*json != '{') { return incorrect_type_error("Not an object"); }
+   return started_object();
+ }
+ 
+@@ -56,6 +58,10 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator
+   //    { "a": [ 1, 2 ], "b": [ 3, 4 ] }
+   //      ^ (depth 2, index 1)
+   //    ```
++  //
++  if (at_first_field()) {
++    has_value = true;
++
+   //
+   // 2. When a previous search did not yield a value or the object is empty:
+   //
+@@ -66,9 +72,12 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator
+   //        ^ (depth 0, index 2)
+   //    ```
+   //
+-  if (!is_open()) { return false; }
+-  if (at_first_field()) {
+-    has_value = true;
++  } else if (!is_open()) {
++    // If we're past the end of the object, we're being iterated out of order.
++    // Note: this isn't perfect detection. It's possible the user is inside some other object; if so,
++    // this object iterator will blithely scan that object for fields.
++    if (_json_iter->depth() < depth() - 1) { return OUT_OF_ORDER_ITERATION; }
++    has_value = false;
+ 
+   // 3. When a previous search found a field or an iterator yielded a value:
+   //
+@@ -138,6 +147,10 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator
+   //    ```
+   //
+   } else if (!is_open()) {
++    // If we're past the end of the object, we're being iterated out of order.
++    // Note: this isn't perfect detection. It's possible the user is inside some other object; if so,
++    // this object iterator will blithely scan that object for fields.
++    if (_json_iter->depth() < depth() - 1) { return OUT_OF_ORDER_ITERATION; }
+     has_value = false;
+ 
+   // 3. When a previous search found a field or an iterator yielded a value:
+@@ -248,7 +261,9 @@ simdjson_warn_unused simdjson_really_inline error_code value_iterator::field_val
+ }
+ 
+ simdjson_warn_unused simdjson_really_inline simdjson_result<bool> value_iterator::start_array() noexcept {
+-  if (*advance_container_start("array") != '[') { return incorrect_type_error("Not an array"); }
++  const uint8_t *json;
++  SIMDJSON_TRY( advance_container_start("array", json) );
++  if (*json != '[') { return incorrect_type_error("Not an array"); }
+   return started_array();
+ }
+ 
+@@ -428,15 +443,20 @@ simdjson_really_inline const uint8_t *value_iterator::advance_start(const char *
+   _json_iter->ascend_to(depth()-1);
+   return result;
+ }
+-simdjson_really_inline const uint8_t *value_iterator::advance_container_start(const char *type) const noexcept {
+-  // If we're not at the position anymore, we don't want to advance the cursor.
+-  if (is_at_container_start()) { return peek_start(); }
+-
++simdjson_really_inline error_code value_iterator::advance_container_start(const char *type, const uint8_t *&json) const noexcept {
+   logger::log_start_value(*_json_iter, _start_position, depth(), type);
+ 
++  // If we're not at the position anymore, we don't want to advance the cursor.
++  if (!is_at_start()) {
++    if (!is_at_container_start()) { return OUT_OF_ORDER_ITERATION; }
++    json = peek_start();
++    return SUCCESS;
++  }
++
+   // Get the JSON and advance the cursor, decreasing depth to signify that we have retrieved the value.
+   assert_at_start();
+-  return _json_iter->advance();
++  json = _json_iter->advance();
++  return SUCCESS;
+ }
+ simdjson_really_inline const uint8_t *value_iterator::advance_root_scalar(const char *type) const noexcept {
+   logger::log_value(*_json_iter, _start_position, depth(), type);
+diff --git a/include/simdjson/generic/ondemand/value_iterator.h b/include/simdjson/generic/ondemand/value_iterator.h
+index a11d1e2e..14dfbf4f 100644
+--- a/include/simdjson/generic/ondemand/value_iterator.h
++++ b/include/simdjson/generic/ondemand/value_iterator.h
+@@ -274,7 +274,7 @@ protected:
+   simdjson_really_inline const uint8_t *peek_start() const noexcept;
+   simdjson_really_inline uint32_t peek_start_length() const noexcept;
+   simdjson_really_inline const uint8_t *advance_start(const char *type) const noexcept;
+-  simdjson_really_inline const uint8_t *advance_container_start(const char *type) const noexcept;
++  simdjson_really_inline error_code advance_container_start(const char *type, const uint8_t *&json) const noexcept;
+   simdjson_really_inline const uint8_t *advance_root_scalar(const char *type) const noexcept;
+   simdjson_really_inline const uint8_t *advance_non_root_scalar(const char *type) const noexcept;
+ 
+diff --git a/src/internal/error_tables.cpp b/src/internal/error_tables.cpp
+index c08bb6c7..f0d5e7b0 100644
+--- a/src/internal/error_tables.cpp
++++ b/src/internal/error_tables.cpp
+@@ -28,7 +28,8 @@ namespace internal {
+     { INVALID_JSON_POINTER, "Invalid JSON pointer syntax." },
+     { INVALID_URI_FRAGMENT, "Invalid URI fragment syntax." },
+     { UNEXPECTED_ERROR, "Unexpected error, consider reporting this problem as you may have found a bug in simdjson" },
+-    { PARSER_IN_USE, "Cannot parse a new document while a document is still in use." }
++    { PARSER_IN_USE, "Cannot parse a new document while a document is still in use." },
++    { OUT_OF_ORDER_ITERATION, "Objects and arrays can only be iterated when they are first encountered." }
+   }; // error_messages[]
+ 
+ } // namespace internal

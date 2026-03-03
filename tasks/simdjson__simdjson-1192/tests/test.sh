@@ -1,0 +1,30 @@
+#!/bin/bash
+
+cd /app/src
+
+# Force fallback implementation to trigger the bug
+export SIMDJSON_FORCE_IMPLEMENTATION=fallback
+
+# Copy HEAD test files from /tests (overwrites BASE state)
+mkdir -p "tests"
+cp "/tests/basictests.cpp" "tests/basictests.cpp"
+
+# Configure CMake
+cmake -DCMAKE_BUILD_TYPE=Debug -DSIMDJSON_DEVELOPER_MODE=ON -DSIMDJSON_ONDEMAND_SAFETY_RAILS=ON -DSIMDJSON_CXX_STANDARD=20 -DSIMDJSON_MINUS_ZERO_AS_FLOAT=ON -B build
+
+# Build the simdjson library
+cmake --build build --target simdjson -j=2
+
+# Build and run the specific test binary
+cmake --build build --target basictests -j=2
+
+# Run the test
+./build/tests/basictests
+test_status=$?
+
+if [ $test_status -eq 0 ]; then
+  echo 1 > /logs/verifier/reward.txt
+else
+  echo 0 > /logs/verifier/reward.txt
+fi
+exit "$test_status"

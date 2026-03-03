@@ -1,0 +1,524 @@
+diff --git a/include/simdjson/generic/ondemand/array-inl.h b/include/simdjson/generic/ondemand/array-inl.h
+index f71738ed..1829b0eb 100644
+--- a/include/simdjson/generic/ondemand/array-inl.h
++++ b/include/simdjson/generic/ondemand/array-inl.h
+@@ -101,17 +101,6 @@ simdjson_really_inline simdjson_result<size_t> array::count_elements() & noexcep
+   return count;
+ }
+ 
+-simdjson_really_inline simdjson_result<bool> array::is_empty() & noexcept {
+-  bool is_not_empty;
+-  auto error = iter.reset_array().get(is_not_empty);
+-  if(error) { return error; }
+-  return !is_not_empty;
+-}
+-
+-inline simdjson_result<bool> array::reset() & noexcept {
+-  return iter.reset_array();
+-}
+-
+ inline simdjson_result<value> array::at_pointer(std::string_view json_pointer) noexcept {
+   if (json_pointer[0] != '/') { return INVALID_JSON_POINTER; }
+   json_pointer = json_pointer.substr(1);
+@@ -190,10 +179,6 @@ simdjson_really_inline  simdjson_result<size_t> simdjson_result<SIMDJSON_IMPLEME
+   if (error()) { return error(); }
+   return first.count_elements();
+ }
+-simdjson_really_inline  simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array>::is_empty() & noexcept {
+-  if (error()) { return error(); }
+-  return first.is_empty();
+-}
+ simdjson_really_inline  simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array>::at(size_t index) noexcept {
+   if (error()) { return error(); }
+   return first.at(index);
+diff --git a/include/simdjson/generic/ondemand/array.h b/include/simdjson/generic/ondemand/array.h
+index 1a7a1cac..131df5a3 100644
+--- a/include/simdjson/generic/ondemand/array.h
++++ b/include/simdjson/generic/ondemand/array.h
+@@ -41,32 +41,9 @@ public:
+    * beginning as if it had never been accessed. If the JSON is malformed (e.g.,
+    * there is a missing comma), then an error is returned and it is no longer
+    * safe to continue.
+-   *
+-   * To check that an array is empty, it is more performant to use
+-   * the is_empty() method.
+    */
+   simdjson_really_inline simdjson_result<size_t> count_elements() & noexcept;
+-  /**
+-   * This method scans the beginning of the array and checks whether the
+-   * array is empty.
+-   * The runtime complexity is constant time. After
+-   * calling this function, if successful, the array is 'rewinded' at its
+-   * beginning as if it had never been accessed. If the JSON is malformed (e.g.,
+-   * there is a missing comma), then an error is returned and it is no longer
+-   * safe to continue.
+-   */
+-  simdjson_really_inline simdjson_result<bool> is_empty() & noexcept;
+-  /**
+-   * Reset the iterator so that we are pointing back at the
+-   * beginning of the array. You should still consume values only once even if you
+-   * can iterate through the array more than once. If you unescape a string
+-   * within the array more than once, you have unsafe code. Note that rewinding
+-   * an array means that you may need to reparse it anew: it is not a free
+-   * operation.
+-   *
+-   * @returns true if the array contains some elements (not empty)
+-   */
+-  inline simdjson_result<bool> reset() & noexcept;
++
+   /**
+    * Get the value associated with the given JSON pointer.  We use the RFC 6901
+    * https://tools.ietf.org/html/rfc6901 standard, interpreting the current node
+@@ -182,9 +159,7 @@ public:
+ 
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterator> begin() noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterator> end() noexcept;
+-  inline simdjson_result<size_t> count_elements() & noexcept;
+-  inline simdjson_result<bool> is_empty() & noexcept;
+-  inline simdjson_result<bool> reset() & noexcept;
++  simdjson_really_inline simdjson_result<size_t> count_elements() & noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> at(size_t index) noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> at_pointer(std::string_view json_pointer) noexcept;
+ };
+diff --git a/include/simdjson/generic/ondemand/document-inl.h b/include/simdjson/generic/ondemand/document-inl.h
+index 619004b8..e8bbec0d 100644
+--- a/include/simdjson/generic/ondemand/document-inl.h
++++ b/include/simdjson/generic/ondemand/document-inl.h
+@@ -38,9 +38,20 @@ simdjson_really_inline simdjson_result<value> document::get_value() noexcept {
+   // gets called.
+   iter.assert_at_document_depth();
+   switch (*iter.peek()) {
+-    case '[':
+-    case '{':
+-      return value(get_root_value_iterator());
++    case '[': {
++      array result;
++      SIMDJSON_TRY( get_array().get(result) );
++      iter._depth = 1 ; /* undoing the potential increment so we go back at the doc depth.*/
++      iter.assert_at_document_depth();
++      return value(result.iter);
++    }
++    case '{': {
++      object result;
++      SIMDJSON_TRY( get_object().get(result) );
++      iter._depth = 1 ; /* undoing the potential increment so we go back at the doc depth.*/
++      iter.assert_at_document_depth();
++      return value(result.iter);
++    }
+     default:
+       // Unfortunately, scalar documents are a special case in simdjson and they cannot
+       // be safely converted to value instances.
+diff --git a/include/simdjson/generic/ondemand/object-inl.h b/include/simdjson/generic/ondemand/object-inl.h
+index aa788a6b..0bd49e11 100644
+--- a/include/simdjson/generic/ondemand/object-inl.h
++++ b/include/simdjson/generic/ondemand/object-inl.h
+@@ -139,18 +139,6 @@ inline simdjson_result<value> object::at_pointer(std::string_view json_pointer)
+   return child;
+ }
+ 
+-
+-simdjson_really_inline simdjson_result<bool> object::is_empty() & noexcept {
+-  bool is_not_empty;
+-  auto error = iter.reset_object().get(is_not_empty);
+-  if(error) { return error; }
+-  return !is_not_empty;
+-}
+-
+-simdjson_really_inline simdjson_result<bool> object::reset() & noexcept {
+-  return iter.reset_object();
+-}
+-
+ } // namespace ondemand
+ } // namespace SIMDJSON_IMPLEMENTATION
+ } // namespace simdjson
+@@ -200,14 +188,4 @@ simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>
+   return first.at_pointer(json_pointer);
+ }
+ 
+-inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::object>::reset() noexcept {
+-  if (error()) { return error(); }
+-  return first.reset();
+-}
+-
+-inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::object>::is_empty() noexcept {
+-  if (error()) { return error(); }
+-  return first.is_empty();
+-}
+-
+ } // namespace simdjson
+diff --git a/include/simdjson/generic/ondemand/object.h b/include/simdjson/generic/ondemand/object.h
+index bac28867..8164646e 100644
+--- a/include/simdjson/generic/ondemand/object.h
++++ b/include/simdjson/generic/ondemand/object.h
+@@ -110,26 +110,6 @@ public:
+    */
+   inline simdjson_result<value> at_pointer(std::string_view json_pointer) noexcept;
+ 
+-  /**
+-   * Reset the iterator so that we are pointing back at the
+-   * beginning of the object. You should still consume values only once even if you
+-   * can iterate through the object more than once. If you unescape a string within
+-   * the object more than once, you have unsafe code. Note that rewinding an object
+-   * means that you may need to reparse it anew: it is not a free operation.
+-   *
+-   * @returns true if the object contains some elements (not empty)
+-   */
+-  inline simdjson_result<bool> reset() & noexcept;
+-  /**
+-   * This method scans the beginning of the object and checks whether the
+-   * object is empty.
+-   * The runtime complexity is constant time. After
+-   * calling this function, if successful, the object is 'rewinded' at its
+-   * beginning as if it had never been accessed. If the JSON is malformed (e.g.,
+-   * there is a missing comma), then an error is returned and it is no longer
+-   * safe to continue.
+-   */
+-  inline simdjson_result<bool> is_empty() & noexcept;
+   /**
+    * Consumes the object and returns a string_view instance corresponding to the
+    * object as represented in JSON. It points inside the original byte array containg
+@@ -179,9 +159,6 @@ public:
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> operator[](std::string_view key) & noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> operator[](std::string_view key) && noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> at_pointer(std::string_view json_pointer) noexcept;
+-  inline simdjson_result<bool> reset() noexcept;
+-  inline simdjson_result<bool> is_empty() noexcept;
+-
+ };
+ 
+ } // namespace simdjson
+diff --git a/tests/ondemand/ondemand_array_tests.cpp b/tests/ondemand/ondemand_array_tests.cpp
+index 4a87d67e..787a667c 100644
+--- a/tests/ondemand/ondemand_array_tests.cpp
++++ b/tests/ondemand/ondemand_array_tests.cpp
+@@ -308,30 +308,7 @@ namespace array_tests {
+       }
+       return true;
+     }));
+-    SUBTEST("ondemand::array-rewind", test_ondemand_doc(json, [&](auto doc_result) {
+-      ondemand::array array;
+-      ASSERT_RESULT( doc_result.type(), json_type::array );
+-      ASSERT_SUCCESS( doc_result.get(array) );
+-
+-      size_t i = 0;
+-      for (auto value : array) { (void)value; i++; }
+-      ASSERT_EQUAL(i*sizeof(uint64_t), sizeof(expected_value));
+-      std::vector<int64_t> container(i); // container of size 'i'.
+ 
+-      array.reset();
+-      i = 0;
+-      for (auto value : array) {
+-        int64_t actual;
+-        ASSERT_SUCCESS( value.get(actual) );
+-        container[i] = actual;
+-        i++;
+-      }
+-      ASSERT_EQUAL(i * sizeof(int64_t), sizeof(expected_value));
+-      for(size_t j = 0; j < sizeof(expected_value)/sizeof(int64_t); j++) {
+-        ASSERT_EQUAL(container[j], expected_value[j]);
+-      }
+-      return true;
+-    }));
+     SUBTEST("simdjson_result<ondemand::array>", test_ondemand_doc(json, [&](auto doc_result) {
+       simdjson_result<ondemand::array> array = doc_result.get_array();
+       ASSERT_RESULT( doc_result.type(), json_type::array );
+@@ -359,71 +336,7 @@ namespace array_tests {
+     }));
+     TEST_SUCCEED();
+   }
+-  bool empty_rewind() {
+-    TEST_START();
+-    const auto json = R"( [] )"_padded;
+-    ondemand::parser parser;
+-    ondemand::document doc;
+-    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-    ondemand::array arr;
+-    ASSERT_SUCCESS(doc.get_array().get(arr));
+-    for(simdjson_unused auto i : arr) {
+-      TEST_FAIL("should be empty?");
+-    }
+-    arr.reset();
+-    for(simdjson_unused auto i : arr) {
+-      TEST_FAIL("should be empty?");
+-    }
+-    TEST_SUCCEED();
+-  }
+-  bool count_empty(simdjson::ondemand::array arr) {
+-    size_t count;
+-    ASSERT_SUCCESS(arr.count_elements().get(count));
+-    ASSERT_EQUAL(count, 0);
+-    bool is_empty;
+-    ASSERT_SUCCESS(arr.is_empty().get(is_empty));
+-    ASSERT_TRUE(is_empty);
+-    return true;
+-  }
+-  bool value_to_array(simdjson::ondemand::value val) {
+-    ondemand::json_type t;
+-    ASSERT_SUCCESS(val.type().get(t));
+-    ASSERT_EQUAL(t, ondemand::json_type::array);
+-    simdjson::ondemand::array arr;
+-    ASSERT_SUCCESS(val.get_array().get(arr));
+-    if(count_empty(arr) != true) { return false; }
+-    return true;
+-  }
+-  bool empty_rewind_convoluted() {
+-    TEST_START();
+-    const auto json = R"( [] )"_padded;
+-    ondemand::parser parser;
+-    ondemand::document doc;
+-    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-    ondemand::value val;
+-    ASSERT_SUCCESS(doc.get_value().get(val));
+-    if(!value_to_array(val)) { return false; }
+-    TEST_SUCCEED();
+-  }
+-#if SIMDJSON_EXCEPTIONS
+-  bool value_to_array_except(simdjson::ondemand::value val) {
+-    ondemand::json_type t = val.type();
+-    ASSERT_EQUAL(t, ondemand::json_type::array);
+-    if(count_empty(simdjson::ondemand::array(val)) != true) { return false; }
+-    return true;
+-  }
+-  bool empty_rewind_convoluted_with_exceptions() {
+-    TEST_START();
+-    const auto json = R"( [] )"_padded;
+-    ondemand::parser parser;
+-    ondemand::document doc;
+-    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-    ondemand::value val;
+-    ASSERT_SUCCESS(doc.get_value().get(val));
+-    if(value_to_array_except(val) != true) { return false; }
+-    TEST_SUCCEED();
+-  }
+-#endif
++
+   bool iterate_array() {
+     TEST_START();
+     const auto json = R"( [ [ 1, 10, 100 ] ] )"_padded;
+@@ -678,24 +591,8 @@ namespace array_tests {
+       ASSERT_EQUAL(i, 0);
+       return true;
+     }));
+-    SUBTEST("ondemand::array-rewind", test_ondemand_doc(json, [&](auto doc_result) {
+-      ondemand::array array;
+-      ASSERT_RESULT( doc_result.type(), json_type::array );
+-      ASSERT_SUCCESS( doc_result.get(array) );
+-
+-      size_t i = 0;
+-      for (auto value : array) { (void) value; i++; }
+-      ASSERT_EQUAL(i, 0);
+-
+-      array.reset();
+-      i = 0;
+-      for (auto value : array) { (void) value; i++; }
+-      ASSERT_EQUAL(i, 0);
+-      return true;
+-    }));
+     TEST_SUCCEED();
+   }
+-
+ #if SIMDJSON_EXCEPTIONS
+ 
+   bool iterate_array_exception() {
+@@ -742,8 +639,6 @@ namespace array_tests {
+ 
+   bool run() {
+     return
+-           empty_rewind_convoluted() &&
+-           empty_rewind() &&
+            iterate_empty_array_count() &&
+            iterate_sub_array_count() &&
+            iterate_complex_array_count() &&
+@@ -755,7 +650,6 @@ namespace array_tests {
+            iterate_empty_array() &&
+            iterate_array_partial_children() &&
+ #if SIMDJSON_EXCEPTIONS
+-           empty_rewind_convoluted_with_exceptions() &&
+            iterate_array_exception() &&
+ #endif // SIMDJSON_EXCEPTIONS
+            true;
+diff --git a/tests/ondemand/ondemand_object_tests.cpp b/tests/ondemand/ondemand_object_tests.cpp
+index 740fac30..25bb98f4 100644
+--- a/tests/ondemand/ondemand_object_tests.cpp
++++ b/tests/ondemand/ondemand_object_tests.cpp
+@@ -237,29 +237,6 @@ namespace object_tests {
+       ASSERT_EQUAL( i*sizeof(uint64_t), sizeof(expected_value) );
+       return true;
+     }));
+-    SUBTEST("ondemand::object-rewind", test_ondemand_doc(json, [&](auto doc_result) {
+-      ondemand::object object;
+-      ASSERT_RESULT( doc_result.type(), json_type::object );
+-      ASSERT_SUCCESS( doc_result.get(object) );
+-      size_t i = 0;
+-      for (auto field : object) {
+-        ASSERT_SUCCESS( field.error() );
+-        ASSERT_EQUAL( field.key().value_unsafe(), expected_key[i]);
+-        ASSERT_EQUAL( field.value().get_uint64().value_unsafe(), expected_value[i] );
+-        i++;
+-      }
+-      ASSERT_EQUAL( i*sizeof(uint64_t), sizeof(expected_value) );
+-      object.reset();
+-      i = 0;
+-      for (auto field : object) {
+-        ASSERT_SUCCESS( field.error() );
+-        ASSERT_EQUAL( field.key().value_unsafe(), expected_key[i]);
+-        ASSERT_EQUAL( field.value().get_uint64().value_unsafe(), expected_value[i] );
+-        i++;
+-      }
+-      ASSERT_EQUAL( i*sizeof(uint64_t), sizeof(expected_value) );
+-      return true;
+-    }));
+     SUBTEST("simdjson_result<ondemand::object>", test_ondemand_doc(json, [&](auto doc_result) {
+       simdjson_result<ondemand::object> object_result = doc_result.get_object();
+       size_t i = 0;
+@@ -613,96 +590,12 @@ namespace object_tests {
+       ASSERT_EQUAL( i, 0 );
+       return true;
+     }));
+-    SUBTEST("ondemand::object-rewind", test_ondemand_doc(json, [&](auto doc_result) {
+-      ondemand::object object;
+-      ASSERT_RESULT( doc_result.type(), json_type::object );
+-      ASSERT_SUCCESS( doc_result.get(object) );
+-      size_t i = 0;
+-      for (auto field : object) {
+-        (void)field;
+-        i++;
+-      }
+-      ASSERT_EQUAL( i, 0 );
+-      object.reset();
+-      i = 0;
+-      for (auto field : object) {
+-        (void)field;
+-        i++;
+-      }
+-      ASSERT_EQUAL( i, 0 );
+-      return true;
+-    }));
+-    SUBTEST("ondemand::object-rewind", test_ondemand_doc(json, [&](auto doc_result) {
+-      ondemand::object object;
+-      ASSERT_RESULT( doc_result.type(), json_type::object );
+-      ASSERT_SUCCESS( doc_result.get(object) );
+-      size_t i = 0;
+-      for (auto field : object) {
+-        (void)field;
+-        i++;
+-      }
+-      ASSERT_EQUAL( i, 0 );
+-      object.reset();
+-      i = 0;
+-      for (auto field : object) {
+-        (void)field;
+-        i++;
+-      }
+-      ASSERT_EQUAL( i, 0 );
+-      return true;
+-    }));
+ 
+     TEST_SUCCEED();
+   }
+ 
+ #endif // SIMDJSON_EXCEPTIONS
+ 
+-  bool empty(simdjson::ondemand::object obj) {
+-    bool is_empty;
+-    ASSERT_SUCCESS(obj.is_empty().get(is_empty));
+-    ASSERT_TRUE(is_empty);
+-    return true;
+-  }
+-  bool value_to_object(simdjson::ondemand::value val) {
+-    ondemand::json_type t;
+-    ASSERT_SUCCESS(val.type().get(t));
+-    ASSERT_EQUAL(t, ondemand::json_type::object);
+-    simdjson::ondemand::object obj;
+-    ASSERT_SUCCESS(val.get_object().get(obj));
+-    if(empty(obj) != true) { return false; }
+-    return true;
+-  }
+-  bool empty_rewind_convoluted() {
+-    TEST_START();
+-    const auto json = R"( {} )"_padded;
+-    ondemand::parser parser;
+-    ondemand::document doc;
+-    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-    ondemand::value val;
+-    ASSERT_SUCCESS(doc.get_value().get(val));
+-    if(!value_to_object(val)) { return false; }
+-    TEST_SUCCEED();
+-  }
+-#if SIMDJSON_EXCEPTIONS
+-  bool value_to_object_except(simdjson::ondemand::value val) {
+-    ondemand::json_type t = val.type();
+-    ASSERT_EQUAL(t, ondemand::json_type::object);
+-    if(empty(simdjson::ondemand::object(val)) != true) { return false; }
+-    return true;
+-  }
+-  bool empty_rewind_convoluted_with_exceptions() {
+-    TEST_START();
+-    const auto json = R"( {} )"_padded;
+-    ondemand::parser parser;
+-    ondemand::document doc;
+-    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+-    ondemand::value val;
+-    ASSERT_SUCCESS(doc.get_value().get(val));
+-    if(value_to_object_except(val) != true) { return false; }
+-    TEST_SUCCEED();
+-  }
+-#endif
+-
+   bool run() {
+     return
+            value_search_unescaped_key() &&
+@@ -719,10 +612,8 @@ namespace object_tests {
+            iterate_empty_object() &&
+            iterate_object_partial_children() &&
+            issue_1480() &&
+-           empty_rewind_convoluted() &&
+ #if SIMDJSON_EXCEPTIONS
+            iterate_object_exception() &&
+-           empty_rewind_convoluted_with_exceptions() &&
+ #endif // SIMDJSON_EXCEPTIONS
+            true;
+   }
+diff --git a/tests/ondemand/ondemand_readme_examples.cpp b/tests/ondemand/ondemand_readme_examples.cpp
+index 24a0ac56..91d21ca7 100644
+--- a/tests/ondemand/ondemand_readme_examples.cpp
++++ b/tests/ondemand/ondemand_readme_examples.cpp
+@@ -305,30 +305,6 @@ bool using_the_parsed_json_rewind() {
+   TEST_SUCCEED();
+ }
+ 
+-
+-bool using_the_parsed_json_rewind_array() {
+-  TEST_START();
+-
+-  ondemand::parser parser;
+-  auto cars_json = R"( [
+-    { "make": "Toyota", "model": "Camry",  "year": 2018, "tire_pressure": [ 40.1, 39.9, 37.7, 40.4 ] },
+-    { "make": "Kia",    "model": "Soul",   "year": 2012, "tire_pressure": [ 30.1, 31.0, 28.6, 28.7 ] },
+-    { "make": "Toyota", "model": "Tercel", "year": 1999, "tire_pressure": [ 29.8, 30.0, 30.2, 30.5 ] }
+-  ] )"_padded;
+-
+-  auto doc = parser.iterate(cars_json);
+-  ondemand::array arr = doc.get_array();
+-  size_t count = 0;
+-  for (simdjson_unused ondemand::object car : arr) {
+-    if(car["make"] == "Toyota") { count++; }
+-  }
+-  std::cout << "We have " << count << " Toyota cars.\n";
+-  arr.reset();
+-  for (ondemand::object car : arr) {
+-    cout << "Make/Model: " << std::string_view(car["make"]) << "/" << std::string_view(car["model"]) << endl;
+-  }
+-  TEST_SUCCEED();
+-}
+ bool using_the_parsed_json_4() {
+   TEST_START();
+ 
+@@ -762,7 +738,6 @@ int main() {
+     && json_array_count_complex()
+     && json_array_count()
+     && using_the_parsed_json_rewind()
+-    && using_the_parsed_json_rewind_array()
+     && basics_2()
+     && using_the_parsed_json_1()
+     && using_the_parsed_json_2()

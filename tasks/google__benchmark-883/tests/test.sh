@@ -6,27 +6,41 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/commandlineflags_gtest.cc" "test/commandlineflags_gtest.cc"
 
-# Rebuild with the fixed test files
-echo "Rebuilding with fixed test files..."
-rm -rf build
-cmake -B build -G Ninja \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-    -DBENCHMARK_ENABLE_TESTING=ON \
-    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-    -DBENCHMARK_ENABLE_WERROR=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# Initialize test_status
+test_status=0
 
-# Build the commandlineflags_gtest specifically
-cmake --build build --config Debug --target commandlineflags_gtest -j 1
+# Rebuild the benchmark library first to pick up any source changes from fix.patch
+cd /app/src
+cmake --build build --config Debug --target benchmark -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark library"
+    test_status=1
+fi
+
+# Rebuild benchmark_main library to pick up changes
+cmake --build build --config Debug --target benchmark_main -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark_main library"
+    test_status=1
+fi
+
+# Build the commandlineflags_gtest target specifically
+if [ $test_status -eq 0 ]; then
+    cmake --build build --config Debug --target commandlineflags_gtest -j 1
+    if [ $? -ne 0 ]; then
+        echo "Failed to build commandlineflags_gtest"
+        test_status=1
+    fi
+fi
 
 # Run the commandlineflags_gtest
-echo "Running commandlineflags_gtest..."
-./build/test/commandlineflags_gtest
-test_status=$?
+if [ $test_status -eq 0 ]; then
+    ./build/test/commandlineflags_gtest
+    if [ $? -ne 0 ]; then
+        echo "commandlineflags_gtest failed"
+        test_status=1
+    fi
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

@@ -1,0 +1,385 @@
+diff --git a/doc/basics.md b/doc/basics.md
+index c9168f81..50017c43 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -312,19 +312,15 @@ support for users who avoid exceptions. See [the simdjson error handling documen
+   `double(element)`. This works for `std::string_view`, double, uint64_t, int64_t, bool,
+   ondemand::object and ondemand::array. We also have explicit methods such as `get_string()`, `get_double()`,
+   `get_uint64()`, `get_int64()`, `get_bool()`, `get_object()` and `get_array()`. After a cast or an explicit method,
+-  the number, string or boolean will be parsed, or the initial `{` or `[` will be verified for ondemand::object and ondemand::array. An exception is thrown if
+-  the cast is not possible. Importantly, when getting an ondemand::object or ondemand::array instance, its content is
+-  not validated: you are only guaranteed that the corresponding initial character (`{` or `[`) is present. Thus,
+-  for example, you could have an ondemand::object instance pointing at the invalid JSON `{ "this is not a valid object" }`: the validation occurs as you access the content.
+-  The `get_string()` returns a valid UTF-8 string, after
++  the number, string or boolean will be parsed, or the initial `[` or `{` will be verified. An exception is thrown if
++  the cast is not possible. The `get_string()` returns a valid UTF-8 string, after
+   unescaping characters as needed: unmatched surrogate pairs are treated as an error unless you
+   pass `true` (`get_string(true)`) as a parameter to get replacement characters where errors
+   occur. If you somehow need to access non-UTF-8 strings in a lossless manner
+   (e.g., if you strings contain unpaired surrogates), you may use the `get_wobbly_string()` function to get a string in the [WTF-8 format](https://simonsapin.github.io/wtf-8).
++  Or you may pass `true` as a parameter to the
+   When calling `get_uint64()` and `get_int64()`, if the number does not fit in a corresponding
+-  64-bit integer type, it is also considered an error. When parsing numbers or other scalar values, the library checks
+-  that the value is followed by an expected character, thus you *may* get a number parsing error when accessing the digits
+-  as an integer in the following strings: `{"number":12332a`, `{"number":12332\0`, `{"number":12332` (the digits appear at the end). We always abide by the [RFC 8259](https://www.tbray.org/ongoing/When/201x/2017/12/14/rfc8259.html) JSON specification so that, for example, numbers prefixed by the `+` sign are in error.
++  64-bit integer type, it is also considered an error.
+ 
+   > IMPORTANT NOTE: values can only be parsed once. Since documents are *iterators*, once you have
+   > parsed a value (such as by casting to double), you cannot get at it again. It is an error to call
+@@ -1129,7 +1125,7 @@ int main(void) {
+ ### Current location in document
+ 
+ Sometimes, it might be helpful to know the current location in the document during iteration. This is especially useful when encountering errors. The `current_location()` method on a
+-`document` instances makes it easy to identify common JSON errors. Users can call the `current_location()` method on a valid document instance to retrieve a `const char *` pointer to the current location in the document. This method also works even after an error has invalidated the document and the parser (e.g. `TAPE_ERROR`, `INCOMPLETE_ARRAY_OR_OBJECT`).
++`document` instances makes it easy to identify common JSON errors. Users can call the `current_location()` method on a validdocument instance to retrieve a `const char *` pointer to the current location in the document. This method also works even after an error has invalidated the document and the parser (e.g. `TAPE_ERROR`, `INCOMPLETE_ARRAY_OR_OBJECT`).
+ When the input was a `padding_string` or another null-terminated source, then you may
+ use the `const char *` pointer as a C string. As an example, consider the following
+ example where we used the exception-free simdjson interface:
+@@ -1142,28 +1138,10 @@ int64_t i;
+ auto error = doc["integer"].get_int64().get(i);    // Expect to get integer from "integer" key, but get TAPE_ERROR
+ if (error) {
+   std::cout << error << std::endl;    // Prints TAPE_ERROR error message
+-  // Recover a pointer to the location of the first error:
+-  const char * ptr;
+-  doc.current_location().get(ptr);
+-  // ptr points at 'false, "integer": -343} " which is the location of the error
+-  //
+-  // Because we pad simdjson::padded_string instances with null characters, you may also do the following:
+   std::cout<< doc.current_location() << std::endl;  // Prints "false, "integer": -343} " (location of TAPE_ERROR)
+ }
+ ```
+ 
+-
+-  auto broken_json = R"( {"double": 13.06, false, "integer": -343} )"_padded;
+-  ondemand::parser parser;
+-  ondemand::document doc;
+-  ASSERT_SUCCESS(parser.iterate(broken_json).get(doc));
+-  const char * ptr;
+-  int64_t i;
+-  ASSERT_ERROR(doc["integer"].get_int64().get(i), TAPE_ERROR);
+-  ASSERT_SUCCESS(doc.current_location().get(ptr));
+-  std::string expected = "false, \"integer\": -343} ";
+-  ASSERT_EQUAL(std::string(ptr,expected.size()), expected);
+-
+ You may also use `current_location()` with exceptions as follows:
+ 
+ ```c++
+diff --git a/include/simdjson/generic/ondemand/document-inl.h b/include/simdjson/generic/ondemand/document-inl.h
+index 75a53197..dd8f6a3a 100644
+--- a/include/simdjson/generic/ondemand/document-inl.h
++++ b/include/simdjson/generic/ondemand/document-inl.h
+@@ -49,22 +49,14 @@ simdjson_inline simdjson_result<value> document::get_value() noexcept {
+   // gets called.
+   iter.assert_at_document_depth();
+   switch (*iter.peek()) {
+-    case '[': {
+-      auto value_iterator = get_root_value_iterator();
+-      auto error = value_iterator.check_root_array();
+-      if(error) { return error; }
++    case '[':
++    case '{':
+       return value(get_root_value_iterator());
+-    }
+-    case '{': {
+-      auto value_iterator = get_root_value_iterator();
+-      auto error = value_iterator.check_root_object();
+-      if(error) { return error; }
+-      return value(get_root_value_iterator());
+-    }
+     default:
+       // Unfortunately, scalar documents are a special case in simdjson and they cannot
+       // be safely converted to value instances.
+       return SCALAR_DOCUMENT_AS_VALUE;
++      // return value(get_root_value_iterator());
+   }
+ }
+ simdjson_inline simdjson_result<array> document::get_array() & noexcept {
+diff --git a/include/simdjson/generic/ondemand/value_iterator-inl.h b/include/simdjson/generic/ondemand/value_iterator-inl.h
+index 40268599..c6785994 100644
+--- a/include/simdjson/generic/ondemand/value_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/value_iterator-inl.h
+@@ -34,7 +34,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::start
+   return true;
+ }
+ 
+-simdjson_warn_unused simdjson_inline error_code value_iterator::check_root_object() noexcept {
++simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::started_root_object() noexcept {
+   // When in streaming mode, we cannot expect peek_last() to be the last structural element of the
+   // current document. It only works in the normal mode where we have indexed a single document.
+   // Note that adding a check for 'streaming' is not expensive since we only have at most
+@@ -56,12 +56,6 @@ simdjson_warn_unused simdjson_inline error_code value_iterator::check_root_objec
+       return report_error(INCOMPLETE_ARRAY_OR_OBJECT, "the document is unbalanced");
+     }
+   }
+-  return SUCCESS;
+-}
+-
+-simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::started_root_object() noexcept {
+-  auto error = check_root_object();
+-  if(error) { return error; }
+   return started_object();
+ }
+ 
+@@ -425,7 +419,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::start
+   return true;
+ }
+ 
+-simdjson_warn_unused simdjson_inline error_code value_iterator::check_root_array() noexcept {
++simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::started_root_array() noexcept {
+   // When in streaming mode, we cannot expect peek_last() to be the last structural element of the
+   // current document. It only works in the normal mode where we have indexed a single document.
+   // Note that adding a check for 'streaming' is not expensive since we only have at most
+@@ -447,12 +441,6 @@ simdjson_warn_unused simdjson_inline error_code value_iterator::check_root_array
+       return report_error(INCOMPLETE_ARRAY_OR_OBJECT, "the document is unbalanced");
+     }
+   }
+-  return SUCCESS;
+-}
+-
+-simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::started_root_array() noexcept {
+-  auto error = check_root_array();
+-  if (error) { return error; }
+   return started_array();
+ }
+ 
+diff --git a/include/simdjson/generic/ondemand/value_iterator.h b/include/simdjson/generic/ondemand/value_iterator.h
+index 2bf75dde..8a48dfbd 100644
+--- a/include/simdjson/generic/ondemand/value_iterator.h
++++ b/include/simdjson/generic/ondemand/value_iterator.h
+@@ -109,14 +109,7 @@ public:
+    * @error TAPE_ERROR if there is no matching } at end of document
+    */
+   simdjson_warn_unused simdjson_inline simdjson_result<bool> start_root_object() noexcept;
+-  /**
+-   * Checks whether an object could be started from the root. May be called by start_root_object.
+-   *
+-   * @returns SUCCESS if it is possible to safely start an object from the root (document level).
+-   * @error INCORRECT_TYPE if there is no opening {
+-   * @error TAPE_ERROR if there is no matching } at end of document
+-   */
+-  simdjson_warn_unused simdjson_inline error_code check_root_object() noexcept;
++
+   /**
+    * Start an object iteration after the user has already checked and moved past the {.
+    *
+@@ -241,14 +234,7 @@ public:
+    * @error TAPE_ERROR if there is no matching ] at end of document
+    */
+   simdjson_warn_unused simdjson_inline simdjson_result<bool> start_root_array() noexcept;
+-  /**
+-   * Checks whether an array could be started from the root. May be called by start_root_array.
+-   *
+-   * @returns SUCCESS if it is possible to safely start an array from the root (document level).
+-   * @error INCORRECT_TYPE If there is no [.
+-   * @error TAPE_ERROR if there is no matching ] at end of document
+-   */
+-  simdjson_warn_unused simdjson_inline error_code check_root_array() noexcept;
++
+   /**
+    * Start an array iteration, after the user has already checked and moved past the [.
+    *
+diff --git a/include/simdjson/padded_string-inl.h b/include/simdjson/padded_string-inl.h
+index 1cd95a91..29a3018d 100644
+--- a/include/simdjson/padded_string-inl.h
++++ b/include/simdjson/padded_string-inl.h
+@@ -35,8 +35,9 @@ inline char *allocate_padded_buffer(size_t length) noexcept {
+   if (padded_buffer == nullptr) {
+     return nullptr;
+   }
+-  // We write nulls in the padded region to avoid having uninitialized
+-  // content which may trigger warning for some sanitizers
++  // We write zeroes in the padded region to avoid having uninitized
++  // garbage. If nothing else, garbage getting read might trigger a
++  // warning in a memory checking.
+   std::memset(padded_buffer + length, 0, totalpaddedlength - length);
+   return padded_buffer;
+ } // allocate_padded_buffer()
+@@ -66,7 +67,7 @@ inline padded_string::padded_string(std::string_view sv_) noexcept
+     : viable_size(sv_.size()), data_ptr(internal::allocate_padded_buffer(sv_.size())) {
+   if(simdjson_unlikely(!data_ptr)) {
+     //allocation failed or zero size
+-    viable_size = 0;
++    viable_size=0;
+     return;
+   }
+   if (sv_.size()) {
+diff --git a/tests/ondemand/ondemand_error_location_tests.cpp b/tests/ondemand/ondemand_error_location_tests.cpp
+index 8bc014da..11dc30f9 100644
+--- a/tests/ondemand/ondemand_error_location_tests.cpp
++++ b/tests/ondemand/ondemand_error_location_tests.cpp
+@@ -19,9 +19,9 @@ namespace error_location_tests {
+             const char* c;
+             // Must call current_location first because get_int64() will consume values
+             ASSERT_SUCCESS(doc.current_location().get(c));
+-            ASSERT_EQUAL(*c, expected[count]);
++            ASSERT_EQUAL(*c,expected[count]);
+             ASSERT_SUCCESS(value.get_int64().get(i));
+-            ASSERT_EQUAL(i, expected_values[count]);
++            ASSERT_EQUAL(i,expected_values[count]);
+             count++;
+         }
+         ASSERT_EQUAL(count,3);
+@@ -64,14 +64,12 @@ namespace error_location_tests {
+         ASSERT_SUCCESS(doc.at_pointer("/a/2/1").get(i));
+         ASSERT_EQUAL(i, 4);
+         ASSERT_SUCCESS(doc.current_location().get(ptr));
+-        std::string expected = ",5]], \"b\": {\"c\": [1.2, 2.3]}} ";
+-        ASSERT_EQUAL(std::string(ptr, expected.size()), expected);
++        ASSERT_EQUAL(ptr, ",5]], \"b\": {\"c\": [1.2, 2.3]}} ");
+         double d;
+         ASSERT_SUCCESS(doc.at_pointer("/b/c/1").get(d));
+         ASSERT_EQUAL(d, 2.3);
+         ASSERT_SUCCESS(doc.current_location().get(ptr));
+-        expected = "]}} ";
+-        ASSERT_EQUAL(std::string(ptr, expected.size()), expected);
++        ASSERT_EQUAL(ptr, "]}} ");
+         TEST_SUCCEED();
+     }
+ 
+@@ -85,13 +83,11 @@ namespace error_location_tests {
+         double d;
+         ASSERT_ERROR(doc.at_pointer("/b/c/0").get(d), NUMBER_ERROR);
+         ASSERT_SUCCESS(doc.current_location().get(ptr));
+-        std::string expected = "1.2., 2.3]}} ";
+-        ASSERT_EQUAL(std::string(ptr, expected.size()), expected);
++        ASSERT_EQUAL(ptr, "1.2., 2.3]}} ");
+         uint64_t i;
+         ASSERT_ERROR(doc.at_pointer("/a/2/1").get(i), TAPE_ERROR);
+         ASSERT_SUCCESS(doc.current_location().get(ptr));
+-        expected = "4,5]], \"b\": {\"c\": [1.2., 2.3]}} ";
+-        ASSERT_EQUAL(std::string(ptr, expected.size()), expected);
++        ASSERT_EQUAL(ptr, "4,5]], \"b\": {\"c\": [1.2., 2.3]}} ");
+         TEST_SUCCEED();
+     }
+ 
+@@ -104,7 +100,7 @@ namespace error_location_tests {
+         ASSERT_SUCCESS(parser.iterate(json).get(doc));
+         ASSERT_ERROR(doc["a"], INCORRECT_TYPE);
+         ASSERT_SUCCESS(doc.current_location().get(ptr));
+-        ASSERT_EQUAL(std::string(ptr, 18), "\xc3\x94\xc3\xb8\xe2\x84\xa6{\"a\":1, 3} ");
++        ASSERT_EQUAL(ptr, "\xc3\x94\xc3\xb8\xe2\x84\xa6{\"a\":1, 3} ");
+         TEST_SUCCEED();
+     }
+ 
+@@ -119,7 +115,7 @@ namespace error_location_tests {
+         ASSERT_SUCCESS(doc.get_array().get(arr));
+         ASSERT_ERROR(arr.count_elements(), TAPE_ERROR);
+         ASSERT_SUCCESS(doc.current_location().get(ptr));
+-        ASSERT_EQUAL(std::string(ptr - 2,2), "] ");
++        ASSERT_EQUAL(ptr - 2, "] ");
+         TEST_SUCCEED();
+     }
+ 
+@@ -140,7 +136,7 @@ namespace error_location_tests {
+         }
+         ASSERT_EQUAL(count, 1);
+         ASSERT_SUCCESS(doc.current_location().get(ptr));
+-        ASSERT_EQUAL(std::string(ptr, strlen("1.23, 2] ")), "1.23, 2] ");
++        ASSERT_EQUAL(ptr, "1.23, 2] ");
+         TEST_SUCCEED();
+     }
+ 
+@@ -153,7 +149,7 @@ namespace error_location_tests {
+         ASSERT_SUCCESS(parser.iterate(json).get(doc));
+         ASSERT_ERROR(doc["b"], TAPE_ERROR);
+         ASSERT_SUCCESS(doc.current_location().get(ptr));
+-        ASSERT_EQUAL(std::string(ptr, strlen("3.5, \"b\":5} ")), "3.5, \"b\":5} ");
++        ASSERT_EQUAL(ptr, "3.5, \"b\":5} ");
+         TEST_SUCCEED();
+     }
+ 
+@@ -168,7 +164,7 @@ namespace error_location_tests {
+             ASSERT_ERROR(val, INCOMPLETE_ARRAY_OR_OBJECT);
+         }
+         ASSERT_SUCCESS(doc.current_location().get(ptr));
+-        ASSERT_EQUAL(std::string(ptr, strlen("[1,2,3 ")), "[1,2,3 ");
++        ASSERT_EQUAL(ptr, "[1,2,3 ");
+         TEST_SUCCEED();
+     }
+ 
+diff --git a/tests/ondemand/ondemand_object_tests.cpp b/tests/ondemand/ondemand_object_tests.cpp
+index e1e13a43..29bad324 100644
+--- a/tests/ondemand/ondemand_object_tests.cpp
++++ b/tests/ondemand/ondemand_object_tests.cpp
+@@ -1118,29 +1118,6 @@ namespace object_tests {
+     TEST_SUCCEED();
+   }
+ 
+-
+-  bool issue1974a() {
+-    TEST_START();
+-    padded_string bad_json = R"({"key":111)"_padded;
+-    ondemand::parser parser;
+-    ondemand::document doc;
+-    ASSERT_SUCCESS(parser.iterate(bad_json).get(doc));
+-    ondemand::object object;
+-    ASSERT_ERROR(doc.get_object().get(object), INCOMPLETE_ARRAY_OR_OBJECT);
+-    TEST_SUCCEED();
+-  }
+-
+-  bool issue1974b() {
+-    TEST_START();
+-    padded_string bad_json = R"({"key":111)"_padded;
+-    ondemand::parser parser;
+-    ondemand::document doc;
+-    ASSERT_SUCCESS(parser.iterate(bad_json).get(doc));
+-    ondemand::value val;
+-    ASSERT_ERROR(doc.get_value().get(val), INCOMPLETE_ARRAY_OR_OBJECT);
+-    TEST_SUCCEED();
+-  }
+-
+   bool iterate_bad_doc_object_count() {
+     TEST_START();
+     padded_string bad_jsons[4] = {R"( {"a":5 "b":3} )"_padded, R"( {"a":5, 3} )"_padded, R"( {"a":5, "b": } )"_padded, R"( {"a":5, "b":3 )"_padded};
+@@ -1150,7 +1127,7 @@ namespace object_tests {
+ 
+     for (auto name : names) {
+       SUBTEST("ondemand::" + name, test_ondemand_doc(bad_jsons[count], [&](auto doc_result) {
+-        ASSERT_RESULT(doc_result.type(), json_type::object );
++        ASSERT_RESULT( doc_result.type(), json_type::object );
+         ASSERT_ERROR(doc_result.count_fields(), errors[count]);
+         return true;
+       }));
+@@ -1267,8 +1244,6 @@ namespace object_tests {
+ #if SIMDJSON_EXCEPTIONS
+            issue1965() &&
+ #endif
+-           issue1974a() &&
+-           issue1974b() &&
+            issue1876a() &&
+            issue1876() &&
+            test_strager() &&
+diff --git a/tests/ondemand/ondemand_readme_examples.cpp b/tests/ondemand/ondemand_readme_examples.cpp
+index 6c847e93..32d68bc1 100644
+--- a/tests/ondemand/ondemand_readme_examples.cpp
++++ b/tests/ondemand/ondemand_readme_examples.cpp
+@@ -973,8 +973,7 @@ bool current_location_tape_error() {
+   int64_t i;
+   ASSERT_ERROR(doc["integer"].get_int64().get(i), TAPE_ERROR);
+   ASSERT_SUCCESS(doc.current_location().get(ptr));
+-  std::string expected = "false, \"integer\": -343} ";
+-  ASSERT_EQUAL(std::string(ptr,expected.size()), expected);
++  ASSERT_EQUAL(ptr, "false, \"integer\": -343} ");
+   TEST_SUCCEED();
+ }
+ 
+@@ -988,8 +987,7 @@ bool current_location_user_error() {
+   int64_t i;
+   ASSERT_ERROR(doc["integer"].get_int64().get(i), INCORRECT_TYPE);
+   ASSERT_SUCCESS(doc.current_location().get(ptr));
+-  std::string expected = "[1,2,3] ";
+-  ASSERT_EQUAL(std::string(ptr, expected.size()), expected);
++  ASSERT_EQUAL(ptr, "[1,2,3] ");
+   TEST_SUCCEED();
+ }
+ 
+@@ -1023,8 +1021,7 @@ bool current_location_no_error() {
+     auto error = val.get_object().get(obj);
+     if (!error) {
+       ASSERT_SUCCESS(doc.current_location().get(ptr));
+-      std::string expected = "\"key\": \"value\"}, true] ";
+-      ASSERT_EQUAL(std::string(ptr, expected.size()), expected);
++      ASSERT_EQUAL(ptr, "\"key\": \"value\"}, true] ");
+     }
+   }
+   TEST_SUCCEED();

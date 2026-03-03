@@ -1,0 +1,256 @@
+diff --git a/README.md b/README.md
+index 2f2d78f..770e466 100644
+--- a/README.md
++++ b/README.md
+@@ -657,12 +657,9 @@ In multithreaded benchmarks, each counter is set on the calling thread only.
+ When the benchmark finishes, the counters from each thread will be summed;
+ the resulting sum is the value which will be shown for the benchmark.
+ 
+-The `Counter` constructor accepts three parameters: the value as a `double`
+-; a bit flag which allows you to show counters as rates, and/or as per-thread
+-iteration, and/or as per-thread averages, and/or iteration invariants;
+-and a flag specifying the 'unit' - i.e. is 1k a 1000 (default,
+-`benchmark::Counter::OneK::kIs1000`), or 1024
+-(`benchmark::Counter::OneK::kIs1024`)?
++The `Counter` constructor accepts two parameters: the value as a `double`
++and a bit flag which allows you to show counters as rates and/or as
++per-thread averages:
+ 
+ ```c++
+   // sets a simple counter
+@@ -678,9 +675,6 @@ and a flag specifying the 'unit' - i.e. is 1k a 1000 (default,
+ 
+   // There's also a combined flag:
+   state.counters["FooAvgRate"] = Counter(numFoos,benchmark::Counter::kAvgThreadsRate);
+-
+-  // This says that we process with the rate of state.range(0) bytes every iteration:
+-  state.counters["BytesProcessed"] = Counter(state.range(0), benchmark::Counter::kIsIterationInvariantRate, benchmark::Counter::OneK::kIs1024);
+ ```
+ 
+ When you're compiling in C++11 mode or later you can use `insert()` with
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index e6ada56..c21ccf7 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -373,20 +373,11 @@ class Counter {
+     kAvgIterationsRate = kIsRate | kAvgIterations
+   };
+ 
+-  enum OneK {
+-    // 1'000 items per 1k
+-    kIs1000 = 1000,
+-    // 1'024 items per 1k
+-    kIs1024 = 1024
+-  };
+-
+   double value;
+   Flags flags;
+-  OneK oneK;
+ 
+   BENCHMARK_ALWAYS_INLINE
+-  Counter(double v = 0., Flags f = kDefaults, OneK k = kIs1000)
+-      : value(v), flags(f), oneK(k) {}
++  Counter(double v = 0., Flags f = kDefaults) : value(v), flags(f) {}
+ 
+   BENCHMARK_ALWAYS_INLINE operator double const&() const { return value; }
+   BENCHMARK_ALWAYS_INLINE operator double&() { return value; }
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index e919e78..48920ca 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -150,7 +150,7 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+   for (auto& c : result.counters) {
+     const std::size_t cNameLen = std::max(std::string::size_type(10),
+                                           c.first.length());
+-    auto const& s = HumanReadableNumber(c.second.value, c.second.oneK);
++    auto const& s = HumanReadableNumber(c.second.value, 1000);
+     if (output_options_ & OO_Tabular) {
+       if (c.second.flags & Counter::kIsRate) {
+         printer(Out, COLOR_DEFAULT, " %*s/s", cNameLen - 2, s.c_str());
+diff --git a/src/statistics.cc b/src/statistics.cc
+index 588fd12..2795011 100644
+--- a/src/statistics.cc
++++ b/src/statistics.cc
+@@ -165,8 +165,7 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+     // user counters
+     for (auto const& kv : counter_stats) {
+       const auto uc_stat = Stat.compute_(kv.second.s);
+-      auto c = Counter(uc_stat, counter_stats[kv.first].c.flags,
+-                       counter_stats[kv.first].c.oneK);
++      auto c = Counter(uc_stat, counter_stats[kv.first].c.flags);
+       data.counters[kv.first] = c;
+     }
+ 
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index aa2058a..f49ca51 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -128,9 +128,6 @@ add_test(user_counters_test user_counters_test --benchmark_min_time=0.01)
+ compile_output_test(user_counters_tabular_test)
+ add_test(user_counters_tabular_test user_counters_tabular_test --benchmark_counters_tabular=true --benchmark_min_time=0.01)
+ 
+-compile_output_test(user_counters_thousands_test)
+-add_test(user_counters_thousands_test user_counters_thousands_test --benchmark_min_time=0.01)
+-
+ check_cxx_compiler_flag(-std=c++03 BENCHMARK_HAS_CXX03_FLAG)
+ if (BENCHMARK_HAS_CXX03_FLAG)
+   compile_benchmark_test(cxx03_test)
+diff --git a/test/user_counters_thousands_test.cc b/test/user_counters_thousands_test.cc
+deleted file mode 100644
+index 6e02829..0000000
+--- a/test/user_counters_thousands_test.cc
++++ /dev/null
+@@ -1,153 +0,0 @@
+-
+-#undef NDEBUG
+-
+-#include "benchmark/benchmark.h"
+-#include "output_test.h"
+-
+-// ========================================================================= //
+-// ------------------------ Thousands Customisation ------------------------ //
+-// ========================================================================= //
+-
+-void BM_Counters_Thousands(benchmark::State& state) {
+-  for (auto _ : state) {
+-  }
+-  namespace bm = benchmark;
+-  state.counters.insert({
+-      {"t0_1000000DefaultBase",
+-       bm::Counter(1000 * 1000, bm::Counter::kDefaults)},
+-      {"t1_1000000Base1000", bm::Counter(1000 * 1000, bm::Counter::kDefaults,
+-                                         benchmark::Counter::OneK::kIs1000)},
+-      {"t2_1000000Base1024", bm::Counter(1000 * 1000, bm::Counter::kDefaults,
+-                                         benchmark::Counter::OneK::kIs1024)},
+-      {"t3_1048576Base1000", bm::Counter(1024 * 1024, bm::Counter::kDefaults,
+-                                         benchmark::Counter::OneK::kIs1000)},
+-      {"t4_1048576Base1024", bm::Counter(1024 * 1024, bm::Counter::kDefaults,
+-                                         benchmark::Counter::OneK::kIs1024)},
+-  });
+-}
+-BENCHMARK(BM_Counters_Thousands)->Repetitions(2);
+-ADD_CASES(
+-    TC_ConsoleOut,
+-    {
+-        {"^BM_Counters_Thousands/repeats:2 %console_report "
+-         "t0_1000000DefaultBase=1000k "
+-         "t1_1000000Base1000=1000k t2_1000000Base1024=976.56[23]k "
+-         "t3_1048576Base1000=1048.58k t4_1048576Base1024=1024k$"},
+-        {"^BM_Counters_Thousands/repeats:2 %console_report "
+-         "t0_1000000DefaultBase=1000k "
+-         "t1_1000000Base1000=1000k t2_1000000Base1024=976.56[23]k "
+-         "t3_1048576Base1000=1048.58k t4_1048576Base1024=1024k$"},
+-        {"^BM_Counters_Thousands/repeats:2_mean %console_report "
+-         "t0_1000000DefaultBase=1000k t1_1000000Base1000=1000k "
+-         "t2_1000000Base1024=976.56[23]k t3_1048576Base1000=1048.58k "
+-         "t4_1048576Base1024=1024k$"},
+-        {"^BM_Counters_Thousands/repeats:2_median %console_report "
+-         "t0_1000000DefaultBase=1000k t1_1000000Base1000=1000k "
+-         "t2_1000000Base1024=976.56[23]k t3_1048576Base1000=1048.58k "
+-         "t4_1048576Base1024=1024k$"},
+-        {"^BM_Counters_Thousands/repeats:2_stddev %console_report "
+-         "t0_1000000DefaultBase=0 t1_1000000Base1000=0 t2_1000000Base1024=0 "
+-         "t3_1048576Base1000=0 t4_1048576Base1024=0$"},
+-    });
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_Thousands/repeats:2\",$"},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"t0_1000000DefaultBase\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t1_1000000Base1000\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t2_1000000Base1024\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t3_1048576Base1000\": 1\\.048576(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t4_1048576Base1024\": 1\\.048576(0)*e\\+(0)*6$", MR_Next},
+-           {"}", MR_Next}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_Thousands/repeats:2\",$"},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"t0_1000000DefaultBase\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t1_1000000Base1000\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t2_1000000Base1024\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t3_1048576Base1000\": 1\\.048576(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t4_1048576Base1024\": 1\\.048576(0)*e\\+(0)*6$", MR_Next},
+-           {"}", MR_Next}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_Thousands/repeats:2_mean\",$"},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"t0_1000000DefaultBase\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t1_1000000Base1000\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t2_1000000Base1024\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t3_1048576Base1000\": 1\\.048576(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t4_1048576Base1024\": 1\\.048576(0)*e\\+(0)*6$", MR_Next},
+-           {"}", MR_Next}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_Thousands/repeats:2_median\",$"},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"t0_1000000DefaultBase\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t1_1000000Base1000\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t2_1000000Base1024\": 1\\.(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t3_1048576Base1000\": 1\\.048576(0)*e\\+(0)*6,$", MR_Next},
+-           {"\"t4_1048576Base1024\": 1\\.048576(0)*e\\+(0)*6$", MR_Next},
+-           {"}", MR_Next}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_Thousands/repeats:2_stddev\",$"},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"t0_1000000DefaultBase\": 0\\.(0)*e\\+(0)*,$", MR_Next},
+-           {"\"t1_1000000Base1000\": 0\\.(0)*e\\+(0)*,$", MR_Next},
+-           {"\"t2_1000000Base1024\": 0\\.(0)*e\\+(0)*,$", MR_Next},
+-           {"\"t3_1048576Base1000\": 0\\.(0)*e\\+(0)*,$", MR_Next},
+-           {"\"t4_1048576Base1024\": 0\\.(0)*e\\+(0)*$", MR_Next},
+-           {"}", MR_Next}});
+-
+-ADD_CASES(
+-    TC_CSVOut,
+-    {{"^\"BM_Counters_Thousands/"
+-      "repeats:2\",%csv_report,1e\\+(0)*6,1e\\+(0)*6,1e\\+(0)*6,1\\.04858e\\+("
+-      "0)*6,1\\.04858e\\+(0)*6$"},
+-     {"^\"BM_Counters_Thousands/"
+-      "repeats:2\",%csv_report,1e\\+(0)*6,1e\\+(0)*6,1e\\+(0)*6,1\\.04858e\\+("
+-      "0)*6,1\\.04858e\\+(0)*6$"},
+-     {"^\"BM_Counters_Thousands/"
+-      "repeats:2_mean\",%csv_report,1e\\+(0)*6,1e\\+(0)*6,1e\\+(0)*6,1\\."
+-      "04858e\\+(0)*6,1\\.04858e\\+(0)*6$"},
+-     {"^\"BM_Counters_Thousands/"
+-      "repeats:2_median\",%csv_report,1e\\+(0)*6,1e\\+(0)*6,1e\\+(0)*6,1\\."
+-      "04858e\\+(0)*6,1\\.04858e\\+(0)*6$"},
+-     {"^\"BM_Counters_Thousands/repeats:2_stddev\",%csv_report,0,0,0,0,0$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckThousands(Results const& e) {
+-  if (e.name != "BM_Counters_Thousands/repeats:2")
+-    return;  // Do not check the aggregates!
+-
+-  // check that the values are within 0.01% of the expected values
+-  CHECK_FLOAT_COUNTER_VALUE(e, "t0_1000000DefaultBase", EQ, 1000 * 1000,
+-                            0.0001);
+-  CHECK_FLOAT_COUNTER_VALUE(e, "t1_1000000Base1000", EQ, 1000 * 1000, 0.0001);
+-  CHECK_FLOAT_COUNTER_VALUE(e, "t2_1000000Base1024", EQ, 1000 * 1000, 0.0001);
+-  CHECK_FLOAT_COUNTER_VALUE(e, "t3_1048576Base1000", EQ, 1024 * 1024, 0.0001);
+-  CHECK_FLOAT_COUNTER_VALUE(e, "t4_1048576Base1024", EQ, 1024 * 1024, 0.0001);
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_Thousands", &CheckThousands);
+-
+-// ========================================================================= //
+-// --------------------------- TEST CASES END ------------------------------ //
+-// ========================================================================= //
+-
+-int main(int argc, char* argv[]) { RunOutputTests(argc, argv); }

@@ -1,0 +1,219 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index aef995e..193fffc 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -243,7 +243,6 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ 
+ namespace benchmark {
+ class BenchmarkReporter;
+-class MemoryManager;
+ 
+ void Initialize(int* argc, char** argv);
+ 
+@@ -268,9 +267,12 @@ size_t RunSpecifiedBenchmarks(BenchmarkReporter* console_reporter);
+ size_t RunSpecifiedBenchmarks(BenchmarkReporter* console_reporter,
+                               BenchmarkReporter* file_reporter);
+ 
+-// Register a MemoryManager instance that will be used to collect and report
+-// allocation measurements for benchmark runs.
+-void RegisterMemoryManager(MemoryManager* memory_manager);
++// If this routine is called, peak memory allocation past this point in the
++// benchmark is reported at the end of the benchmark report line. (It is
++// computed by running the benchmark once with a single iteration and a memory
++// tracer.)
++// TODO(dominic)
++// void MemoryUsage();
+ 
+ namespace internal {
+ class Benchmark;
+@@ -1278,10 +1280,7 @@ class BenchmarkReporter {
+           complexity_n(0),
+           report_big_o(false),
+           report_rms(false),
+-          counters(),
+-          has_memory_result(false),
+-          allocs_per_iter(0.0),
+-          max_bytes_used(0) {}
++          counters() {}
+ 
+     std::string benchmark_name;
+     std::string report_label;  // Empty if not set by benchmark.
+@@ -1325,11 +1324,6 @@ class BenchmarkReporter {
+     bool report_rms;
+ 
+     UserCounters counters;
+-
+-    // Memory metrics.
+-    bool has_memory_result;
+-    double allocs_per_iter;
+-    int64_t max_bytes_used;
+   };
+ 
+   // Construct a BenchmarkReporter with the output stream set to 'std::cout'
+@@ -1444,29 +1438,6 @@ class BENCHMARK_DEPRECATED_MSG("The CSV Reporter will be removed in a future rel
+   std::set<std::string> user_counter_names_;
+ };
+ 
+-// If a MemoryManager is registered, it can be used to collect and report
+-// allocation metrics for a run of the benchmark.
+-class MemoryManager {
+- public:
+-  struct Result {
+-    Result() : num_allocs(0), max_bytes_used(0) {}
+-
+-    // The number of allocations made in total between Start and Stop.
+-    int64_t num_allocs;
+-
+-    // The peak memory use between Start and Stop.
+-    int64_t max_bytes_used;
+-  };
+-
+-  virtual ~MemoryManager() {}
+-
+-  // Implement this to start recording allocation information.
+-  virtual void Start() = 0;
+-
+-  // Implement this to stop recording and fill out the given Result structure.
+-  virtual void Stop(Result* result) = 0;
+-};
+-
+ inline const char* GetTimeUnitString(TimeUnit unit) {
+   switch (unit) {
+     case kMillisecond:
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index b4875a1..da55322 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -105,8 +105,6 @@ namespace benchmark {
+ 
+ namespace {
+ static const size_t kMaxIterations = 1000000000;
+-
+-static MemoryManager* memory_manager = nullptr;
+ }  // end namespace
+ 
+ namespace internal {
+@@ -117,8 +115,7 @@ namespace {
+ 
+ BenchmarkReporter::Run CreateRunReport(
+     const benchmark::internal::Benchmark::Instance& b,
+-    const internal::ThreadManager::Result& results, size_t memory_iterations,
+-    const MemoryManager::Result& memory_result, double seconds) {
++    const internal::ThreadManager::Result& results, double seconds) {
+   // Create report about this benchmark run.
+   BenchmarkReporter::Run report;
+ 
+@@ -153,16 +150,6 @@ BenchmarkReporter::Run CreateRunReport(
+     report.complexity_lambda = b.complexity_lambda;
+     report.statistics = b.statistics;
+     report.counters = results.counters;
+-
+-    if (memory_iterations > 0) {
+-      report.has_memory_result = true;
+-      report.allocs_per_iter =
+-          memory_iterations ? static_cast<double>(memory_result.num_allocs) /
+-                                  memory_iterations
+-                            : 0;
+-      report.max_bytes_used = memory_result.max_bytes_used;
+-    }
+-
+     internal::Finish(&report.counters, results.iterations, seconds, b.threads);
+   }
+   return report;
+@@ -262,23 +249,7 @@ std::vector<BenchmarkReporter::Run> RunBenchmark(
+       // clang-format on
+ 
+       if (should_report) {
+-        MemoryManager::Result memory_result;
+-        size_t memory_iterations = 0;
+-        if (memory_manager != nullptr) {
+-          // Only run a few iterations to reduce the impact of one-time
+-          // allocations in benchmarks that are not properly managed.
+-          memory_iterations = std::min<size_t>(16, iters);
+-          memory_manager->Start();
+-          manager.reset(new internal::ThreadManager(1));
+-          RunInThread(&b, memory_iterations, 0, manager.get());
+-          manager->WaitForAllThreads();
+-          manager.reset();
+-
+-          memory_manager->Stop(&memory_result);
+-        }
+-
+-        BenchmarkReporter::Run report = CreateRunReport(
+-            b, results, memory_iterations, memory_result, seconds);
++        BenchmarkReporter::Run report = CreateRunReport(b, results, seconds);
+         if (!report.error_occurred && b.complexity != oNone)
+           complexity_reports->push_back(report);
+         reports.push_back(report);
+@@ -579,8 +550,6 @@ size_t RunSpecifiedBenchmarks(BenchmarkReporter* console_reporter,
+   return benchmarks.size();
+ }
+ 
+-void RegisterMemoryManager(MemoryManager* manager) { memory_manager = manager; }
+-
+ namespace internal {
+ 
+ void PrintUsageAndExit() {
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index 6d0706f..611605a 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -186,12 +186,6 @@ void JSONReporter::PrintRunData(Run const& run) {
+   for (auto& c : run.counters) {
+     out << ",\n" << indent << FormatKV(c.first, c.second);
+   }
+-
+-  if (run.has_memory_result) {
+-    out << ",\n" << indent << FormatKV("allocs_per_iter", run.allocs_per_iter);
+-    out << ",\n" << indent << FormatKV("max_bytes_used", run.max_bytes_used);
+-  }
+-
+   if (!run.report_label.empty()) {
+     out << ",\n" << indent << FormatKV("label", run.report_label);
+   }
+diff --git a/test/memory_manager_test.cc b/test/memory_manager_test.cc
+deleted file mode 100644
+index da73593..0000000
+--- a/test/memory_manager_test.cc
++++ /dev/null
+@@ -1,40 +0,0 @@
+-#include <memory>
+-
+-#include "../src/check.h"
+-#include "benchmark/benchmark.h"
+-#include "output_test.h"
+-
+-class TestMemoryManager : public benchmark::MemoryManager {
+-  void Start() {}
+-  void Stop(Result* result) {
+-    result->num_allocs = 42;
+-    result->max_bytes_used = 42000;
+-  }
+-};
+-
+-void BM_empty(benchmark::State& state) {
+-  for (auto _ : state) {
+-    benchmark::DoNotOptimize(state.iterations());
+-  }
+-}
+-BENCHMARK(BM_empty);
+-
+-ADD_CASES(TC_ConsoleOut, {{"^BM_empty %console_report$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_empty\",$"},
+-                       {"\"iterations\": %int,$", MR_Next},
+-                       {"\"real_time\": %float,$", MR_Next},
+-                       {"\"cpu_time\": %float,$", MR_Next},
+-                       {"\"time_unit\": \"ns\",$", MR_Next},
+-                       {"\"allocs_per_iter\": %float,$", MR_Next},
+-                       {"\"max_bytes_used\": 42000$", MR_Next},
+-                       {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_empty\",%csv_report$"}});
+-
+-
+-int main(int argc, char *argv[]) {
+-  std::unique_ptr<benchmark::MemoryManager> mm(new TestMemoryManager());
+-
+-  benchmark::RegisterMemoryManager(mm.get());
+-  RunOutputTests(argc, argv);
+-  benchmark::RegisterMemoryManager(nullptr);
+-}

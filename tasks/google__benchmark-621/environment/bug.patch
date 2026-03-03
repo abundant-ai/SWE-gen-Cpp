@@ -1,0 +1,327 @@
+diff --git a/.gitignore b/.gitignore
+index 8c30e28..050e469 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -48,7 +48,6 @@ bazel-*
+ # out-of-source build top-level folders.
+ build/
+ _build/
+-build*/
+ 
+ # in-source dependencies
+ /googletest/
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 193fffc..be9498c 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -343,24 +343,12 @@ class Counter {
+     kDefaults = 0,
+     // Mark the counter as a rate. It will be presented divided
+     // by the duration of the benchmark.
+-    kIsRate = 1U << 0U,
++    kIsRate = 1,
+     // Mark the counter as a thread-average quantity. It will be
+     // presented divided by the number of threads.
+-    kAvgThreads = 1U << 1U,
++    kAvgThreads = 2,
+     // Mark the counter as a thread-average rate. See above.
+-    kAvgThreadsRate = kIsRate | kAvgThreads,
+-    // Mark the counter as a constant value, valid/same for *every* iteration.
+-    // When reporting, it will be *multiplied* by the iteration count.
+-    kIsIterationInvariant = 1U << 2U,
+-    // Mark the counter as a constant rate.
+-    // When reporting, it will be *multiplied* by the iteration count
+-    // and then divided by the duration of the benchmark.
+-    kIsIterationInvariantRate = kIsRate | kIsIterationInvariant,
+-    // Mark the counter as a iteration-average quantity.
+-    // It will be presented divided by the number of iterations.
+-    kAvgIterations = 1U << 3U,
+-    // Mark the counter as a iteration-average rate. See above.
+-    kAvgIterationsRate = kIsRate | kAvgIterations
++    kAvgThreadsRate = kIsRate | kAvgThreads
+   };
+ 
+   double value;
+@@ -373,14 +361,6 @@ class Counter {
+   BENCHMARK_ALWAYS_INLINE operator double&() { return value; }
+ };
+ 
+-// A helper for user code to create unforeseen combinations of Flags, without
+-// having to do this cast manually each time, or providing this operator.
+-Counter::Flags inline operator|(const Counter::Flags& LHS,
+-                                const Counter::Flags& RHS) {
+-  return static_cast<Counter::Flags>(static_cast<int>(LHS) |
+-                                     static_cast<int>(RHS));
+-}
+-
+ // This is the container for the user-defined counters.
+ typedef std::map<std::string, Counter> UserCounters;
+ 
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index da55322..9422cdb 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -150,7 +150,7 @@ BenchmarkReporter::Run CreateRunReport(
+     report.complexity_lambda = b.complexity_lambda;
+     report.statistics = b.statistics;
+     report.counters = results.counters;
+-    internal::Finish(&report.counters, results.iterations, seconds, b.threads);
++    internal::Finish(&report.counters, seconds, b.threads);
+   }
+   return report;
+ }
+diff --git a/src/counter.cc b/src/counter.cc
+index cb604e0..50d89a6 100644
+--- a/src/counter.cc
++++ b/src/counter.cc
+@@ -17,8 +17,7 @@
+ namespace benchmark {
+ namespace internal {
+ 
+-double Finish(Counter const& c, int64_t iterations, double cpu_time,
+-              double num_threads) {
++double Finish(Counter const& c, double cpu_time, double num_threads) {
+   double v = c.value;
+   if (c.flags & Counter::kIsRate) {
+     v /= cpu_time;
+@@ -26,18 +25,12 @@ double Finish(Counter const& c, int64_t iterations, double cpu_time,
+   if (c.flags & Counter::kAvgThreads) {
+     v /= num_threads;
+   }
+-  if (c.flags & Counter::kIsIterationInvariant) {
+-    v *= iterations;
+-  }
+-  if (c.flags & Counter::kAvgIterations) {
+-    v /= iterations;
+-  }
+   return v;
+ }
+ 
+-void Finish(UserCounters* l, int64_t iterations, double cpu_time, double num_threads) {
++void Finish(UserCounters* l, double cpu_time, double num_threads) {
+   for (auto& c : *l) {
+-    c.second.value = Finish(c.second, iterations, cpu_time, num_threads);
++    c.second.value = Finish(c.second, cpu_time, num_threads);
+   }
+ }
+ 
+diff --git a/src/counter.h b/src/counter.h
+index d884e50..299cc02 100644
+--- a/src/counter.h
++++ b/src/counter.h
+@@ -18,7 +18,7 @@ namespace benchmark {
+ 
+ // these counter-related functions are hidden to reduce API surface.
+ namespace internal {
+-void Finish(UserCounters* l, int64_t iterations, double time, double num_threads);
++void Finish(UserCounters* l, double time, double num_threads);
+ void Increment(UserCounters* l, UserCounters const& r);
+ bool SameNames(UserCounters const& l, UserCounters const& r);
+ }  // end namespace internal
+diff --git a/test/output_test.h b/test/output_test.h
+index 31a9199..b157fe6 100644
+--- a/test/output_test.h
++++ b/test/output_test.h
+@@ -92,8 +92,6 @@ struct Results {
+ 
+   int NumThreads() const;
+ 
+-  double NumIterations() const;
+-
+   typedef enum { kCpuTime, kRealTime } BenchmarkTime;
+ 
+   // get cpu_time or real_time in seconds
+@@ -103,11 +101,11 @@ struct Results {
+   // it is better to use fuzzy float checks for this, as the float
+   // ASCII formatting is lossy.
+   double DurationRealTime() const {
+-    return NumIterations() * GetTime(kRealTime);
++    return GetAs<double>("iterations") * GetTime(kRealTime);
+   }
+   // get the cpu_time duration of the benchmark in seconds
+   double DurationCPUTime() const {
+-    return NumIterations() * GetTime(kCpuTime);
++    return GetAs<double>("iterations") * GetTime(kCpuTime);
+   }
+ 
+   // get the string for a result by name, or nullptr if the name
+diff --git a/test/output_test_helper.cc b/test/output_test_helper.cc
+index 394c4f5..92c2448 100644
+--- a/test/output_test_helper.cc
++++ b/test/output_test_helper.cc
+@@ -301,10 +301,6 @@ int Results::NumThreads() const {
+   return num;
+ }
+ 
+-double Results::NumIterations() const {
+-  return GetAs<double>("iterations");
+-}
+-
+ double Results::GetTime(BenchmarkTime which) const {
+   CHECK(which == kCpuTime || which == kRealTime);
+   const char* which_str = which == kCpuTime ? "cpu_time" : "real_time";
+diff --git a/test/user_counters_test.cc b/test/user_counters_test.cc
+index 7f7ccb9..acc8426 100644
+--- a/test/user_counters_test.cc
++++ b/test/user_counters_test.cc
+@@ -43,7 +43,7 @@ ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_Simple\",%csv_report,%float,%float$"}});
+ // VS2013 does not allow this function to be passed as a lambda argument
+ // to CHECK_BENCHMARK_RESULTS()
+ void CheckSimple(Results const& e) {
+-  double its = e.NumIterations();
++  double its = e.GetAs<double>("iterations");
+   CHECK_COUNTER_VALUE(e, int, "foo", EQ, 1);
+   // check that the value of bar is within 0.1% of the expected value
+   CHECK_FLOAT_COUNTER_VALUE(e, "bar", EQ, 2. * its, 0.001);
+@@ -228,151 +228,6 @@ void CheckAvgThreadsRate(Results const& e) {
+ CHECK_BENCHMARK_RESULTS("BM_Counters_AvgThreadsRate/threads:%int",
+                         &CheckAvgThreadsRate);
+ 
+-// ========================================================================= //
+-// ------------------- IterationInvariant Counters Output ------------------ //
+-// ========================================================================= //
+-
+-void BM_Counters_IterationInvariant(benchmark::State& state) {
+-  for (auto _ : state) {
+-  }
+-  namespace bm = benchmark;
+-  state.counters["foo"] = bm::Counter{1, bm::Counter::kIsIterationInvariant};
+-  state.counters["bar"] = bm::Counter{2, bm::Counter::kIsIterationInvariant};
+-}
+-BENCHMARK(BM_Counters_IterationInvariant);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_IterationInvariant %console_report "
+-                           "bar=%hrfloat foo=%hrfloat$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_IterationInvariant\",$"},
+-                       {"\"iterations\": %int,$", MR_Next},
+-                       {"\"real_time\": %float,$", MR_Next},
+-                       {"\"cpu_time\": %float,$", MR_Next},
+-                       {"\"time_unit\": \"ns\",$", MR_Next},
+-                       {"\"bar\": %float,$", MR_Next},
+-                       {"\"foo\": %float$", MR_Next},
+-                       {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut,
+-          {{"^\"BM_Counters_IterationInvariant\",%csv_report,%float,%float$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckIterationInvariant(Results const& e) {
+-  double its = e.NumIterations();
+-  // check that the values are within 0.1% of the expected value
+-  CHECK_FLOAT_COUNTER_VALUE(e, "foo", EQ, its, 0.001);
+-  CHECK_FLOAT_COUNTER_VALUE(e, "bar", EQ, 2. * its, 0.001);
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_IterationInvariant",
+-                        &CheckIterationInvariant);
+-
+-// ========================================================================= //
+-// ----------------- IterationInvariantRate Counters Output ---------------- //
+-// ========================================================================= //
+-
+-void BM_Counters_kIsIterationInvariantRate(benchmark::State& state) {
+-  for (auto _ : state) {
+-  }
+-  namespace bm = benchmark;
+-  state.counters["foo"] =
+-      bm::Counter{1, bm::Counter::kIsIterationInvariantRate};
+-  state.counters["bar"] =
+-      bm::Counter{2, bm::Counter::kIsRate | bm::Counter::kIsIterationInvariant};
+-}
+-BENCHMARK(BM_Counters_kIsIterationInvariantRate);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_kIsIterationInvariantRate "
+-                           "%console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_kIsIterationInvariantRate\",$"},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"bar\": %float,$", MR_Next},
+-           {"\"foo\": %float$", MR_Next},
+-           {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_kIsIterationInvariantRate\",%csv_report,"
+-                       "%float,%float$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckIsIterationInvariantRate(Results const& e) {
+-  double its = e.NumIterations();
+-  double t = e.DurationCPUTime();  // this (and not real time) is the time used
+-  // check that the values are within 0.1% of the expected values
+-  CHECK_FLOAT_COUNTER_VALUE(e, "foo", EQ, its * 1. / t, 0.001);
+-  CHECK_FLOAT_COUNTER_VALUE(e, "bar", EQ, its * 2. / t, 0.001);
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_kIsIterationInvariantRate",
+-                        &CheckIsIterationInvariantRate);
+-
+-// ========================================================================= //
+-// ------------------- AvgIterations Counters Output ------------------ //
+-// ========================================================================= //
+-
+-void BM_Counters_AvgIterations(benchmark::State& state) {
+-  for (auto _ : state) {
+-  }
+-  namespace bm = benchmark;
+-  state.counters["foo"] = bm::Counter{1, bm::Counter::kAvgIterations};
+-  state.counters["bar"] = bm::Counter{2, bm::Counter::kAvgIterations};
+-}
+-BENCHMARK(BM_Counters_AvgIterations);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_AvgIterations %console_report "
+-                           "bar=%hrfloat foo=%hrfloat$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_AvgIterations\",$"},
+-                       {"\"iterations\": %int,$", MR_Next},
+-                       {"\"real_time\": %float,$", MR_Next},
+-                       {"\"cpu_time\": %float,$", MR_Next},
+-                       {"\"time_unit\": \"ns\",$", MR_Next},
+-                       {"\"bar\": %float,$", MR_Next},
+-                       {"\"foo\": %float$", MR_Next},
+-                       {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut,
+-          {{"^\"BM_Counters_AvgIterations\",%csv_report,%float,%float$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckAvgIterations(Results const& e) {
+-  double its = e.NumIterations();
+-  // check that the values are within 0.1% of the expected value
+-  CHECK_FLOAT_COUNTER_VALUE(e, "foo", EQ, 1. / its, 0.001);
+-  CHECK_FLOAT_COUNTER_VALUE(e, "bar", EQ, 2. / its, 0.001);
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_AvgIterations", &CheckAvgIterations);
+-
+-// ========================================================================= //
+-// ----------------- AvgIterationsRate Counters Output ---------------- //
+-// ========================================================================= //
+-
+-void BM_Counters_kAvgIterationsRate(benchmark::State& state) {
+-  for (auto _ : state) {
+-  }
+-  namespace bm = benchmark;
+-  state.counters["foo"] = bm::Counter{1, bm::Counter::kAvgIterationsRate};
+-  state.counters["bar"] =
+-      bm::Counter{2, bm::Counter::kIsRate | bm::Counter::kAvgIterations};
+-}
+-BENCHMARK(BM_Counters_kAvgIterationsRate);
+-ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_kAvgIterationsRate "
+-                           "%console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+-ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_kAvgIterationsRate\",$"},
+-                       {"\"iterations\": %int,$", MR_Next},
+-                       {"\"real_time\": %float,$", MR_Next},
+-                       {"\"cpu_time\": %float,$", MR_Next},
+-                       {"\"time_unit\": \"ns\",$", MR_Next},
+-                       {"\"bar\": %float,$", MR_Next},
+-                       {"\"foo\": %float$", MR_Next},
+-                       {"}", MR_Next}});
+-ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_kAvgIterationsRate\",%csv_report,"
+-                       "%float,%float$"}});
+-// VS2013 does not allow this function to be passed as a lambda argument
+-// to CHECK_BENCHMARK_RESULTS()
+-void CheckAvgIterationsRate(Results const& e) {
+-  double its = e.NumIterations();
+-  double t = e.DurationCPUTime();  // this (and not real time) is the time used
+-  // check that the values are within 0.1% of the expected values
+-  CHECK_FLOAT_COUNTER_VALUE(e, "foo", EQ, 1. / its / t, 0.001);
+-  CHECK_FLOAT_COUNTER_VALUE(e, "bar", EQ, 2. / its / t, 0.001);
+-}
+-CHECK_BENCHMARK_RESULTS("BM_Counters_kAvgIterationsRate",
+-                        &CheckAvgIterationsRate);
+-
+ // ========================================================================= //
+ // --------------------------- TEST CASES END ------------------------------ //
+ // ========================================================================= //

@@ -1,0 +1,204 @@
+diff --git a/dependencies/CMakeLists.txt b/dependencies/CMakeLists.txt
+index 1d98e6f7..b9802392 100644
+--- a/dependencies/CMakeLists.txt
++++ b/dependencies/CMakeLists.txt
+@@ -155,6 +155,6 @@ if(SIMDJSON_CXXOPTS)
+   set_off(CXXOPTS_BUILD_TESTS)
+   set_off(CXXOPTS_ENABLE_INSTALL)
+ 
+-  import_dependency(cxxopts jarro2783/cxxopts 794c975)
++  import_dependency(cxxopts jarro2783/cxxopts 5965670)
+   add_dependency(cxxopts)
+ endif()
+diff --git a/include/simdjson/generic/ondemand/field-inl.h b/include/simdjson/generic/ondemand/field-inl.h
+index 41e7dc54..ae518953 100644
+--- a/include/simdjson/generic/ondemand/field-inl.h
++++ b/include/simdjson/generic/ondemand/field-inl.h
+@@ -38,6 +38,14 @@ simdjson_inline simdjson_warn_unused simdjson_result<std::string_view> field::un
+   return answer;
+ }
+ 
++template <typename string_type>
++simdjson_inline simdjson_warn_unused error_code field::unescaped_key(string_type& receiver, bool allow_replacement) noexcept {
++  std::string_view key;
++  SIMDJSON_TRY( unescaped_key(allow_replacement).get(key) );
++  receiver = key;
++  return SUCCESS;
++}
++
+ simdjson_inline raw_json_string field::key() const noexcept {
+   SIMDJSON_ASSUME(first.buf != nullptr); // We would like to call .alive() by Visual Studio won't let us.
+   return first;
+@@ -105,6 +113,12 @@ simdjson_inline simdjson_result<std::string_view> simdjson_result<SIMDJSON_IMPLE
+   return first.unescaped_key(allow_replacement);
+ }
+ 
++template<typename string_type>
++simdjson_inline error_code simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::unescaped_key(string_type &receiver, bool allow_replacement) noexcept {
++  if (error()) { return error(); }
++  return first.unescaped_key(receiver, allow_replacement);
++}
++
+ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::value() noexcept {
+   if (error()) { return error(); }
+   return std::move(first.value());
+diff --git a/include/simdjson/generic/ondemand/field.h b/include/simdjson/generic/ondemand/field.h
+index 288e17ab..71344362 100644
+--- a/include/simdjson/generic/ondemand/field.h
++++ b/include/simdjson/generic/ondemand/field.h
+@@ -36,21 +36,37 @@ public:
+    * This consumes the key: once you have called unescaped_key(), you cannot
+    * call it again nor can you call key().
+    */
+-  simdjson_inline simdjson_warn_unused simdjson_result<std::string_view> unescaped_key(bool allow_replacement) noexcept;
++  simdjson_inline simdjson_warn_unused simdjson_result<std::string_view> unescaped_key(bool allow_replacement = false) noexcept;
++  /**
++   * Get the key as a string_view (for higher speed, consider raw_key).
++   * We deliberately use a more cumbersome name (unescaped_key) to force users
++   * to think twice about using it. The content is stored in the receiver.
++   *
++   * This consumes the key: once you have called unescaped_key(), you cannot
++   * call it again nor can you call key().
++   */
++  template <typename string_type>
++  simdjson_inline simdjson_warn_unused error_code unescaped_key(string_type& receiver, bool allow_replacement = false) noexcept;
+   /**
+    * Get the key as a raw_json_string. Can be used for direct comparison with
+-   * an unescaped C string: e.g., key() == "test".
++   * an unescaped C string: e.g., key() == "test". This does not count as
++   * consumption of the content: you can safely call it repeatedly.
++   * See escaped_key() for a similar function which returns
++   * a more convenient std::string_view result.
+    */
+   simdjson_inline raw_json_string key() const noexcept;
+   /**
+    * Get the unprocessed key as a string_view. This includes the quotes and may include
+-   * some spaces after the last quote.
++   * some spaces after the last quote. This does not count as
++   * consumption of the content: you can safely call it repeatedly.
++   * See escaped_key().
+    */
+   simdjson_inline std::string_view key_raw_json_token() const noexcept;
+   /**
+    * Get the key as a string_view. This does not include the quotes and
+    * the string is unprocessed key so it may contain escape characters
+-   * (e.g., \uXXXX or \n). Use unescaped_key() to get the unescaped key.
++   * (e.g., \uXXXX or \n). It does not count as a consumption of the content:
++   * you can safely call it repeatedly. Use unescaped_key() to get the unescaped key.
+    */
+   simdjson_inline std::string_view escaped_key() const noexcept;
+   /**
+@@ -84,6 +100,8 @@ public:
+   simdjson_inline simdjson_result() noexcept = default;
+ 
+   simdjson_inline simdjson_result<std::string_view> unescaped_key(bool allow_replacement = false) noexcept;
++  template<typename string_type>
++  simdjson_inline error_code unescaped_key(string_type &receiver, bool allow_replacement = false) noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::raw_json_string> key() noexcept;
+   simdjson_inline simdjson_result<std::string_view> key_raw_json_token() noexcept;
+   simdjson_inline simdjson_result<std::string_view> escaped_key() noexcept;
+diff --git a/include/simdjson/generic/ondemand/json_iterator-inl.h b/include/simdjson/generic/ondemand/json_iterator-inl.h
+index 28c924af..6a054af8 100644
+--- a/include/simdjson/generic/ondemand/json_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/json_iterator-inl.h
+@@ -354,11 +354,23 @@ simdjson_inline token_position json_iterator::position() const noexcept {
+ }
+ 
+ simdjson_inline simdjson_result<std::string_view> json_iterator::unescape(raw_json_string in, bool allow_replacement) noexcept {
++#if SIMDJSON_DEVELOPMENT_CHECKS
++  auto result = parser->unescape(in, _string_buf_loc, allow_replacement);
++  SIMDJSON_ASSUME(!parser->string_buffer_overflow(_string_buf_loc));
++  return result;
++#else
+   return parser->unescape(in, _string_buf_loc, allow_replacement);
++#endif
+ }
+ 
+ simdjson_inline simdjson_result<std::string_view> json_iterator::unescape_wobbly(raw_json_string in) noexcept {
++#if SIMDJSON_DEVELOPMENT_CHECKS
++  auto result = parser->unescape_wobbly(in, _string_buf_loc);
++  SIMDJSON_ASSUME(!parser->string_buffer_overflow(_string_buf_loc));
++  return result;
++#else
+   return parser->unescape_wobbly(in, _string_buf_loc);
++#endif
+ }
+ 
+ simdjson_inline void json_iterator::reenter_child(token_position position, depth_t child_depth) noexcept {
+diff --git a/include/simdjson/generic/ondemand/parser-inl.h b/include/simdjson/generic/ondemand/parser-inl.h
+index 7d935f58..8350fe73 100644
+--- a/include/simdjson/generic/ondemand/parser-inl.h
++++ b/include/simdjson/generic/ondemand/parser-inl.h
+@@ -42,6 +42,11 @@ simdjson_warn_unused simdjson_inline error_code parser::allocate(size_t new_capa
+   _max_depth = new_max_depth;
+   return SUCCESS;
+ }
++#if SIMDJSON_DEVELOPMENT_CHECKS
++simdjson_inline simdjson_warn_unused bool parser::string_buffer_overflow(const uint8_t *string_buf_loc) const noexcept {
++  return (string_buf_loc < string_buf.get()) || (size_t(string_buf_loc - string_buf.get()) >= capacity());
++}
++#endif
+ 
+ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
+   if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+diff --git a/include/simdjson/generic/ondemand/parser.h b/include/simdjson/generic/ondemand/parser.h
+index 7972fbd3..2dd61768 100644
+--- a/include/simdjson/generic/ondemand/parser.h
++++ b/include/simdjson/generic/ondemand/parser.h
+@@ -327,6 +327,17 @@ public:
+    */
+   simdjson_inline simdjson_result<std::string_view> unescape_wobbly(raw_json_string in, uint8_t *&dst) const noexcept;
+ 
++#if SIMDJSON_DEVELOPMENT_CHECKS
++  /**
++   * Returns true if string_buf_loc is outside of the allocated range for the
++   * the string buffer. When true, it indicates that the string buffer has overflowed.
++   * This is a development-time check that is not needed in production. It can be
++   * used to detect buffer overflows in the string buffer and usafe usage of the
++   * string buffer.
++   */
++  bool string_buffer_overflow(const uint8_t *string_buf_loc) const noexcept;
++#endif
++
+ private:
+   /** @private [for benchmarking access] The implementation to use */
+   std::unique_ptr<internal::dom_parser_implementation> implementation{};
+diff --git a/tools/json2json.cpp b/tools/json2json.cpp
+index 1afc85de..6ac0983f 100644
+--- a/tools/json2json.cpp
++++ b/tools/json2json.cpp
+@@ -92,7 +92,7 @@ int main(int argc, const char *argv[]) {
+   }
+   return EXIT_SUCCESS;
+ #ifdef __cpp_exceptions
+-  } catch (const cxxopts::OptionException& e) {
++  } catch (const cxxopts::exceptions::option_has_no_value& e) {
+     std::cout << "error parsing options: " << e.what() << std::endl;
+     return EXIT_FAILURE;
+   }
+diff --git a/tools/jsonstats.cpp b/tools/jsonstats.cpp
+index af0ef3ce..82e8f33e 100644
+--- a/tools/jsonstats.cpp
++++ b/tools/jsonstats.cpp
+@@ -278,7 +278,7 @@ int main(int argc, const char *argv[]) {
+          s.repeated_key_byte_count, s.maximum_depth);
+   return EXIT_SUCCESS;
+ #ifdef __cpp_exceptions
+-  } catch (const cxxopts::OptionException& e) {
++  } catch (const cxxopts::exceptions::option_has_no_value& e) {
+     std::cout << "error parsing options: " << e.what() << std::endl;
+     return EXIT_FAILURE;
+   }
+diff --git a/tools/minify.cpp b/tools/minify.cpp
+index 0acf8b5a..040928fb 100644
+--- a/tools/minify.cpp
++++ b/tools/minify.cpp
+@@ -111,7 +111,7 @@ int main(int argc, const char *argv[]) {
+   }
+   return EXIT_SUCCESS;
+ #ifdef __cpp_exceptions
+-  } catch (const cxxopts::OptionException& e) {
++  } catch (const cxxopts::exceptions::option_has_no_value& e) {
+     std::cout << "error parsing options: " << e.what() << std::endl;
+     return EXIT_FAILURE;
+   }

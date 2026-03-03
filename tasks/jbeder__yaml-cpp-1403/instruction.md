@@ -1,8 +1,10 @@
-`YAML::LoadAll()` incorrectly handles YAML streams that contain empty documents (documents that consist of only a document start marker `---` and no content). This is a regression: in version 0.8.0, loading a stream with multiple empty documents returns the correct number of documents, but in 0.9.0 the same input returns an empty result.
+`YAML::LoadAll()` fails to parse YAML streams that contain empty documents in yaml-cpp 0.9.0.
+
+In yaml-cpp 0.8.0, calling `YAML::LoadAll()` on a stream containing document separators with no content between them correctly returns entries for those empty documents. In yaml-cpp 0.9.0, the same input incorrectly returns an empty result (size 0), indicating the parser stops early or skips documents entirely.
 
 Reproduction:
 
-```cpp
+```c++
 #include <iostream>
 #include <yaml-cpp/yaml.h>
 
@@ -18,8 +20,14 @@ A
 }
 ```
 
-Expected behavior: `YAML::LoadAll(docs)` should return a sequence-like container with one entry per YAML document in the stream. For the example above, it should return 2 documents (the first is an empty document, the second contains the scalar `A`).
+Expected behavior:
+- `YAML::LoadAll(docs)` should return 2 documents for the example above: the first document is empty (should be represented as a null/empty `YAML::Node`), and the second document contains the scalar `"A"`.
+- Therefore `parsed.size()` should print `2`.
 
-Actual behavior: On 0.9.0, `YAML::LoadAll(docs)` returns 0 documents for this input.
+Actual behavior in 0.9.0:
+- `YAML::LoadAll(docs)` returns an empty vector and `parsed.size()` prints `0`.
 
-The fix should ensure that `YAML::LoadAll()` correctly counts and returns empty documents when they are explicitly present in the stream (e.g., introduced by `---`), without breaking normal parsing of non-empty documents. Empty documents should be represented as a valid `YAML::Node` (typically a null/empty node), and mixed streams like `---\n---\nA\n` must produce the correct number of returned nodes in the correct order.
+Fix required:
+- Restore correct handling of empty documents in a multi-document stream when using `YAML::LoadAll()`.
+- Ensure that document separators (`---`) with no following content still produce a corresponding `Node` in the returned list rather than being dropped or causing parsing to terminate.
+- The behavior should be consistent across combinations like leading empty documents, consecutive empty documents, and empty documents followed by a non-empty document (e.g., `---\n---\nA\n`).

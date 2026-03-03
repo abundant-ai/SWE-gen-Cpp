@@ -1,36 +1,20 @@
-When installing yaml-cpp and consuming it via CMake using `find_package(yaml-cpp CONFIG REQUIRED)`, the generated `yaml-cpp-config.cmake` currently provides incorrect or non-relocatable values, which breaks package managers that relocate CMake config files (notably vcpkg) and can also mislead normal consumers.
+When a project installs yaml-cpp and downstream consumers use `find_package(yaml-cpp CONFIG REQUIRED)`, the generated CMake package configuration is currently incorrect in several ways that break or mislead consumers, especially in package-manager environments that relocate installed CMake config files (e.g., moving them under `share/<pkg>` and patching prefix variables).
 
-There are three user-visible problems in the generated config:
+1) `YAML_CPP_SHARED_LIBS_BUILT` is set using a path-style substitution so it expands to something like `${PACKAGE_PREFIX_DIR}/<value>`. In CMake this evaluates as a non-empty string and is effectively always true, so consumers cannot reliably detect whether yaml-cpp was built as a shared or static library. As a result, a consumer that checks the imported target type (e.g., `get_target_property(... TYPE)`) can find that `YAML_CPP_SHARED_LIBS_BUILT` contradicts the actual library type.
 
-1) `YAML_CPP_SHARED_LIBS_BUILT` is not a real boolean.
-The config sets `YAML_CPP_SHARED_LIBS_BUILT` using a path-style substitution, which expands to something like `${PACKAGE_PREFIX_DIR}/<value>`. In CMake, this is effectively always a non-empty string and therefore truthy, even when yaml-cpp was built as a static library. As a result, consumers cannot reliably detect whether the installed library is shared or static.
-
-Expected behavior: after `find_package(yaml-cpp CONFIG REQUIRED)`, `YAML_CPP_SHARED_LIBS_BUILT` must accurately reflect how yaml-cpp itself was built (true for shared builds, false for static builds). Consumers should be able to compare it to the actual imported target type without contradictions.
-
-2) The config is not relocatable because it includes the exported targets file via a prefix-based path variable.
-The config loads `yaml-cpp-targets.cmake` using a path derived from a substituted install prefix variable. Package managers like vcpkg move CMake config files to a different directory after installation (e.g., to `share/<package>`), and patch prefix variables (`PACKAGE_PREFIX_DIR`, `_IMPORT_PREFIX`). If the config relies on a prefix-derived path variable to include the targets file, this relocation can cause the include to point at the wrong location and fail.
-
-Expected behavior: `find_package(yaml-cpp CONFIG REQUIRED)` should succeed even if the installed CMake config files are relocated together, as long as `yaml-cpp-config.cmake` and `yaml-cpp-targets.cmake` remain in the same directory. The config should load the targets file from its own directory (relative to the config file) rather than from a separately substituted prefix path.
-
-3) `YAML_CPP_LIBRARIES` points to the wrong thing.
-The config sets `YAML_CPP_LIBRARIES` to `yaml-cpp` (without namespace), but consumers are expected to link against the imported target `yaml-cpp::yaml-cpp`. Linking with `${YAML_CPP_LIBRARIES}` therefore does not work reliably.
-
-Expected behavior: after `find_package(yaml-cpp CONFIG REQUIRED)`, `YAML_CPP_LIBRARIES` should be set so that `target_link_libraries(app PRIVATE ${YAML_CPP_LIBRARIES})` correctly links against yaml-cpp, and the canonical imported target `yaml-cpp::yaml-cpp` must be available.
-
-Additionally, provide a CMake option to control where the package config files are installed:
-
-- Add an option named `YAML_CPP_INSTALL_CMAKEDIR` that allows choosing the install directory for the generated CMake package config and targets files. This is needed by package managers that require a specific convention for config placement.
-
-A minimal consumer scenario that must work:
+`YAML_CPP_SHARED_LIBS_BUILT` must instead evaluate to a real boolean reflecting how yaml-cpp was built/installed, so consumers can do logic like:
 
 ```cmake
 find_package(yaml-cpp CONFIG REQUIRED)
 get_target_property(LIBRARY_TYPE yaml-cpp::yaml-cpp TYPE)
-
-# YAML_CPP_SHARED_LIBS_BUILT must match LIBRARY_TYPE
-
-add_executable(main main.cpp)
-target_link_libraries(main PRIVATE ${YAML_CPP_LIBRARIES})
+# If LIBRARY_TYPE is SHARED_LIBRARY then YAML_CPP_SHARED_LIBS_BUILT must be true,
+# otherwise it must be false.
 ```
 
-Currently, consumers can see contradictions like a static `yaml-cpp::yaml-cpp` target while `YAML_CPP_SHARED_LIBS_BUILT` still evaluates true, and relocation can break loading of `yaml-cpp-targets.cmake`. Fix the generated config so these behaviors are correct and robust.
+2) The package config includes `yaml-cpp-targets.cmake` via a path that depends on an install-time directory variable rather than being relative to the config file itself. This breaks in environments where the config directory is relocated after install, because the computed path no longer points at the targets file. The config must load the targets file in a way that continues to work after relocation, assuming the config and targets files are installed side-by-side.
+
+3) `YAML_CPP_LIBRARIES` is currently set to `yaml-cpp` (without namespace), but the consumer-visible imported target is `yaml-cpp::yaml-cpp`. Consumers that do `target_link_libraries(... PRIVATE ${YAML_CPP_LIBRARIES})` should successfully link without needing to guess the correct target name. `YAML_CPP_LIBRARIES` should therefore resolve to the namespaced target that `find_package` actually provides.
+
+4) There should be an install-time option to control where the CMake package config files are installed (for example, package managers may require configs under a specific directory such as `share/<pkg>`). Add a CMake option (e.g., `YAML_CPP_INSTALL_CMAKEDIR`) that allows overriding the install destination for the generated config/targets files while keeping the config functional.
+
+After these changes, a minimal consumer project should be able to `find_package(yaml-cpp CONFIG REQUIRED)`, observe a correct `YAML_CPP_SHARED_LIBS_BUILT` boolean consistent with `yaml-cpp::yaml-cpp`’s imported target type, and link successfully using `target_link_libraries(... PRIVATE ${YAML_CPP_LIBRARIES})`, even if the installed CMake config directory is relocated as long as the config and targets files remain together.

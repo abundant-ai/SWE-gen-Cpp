@@ -14,34 +14,63 @@ cp "/tests/statistics_gtest.cc" "test/statistics_gtest.cc"
 mkdir -p "test"
 cp "/tests/user_counters_tabular_test.cc" "test/user_counters_tabular_test.cc"
 
-# Rebuild with the fixed test files
-echo "Rebuilding with fixed test files..."
-rm -rf build
-cmake -B build -G Ninja \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-    -DBENCHMARK_ENABLE_TESTING=ON \
-    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-    -DBENCHMARK_ENABLE_WERROR=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# Initialize test_status
+test_status=0
 
-# Build specific test targets (output_test_helper is a library, not a test)
+# Rebuild the test targets with the fixed files
+cd /app/src
 cmake --build build --config Debug --target display_aggregates_only_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build display_aggregates_only_test"
+    test_status=1
+fi
+
 cmake --build build --config Debug --target report_aggregates_only_test -j 1
-cmake --build build --config Debug --target statistics_gtest -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build report_aggregates_only_test"
+    test_status=1
+fi
+
 cmake --build build --config Debug --target user_counters_tabular_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build user_counters_tabular_test"
+    test_status=1
+fi
 
-# Run the specific tests with required arguments
-echo "Running tests..."
-./build/test/display_aggregates_only_test --benchmark_min_time=0.01 && \
-./build/test/report_aggregates_only_test --benchmark_min_time=0.01 && \
-./build/test/statistics_gtest && \
-./build/test/user_counters_tabular_test --benchmark_counters_tabular=true --benchmark_min_time=0.01
+cmake --build build --config Debug --target statistics_gtest -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build statistics_gtest"
+    test_status=1
+fi
 
-test_status=$?
+# Run the tests only if they built successfully
+if [ $test_status -eq 0 ]; then
+    cd /app/src/build
+
+    ./test/display_aggregates_only_test --benchmark_min_time=0.01
+    if [ $? -ne 0 ]; then
+        echo "display_aggregates_only_test failed"
+        test_status=1
+    fi
+
+    ./test/report_aggregates_only_test --benchmark_min_time=0.01
+    if [ $? -ne 0 ]; then
+        echo "report_aggregates_only_test failed"
+        test_status=1
+    fi
+
+    ./test/user_counters_tabular_test --benchmark_counters_tabular=true --benchmark_min_time=0.01
+    if [ $? -ne 0 ]; then
+        echo "user_counters_tabular_test failed"
+        test_status=1
+    fi
+
+    ./test/statistics_gtest
+    if [ $? -ne 0 ]; then
+        echo "statistics_gtest failed"
+        test_status=1
+    fi
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

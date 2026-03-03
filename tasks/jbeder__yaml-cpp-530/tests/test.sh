@@ -2,24 +2,16 @@
 
 cd /app/src
 
+# Fix compilation issue: add const to less comparator
+sed -i 's/bool operator ()(const node\* l, const node\* r) {return l->m_index < r->m_index;}/bool operator ()(const node* l, const node* r) const {return l->m_index < r->m_index;}/' include/yaml-cpp/node/detail/node.h
+
 # Copy HEAD test files from /tests (overwrites BASE state)
-mkdir -p "test"
-cp "/tests/create-emitter-tests.py" "test/create-emitter-tests.py"
 mkdir -p "test/integration"
 cp "/tests/integration/gen_emitter_test.cpp" "test/integration/gen_emitter_test.cpp"
-mkdir -p "test/integration"
 cp "/tests/integration/handler_spec_test.cpp" "test/integration/handler_spec_test.cpp"
-mkdir -p "test"
 cp "/tests/mock_event_handler.h" "test/mock_event_handler.h"
 
-# Rebuild yaml-cpp (oracle applies fix.patch before running this script,
-# so we need to rebuild to get the fixed version)
-
-# Fix GoogleTest 1.10.0 compilation with modern GCC
-# Remove -Werror flags from GoogleTest CMake cache
-sed -i 's/-Werror[^ ]*//g' build/test/prefix/googletest/CMakeFiles/gtest.dir/flags.make 2>/dev/null || true
-sed -i 's/-Werror[^ ]*//g' build/test/prefix/googletest/CMakeFiles/gtest_main.dir/flags.make 2>/dev/null || true
-
+# Rebuild the test executable with the updated test files
 cmake --build build --config Debug 2>&1
 rebuild_status=$?
 
@@ -29,8 +21,8 @@ if [ $rebuild_status -ne 0 ]; then
   exit $rebuild_status
 fi
 
-# Run the specific tests for HandlerSpecTest and GenEmitterTest
-./build/test/run-tests --gtest_filter="HandlerSpecTest.*:GenEmitterTest.*" 2>&1
+# Run only the specific tests from gen_emitter_test.cpp and handler_spec_test.cpp
+./build/test/run-tests --gtest_filter=GenEmitterTest.*:HandlerSpecTest.*
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

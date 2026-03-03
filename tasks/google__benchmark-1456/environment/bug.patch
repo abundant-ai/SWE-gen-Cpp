@@ -1,0 +1,233 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3d636be..2058eff 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -223,7 +223,7 @@ else()
+   add_cxx_compiler_flag(-wd654)
+   add_cxx_compiler_flag(-Wthread-safety)
+   if (HAVE_CXX_FLAG_WTHREAD_SAFETY)
+-    cxx_feature_check(THREAD_SAFETY_ATTRIBUTES "-DINCLUDE_DIRECTORIES=${PROJECT_SOURCE_DIR}/include")
++    cxx_feature_check(THREAD_SAFETY_ATTRIBUTES)
+   endif()
+ 
+   # On most UNIX like platforms g++ and clang++ define _GNU_SOURCE as a
+diff --git a/cmake/CXXFeatureCheck.cmake b/cmake/CXXFeatureCheck.cmake
+index a96a014..aa67f58 100644
+--- a/cmake/CXXFeatureCheck.cmake
++++ b/cmake/CXXFeatureCheck.cmake
+@@ -27,18 +27,17 @@ function(cxx_feature_check FILE)
+     return()
+   endif()
+ 
+-  set(FEATURE_CHECK_CMAKE_FLAGS ${BENCHMARK_CXX_LINKER_FLAGS})
+   if (ARGC GREATER 1)
+     message(STATUS "Enabling additional flags: ${ARGV1}")
+-    list(APPEND FEATURE_CHECK_CMAKE_FLAGS ${ARGV1})
++    list(APPEND BENCHMARK_CXX_LINKER_FLAGS ${ARGV1})
+   endif()
+ 
+   if (NOT DEFINED COMPILE_${FEATURE})
++    message(STATUS "Performing Test ${FEATURE}")
+     if(CMAKE_CROSSCOMPILING)
+-      message(STATUS "Cross-compiling to test ${FEATURE}")
+       try_compile(COMPILE_${FEATURE}
+               ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/${FILE}.cpp
+-              CMAKE_FLAGS ${FEATURE_CHECK_CMAKE_FLAGS}
++              CMAKE_FLAGS ${BENCHMARK_CXX_LINKER_FLAGS}
+               LINK_LIBRARIES ${BENCHMARK_CXX_LIBRARIES}
+               OUTPUT_VARIABLE COMPILE_OUTPUT_VAR)
+       if(COMPILE_${FEATURE})
+@@ -49,10 +48,10 @@ function(cxx_feature_check FILE)
+         set(RUN_${FEATURE} 1 CACHE INTERNAL "")
+       endif()
+     else()
+-      message(STATUS "Compiling and running to test ${FEATURE}")
++      message(STATUS "Performing Test ${FEATURE}")
+       try_run(RUN_${FEATURE} COMPILE_${FEATURE}
+               ${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/${FILE}.cpp
+-              CMAKE_FLAGS ${FEATURE_CHECK_CMAKE_FLAGS}
++              CMAKE_FLAGS ${BENCHMARK_CXX_LINKER_FLAGS}
+               LINK_LIBRARIES ${BENCHMARK_CXX_LIBRARIES}
+               COMPILE_OUTPUT_VARIABLE COMPILE_OUTPUT_VAR)
+     endif()
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index f0152e5..a17038c 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -220,11 +220,22 @@ BENCHMARK(BM_test)->Unit(benchmark::kMillisecond);
+ 
+ #if defined(__GNUC__) || defined(__clang__)
+ #define BENCHMARK_ALWAYS_INLINE __attribute__((always_inline))
++#define BENCHMARK_NOEXCEPT noexcept
++#define BENCHMARK_NOEXCEPT_OP(x) noexcept(x)
+ #elif defined(_MSC_VER) && !defined(__clang__)
+ #define BENCHMARK_ALWAYS_INLINE __forceinline
++#if _MSC_VER >= 1900
++#define BENCHMARK_NOEXCEPT noexcept
++#define BENCHMARK_NOEXCEPT_OP(x) noexcept(x)
++#else
++#define BENCHMARK_NOEXCEPT
++#define BENCHMARK_NOEXCEPT_OP(x)
++#endif
+ #define __func__ __FUNCTION__
+ #else
+ #define BENCHMARK_ALWAYS_INLINE
++#define BENCHMARK_NOEXCEPT
++#define BENCHMARK_NOEXCEPT_OP(x)
+ #endif
+ 
+ #define BENCHMARK_INTERNAL_TOSTRING2(x) #x
+diff --git a/src/benchmark_register.h b/src/benchmark_register.h
+index 53367c7..a5a250c 100644
+--- a/src/benchmark_register.h
++++ b/src/benchmark_register.h
+@@ -1,7 +1,6 @@
+ #ifndef BENCHMARK_REGISTER_H
+ #define BENCHMARK_REGISTER_H
+ 
+-#include <algorithm>
+ #include <limits>
+ #include <vector>
+ 
+diff --git a/src/check.h b/src/check.h
+index c1cd5e8..1129e81 100644
+--- a/src/check.h
++++ b/src/check.h
+@@ -9,23 +9,6 @@
+ #include "internal_macros.h"
+ #include "log.h"
+ 
+-#if defined(__GNUC__) || defined(__clang__)
+-#define BENCHMARK_NOEXCEPT noexcept
+-#define BENCHMARK_NOEXCEPT_OP(x) noexcept(x)
+-#elif defined(_MSC_VER) && !defined(__clang__)
+-#if _MSC_VER >= 1900
+-#define BENCHMARK_NOEXCEPT noexcept
+-#define BENCHMARK_NOEXCEPT_OP(x) noexcept(x)
+-#else
+-#define BENCHMARK_NOEXCEPT
+-#define BENCHMARK_NOEXCEPT_OP(x)
+-#endif
+-#define __func__ __FUNCTION__
+-#else
+-#define BENCHMARK_NOEXCEPT
+-#define BENCHMARK_NOEXCEPT_OP(x)
+-#endif
+-
+ namespace benchmark {
+ namespace internal {
+ 
+diff --git a/src/internal_macros.h b/src/internal_macros.h
+index 1fe1eb6..72ba54b 100644
+--- a/src/internal_macros.h
++++ b/src/internal_macros.h
+@@ -1,6 +1,8 @@
+ #ifndef BENCHMARK_INTERNAL_MACROS_H_
+ #define BENCHMARK_INTERNAL_MACROS_H_
+ 
++#include "benchmark/benchmark.h"
++
+ /* Needed to detect STL */
+ #include <cstdlib>
+ 
+diff --git a/src/log.h b/src/log.h
+index 4570166..48c071a 100644
+--- a/src/log.h
++++ b/src/log.h
+@@ -4,12 +4,7 @@
+ #include <iostream>
+ #include <ostream>
+ 
+-// NOTE: this is also defined in benchmark.h but we're trying to avoid a
+-// dependency.
+-// The _MSVC_LANG check should detect Visual Studio 2015 Update 3 and newer.
+-#if __cplusplus >= 201103L || (defined(_MSVC_LANG) && _MSVC_LANG >= 201103L)
+-#define BENCHMARK_HAS_CXX11
+-#endif
++#include "benchmark/benchmark.h"
+ 
+ namespace benchmark {
+ namespace internal {
+@@ -28,16 +23,7 @@ class LogType {
+  private:
+   LogType(std::ostream* out) : out_(out) {}
+   std::ostream* out_;
+-
+-  // NOTE: we could use BENCHMARK_DISALLOW_COPY_AND_ASSIGN but we shouldn't have
+-  // a dependency on benchmark.h from here.
+-#ifndef BENCHMARK_HAS_CXX11
+-  LogType(const LogType&);
+-  LogType& operator=(const LogType&);
+-#else
+-  LogType(const LogType&) = delete;
+-  LogType& operator=(const LogType&) = delete;
+-#endif
++  BENCHMARK_DISALLOW_COPY_AND_ASSIGN(LogType);
+ };
+ 
+ template <class Tp>
+@@ -61,13 +47,13 @@ inline int& LogLevel() {
+ }
+ 
+ inline LogType& GetNullLogInstance() {
+-  static LogType null_log((std::ostream*)nullptr);
+-  return null_log;
++  static LogType log(nullptr);
++  return log;
+ }
+ 
+ inline LogType& GetErrorLogInstance() {
+-  static LogType error_log(&std::clog);
+-  return error_log;
++  static LogType log(&std::clog);
++  return log;
+ }
+ 
+ inline LogType& GetLogInstanceForLevel(int level) {
+diff --git a/src/string_util.h b/src/string_util.h
+index 37bdd2e..4145861 100644
+--- a/src/string_util.h
++++ b/src/string_util.h
+@@ -4,10 +4,8 @@
+ #include <sstream>
+ #include <string>
+ #include <utility>
+-#include <vector>
+ 
+ #include "benchmark/export.h"
+-#include "check.h"
+ #include "internal_macros.h"
+ 
+ namespace benchmark {
+diff --git a/test/benchmark_gtest.cc b/test/benchmark_gtest.cc
+index 2c9e555..a6919be 100644
+--- a/test/benchmark_gtest.cc
++++ b/test/benchmark_gtest.cc
+@@ -3,7 +3,6 @@
+ #include <vector>
+ 
+ #include "../src/benchmark_register.h"
+-#include "benchmark/benchmark.h"
+ #include "gmock/gmock.h"
+ #include "gtest/gtest.h"
+ 
+@@ -136,7 +135,8 @@ TEST(AddRangeTest, Simple8) {
+ }
+ 
+ TEST(AddCustomContext, Simple) {
+-  std::map<std::string, std::string> *&global_context = GetGlobalContext();
++  std::map<std::string, std::string> *&global_context =
++      internal::GetGlobalContext();
+   EXPECT_THAT(global_context, nullptr);
+ 
+   AddCustomContext("foo", "bar");
+@@ -151,7 +151,8 @@ TEST(AddCustomContext, Simple) {
+ }
+ 
+ TEST(AddCustomContext, DuplicateKey) {
+-  std::map<std::string, std::string> *&global_context = GetGlobalContext();
++  std::map<std::string, std::string> *&global_context =
++      internal::GetGlobalContext();
+   EXPECT_THAT(global_context, nullptr);
+ 
+   AddCustomContext("foo", "bar");

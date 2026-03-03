@@ -1,0 +1,314 @@
+diff --git a/src/benchmark_register.cc b/src/benchmark_register.cc
+index 4e94b5a..9d77529 100644
+--- a/src/benchmark_register.cc
++++ b/src/benchmark_register.cc
+@@ -34,9 +34,6 @@
+ #include <sstream>
+ #include <thread>
+ 
+-#define __STDC_FORMAT_MACROS
+-#include <inttypes.h>
+-
+ #include "benchmark/benchmark.h"
+ #include "benchmark_api_internal.h"
+ #include "check.h"
+@@ -186,7 +183,11 @@ bool BenchmarkFamilies::FindBenchmarks(
+             }
+           }
+ 
+-          instance.name.args += StrFormat("%" PRId64, arg);
++          // we know that the args are always non-negative (see 'AddRange()'),
++          // thus print as 'unsigned'. BUT, do a cast due to the 32-bit builds.
++          instance.name.args +=
++              StrFormat("%lu", static_cast<unsigned long>(arg));
++
+           ++arg_i;
+         }
+ 
+@@ -333,6 +334,7 @@ Benchmark* Benchmark::ArgNames(const std::vector<std::string>& names) {
+ 
+ Benchmark* Benchmark::DenseRange(int64_t start, int64_t limit, int step) {
+   CHECK(ArgsCnt() == -1 || ArgsCnt() == 1);
++  CHECK_GE(start, 0);
+   CHECK_LE(start, limit);
+   for (int64_t arg = start; arg <= limit; arg += step) {
+     args_.push_back({arg});
+diff --git a/src/benchmark_register.h b/src/benchmark_register.h
+index 61377d7..0705e21 100644
+--- a/src/benchmark_register.h
++++ b/src/benchmark_register.h
+@@ -5,103 +5,29 @@
+ 
+ #include "check.h"
+ 
+-namespace benchmark {
+-namespace internal {
+-
+-// Append the powers of 'mult' in the closed interval [lo, hi].
+-// Returns iterator to the start of the inserted range.
+ template <typename T>
+-typename std::vector<T>::iterator
+-AddPowers(std::vector<T>* dst, T lo, T hi, int mult) {
++void AddRange(std::vector<T>* dst, T lo, T hi, int mult) {
+   CHECK_GE(lo, 0);
+   CHECK_GE(hi, lo);
+   CHECK_GE(mult, 2);
+ 
+-  const size_t start_offset = dst->size();
++  // Add "lo"
++  dst->push_back(lo);
+ 
+   static const T kmax = std::numeric_limits<T>::max();
+ 
+-  // Space out the values in multiples of "mult"
+-  for (T i = 1; i <= hi; i *= mult) {
+-    if (i >= lo) {
++  // Now space out the benchmarks in multiples of "mult"
++  for (T i = 1; i < kmax / mult; i *= mult) {
++    if (i >= hi) break;
++    if (i > lo) {
+       dst->push_back(i);
+     }
+-    // Break the loop here since multiplying by
+-    // 'mult' would move outside of the range of T
+-    if (i > kmax / mult) break;
+-  }
+-
+-  return dst->begin() + start_offset;
+-}
+-
+-template <typename T>
+-void AddNegatedPowers(std::vector<T>* dst, T lo, T hi, int mult) {
+-  // We negate lo and hi so we require that they cannot be equal to 'min'.
+-  CHECK_GT(lo, std::numeric_limits<T>::min());
+-  CHECK_GT(hi, std::numeric_limits<T>::min());
+-  CHECK_GE(hi, lo);
+-  CHECK_LE(hi, 0);
+-
+-  // Add positive powers, then negate and reverse.
+-  // Casts necessary since small integers get promoted
+-  // to 'int' when negating.
+-  const auto lo_complement = static_cast<T>(-lo);
+-  const auto hi_complement = static_cast<T>(-hi);
+-
+-  const auto it = AddPowers(dst, hi_complement, lo_complement, mult);
+-
+-  std::for_each(it, dst->end(), [](T& t) { t *= -1; });
+-  std::reverse(it, dst->end());
+-}
+-
+-template <typename T>
+-void AddRange(std::vector<T>* dst, T lo, T hi, int mult) {
+-  static_assert(std::is_integral<T>::value && std::is_signed<T>::value,
+-                "Args type must be a signed integer");
+-
+-  CHECK_GE(hi, lo);
+-  CHECK_GE(mult, 2);
+-
+-  // Add "lo"
+-  dst->push_back(lo);
+-
+-  // Handle lo == hi as a special case, so we then know
+-  // lo < hi and so it is safe to add 1 to lo and subtract 1
+-  // from hi without falling outside of the range of T.
+-  if (lo == hi) return;
+-
+-  // Ensure that lo_inner <= hi_inner below.
+-  if (lo + 1 == hi) {
+-    dst->push_back(hi);
+-    return;
+   }
+ 
+-  // Add all powers of 'mult' in the range [lo+1, hi-1] (inclusive).
+-  const auto lo_inner = static_cast<T>(lo + 1);
+-  const auto hi_inner = static_cast<T>(hi - 1);
+-
+-  // Insert negative values
+-  if (lo_inner < 0) {
+-    AddNegatedPowers(dst, lo_inner, std::min(hi_inner, T{-1}), mult);
+-  }
+-
+-  // Treat 0 as a special case (see discussion on #762).
+-  if (lo <= 0 && hi >= 0) {
+-    dst->push_back(0);
+-  }
+-
+-  // Insert positive values
+-  if (hi_inner > 0) {
+-    AddPowers(dst, std::max(lo_inner, T{1}), hi_inner, mult);
+-  }
+-
+-  // Add "hi" (if different from last value).
+-  if (hi != dst->back()) {
++  // Add "hi" (if different from "lo")
++  if (hi != lo) {
+     dst->push_back(hi);
+   }
+ }
+ 
+-}  // namespace internal
+-}  // namespace benchmark
+-
+ #endif  // BENCHMARK_REGISTER_H
+diff --git a/src/string_util.h b/src/string_util.h
+index c5dcee6..fc5f8b0 100644
+--- a/src/string_util.h
++++ b/src/string_util.h
+@@ -12,9 +12,7 @@ void AppendHumanReadable(int n, std::string* str);
+ 
+ std::string HumanReadableNumber(double n, double one_k = 1024.0);
+ 
+-#if defined(__MINGW32__)
+-__attribute__((format(__MINGW_PRINTF_FORMAT, 1, 2)))
+-#elif defined(__GNUC__)
++#ifdef __GNUC__
+ __attribute__((format(printf, 1, 2)))
+ #endif
+ std::string
+diff --git a/test/benchmark_gtest.cc b/test/benchmark_gtest.cc
+index 9557b20..10683b4 100644
+--- a/test/benchmark_gtest.cc
++++ b/test/benchmark_gtest.cc
+@@ -4,8 +4,6 @@
+ #include "gmock/gmock.h"
+ #include "gtest/gtest.h"
+ 
+-namespace benchmark {
+-namespace internal {
+ namespace {
+ 
+ TEST(AddRangeTest, Simple) {
+@@ -32,97 +30,4 @@ TEST(AddRangeTest, Advanced64) {
+   EXPECT_THAT(dst, testing::ElementsAre(5, 8, 15));
+ }
+ 
+-TEST(AddRangeTest, FullRange8) {
+-  std::vector<int8_t> dst;
+-  AddRange(&dst, int8_t{1}, std::numeric_limits<int8_t>::max(), 8);
+-  EXPECT_THAT(dst, testing::ElementsAre(1, 8, 64, 127));
+-}
+-
+-TEST(AddRangeTest, FullRange64) {
+-  std::vector<int64_t> dst;
+-  AddRange(&dst, int64_t{1}, std::numeric_limits<int64_t>::max(), 1024);
+-  EXPECT_THAT(
+-      dst, testing::ElementsAre(1LL, 1024LL, 1048576LL, 1073741824LL,
+-                                1099511627776LL, 1125899906842624LL,
+-                                1152921504606846976LL, 9223372036854775807LL));
+-}
+-
+-TEST(AddRangeTest, NegativeRanges) {
+-  std::vector<int> dst;
+-  AddRange(&dst, -8, 0, 2);
+-  EXPECT_THAT(dst, testing::ElementsAre(-8, -4, -2, -1, 0));
+-}
+-
+-TEST(AddRangeTest, StrictlyNegative) {
+-  std::vector<int> dst;
+-  AddRange(&dst, -8, -1, 2);
+-  EXPECT_THAT(dst, testing::ElementsAre(-8, -4, -2, -1));
+-}
+-
+-TEST(AddRangeTest, SymmetricNegativeRanges) {
+-  std::vector<int> dst;
+-  AddRange(&dst, -8, 8, 2);
+-  EXPECT_THAT(dst, testing::ElementsAre(-8, -4, -2, -1, 0, 1, 2, 4, 8));
+-}
+-
+-TEST(AddRangeTest, SymmetricNegativeRangesOddMult) {
+-  std::vector<int> dst;
+-  AddRange(&dst, -30, 32, 5);
+-  EXPECT_THAT(dst, testing::ElementsAre(-30, -25, -5, -1, 0, 1, 5, 25, 32));
+-}
+-
+-TEST(AddRangeTest, NegativeRangesAsymmetric) {
+-  std::vector<int> dst;
+-  AddRange(&dst, -3, 5, 2);
+-  EXPECT_THAT(dst, testing::ElementsAre(-3, -2, -1, 0, 1, 2, 4, 5));
+-}
+-
+-TEST(AddRangeTest, NegativeRangesLargeStep) {
+-  // Always include -1, 0, 1 when crossing zero.
+-  std::vector<int> dst;
+-  AddRange(&dst, -8, 8, 10);
+-  EXPECT_THAT(dst, testing::ElementsAre(-8, -1, 0, 1, 8));
+-}
+-
+-TEST(AddRangeTest, ZeroOnlyRange) {
+-  std::vector<int> dst;
+-  AddRange(&dst, 0, 0, 2);
+-  EXPECT_THAT(dst, testing::ElementsAre(0));
+-}
+-
+-TEST(AddRangeTest, NegativeRange64) {
+-  std::vector<int64_t> dst;
+-  AddRange<int64_t>(&dst, -4, 4, 2);
+-  EXPECT_THAT(dst, testing::ElementsAre(-4, -2, -1, 0, 1, 2, 4));
+-}
+-
+-TEST(AddRangeTest, NegativeRangePreservesExistingOrder) {
+-  // If elements already exist in the range, ensure we don't change
+-  // their ordering by adding negative values.
+-  std::vector<int64_t> dst = {1, 2, 3};
+-  AddRange<int64_t>(&dst, -2, 2, 2);
+-  EXPECT_THAT(dst, testing::ElementsAre(1, 2, 3, -2, -1, 0, 1, 2));
+-}
+-
+-TEST(AddRangeTest, FullNegativeRange64) {
+-  std::vector<int64_t> dst;
+-  const auto min = std::numeric_limits<int64_t>::min();
+-  const auto max = std::numeric_limits<int64_t>::max();
+-  AddRange(&dst, min, max, 1024);
+-  EXPECT_THAT(
+-      dst, testing::ElementsAreArray(std::vector<int64_t>{
+-               min, -1152921504606846976LL, -1125899906842624LL,
+-               -1099511627776LL, -1073741824LL, -1048576LL, -1024LL, -1LL, 0LL,
+-               1LL, 1024LL, 1048576LL, 1073741824LL, 1099511627776LL,
+-               1125899906842624LL, 1152921504606846976LL, max}));
+-}
+-
+-TEST(AddRangeTest, Simple8) {
+-  std::vector<int8_t> dst;
+-  AddRange<int8_t>(&dst, 1, 8, 2);
+-  EXPECT_THAT(dst, testing::ElementsAre(1, 2, 4, 8));
+-}
+-
+-}  // namespace
+-}  // namespace internal
+-}  // namespace benchmark
++}  // end namespace
+diff --git a/test/multiple_ranges_test.cc b/test/multiple_ranges_test.cc
+index b25f40e..c64acab 100644
+--- a/test/multiple_ranges_test.cc
++++ b/test/multiple_ranges_test.cc
+@@ -40,7 +40,8 @@ class MultipleRangesFixture : public ::benchmark::Fixture {
+   // NOTE: This is not TearDown as we want to check after _all_ runs are
+   // complete.
+   virtual ~MultipleRangesFixture() {
+-    if (actualValues != expectedValues) {
++    assert(actualValues.size() == expectedValues.size());
++    if (actualValues.size() != expectedValues.size()) {
+       std::cout << "EXPECTED\n";
+       for (auto v : expectedValues) {
+         std::cout << "{";
+diff --git a/test/options_test.cc b/test/options_test.cc
+index 7bfc235..fdec691 100644
+--- a/test/options_test.cc
++++ b/test/options_test.cc
+@@ -35,16 +35,6 @@ BENCHMARK(BM_basic)->UseRealTime();
+ BENCHMARK(BM_basic)->ThreadRange(2, 4);
+ BENCHMARK(BM_basic)->ThreadPerCpu();
+ BENCHMARK(BM_basic)->Repetitions(3);
+-BENCHMARK(BM_basic)
+-    ->RangeMultiplier(std::numeric_limits<int>::max())
+-    ->Range(std::numeric_limits<int64_t>::min(),
+-            std::numeric_limits<int64_t>::max());
+-
+-// Negative ranges
+-BENCHMARK(BM_basic)->Range(-64, -1);
+-BENCHMARK(BM_basic)->RangeMultiplier(4)->Range(-8, 8);
+-BENCHMARK(BM_basic)->DenseRange(-2, 2, 1);
+-BENCHMARK(BM_basic)->Ranges({{-64, 1}, {-8, -1}});
+ 
+ void CustomArgs(benchmark::internal::Benchmark* b) {
+   for (int i = 0; i < 10; ++i) {

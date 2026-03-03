@@ -2,17 +2,29 @@
 
 cd /app/src
 
-
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test/integration"
 cp "/tests/integration/emitter_test.cpp" "test/integration/emitter_test.cpp"
 
-# Clean and rebuild to ensure test file changes are picked up
-rm -f build/test/yaml-cpp-tests build/test/CMakeFiles/yaml-cpp-tests.dir/integration/emitter_test.cpp.o
-cmake --build build --config Debug --parallel
+# Rebuild yaml-cpp (oracle applies fix.patch before running this script,
+# so we need to rebuild to get the fixed version)
 
-# Run the specific test using Google Test filter
-./build/test/yaml-cpp-tests --gtest_filter="EmitterTest.*"
+# Fix GoogleTest 1.10.0 compilation with modern GCC
+# Remove -Werror flags from GoogleTest CMake cache
+sed -i 's/-Werror[^ ]*//g' build/test/prefix/googletest/CMakeFiles/gtest.dir/flags.make 2>/dev/null || true
+sed -i 's/-Werror[^ ]*//g' build/test/prefix/googletest/CMakeFiles/gtest_main.dir/flags.make 2>/dev/null || true
+
+cmake --build build --config Debug 2>&1
+rebuild_status=$?
+
+if [ $rebuild_status -ne 0 ]; then
+  echo "Rebuild failed with status $rebuild_status" >&2
+  echo 0 > /logs/verifier/reward.txt
+  exit $rebuild_status
+fi
+
+# Run the specific tests for EmitterTest
+./build/test/yaml-cpp-tests --gtest_filter="EmitterTest.*" 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

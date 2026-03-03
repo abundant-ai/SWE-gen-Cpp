@@ -6,25 +6,23 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/perf_counters_gtest.cc" "test/perf_counters_gtest.cc"
 
-# Rebuild the test with updated files
-echo "Rebuilding perf_counters_gtest..."
-rm -rf build
-cmake -B build -G Ninja \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-    -DBENCHMARK_ENABLE_TESTING=ON \
-    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-    -DBENCHMARK_ENABLE_WERROR=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# Initialize test_status
+test_status=0
 
+# Rebuild tests with the fixed test files
+cd /app/src
 cmake --build build --config Debug --target perf_counters_gtest -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build perf_counters_gtest"
+    test_status=1
+fi
 
-# Run the specific test
-echo "Running perf_counters_gtest..."
-./build/test/perf_counters_gtest
-test_status=$?
+# Run the specific test for this PR only if it built successfully
+if [ $test_status -eq 0 ]; then
+    cd /app/src/build
+    ./test/perf_counters_gtest
+    test_status=$?
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

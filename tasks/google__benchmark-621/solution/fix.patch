@@ -1,0 +1,120 @@
+diff --git a/.gitignore b/.gitignore
+index 050e469..8c30e28 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -48,6 +48,7 @@ bazel-*
+ # out-of-source build top-level folders.
+ build/
+ _build/
++build*/
+ 
+ # in-source dependencies
+ /googletest/
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index be9498c..193fffc 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -343,12 +343,24 @@ class Counter {
+     kDefaults = 0,
+     // Mark the counter as a rate. It will be presented divided
+     // by the duration of the benchmark.
+-    kIsRate = 1,
++    kIsRate = 1U << 0U,
+     // Mark the counter as a thread-average quantity. It will be
+     // presented divided by the number of threads.
+-    kAvgThreads = 2,
++    kAvgThreads = 1U << 1U,
+     // Mark the counter as a thread-average rate. See above.
+-    kAvgThreadsRate = kIsRate | kAvgThreads
++    kAvgThreadsRate = kIsRate | kAvgThreads,
++    // Mark the counter as a constant value, valid/same for *every* iteration.
++    // When reporting, it will be *multiplied* by the iteration count.
++    kIsIterationInvariant = 1U << 2U,
++    // Mark the counter as a constant rate.
++    // When reporting, it will be *multiplied* by the iteration count
++    // and then divided by the duration of the benchmark.
++    kIsIterationInvariantRate = kIsRate | kIsIterationInvariant,
++    // Mark the counter as a iteration-average quantity.
++    // It will be presented divided by the number of iterations.
++    kAvgIterations = 1U << 3U,
++    // Mark the counter as a iteration-average rate. See above.
++    kAvgIterationsRate = kIsRate | kAvgIterations
+   };
+ 
+   double value;
+@@ -361,6 +373,14 @@ class Counter {
+   BENCHMARK_ALWAYS_INLINE operator double&() { return value; }
+ };
+ 
++// A helper for user code to create unforeseen combinations of Flags, without
++// having to do this cast manually each time, or providing this operator.
++Counter::Flags inline operator|(const Counter::Flags& LHS,
++                                const Counter::Flags& RHS) {
++  return static_cast<Counter::Flags>(static_cast<int>(LHS) |
++                                     static_cast<int>(RHS));
++}
++
+ // This is the container for the user-defined counters.
+ typedef std::map<std::string, Counter> UserCounters;
+ 
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 9422cdb..da55322 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -150,7 +150,7 @@ BenchmarkReporter::Run CreateRunReport(
+     report.complexity_lambda = b.complexity_lambda;
+     report.statistics = b.statistics;
+     report.counters = results.counters;
+-    internal::Finish(&report.counters, seconds, b.threads);
++    internal::Finish(&report.counters, results.iterations, seconds, b.threads);
+   }
+   return report;
+ }
+diff --git a/src/counter.cc b/src/counter.cc
+index 50d89a6..cb604e0 100644
+--- a/src/counter.cc
++++ b/src/counter.cc
+@@ -17,7 +17,8 @@
+ namespace benchmark {
+ namespace internal {
+ 
+-double Finish(Counter const& c, double cpu_time, double num_threads) {
++double Finish(Counter const& c, int64_t iterations, double cpu_time,
++              double num_threads) {
+   double v = c.value;
+   if (c.flags & Counter::kIsRate) {
+     v /= cpu_time;
+@@ -25,12 +26,18 @@ double Finish(Counter const& c, double cpu_time, double num_threads) {
+   if (c.flags & Counter::kAvgThreads) {
+     v /= num_threads;
+   }
++  if (c.flags & Counter::kIsIterationInvariant) {
++    v *= iterations;
++  }
++  if (c.flags & Counter::kAvgIterations) {
++    v /= iterations;
++  }
+   return v;
+ }
+ 
+-void Finish(UserCounters* l, double cpu_time, double num_threads) {
++void Finish(UserCounters* l, int64_t iterations, double cpu_time, double num_threads) {
+   for (auto& c : *l) {
+-    c.second.value = Finish(c.second, cpu_time, num_threads);
++    c.second.value = Finish(c.second, iterations, cpu_time, num_threads);
+   }
+ }
+ 
+diff --git a/src/counter.h b/src/counter.h
+index 299cc02..d884e50 100644
+--- a/src/counter.h
++++ b/src/counter.h
+@@ -18,7 +18,7 @@ namespace benchmark {
+ 
+ // these counter-related functions are hidden to reduce API surface.
+ namespace internal {
+-void Finish(UserCounters* l, double time, double num_threads);
++void Finish(UserCounters* l, int64_t iterations, double time, double num_threads);
+ void Increment(UserCounters* l, UserCounters const& r);
+ bool SameNames(UserCounters const& l, UserCounters const& r);
+ }  // end namespace internal

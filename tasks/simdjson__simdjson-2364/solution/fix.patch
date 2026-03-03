@@ -1,0 +1,85 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b0c946ba..da474908 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -111,6 +111,12 @@ if(
+   )
+ endif()
+ 
++option(SIMDJSON_MINUS_ZERO_AS_FLOAT "Treat -0 as a floating-point value" OFF)
++
++if(SIMDJSON_MINUS_ZERO_AS_FLOAT)
++  simdjson_add_props(target_compile_definitions PRIVATE SIMDJSON_MINUS_ZERO_AS_FLOAT=1)
++endif(SIMDJSON_MINUS_ZERO_AS_FLOAT)
++
+ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(loongarch64)$")
+     option(SIMDJSON_PREFER_LSX "Prefer LoongArch SX" ON)
+     include(CheckCXXCompilerFlag)
+diff --git a/doc/basics.md b/doc/basics.md
+index 8fd912ab..bdf09d8b 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -2248,6 +2248,11 @@ Thus it is a dynamically typed number. Before accessing the value, you must dete
+ such a number of `get_number()`, you get the error `BIGINT_ERROR`. You can access the underlying string of digits with the function `raw_json_token()` which returns a `std::string_view` instance starting at the beginning of the digit. You can also call `get_double()` to get a floating-point approximation.
+ 
+ 
++  By default, the string `-0` is parsed as the integer 0 as in Python or C++. If you set the macro
++  `SIMDJSON_MINUS_ZERO_AS_FLOAT` to `1` when building simdjson, you can get that `-0` is mapped to `-0.0`
++  as in JavaScript. You can get the desired effect by building simdjson with cmake setting the
++  `SIMDJSON_MINUS_ZERO_AS_FLOAT` to on: `cmake -B build -D SIMDJSON_MINUS_ZERO_AS_FLOAT=ON`.
++
+ You must check the type before accessing the value: it is an error to call `get_int64()` when `number.get_number_type()` is not `number_type::signed_integer` and when `number.is_int64()` is false. You are responsible for this check as the user of the library.
+ 
+ The `get_number()` function is designed with performance in mind. When calling `get_number()`, you scan the number string only once, determining efficiently the type and storing it in an efficient manner.
+diff --git a/doc/dom.md b/doc/dom.md
+index aa5ec2e0..e44811dd 100644
+--- a/doc/dom.md
++++ b/doc/dom.md
+@@ -118,9 +118,10 @@ Once you have an element, you can navigate it with idiomatic C++ iterators, oper
+   if (error) { std::cerr << error << std::endl; return EXIT_FAILURE; }
+   std::cout << "I parsed " << value << " from " << numberstring.data() << std::endl;
+   ```
+-  The strings contain unescaped valid UTF-8 strings: no unmatched surrogate is allowed.   Internally, numbers are stored as either 64-bit integers or 64-bit floating-point numbers.
++  The strings contain unescaped valid UTF-8 strings: no unmatched surrogate is allowed.
++  Internally, numbers are stored as either 64-bit integers or 64-bit floating-point numbers.
+   Thus it is possible to get the full 64-bit integer range (either signed or  unsigned).
+-  By default, the string `-0` is parsed as the integer 0 as in Python or C++. If you set the macro
++  By default, the string `-0` is parsed as the integer 0 as in Pytho or C++. If you set the macro
+   `SIMDJSON_MINUS_ZERO_AS_FLOAT` to `1` when building simdjson, you can get that `-0` is mapped to `-0.0`
+   as in JavaScript. You can get the desired effect by building simdjson with cmake setting the
+   `SIMDJSON_MINUS_ZERO_AS_FLOAT` to on: `cmake -B build -D SIMDJSON_MINUS_ZERO_AS_FLOAT=ON`.
+diff --git a/include/simdjson/generic/numberparsing.h b/include/simdjson/generic/numberparsing.h
+index a6d96d0b..9a841013 100644
+--- a/include/simdjson/generic/numberparsing.h
++++ b/include/simdjson/generic/numberparsing.h
+@@ -647,7 +647,16 @@ simdjson_inline error_code parse_number(const uint8_t *const src, W &writer) {
+   if (i > uint64_t(INT64_MAX)) {
+     WRITE_UNSIGNED(i, src, writer);
+   } else {
+-    WRITE_INTEGER(negative ? (~i+1) : i, src, writer);
++#if SIMDJSON_MINUS_ZERO_AS_FLOAT
++    if(i == 0 && negative) {
++      // We have to write -0.0 instead of 0
++      WRITE_DOUBLE(-0.0, src, writer);
++    } else {
++      WRITE_INTEGER(negative ? (~i+1) : i, src, writer);
++    }
++#else
++  WRITE_INTEGER(negative ? (~i+1) : i, src, writer);
++#endif
+   }
+   if (jsoncharutils::is_not_structural_or_whitespace(*p)) { return INVALID_NUMBER(src); }
+   return SUCCESS;
+@@ -1108,6 +1117,12 @@ simdjson_unused simdjson_inline simdjson_result<number_type> get_number_type(con
+       if (simdjson_unlikely(digit_count == 19 && memcmp(src, smaller_big_integer, 19) > 0)) {
+         return number_type::big_integer;
+       }
++#if SIMDJSON_MINUS_ZERO_AS_FLOAT
++      if(digit_count == 1 && src[0] == '0') {
++        // We have to write -0.0 instead of 0
++        return number_type::floating_point_number;
++      }
++#endif
+       return number_type::signed_integer;
+     }
+     // Let us check if we have a big integer (>=2**64).

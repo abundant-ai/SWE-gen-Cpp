@@ -1,27 +1,23 @@
-Benchmark execution order is currently deterministic: when a filter matches multiple benchmark instances (including different Args/Range values), they run grouped by benchmark/argument, and when repetitions are enabled, each benchmark instance is run N times consecutively before moving to the next instance. This makes results vulnerable to process dynamic state (cache warmup, allocation patterns, scheduling), increasing run-to-run variance.
+Google Benchmark currently runs benchmarks in a fixed, deterministic order across all configured argument instances, and when repetitions are enabled it tends to run the same benchmark instance back-to-back. This can amplify run-to-run variance because measurements become correlated with process dynamic state (cache warmup, allocator state, scheduling), especially when multiple benchmark instances are affected similarly within a run.
 
-Add support for “random interleaving” of benchmarks across repetitions so that, when repetitions > 1, the runner can execute benchmarks in an interleaved order rather than running all repetitions of one benchmark instance back-to-back. The intent is that within each repetition the set of matched benchmark instances are executed in a randomized order, and across repetitions the overall sequence is interleaved (e.g., repetition 1 order, then repetition 2 order, etc.), so that no single benchmark instance always runs in the same relative position.
+Implement “random interleaving” so that when the feature is enabled, the library can interleave benchmark instances in a randomized order across repetitions, while keeping the command-line interface compatible. The goal is to reduce variance by shuffling execution order without requiring users to change how they invoke benchmarks.
 
-This feature must be controlled by command-line flags:
+A new boolean flag must control the behavior: `--benchmark_enable_random_interleaving`.
 
-- A boolean flag named `--benchmark_enable_random_interleaving` that enables/disables the behavior. When disabled, behavior must remain exactly as before (deterministic grouping and repetition behavior).
-- A double flag named `--benchmark_random_interleaving_max_overhead` that limits the acceptable additional overhead introduced by interleaving (for example, from more frequent setup/teardown or loss of batching). If the computed overhead would exceed this threshold, the runner should fall back to the non-interleaved execution strategy.
+Behavior requirements:
 
-Random interleaving is intended to become the default behavior without requiring users to change their command line. The default configuration should effectively behave like running with `--benchmark_repetitions=12 --benchmark_min_time=0.042` (totaling about 0.5s) to reduce variance, while keeping typical overall runtime similar to the existing default minimum time of ~0.5 seconds. Users must be able to disable the new default behavior and restore the old behavior by setting `--benchmark_enable_random_interleaving=false --benchmark_repetitions=1 --benchmark_min_time=0.5`.
+When `benchmark_enable_random_interleaving` is disabled (the legacy behavior), running `RunSpecifiedBenchmarks(...)` with a filter that matches a parameterized benchmark (multiple argument instances) must execute those instances in deterministic registration order. If repetitions are set to N (via the repetitions flag), each benchmark instance must still be executed N times, and under the legacy mode those N executions for a given instance must occur contiguously (i.e., the same instance repeated N times before moving to the next matched instance).
 
-The benchmark API hooks must still run correctly with the new scheduling. In particular, setup/teardown hooks associated with benchmark execution must be called in the proper places relative to benchmark runs, and interleaving must not cause hooks to be skipped or called out of sequence.
+When `benchmark_enable_random_interleaving` is enabled and repetitions are greater than 1, the execution order across repetitions must be randomized/interleaved such that:
 
-Correctness requirements for execution ordering:
+- Every matched benchmark instance is executed exactly `benchmark_repetitions` times.
+- Executions should be interleaved across different benchmark instances rather than running the same instance N times in a row.
+- The ordering should not be purely deterministic by registration order; it must incorporate randomness so that consecutive runs are less correlated.
 
-- When repetitions are not requested (repetitions == 1) and/or random interleaving is disabled, executing a filtered set of benchmarks should run them in the same deterministic order as before.
-- When repetitions > 1 and random interleaving is disabled, each benchmark instance should run consecutively `repetitions` times before moving to the next instance.
-- When repetitions > 1 and random interleaving is enabled, the runner should interleave benchmark instances across repetitions so that you do not get `AAAA...BBBB...` (all repetitions of A then all repetitions of B). Instead you should see each benchmark instance appear once per repetition in some randomized order per repetition.
+The feature request also requires that enabling random interleaving does not require users to change their command line for typical usage. The intended effect is equivalent to running with `--benchmark_repetitions=12` and `--benchmark_min_time=0.042` (approximately `0.5 / 12`) so that total benchmark wall time remains close to the default minimum time budget. Disabling random interleaving should allow users to revert to the legacy single-repetition behavior (e.g., `--benchmark_enable_random_interleaving=false --benchmark_repetitions=1 --benchmark_min_time=0.5`).
 
-Example scenario to validate behavior: if a filter matches exactly two benchmark instances (e.g., `BM_Match1/64` and `BM_Match1/80`) and `--benchmark_repetitions=2`:
+To keep overhead bounded, introduce and honor a double flag `--benchmark_random_interleaving_max_overhead` that limits how much additional time (as a fraction/ratio of baseline) random interleaving is allowed to introduce due to increased setup/teardown, additional repetitions, or reduced per-repetition minimum time. The library should adjust effective repetitions and/or minimum time to stay within this overhead constraint.
 
-- With random interleaving disabled, the sequence must be:
-  `BM_Match1/64`, `BM_Match1/64`, `BM_Match1/80`, `BM_Match1/80`.
-- With random interleaving enabled, the sequence must be interleaved by repetition, such as:
-  repetition 1: (`BM_Match1/64`, `BM_Match1/80`) in random order, then repetition 2: (`BM_Match1/64`, `BM_Match1/80`) in (independently) random order; it must not always keep the original deterministic order.
+Ensure that benchmark setup/teardown hooks (e.g., per-benchmark or per-thread setup/teardown mechanisms exposed via the public API) still behave correctly under random interleaving: setup must occur before a benchmark run and teardown after it, and randomization must not cause hooks to be skipped or executed out of order relative to each individual benchmark execution.
 
-Implement the necessary public/internal API surface so this behavior is applied when calling `RunSpecifiedBenchmarks(...)` and interacting with `benchmark::State` benchmarks registered via `BENCHMARK(...)` with argument generators like `Arg`, `Args`, and `Range`. The output and benchmark reporting semantics should remain consistent; only the execution scheduling and the default repetition/min_time behavior should change as described.
+After implementation, running a filtered set of benchmark instances with repetitions should still produce valid results and should not change the set of matched benchmarks; only the execution ordering and repetition/min_time scheduling should differ when random interleaving is enabled.

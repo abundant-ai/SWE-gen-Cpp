@@ -26,12 +26,17 @@ RUN git clone https://github.com/Neargye/magic_enum.git src && \
 
 WORKDIR /app/src
 
+# Build the project with CMake - only build the specific test we need
+RUN mkdir -p build && cd build && \
+    cmake .. -DMAGIC_ENUM_OPT_BUILD_TESTS=ON && \
+    cmake --build . --target test_containers-cpp17
+
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
+RUN git reset --hard
+
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
-
-# Create build directory (tests will be built in test.sh after copying specific test files)
-RUN mkdir build
 
 RUN rm -rf /app/src/.git
 

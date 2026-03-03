@@ -1,0 +1,298 @@
+diff --git a/benchmark/benchmarker.h b/benchmark/benchmarker.h
+index b90a5a40..d1a46577 100644
+--- a/benchmark/benchmarker.h
++++ b/benchmark/benchmarker.h
+@@ -445,7 +445,7 @@ struct benchmarker {
+     return 100.0 * a / b;
+   }
+ 
+-  void print(bool tabbed_output, bool stage1_only) const {
++  void print(bool tabbed_output) const {
+     if (tabbed_output) {
+       char* filename_copy = reinterpret_cast<char*>(malloc(strlen(filename)+1));
+       SIMDJSON_PUSH_DISABLE_WARNINGS
+@@ -503,21 +503,17 @@ struct benchmarker {
+           stats->blocks_with_16_structurals_flipped, percent(stats->blocks_with_16_structurals_flipped, stats->blocks));
+       }
+       printf("\n");
+-      if(!stage1_only) {
+-        printf("All Stages (excluding allocation)\n");
+-        print_aggregate("|    "   , all_stages_without_allocation.best);
+-        // frequently, allocation is a tiny fraction of the running time so we omit it
+-        if(allocate_stage.best.elapsed_sec() > 0.01 * all_stages_without_allocation.best.elapsed_sec()) {
+-          printf("|- Allocation\n");
+-          print_aggregate("|    ", allocate_stage.best);
+-        }
++      printf("All Stages (excluding allocation)\n");
++      print_aggregate("|    "   , all_stages_without_allocation.best);
++      // frequently, allocation is a tiny fraction of the running time so we omit it
++      if(allocate_stage.best.elapsed_sec() > 0.01 * all_stages_without_allocation.best.elapsed_sec()) {
++        printf("|- Allocation\n");
++        print_aggregate("|    ", allocate_stage.best);
+       }
+       printf("|- Stage 1\n");
+       print_aggregate("|    ", stage1.best);
+-      if(!stage1_only) {
+-        printf("|- Stage 2\n");
+-        print_aggregate("|    ", stage2.best);
+-      }
++      printf("|- Stage 2\n");
++      print_aggregate("|    ", stage2.best);
+       if (collector.has_events()) {
+         double freq1 = (stage1.best.cycles() / stage1.best.elapsed_sec()) / 1000000000.0;
+         double freq2 = (stage2.best.cycles() / stage2.best.elapsed_sec()) / 1000000000.0;
+diff --git a/benchmark/dom/parse.cpp b/benchmark/dom/parse.cpp
+index d26622da..9a9c9126 100644
+--- a/benchmark/dom/parse.cpp
++++ b/benchmark/dom/parse.cpp
+@@ -218,7 +218,7 @@ int main(int argc, char *argv[]) {
+   if (!options.verbose) { progress.erase(); }
+ 
+   for (size_t i=0; i<options.files.size(); i++) {
+-    benchmarkers[i]->print(options.tabbed_output, options.stage1_only);
++    benchmarkers[i]->print(options.tabbed_output);
+     delete benchmarkers[i];
+   }
+ 
+diff --git a/cmake/developer-options.cmake b/cmake/developer-options.cmake
+index 0d2da750..0db8e5ad 100644
+--- a/cmake/developer-options.cmake
++++ b/cmake/developer-options.cmake
+@@ -117,12 +117,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
+ set(CMAKE_MACOSX_RPATH OFF)
+ set(CMAKE_THREAD_PREFER_PTHREAD ON)
+ set(THREADS_PREFER_PTHREAD_FLAG ON)
+-set(SIMDJSON_STRUCTURAL_INDEXER_STEP CACHE STRING "the SIMDJSON_STRUCTURAL_INDEXER_STEP variable")
+ 
+-if(SIMDJSON_STRUCTURAL_INDEXER_STEP)
+-  message(STATUS "Setting SIMDJSON_STRUCTURAL_INDEXER_STEP to ${SIMDJSON_STRUCTURAL_INDEXER_STEP}.")
+-  add_compile_definitions(SIMDJSON_STRUCTURAL_INDEXER_STEP=${SIMDJSON_STRUCTURAL_INDEXER_STEP})
+-endif()
+ # LTO seems to create all sorts of fun problems. Let us
+ # disable temporarily.
+ #include(CheckIPOSupported)
+diff --git a/include/simdjson/compiler_check.h b/include/simdjson/compiler_check.h
+index dba8ab2a..bf121dd9 100644
+--- a/include/simdjson/compiler_check.h
++++ b/include/simdjson/compiler_check.h
+@@ -32,12 +32,4 @@
+ #error simdjson requires a compiler compliant with the C++11 standard
+ #endif
+ 
+-#ifndef SIMDJSON_IF_CONSTEXPR
+-#if SIMDJSON_CPLUSPLUS17
+-#define SIMDJSON_IF_CONSTEXPR if constexpr
+-#else
+-#define SIMDJSON_IF_CONSTEXPR if
+-#endif
+-#endif
+-
+ #endif // SIMDJSON_COMPILER_CHECK_H
+diff --git a/src/generic/stage1/json_structural_indexer.h b/src/generic/stage1/json_structural_indexer.h
+index fe00c286..a6ac4be2 100644
+--- a/src/generic/stage1/json_structural_indexer.h
++++ b/src/generic/stage1/json_structural_indexer.h
+@@ -27,58 +27,6 @@ public:
+ 
+   simdjson_inline bit_indexer(uint32_t *index_buf) : tail(index_buf) {}
+ 
+-#if SIMDJSON_PREFER_REVERSE_BITS
+-  /**
+-    * ARM lacks a fast trailing zero instruction, but it has a fast
+-    * bit reversal instruction and a fast leading zero instruction.
+-    * Thus it may be profitable to reverse the bits (once) and then
+-    * to rely on a sequence of instructions that call the leading
+-    * zero instruction.
+-    *
+-    * Performance notes:
+-    * The chosen routine is not optimal in terms of data dependency
+-    * since zero_leading_bit might require two instructions. However,
+-    * it tends to minimize the total number of instructions which is
+-    * beneficial.
+-    */
+-  simdjson_inline void write_index(uint32_t idx, uint64_t& rev_bits, int i) {
+-    int lz = leading_zeroes(rev_bits);
+-    this->tail[i] = static_cast<uint32_t>(idx) + lz;
+-    rev_bits = zero_leading_bit(rev_bits, lz);
+-  }
+-#else
+-  /**
+-    * Under recent x64 systems, we often have both a fast trailing zero
+-    * instruction and a fast 'clear-lower-bit' instruction so the following
+-    * algorithm can be competitive.
+-    */
+-
+-  simdjson_inline void write_index(uint32_t idx, uint64_t& bits, int i) {
+-    this->tail[i] = idx + trailing_zeroes(bits);
+-    bits = clear_lowest_bit(bits);
+-  }
+-#endif // SIMDJSON_PREFER_REVERSE_BITS
+-
+-  template <int START, int N>
+-  simdjson_inline int write_indexes(uint32_t idx, uint64_t& bits) {
+-    write_index(idx, bits, START);
+-    SIMDJSON_IF_CONSTEXPR (N > 1) {
+-      write_indexes<(N-1>0?START+1:START), (N-1>=0?N-1:1)>(idx, bits);
+-    }
+-    return START+N;
+-  }
+-
+-  template <int START, int END, int STEP>
+-  simdjson_inline int write_indexes_stepped(uint32_t idx, uint64_t& bits, int cnt) {
+-    write_indexes<START, STEP>(idx, bits);
+-    SIMDJSON_IF_CONSTEXPR ((START+STEP)  < END) {
+-      if (simdjson_unlikely((START+STEP) < cnt)) {
+-        write_indexes_stepped<(START+STEP<END?START+STEP:END), END, STEP>(idx, bits, cnt);
+-      }
+-    }
+-    return ((END-START) % STEP) == 0 ? END : (END-START) - ((END-START) % STEP) + STEP;
+-  }
+-
+   // flatten out values in 'bits' assuming that they are are to have values of idx
+   // plus their position in the bitvector, and store these indexes at
+   // base_ptr[base] incrementing base as we go
+@@ -96,29 +44,91 @@ public:
+     // it helps tremendously.
+     if (bits == 0)
+         return;
++#if SIMDJSON_PREFER_REVERSE_BITS
++    /**
++     * ARM lacks a fast trailing zero instruction, but it has a fast
++     * bit reversal instruction and a fast leading zero instruction.
++     * Thus it may be profitable to reverse the bits (once) and then
++     * to rely on a sequence of instructions that call the leading
++     * zero instruction.
++     *
++     * Performance notes:
++     * The chosen routine is not optimal in terms of data dependency
++     * since zero_leading_bit might require two instructions. However,
++     * it tends to minimize the total number of instructions which is
++     * beneficial.
++     */
+ 
++    uint64_t rev_bits = reverse_bits(bits);
+     int cnt = static_cast<int>(count_ones(bits));
++    int i = 0;
++    // Do the first 8 all together
++    for (; i<8; i++) {
++      int lz = leading_zeroes(rev_bits);
++      this->tail[i] = static_cast<uint32_t>(idx) + lz;
++      rev_bits = zero_leading_bit(rev_bits, lz);
++    }
++    // Do the next 8 all together (we hope in most cases it won't happen at all
++    // and the branch is easily predicted).
++    if (simdjson_unlikely(cnt > 8)) {
++      i = 8;
++      for (; i<16; i++) {
++        int lz = leading_zeroes(rev_bits);
++        this->tail[i] = static_cast<uint32_t>(idx) + lz;
++        rev_bits = zero_leading_bit(rev_bits, lz);
++      }
+ 
+-#if SIMDJSON_PREFER_REVERSE_BITS
+-    bits = reverse_bits(bits);
+-#endif
+-#ifdef SIMDJSON_STRUCTURAL_INDEXER_STEP
+-    static constexpr const int STEP = SIMDJSON_STRUCTURAL_INDEXER_STEP;
+-#else
+-    static constexpr const int STEP = 4;
+-#endif
+-    static constexpr const int STEP_UNTIL = 24;
+ 
+-    write_indexes_stepped<0, STEP_UNTIL, STEP>(idx, bits, cnt);
+-    SIMDJSON_IF_CONSTEXPR (STEP_UNTIL < 64) {
+-      if (simdjson_unlikely(STEP_UNTIL < cnt)) {
+-        for (int i=STEP_UNTIL; i<cnt; i++) {
+-          write_index(idx, bits, i);
++      // Most files don't have 16+ structurals per block, so we take several basically guaranteed
++      // branch mispredictions here. 16+ structurals per block means either punctuation ({} [] , :)
++      // or the start of a value ("abc" true 123) every four characters.
++      if (simdjson_unlikely(cnt > 16)) {
++        i = 16;
++        while (rev_bits != 0) {
++          int lz = leading_zeroes(rev_bits);
++          this->tail[i++] = static_cast<uint32_t>(idx) + lz;
++          rev_bits = zero_leading_bit(rev_bits, lz);
+         }
+       }
+     }
++    this->tail += cnt;
++#else // SIMDJSON_PREFER_REVERSE_BITS
++    /**
++     * Under recent x64 systems, we often have both a fast trailing zero
++     * instruction and a fast 'clear-lower-bit' instruction so the following
++     * algorithm can be competitive.
++     */
++
++    int cnt = static_cast<int>(count_ones(bits));
++    // Do the first 8 all together
++    for (int i=0; i<8; i++) {
++      this->tail[i] = idx + trailing_zeroes(bits);
++      bits = clear_lowest_bit(bits);
++    }
++
++    // Do the next 8 all together (we hope in most cases it won't happen at all
++    // and the branch is easily predicted).
++    if (simdjson_unlikely(cnt > 8)) {
++      for (int i=8; i<16; i++) {
++        this->tail[i] = idx + trailing_zeroes(bits);
++        bits = clear_lowest_bit(bits);
++      }
++
++      // Most files don't have 16+ structurals per block, so we take several basically guaranteed
++      // branch mispredictions here. 16+ structurals per block means either punctuation ({} [] , :)
++      // or the start of a value ("abc" true 123) every four characters.
++      if (simdjson_unlikely(cnt > 16)) {
++        int i = 16;
++        do {
++          this->tail[i] = idx + trailing_zeroes(bits);
++          bits = clear_lowest_bit(bits);
++          i++;
++        } while (i < cnt);
++      }
++    }
+ 
+     this->tail += cnt;
++#endif
+   }
+ #endif // SIMDJSON_GENERIC_JSON_STRUCTURAL_INDEXER_CUSTOM_BIT_INDEXER
+ 
+@@ -355,4 +365,4 @@ simdjson_inline error_code json_structural_indexer::finish(dom_parser_implementa
+ // Clear CUSTOM_BIT_INDEXER so other implementations can set it if they need to.
+ #undef SIMDJSON_GENERIC_JSON_STRUCTURAL_INDEXER_CUSTOM_BIT_INDEXER
+ 
+-#endif // SIMDJSON_SRC_GENERIC_STAGE1_JSON_STRUCTURAL_INDEXER_H
++#endif // SIMDJSON_SRC_GENERIC_STAGE1_JSON_STRUCTURAL_INDEXER_H
+\ No newline at end of file
+diff --git a/src/generic/stage1/utf8_lookup4_algorithm.h b/src/generic/stage1/utf8_lookup4_algorithm.h
+index 64578915..a49ba54f 100644
+--- a/src/generic/stage1/utf8_lookup4_algorithm.h
++++ b/src/generic/stage1/utf8_lookup4_algorithm.h
+@@ -170,6 +170,14 @@ using namespace simd;
+       this->error |= this->prev_incomplete;
+     }
+ 
++#ifndef SIMDJSON_IF_CONSTEXPR
++#if SIMDJSON_CPLUSPLUS17
++#define SIMDJSON_IF_CONSTEXPR if constexpr
++#else
++#define SIMDJSON_IF_CONSTEXPR if
++#endif
++#endif
++
+     simdjson_inline void check_next_input(const simd8x64<uint8_t>& input) {
+       if(simdjson_likely(is_ascii(input))) {
+         this->error |= this->prev_incomplete;
+diff --git a/tests/dom/integer_tests.cpp b/tests/dom/integer_tests.cpp
+index c9ba1998..41271a8f 100644
+--- a/tests/dom/integer_tests.cpp
++++ b/tests/dom/integer_tests.cpp
+@@ -32,7 +32,7 @@ static bool parse_and_validate(const std::string src, T expected) {
+   const padded_string pstr{src};
+   simdjson::dom::parser parser;
+ 
+-  SIMDJSON_IF_CONSTEXPR (std::is_same<int64_t, T>::value) {
++  if constexpr (std::is_same<int64_t, T>::value) {
+     int64_t actual{};
+     ASSERT_SUCCESS( parser.parse(pstr)["key"].get(actual) );
+     std::cout << std::boolalpha << "test: " << (expected == actual) << std::endl;

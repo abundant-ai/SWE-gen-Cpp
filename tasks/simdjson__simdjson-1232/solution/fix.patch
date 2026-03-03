@@ -1,0 +1,205 @@
+diff --git a/doc/ondemand.md b/doc/ondemand.md
+index 570eeb15..93a0eb4e 100644
+--- a/doc/ondemand.md
++++ b/doc/ondemand.md
+@@ -447,6 +447,44 @@ When the user requests strings, we unescape them to a single string buffer much
+ so that users enjoy the same string performance as the core simdjson. We do not write the length to the 
+ string buffer, however; that is stored in the `string_view` instance we return to the user.
+ 
++```C++
++  ondemand::parser parser;
++  auto doc = parser.iterate(json);
++  std::set<std::string_view> default_users;
++  ondemand::array tweets = doc["statuses"].get_array();
++  for (auto tweet_value : tweets) {
++    auto tweet = tweet_value.get_object();
++    ondemand::object user = tweet["user"].get_object();
++    std::string_view screen_name = user["screen_name"].get_string();
++    bool default_profile = user["default_profile"].get_bool();
++    if (default_profile) { default_users.insert(screen_name); }
++  }
++```
++
++By using `string_view` instances, we avoid the high cost of allocating many small strings (as would be the
++case with `std::string`) but be mindful that the life cycle of these `string_view` instances is tied to the
++parser instance. If the parser instance is destroyed or reused for a new JSON document, these strings are no longer valid.
++
++We iterate through object instances using `field` instances which represent key-value pairs. The value
++is accessible by the `value()` method whereas the key is accessible by the `key()` method. 
++The keys are treated differently than values are made available as as special type `raw_json_string` 
++which is a lightweight type that is meant to be used on a temporary basis, amost solely for 
++direct raw ASCII comparisons (`field.key() == "mykey"`). If you occasionally need to access and store the
++unescaped key values, you may use the `unescaped_key()` method. Once you have called `unescaped_key()` method, 
++neither the `key()` nor the `unescaped_key()` methods should be called: the current field instance
++has no longer a key (that is by design). Like other strings, the resulting `std::string_view` generated
++from the `unescaped_key()` method has a lifecycle tied to the `parser` instance: once the parser
++is destroyed or reused with another document, the `std::string_view` instance becomes invalid.
++
++
++```C++
++auto doc = parser.iterate(json);
++for(auto field : doc.get_object())  {
++      std::string_view keyv = field.unescaped_key();
++}
++```
++
++
+ 
+ ### Iteration Safety
+ 
+diff --git a/include/simdjson/generic/ondemand/field-inl.h b/include/simdjson/generic/ondemand/field-inl.h
+index 8e818cd3..59bdab42 100644
+--- a/include/simdjson/generic/ondemand/field-inl.h
++++ b/include/simdjson/generic/ondemand/field-inl.h
+@@ -21,7 +21,15 @@ simdjson_really_inline simdjson_result<field> field::start(json_iterator_ref &&i
+     return field(key, value::start(std::forward<json_iterator_ref>(iter)));
+ }
+ 
++simdjson_really_inline simdjson_warn_unused simdjson_result<std::string_view> field::unescaped_key() noexcept {
++  SIMDJSON_ASSUME(first.buf != nullptr); // We would like to call .alive() by Visual Studio won't let us.
++  simdjson_result<std::string_view> answer = first.unescape(second.get_iterator());
++  first.consume();
++  return answer;
++}
++
+ simdjson_really_inline raw_json_string field::key() const noexcept {
++  SIMDJSON_ASSUME(first.buf != nullptr); // We would like to call .alive() by Visual Studio won't let us.
+   return first;
+ }
+ 
+@@ -58,6 +66,10 @@ simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::raw_js
+   if (error()) { return error(); }
+   return first.key();
+ }
++simdjson_really_inline simdjson_result<std::string_view> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::unescaped_key() noexcept {
++  if (error()) { return error(); }
++  return first.unescaped_key();
++}
+ simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::value() noexcept {
+   if (error()) { return error(); }
+   return std::move(first.value());
+diff --git a/include/simdjson/generic/ondemand/field.h b/include/simdjson/generic/ondemand/field.h
+index 03b4dcaf..e6e3b32e 100644
+--- a/include/simdjson/generic/ondemand/field.h
++++ b/include/simdjson/generic/ondemand/field.h
+@@ -26,7 +26,17 @@ public:
+   simdjson_really_inline field &operator=(const field &other) noexcept = delete;
+ 
+   /**
+-   * Get the key.
++   * Get the key as a string_view (for higher speed, consider raw_key).
++   * We deliberately use a more cumbersome name (unescaped_key) to force users
++   * to think twice about using it.
++   * 
++   * This consumes the key: once you have called unescaped_key(), you cannot
++   * call it again nor can you call key().
++   */
++  simdjson_really_inline simdjson_warn_unused simdjson_result<std::string_view> unescaped_key() noexcept;
++  /**
++   * Get the key as a raw_json_string: this is fast and allows straight comparisons.
++   * We want this to be the default for most users.
+    */
+   simdjson_really_inline raw_json_string key() const noexcept;
+   /**
+@@ -62,6 +72,7 @@ public:
+   simdjson_really_inline simdjson_result(simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field> &&a) noexcept = default;
+   simdjson_really_inline ~simdjson_result() noexcept = default; ///< @private
+ 
++  simdjson_really_inline simdjson_result<std::string_view> unescaped_key() noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::raw_json_string> key() noexcept;
+   simdjson_really_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> value() noexcept;
+ };
+diff --git a/include/simdjson/generic/ondemand/parser-inl.h b/include/simdjson/generic/ondemand/parser-inl.h
+index bb32597c..366567fa 100644
+--- a/include/simdjson/generic/ondemand/parser-inl.h
++++ b/include/simdjson/generic/ondemand/parser-inl.h
+@@ -8,9 +8,8 @@ simdjson_warn_unused simdjson_really_inline error_code parser::allocate(size_t n
+   // string_capacity copied from document::allocate
+   _capacity = 0;
+   _max_depth = 0;
+-  // The most string buffer we could possibly need is capacity-2 (a string the whole document long).
+-  // Allocate up to capacity so we don't have to check for capacity == 0 or 1.
+-  string_buf.reset(new (std::nothrow) uint8_t[new_capacity]);
++  size_t string_capacity = SIMDJSON_ROUNDUP_N(5 * new_capacity / 3 + SIMDJSON_PADDING, 64);
++  string_buf.reset(new (std::nothrow) uint8_t[string_capacity]);
+   SIMDJSON_TRY( dom_parser.set_capacity(new_capacity) );
+   SIMDJSON_TRY( dom_parser.set_max_depth(DEFAULT_MAX_DEPTH) );
+   _capacity = new_capacity;
+diff --git a/include/simdjson/generic/ondemand/raw_json_string.h b/include/simdjson/generic/ondemand/raw_json_string.h
+index be135f3c..31e0298a 100644
+--- a/include/simdjson/generic/ondemand/raw_json_string.h
++++ b/include/simdjson/generic/ondemand/raw_json_string.h
+@@ -8,10 +8,20 @@ class object;
+ class parser;
+ 
+ /**
+- * A string escaped per JSON rules, terminated with quote (")
++ * A string escaped per JSON rules, terminated with quote ("). They are used to represent
++ * unescaped keys inside JSON documents.
+  *
+  * (In other words, a pointer to the beginning of a string, just after the start quote, inside a
+  * JSON file.)
++ * 
++ * This class is deliberately simplistic and has little functionality. You can
++ * compare two raw_json_string instances, or compare a raw_json_string with a string_view, but
++ * that is pretty much all you can do.
++ * 
++ * They originate typically from field instance which in turn represent key-value pairs from
++ * object instances. From a field instance, you get the raw_json_string instance by calling key().
++ * You can, if you want a more usable string_view instance, call the unescaped_key() method
++ * on the field instance.
+  */
+ class raw_json_string {
+ public:
+@@ -35,8 +45,24 @@ public:
+   simdjson_really_inline raw_json_string(const uint8_t * _buf) noexcept;
+   /**
+    * Get the raw pointer to the beginning of the string in the JSON (just after the ").
++   * 
++   * It is possible for this function to return a null pointer if the instance
++   * has outlived its existence.
+    */
+   simdjson_really_inline const char * raw() const noexcept;
++
++private:
++  /**
++   * This will set the inner pointer to zero, effectively making
++   * this instance unusable.
++   */
++  simdjson_really_inline void consume() noexcept { buf = nullptr; }
++
++  /**
++   * Checks whether the inner pointer is non-null and thus usable.
++   */
++  simdjson_really_inline simdjson_warn_unused bool alive() const noexcept { return buf != nullptr; }
++
+   /**
+    * Unescape this JSON string, replacing \\ with \, \n with newline, etc.
+    * 
+@@ -62,9 +88,10 @@ public:
+    */
+   simdjson_really_inline simdjson_warn_unused simdjson_result<std::string_view> unescape(json_iterator &iter) const noexcept;
+ 
+-private:
+   const uint8_t * buf{};
+   friend class object;
++  friend class field;
++  friend struct simdjson_result<raw_json_string>;
+ };
+ 
+ simdjson_unused simdjson_really_inline bool operator==(const raw_json_string &a, std::string_view b) noexcept;
+diff --git a/include/simdjson/generic/stringparsing.h b/include/simdjson/generic/stringparsing.h
+index 2b92eba8..0f772d0d 100644
+--- a/include/simdjson/generic/stringparsing.h
++++ b/include/simdjson/generic/stringparsing.h
+@@ -73,6 +73,10 @@ simdjson_really_inline bool handle_unicode_codepoint(const uint8_t **src_ptr,
+   return offset > 0;
+ }
+ 
++/**
++ * Unescape a string from src to dst, stopping at a final unescaped quote. E.g., if src points at 'joe"', then
++ * dst needs to have four free bytes.
++ */
+ simdjson_warn_unused simdjson_really_inline uint8_t *parse_string(const uint8_t *src, uint8_t *dst) {
+   while (1) {
+     // Copy the next n bytes, and find the backslash and quote in them.

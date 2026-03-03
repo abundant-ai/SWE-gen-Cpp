@@ -10,16 +10,21 @@ cp "/tests/test.cpp" "test/test.cpp"
 mkdir -p "test"
 cp "/tests/test_wchar_t.cpp" "test/test_wchar_t.cpp"
 
-# Rebuild the test with the updated source (test files were copied above)
-cd /app/src
-rm -rf build
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --target test-cpp17 test_wchar_t-cpp17 -- -j2
+# Rebuild tests with updated test files
+cd build
+cmake --build .
+build_status=$?
 
-# Run the specific tests for test.cpp and test_wchar_t.cpp
-ctest --output-on-failure -R "test-cpp17|test_wchar_t-cpp17"
-test_status=$?
+# If build fails, the test fails
+if [ $build_status -ne 0 ]; then
+  test_status=1
+else
+  # Run the specific test executables for test.cpp and test_wchar_t.cpp
+  # These tests are built for multiple C++ standards, we'll run the C++17 versions
+  cd test
+  ./test-cpp17 && ./test_wchar_t-cpp17
+  test_status=$?
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

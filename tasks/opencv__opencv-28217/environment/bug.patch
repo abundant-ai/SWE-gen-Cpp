@@ -1,0 +1,120 @@
+diff --git a/modules/video/include/opencv2/video/tracking.hpp b/modules/video/include/opencv2/video/tracking.hpp
+index 2ed27f505d..7cd04061de 100644
+--- a/modules/video/include/opencv2/video/tracking.hpp
++++ b/modules/video/include/opencv2/video/tracking.hpp
+@@ -678,16 +678,6 @@ public:
+     /** @copybrief getFinestScale @see getFinestScale */
+     CV_WRAP virtual void setFinestScale(int val) = 0;
+ 
+-    /** @brief Sets the coarsest scale
+-    @param val Coarsest level of the Gaussian pyramid on which the flow is computed.
+-    If set to -1, the auto-computed coarsest scale will be used.
+-    */
+-    CV_WRAP virtual void setCoarsestScale(int val) = 0;
+-
+-    /** @brief Gets the coarsest scale
+-    */
+-    CV_WRAP virtual int getCoarsestScale() const = 0;
+-
+     /** @brief Size of an image patch for matching (in pixels). Normally, default 8x8 patches work well
+         enough in most cases.
+         @see setPatchSize */
+diff --git a/modules/video/src/dis_flow.cpp b/modules/video/src/dis_flow.cpp
+index c859555c22..75090d093d 100644
+--- a/modules/video/src/dis_flow.cpp
++++ b/modules/video/src/dis_flow.cpp
+@@ -60,7 +60,6 @@ class DISOpticalFlowImpl CV_FINAL : public DISOpticalFlow
+ 
+   protected: //!< algorithm parameters
+     int finest_scale, coarsest_scale;
+-    int user_coarsest_scale;
+     int patch_size;
+     int patch_stride;
+     int grad_descent_iter;
+@@ -80,8 +79,6 @@ class DISOpticalFlowImpl CV_FINAL : public DISOpticalFlow
+   public:
+     int getFinestScale() const CV_OVERRIDE { return finest_scale; }
+     void setFinestScale(int val) CV_OVERRIDE { finest_scale = val; }
+-    int getCoarsestScale() const CV_OVERRIDE { return user_coarsest_scale; }
+-    void setCoarsestScale(int val) CV_OVERRIDE { user_coarsest_scale = val; }
+     int getPatchSize() const CV_OVERRIDE { return patch_size; }
+     void setPatchSize(int val) CV_OVERRIDE { patch_size = val; }
+     int getPatchStride() const CV_OVERRIDE { return patch_stride; }
+@@ -231,7 +228,6 @@ DISOpticalFlowImpl::DISOpticalFlowImpl()
+     use_mean_normalization = true;
+     use_spatial_propagation = true;
+     coarsest_scale = 10;
+-    user_coarsest_scale = -1;
+ 
+     /* Use separate variational refinement instances for different scales to avoid repeated memory allocation: */
+     int max_possible_scales = 10;
+@@ -1371,14 +1367,8 @@ bool DISOpticalFlowImpl::ocl_calc(InputArray I0, InputArray I1, InputOutputArray
+     bool use_input_flow = false;
+     if (flow.sameSize(I0) && flow.depth() == CV_32F && flow.channels() == 2)
+         use_input_flow = true;
+-
+-    int max_possible_scale = min((int)(log(max(I0Mat.cols, I0Mat.rows) / (4.0 * patch_size)) / log(2.0) + 0.5), /* Original code search for maximal movement of width/4 */
+-                                 (int)(log(min(I0Mat.cols, I0Mat.rows) / patch_size) / log(2.0)));              /* Deepest pyramid level greater or equal than patch*/
+-
+-    if (user_coarsest_scale != -1)
+-        coarsest_scale = min(user_coarsest_scale, max_possible_scale);
+-    else
+-        coarsest_scale = max_possible_scale;
++    coarsest_scale = min((int)(log(max(I0Mat.cols, I0Mat.rows) / (4.0 * patch_size)) / log(2.0) + 0.5), /* Original code search for maximal movement of width/4 */
++                         (int)(log(min(I0Mat.cols, I0Mat.rows) / patch_size) / log(2.0)));              /* Deepest pyramid level greater or equal than patch*/
+ 
+     if (coarsest_scale<0)
+         CV_Error(cv::Error::StsBadSize, "The input image must have either width or height >= 12");
+@@ -1459,14 +1449,9 @@ void DISOpticalFlowImpl::calc(InputArray I0, InputArray I1, InputOutputArray flo
+     else
+         flow.create(I1Mat.size(), CV_32FC2);
+     Mat flowMat = flow.getMat();
++    coarsest_scale = min((int)(log(max(I0Mat.cols, I0Mat.rows) / (4.0 * patch_size)) / log(2.0) + 0.5), /* Original code search for maximal movement of width/4 */
++                         (int)(log(min(I0Mat.cols, I0Mat.rows) / patch_size) / log(2.0)));              /* Deepest pyramid level greater or equal than patch*/
+ 
+-    int max_possible_scale = min((int)(log(max(I0Mat.cols, I0Mat.rows) / (4.0 * patch_size)) / log(2.0) + 0.5), /* Original code search for maximal movement of width/4 */
+-                                 (int)(log(min(I0Mat.cols, I0Mat.rows) / patch_size) / log(2.0)));              /* Deepest pyramid level greater or equal than patch*/
+-
+-    if (user_coarsest_scale != -1)
+-        coarsest_scale = min(user_coarsest_scale, max_possible_scale);
+-    else
+-        coarsest_scale = max_possible_scale;
+     if (coarsest_scale<0)
+         CV_Error(cv::Error::StsBadSize, "The input image must have either width or height >= 12");
+ 
+diff --git a/modules/video/test/test_OF_accuracy.cpp b/modules/video/test/test_OF_accuracy.cpp
+index cf51cd1dc4..b99ffce2a8 100644
+--- a/modules/video/test/test_OF_accuracy.cpp
++++ b/modules/video/test/test_OF_accuracy.cpp
+@@ -172,29 +172,4 @@ TEST(DenseOpticalFlow_VariationalRefinement, ReferenceAccuracy)
+     EXPECT_LE(calcRMSE(GT, flow), target_RMSE);
+ }
+ 
+-TEST(DenseOpticalFlow_DIS, ManualCoarsestScale)
+-{
+-    Mat prev = Mat::zeros(Size(320, 240), CV_8UC1);
+-    Mat next = Mat::zeros(Size(320, 240), CV_8UC1);
+-    randu(prev, 0, 255);
+-    randu(next, 0, 255);
+-
+-    Ptr<DISOpticalFlow> dis = DISOpticalFlow::create(DISOpticalFlow::PRESET_FAST);
+-
+-    EXPECT_EQ(dis->getCoarsestScale(), -1);
+-
+-    Mat flow;
+-    dis->calc(prev, next, flow);
+-    EXPECT_FALSE(flow.empty());
+-    int manual_scale = 3;
+-    dis->setCoarsestScale(manual_scale);
+-    EXPECT_EQ(dis->getCoarsestScale(), manual_scale);
+-
+-    dis->calc(prev, next, flow);
+-    EXPECT_FALSE(flow.empty());
+-
+-    dis->setCoarsestScale(-1);
+-    EXPECT_EQ(dis->getCoarsestScale(), -1);
+-}
+-
+-}} // namespace
+\ No newline at end of file
++}} // namespace

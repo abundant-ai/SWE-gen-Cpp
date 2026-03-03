@@ -6,15 +6,19 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/test_containers.cpp" "test/test_containers.cpp"
 
-# Rebuild the test with the updated source (test file was copied above)
-cd /app/src
-rm -rf build
-mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . -j 4
+# Patch Catch2 to fix MINSIGSTKSZ issue with newer glibc
+sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static const std::size_t sigStackSize = 32768;/' test/3rdparty/Catch2/catch.hpp
 
-# Run the specific test for test_containers.cpp
-ctest --output-on-failure -R test_containers-cpp17
+# Rebuild tests with updated test files
+cd build
+cmake .. -DMAGIC_ENUM_OPT_BUILD_TESTS=ON -DMAGIC_ENUM_OPT_ENABLE_NONASCII=OFF
+
+# Build only the test targets for test_containers.cpp
+cmake --build . --target test_containers-cpp17 2>&1 | head -100
+cmake --build . --target test_containers-cpp20 2>&1 | head -100
+
+# Run only the test targets for the specific test for this PR (test_containers.cpp)
+ctest -R "^test_containers-(cpp17|cpp20)$" -V
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

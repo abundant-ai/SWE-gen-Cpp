@@ -1,0 +1,176 @@
+diff --git a/include/simdjson/inline/parser.h b/include/simdjson/inline/parser.h
+index ab99d741..610864c4 100644
+--- a/include/simdjson/inline/parser.h
++++ b/include/simdjson/inline/parser.h
+@@ -151,22 +151,15 @@ inline error_code parser::allocate(size_t capacity, size_t max_depth) noexcept {
+   // Reallocate implementation and document if needed
+   //
+   error_code err;
+-  //
+-  // It is possible that we change max_depth without touching capacity, in
+-  // which case, we do not want to reallocate the document buffers.
+-  //
+-  bool need_doc_allocation{false};
+   if (implementation) {
+-    need_doc_allocation = implementation->capacity() != capacity || !doc.tape;
+     err = implementation->allocate(capacity, max_depth);
+   } else {
+-    need_doc_allocation = true;
+     err = simdjson::active_implementation->create_dom_parser_implementation(capacity, max_depth, implementation);
+   }
+   if (err) { return err; }
+-  if (need_doc_allocation) {
+-    err = doc.allocate(capacity);
+-    if (err) { return err; }
++
++  if (implementation->capacity() != capacity || !doc.tape) {
++    return doc.allocate(capacity);
+   }
+   return SUCCESS;
+ }
+diff --git a/simdjson-flags.cmake b/simdjson-flags.cmake
+index c64ebe6b..af913035 100644
+--- a/simdjson-flags.cmake
++++ b/simdjson-flags.cmake
+@@ -1,29 +1,6 @@
+-
+-#
+-# Flags used by exes and by the simdjson library (project-wide flags)
+-#
+-add_library(simdjson-flags INTERFACE)
+-add_library(simdjson-internal-flags INTERFACE)
+-target_link_libraries(simdjson-internal-flags INTERFACE simdjson-flags)
+-
+-option(SIMDJSON_SANITIZE "Sanitize addresses" OFF)
+-if(SIMDJSON_SANITIZE)
+-  target_compile_options(simdjson-flags INTERFACE -fsanitize=address -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=all)
+-  target_link_libraries(simdjson-flags INTERFACE -fsanitize=address -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=all)
+-
+-  # Ubuntu bug for GCC 5.0+ (safe for all versions)
+-  if (CMAKE_COMPILER_IS_GNUCC)
+-    target_link_libraries(simdjson-flags INTERFACE -fuse-ld=gold)
+-  endif()
+-endif()
+-
+-
+ if (NOT CMAKE_BUILD_TYPE)
+   message(STATUS "No build type selected, default to Release")
+   set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+-  if(SIMDJSON_SANITIZE)
+-    message(WARNING "No build type selected and you have enabled the sanitizer. Consider setting CMAKE_BUILD_TYPE to Debug to help identify the eventual problems.")
+-  endif()
+ endif()
+ 
+ if(MSVC)
+@@ -54,6 +31,12 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
+ #  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+ #endif()
+ 
++#
++# Flags used by exes and by the simdjson library (project-wide flags)
++#
++add_library(simdjson-flags INTERFACE)
++add_library(simdjson-internal-flags INTERFACE)
++target_link_libraries(simdjson-internal-flags INTERFACE simdjson-flags)
+ 
+ if(MSVC)
+   target_compile_options(simdjson-internal-flags INTERFACE /WX /W3 /sdl)
+@@ -100,6 +83,17 @@ if(SIMDJSON_ENABLE_THREADS)
+   target_compile_definitions(simdjson-flags INTERFACE SIMDJSON_THREADS_ENABLED=1)
+ endif()
+ 
++option(SIMDJSON_SANITIZE "Sanitize addresses" OFF)
++if(SIMDJSON_SANITIZE)
++  target_compile_options(simdjson-flags INTERFACE -fsanitize=address -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=all)
++  target_link_libraries(simdjson-flags INTERFACE -fsanitize=address -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=all)
++
++  # Ubuntu bug for GCC 5.0+ (safe for all versions)
++  if (CMAKE_COMPILER_IS_GNUCC)
++    target_link_libraries(simdjson-flags INTERFACE -fuse-ld=gold)
++  endif()
++endif()
++
+ if(SIMDJSON_USE_LIBCPP)
+   target_link_libraries(simdjson-flags INTERFACE -stdlib=libc++ -lc++abi)
+   # instead of the above line, we could have used
+diff --git a/tests/basictests.cpp b/tests/basictests.cpp
+index 5932faf2..5a8ae77f 100644
+--- a/tests/basictests.cpp
++++ b/tests/basictests.cpp
+@@ -19,20 +19,8 @@
+ #define SIMDJSON_BENCHMARK_DATA_DIR "jsonexamples/"
+ #endif
+ const char *TWITTER_JSON = SIMDJSON_BENCHMARK_DATA_DIR "twitter.json";
+-const char *TWITTER_TIMELINE_JSON = SIMDJSON_BENCHMARK_DATA_DIR "twitter_timeline.json";
+-const char *REPEAT_JSON = SIMDJSON_BENCHMARK_DATA_DIR "repeat.json";
+ const char *AMAZON_CELLPHONES_NDJSON = SIMDJSON_BENCHMARK_DATA_DIR "amazon_cellphones.ndjson";
+ 
+-#define SIMDJSON_BENCHMARK_SMALLDATA_DIR SIMDJSON_BENCHMARK_DATA_DIR "small/"
+-
+-const char *ADVERSARIAL_JSON = SIMDJSON_BENCHMARK_SMALLDATA_DIR  "adversarial.json";
+-const char *FLATADVERSARIAL_JSON = SIMDJSON_BENCHMARK_SMALLDATA_DIR  "flatadversarial.json";
+-const char *DEMO_JSON = SIMDJSON_BENCHMARK_SMALLDATA_DIR  "demo.json";
+-const char *SMALLDEMO_JSON = SIMDJSON_BENCHMARK_SMALLDATA_DIR  "smalldemo.json";
+-const char *TRUENULL_JSON = SIMDJSON_BENCHMARK_SMALLDATA_DIR  "truenull.json";
+-
+-
+-
+ template<typename T>
+ bool equals_expected(T actual, T expected) {
+   return actual == expected;
+@@ -203,45 +191,6 @@ namespace number_tests {
+ }
+ 
+ namespace document_tests {
+-  int issue938() {
+-    std::vector<std::string> json_strings{"[true,false]", "[1,2,3,null]",
+-                                        R"({"yay":"json!"})"};
+-    simdjson::dom::parser parser1;
+-    for (simdjson::padded_string str : json_strings) {
+-      auto [element, error] = parser1.parse(str);
+-      if(error) {
+-        std::cerr << error << std::endl;
+-      } else {
+-        std::cout << element << std::endl;
+-      }
+-    }
+-    std::vector<std::string> file_paths{
+-      ADVERSARIAL_JSON,      FLATADVERSARIAL_JSON, DEMO_JSON,
+-      TWITTER_TIMELINE_JSON, REPEAT_JSON,         SMALLDEMO_JSON,
+-      TRUENULL_JSON};
+-    for (auto path : file_paths) {
+-      simdjson::dom::parser parser2;
+-      std::cout << "file: " << path << std::endl;
+-      auto [element, error] = parser2.load(path);
+-      if(error) {
+-        std::cerr << error << std::endl;
+-      } else {
+-        std::cout << element.type() << std::endl;
+-      }
+-    }
+-    simdjson::dom::parser parser3;
+-    for (auto path : file_paths) {
+-      std::cout << "file: " << path << std::endl;
+-      auto [element, error] = parser3.load(path);
+-      if(error) {
+-        std::cerr << error << std::endl;
+-      } else {
+-        std::cout << element.type() << std::endl;
+-      }    
+-    }
+-    return true;
+-  }
+-
+   // adversarial example that once triggred overruns, see https://github.com/lemire/simdjson/issues/345
+   bool bad_example() {
+     std::cout << __func__ << std::endl;
+@@ -402,8 +351,7 @@ namespace document_tests {
+     return true;
+   }
+   bool run() {
+-    return issue938() &&
+-           padded_with_open_bracket() &&
++    return padded_with_open_bracket() &&
+            bad_example() &&
+            count_array_example() &&
+            count_object_example() &&

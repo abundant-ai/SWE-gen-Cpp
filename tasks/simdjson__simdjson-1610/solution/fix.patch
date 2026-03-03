@@ -1,0 +1,153 @@
+diff --git a/doc/basics.md b/doc/basics.md
+index d7004867..5a8a8a4a 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -801,7 +801,7 @@ Rewinding
+ ----------
+ 
+ In some instances, you may need to go through a document more than once. For that purpose, you may
+-call the `rewind()` method on the document instance. It allows you to restart processing from the 
++call the `rewind()` method on the document instance. It allows you to restart processing from the
+ beginning without rescanning all of the input data again. It invalidates all values, objects and arrays
+ that you have created so far (including unescaped strings).
+ 
+diff --git a/doc/ondemand_design.md b/doc/ondemand_design.md
+index 92d414e1..ecd88cc1 100644
+--- a/doc/ondemand_design.md
++++ b/doc/ondemand_design.md
+@@ -709,6 +709,42 @@ in production systems:
+     }
+ ```
+ 
++
++### Long-Running Processes and Memory Capacity
++
++The On Demand approach also automatically expands its memory capacity when larger documents are parsed. However, for longer processes where very large files are processed (such as server loops), this capacity is not resized down. Similarly to the DOM-based approach (see [here](https://github.com/simdjson/simdjson/blob/master/doc/dom.md#server-loops-long-running-processes-and-memory-capacity)]), On Demand also lets you adjust the maximal capacity that the parser can process:
++
++* You can set an upper bound (*max_capacity*) when construction the parser:
++```C++
++    ondemand::parser parser(1000*1000);  // Never grows past documents > 1 MB
++    auto doc = parser.iterate(json);
++    for (web_request request : listen()) {
++      padded_string json;
++      padded_string json = padded_string::load(request.body);
++      auto error = parser.iterate(json);
++      // If the document was above our limit, emit 413 = payload too large
++      if (error == CAPACITY) { request.respond(413); continue; }
++      // ...
++    }
++```
++
++The capacity will grow as the parser encounters larger documents up to 1 MB.
++
++* You can also allocate a *fixed capacity* that will never grow:
++```C++
++    ondemand::parser parser(1000*1000);
++    parser.allocate(1000*1000)  // Fix the capacity to 1 MB
++    auto doc = parser.iterate(json);
++    for (web_request request : listen()) {
++      padded_string json;
++      padded_string json = padded_string::load(request.body);
++      auto error = parser.iterate(json);
++      // If the document was above our limit, emit 413 = payload too large
++      if (error == CAPACITY) { request.respond(413); continue; }
++      // ...
++    }
++```
++You can also manually set the maximal capacity using the method `set_max_capacity()`.
+ ### Benefits of the On Demand Approach
+ 
+ We expect that the On Demand approach has many of the performance benefits of the schema-based approach, while providing a flexibility that is similar to that of the DOM-based approach.
+diff --git a/include/simdjson/generic/ondemand/parser-inl.h b/include/simdjson/generic/ondemand/parser-inl.h
+index 001d4a5b..c151d7fd 100644
+--- a/include/simdjson/generic/ondemand/parser-inl.h
++++ b/include/simdjson/generic/ondemand/parser-inl.h
+@@ -2,7 +2,12 @@ namespace simdjson {
+ namespace SIMDJSON_IMPLEMENTATION {
+ namespace ondemand {
+ 
++simdjson_really_inline parser::parser(size_t max_capacity) noexcept
++  : _max_capacity{max_capacity} {
++}
++
+ simdjson_warn_unused simdjson_really_inline error_code parser::allocate(size_t new_capacity, size_t new_max_depth) noexcept {
++  if (new_capacity > max_capacity()) { return CAPACITY; }
+   if (string_buf && new_capacity == capacity() && new_max_depth == max_depth()) { return SUCCESS; }
+ 
+   // string_capacity copied from document::allocate
+@@ -82,10 +87,21 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<json_iterator> parse
+ simdjson_really_inline size_t parser::capacity() const noexcept {
+   return _capacity;
+ }
++simdjson_really_inline size_t parser::max_capacity() const noexcept {
++  return _max_capacity;
++}
+ simdjson_really_inline size_t parser::max_depth() const noexcept {
+   return _max_depth;
+ }
+ 
++simdjson_really_inline void parser::set_max_capacity(size_t max_capacity) noexcept {
++  size_t MINIMAL_DOCUMENT_CAPACITY = 32;
++  if(max_capacity < MINIMAL_DOCUMENT_CAPACITY) {
++    _max_capacity = max_capacity;
++  } else {
++    _max_capacity = MINIMAL_DOCUMENT_CAPACITY;
++  }
++}
+ 
+ } // namespace ondemand
+ } // namespace SIMDJSON_IMPLEMENTATION
+diff --git a/include/simdjson/generic/ondemand/parser.h b/include/simdjson/generic/ondemand/parser.h
+index ec5a89a9..b8539f86 100644
+--- a/include/simdjson/generic/ondemand/parser.h
++++ b/include/simdjson/generic/ondemand/parser.h
+@@ -21,7 +21,7 @@ public:
+    *
+    * The new parser will have zero capacity.
+    */
+-  inline parser() noexcept = default;
++  inline explicit parser(size_t max_capacity = SIMDJSON_MAXSIZE_BYTES) noexcept;
+ 
+   inline parser(parser &&other) noexcept = default;
+   simdjson_really_inline parser(const parser &other) = delete;
+@@ -122,19 +122,12 @@ public:
+ 
+   /** The capacity of this parser (the largest document it can process). */
+   simdjson_really_inline size_t capacity() const noexcept;
++  /** The maximum capacity of this parser (the largest document it is allowed to process). */
++  simdjson_really_inline size_t max_capacity() const noexcept;
++  simdjson_really_inline void set_max_capacity(size_t max_capacity) noexcept;
+   /** The maximum depth of this parser (the most deeply nested objects and arrays it can process). */
+   simdjson_really_inline size_t max_depth() const noexcept;
+ 
+-private:
+-  /** @private [for benchmarking access] The implementation to use */
+-  std::unique_ptr<internal::dom_parser_implementation> implementation{};
+-  size_t _capacity{0};
+-  size_t _max_depth{DEFAULT_MAX_DEPTH};
+-  std::unique_ptr<uint8_t[]> string_buf{};
+-#ifdef SIMDJSON_DEVELOPMENT_CHECKS
+-  std::unique_ptr<token_position[]> start_positions{};
+-#endif
+-
+   /**
+    * Ensure this parser has enough memory to process JSON documents up to `capacity` bytes in length
+    * and `max_depth` depth.
+@@ -145,6 +138,17 @@ private:
+    */
+   simdjson_warn_unused error_code allocate(size_t capacity, size_t max_depth=DEFAULT_MAX_DEPTH) noexcept;
+ 
++private:
++  /** @private [for benchmarking access] The implementation to use */
++  std::unique_ptr<internal::dom_parser_implementation> implementation{};
++  size_t _capacity{0};
++  size_t _max_capacity;
++  size_t _max_depth{DEFAULT_MAX_DEPTH};
++  std::unique_ptr<uint8_t[]> string_buf{};
++#ifdef SIMDJSON_DEVELOPMENT_CHECKS
++  std::unique_ptr<token_position[]> start_positions{};
++#endif
++
+   friend class json_iterator;
+ };
+ 

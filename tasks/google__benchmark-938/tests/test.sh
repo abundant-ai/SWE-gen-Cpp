@@ -6,26 +6,41 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/skip_with_error_test.cc" "test/skip_with_error_test.cc"
 
-# Rebuild with the fixed test files
-echo "Rebuilding with fixed test files..."
-rm -rf build
-cmake -B build -G Ninja \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-    -DBENCHMARK_ENABLE_TESTING=ON \
-    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-    -DBENCHMARK_ENABLE_WERROR=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# Initialize test_status
+test_status=0
 
-# Build everything to ensure all dependencies are correct
-cmake --build build --config Debug -j 1
+# Rebuild the benchmark library first to pick up any source changes from fix.patch
+cd /app/src
+cmake --build build --config Debug --target benchmark -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark library"
+    test_status=1
+fi
 
-# Run the specific test for this PR
-./build/test/skip_with_error_test
-test_status=$?
+# Remove old test object files to force rebuild with new test files
+rm -f build/test/CMakeFiles/skip_with_error_test.dir/skip_with_error_test.cc.o
+rm -f build/test/skip_with_error_test
+
+# Build the specific test executable for the modified test file
+cmake --build build --config Debug --target skip_with_error_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build skip_with_error_test"
+    test_status=1
+fi
+
+# Run the test only if it built successfully
+if [ $test_status -eq 0 ]; then
+    cd /app/src/build
+
+    echo "Running skip_with_error_test..."
+    ./test/skip_with_error_test
+    if [ $? -ne 0 ]; then
+        echo "skip_with_error_test FAILED"
+        test_status=1
+    else
+        echo "skip_with_error_test PASSED"
+    fi
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

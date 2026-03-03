@@ -1,0 +1,326 @@
+diff --git a/bazel/private/BUILD b/bazel/private/BUILD
+index 11feb3e3e..652d41d1c 100644
+--- a/bazel/private/BUILD
++++ b/bazel/private/BUILD
+@@ -117,10 +117,7 @@ bzl_library(
+         "bazel_cc_proto_library.bzl",
+         "cc_proto_support.bzl",
+     ],
+-    visibility = [
+-        "//bazel:__subpackages__",
+-        "//hpb/bazel:__subpackages__",
+-    ],
++    visibility = ["//bazel:__subpackages__"],
+     deps = [
+         ":toolchain_helpers_bzl",
+         "//bazel/common:proto_common_bzl",
+diff --git a/hpb/backend/cpp/BUILD b/hpb/backend/cpp/BUILD
+index 3ec448038..35a94e611 100644
+--- a/hpb/backend/cpp/BUILD
++++ b/hpb/backend/cpp/BUILD
+@@ -18,7 +18,6 @@ cc_library(
+         "//hpb:arena",
+         "//hpb:extension",
+         "//hpb:ptr",
+-        "//hpb/internal",
+         "//hpb/internal:template_help",
+         "@abseil-cpp//absl/status:statusor",
+         "@abseil-cpp//absl/strings:string_view",
+@@ -52,7 +51,7 @@ cc_test(
+         "//hpb",
+         "//hpb:arena",
+         "//hpb:ptr",
+-        "//hpb_generator/tests:trivial_hpb_proto",
++        "//hpb_generator/tests:test_model_hpb_proto",
+         "@googletest//:gtest",
+         "@googletest//:gtest_main",
+     ],
+diff --git a/hpb/backend/cpp/cpp_test.cc b/hpb/backend/cpp/cpp_test.cc
+index 69f04e8fe..09c16deff 100644
+--- a/hpb/backend/cpp/cpp_test.cc
++++ b/hpb/backend/cpp/cpp_test.cc
+@@ -6,33 +6,26 @@
+ // https://developers.google.com/open-source/licenses/bsd
+ 
+ #include <gtest/gtest.h>
+-#include "hpb_generator/tests/trivial.hpb.h"
++#include "hpb_generator/tests/test_model.hpb.h"
+ #include "hpb/arena.h"
+ #include "hpb/hpb.h"
+ #include "hpb/ptr.h"
+ 
+-// Tests in this file are run against both backends {upb, cpp} to ensure
+-// api conformance, compatibility, and correctness.
+-
+ namespace hpb::testing {
+ namespace {
+ 
+-using ::hpb_unittest::protos::Trivial;
+-using ::hpb_unittest::protos::TRIVIAL_PAINTING_SARGENT;
++using ::hpb_unittest::protos::TestModel;
++using ::hpb_unittest::protos::TestModel_Category_IMAGES;
++
++// Tests in this file are run against both backends {upb, cpp} to ensure
++// api conformance, compatibility, and correctness.
+ 
+ TEST(CppBackend, CanCreateMessage) {
+   hpb::Arena arena;
+-  hpb::Ptr<Trivial> trivial_ptr = hpb::CreateMessage<Trivial>(arena);
+-  (void)trivial_ptr;
+-}
+-
+-TEST(CppBackend, Enums) { EXPECT_EQ(2, TRIVIAL_PAINTING_SARGENT); }
+-
+-TEST(CppBackend, Booleans) {
+-  Trivial cpp_trivial;
+-  EXPECT_FALSE(cpp_trivial.b());
+-  // TODO: set, clear
++  hpb::Ptr<TestModel> test_model_ptr = hpb::CreateMessage<TestModel>(arena);
++  (void)test_model_ptr;
+ }
+ 
++TEST(CppBackend, MessageEnums) { EXPECT_EQ(5, TestModel_Category_IMAGES); }
+ }  // namespace
+ }  // namespace hpb::testing
+diff --git a/hpb/bazel/BUILD b/hpb/bazel/BUILD
+index fbec6085c..8c9711ddf 100644
+--- a/hpb/bazel/BUILD
++++ b/hpb/bazel/BUILD
+@@ -18,7 +18,6 @@ bzl_library(
+     deps = [
+         "//bazel:upb_proto_library_bzl",
+         "//bazel/common:proto_common_bzl",
+-        "//bazel/private:bazel_cc_proto_library_bzl",
+         "@bazel_skylib//lib:paths",
+         "@bazel_tools//tools/cpp:toolchain_utils.bzl",
+     ],
+diff --git a/hpb/bazel/hpb_proto_library.bzl b/hpb/bazel/hpb_proto_library.bzl
+index da8e52e61..3b8441836 100644
+--- a/hpb/bazel/hpb_proto_library.bzl
++++ b/hpb/bazel/hpb_proto_library.bzl
+@@ -9,14 +9,12 @@
+   - hpb_proto_library()
+ """
+ 
+-load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
+ load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "use_cpp_toolchain")
+ load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+ load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+ load("//bazel:upb_proto_library.bzl", "GeneratedSrcsInfo", "UpbWrappedCcInfo", "upb_proto_library_aspect")
+ load("//bazel/common:proto_common.bzl", "proto_common")
+ load("//bazel/common:proto_info.bzl", "ProtoInfo")
+-load("//bazel/private:bazel_cc_proto_library.bzl", "cc_proto_aspect")
+ load("//bazel/private:upb_proto_library_internal/cc_library_func.bzl", "cc_library_func")  # buildifier: disable=bzl-visibility
+ 
+ def upb_use_cpp_toolchain():
+@@ -95,15 +93,9 @@ def _upb_cc_proto_aspect_impl(target, ctx, cc_provider, file_provider):
+     dep_ccinfos = [dep[CcInfo] for dep in deps if CcInfo in dep]
+     dep_ccinfos += [dep[UpbWrappedCcInfo].cc_info for dep in deps if UpbWrappedCcInfo in dep]
+     dep_ccinfos += [dep[_HpbWrappedCcInfo].cc_info for dep in deps if _HpbWrappedCcInfo in dep]
+-
+-    backend = ctx.attr._hpb_backend[BuildSettingInfo].value
+-
+-    if backend == "upb" and UpbWrappedCcInfo in target:
+-        dep_ccinfos.append(target[UpbWrappedCcInfo].cc_info)
+-
+-    if backend == "cpp" and CcInfo in target:
+-        dep_ccinfos.append(target[CcInfo])
+-
++    if UpbWrappedCcInfo not in target:
++        fail("Target should have UpbWrappedCcInfo provider")
++    dep_ccinfos.append(target[UpbWrappedCcInfo].cc_info)
+     proto_info = target[ProtoInfo]
+ 
+     if not getattr(ctx.rule.attr, "srcs", []):
+@@ -145,9 +137,6 @@ _hpb_proto_library_aspect = aspect(
+                 "//hpb:repeated_field",
+             ],
+         ),
+-        "_hpb_backend": attr.label(
+-            default = "//hpb:hpb_backend",
+-        ),
+     },
+     exec_groups = {
+         "proto_compiler": exec_group(),
+@@ -157,9 +146,7 @@ _hpb_proto_library_aspect = aspect(
+         _HpbWrappedCcInfo,
+         _WrappedCcGeneratedSrcsInfo,
+     ],
+-    requires = [cc_proto_aspect, upb_proto_library_aspect],
+     required_aspect_providers = [
+-        CcInfo,
+         UpbWrappedCcInfo,
+     ],
+     attr_aspects = ["deps"],
+@@ -173,6 +160,7 @@ hpb_proto_library = rule(
+     attrs = {
+         "deps": attr.label_list(
+             aspects = [
++                upb_proto_library_aspect,
+                 _hpb_proto_library_aspect,
+             ],
+             allow_rules = ["proto_library"],
+diff --git a/hpb_generator/BUILD b/hpb_generator/BUILD
+index 145a9eedf..27aaf69c6 100644
+--- a/hpb_generator/BUILD
++++ b/hpb_generator/BUILD
+@@ -69,7 +69,6 @@ cc_library(
+         "//src/google/protobuf/compiler:code_generator",
+         "//src/google/protobuf/compiler:code_generator_lite",
+         "//src/google/protobuf/compiler:plugin",
+-        "//src/google/protobuf/compiler/cpp:names",
+         "//upb_generator:common",
+         "//upb_generator:file_layout",
+         "//upb_generator/c:names",
+diff --git a/hpb_generator/generator.cc b/hpb_generator/generator.cc
+index b2898765a..2ccdca7f6 100644
+--- a/hpb_generator/generator.cc
++++ b/hpb_generator/generator.cc
+@@ -16,7 +16,6 @@
+ #include "absl/strings/str_replace.h"
+ #include "google/protobuf/compiler/code_generator.h"
+ #include "google/protobuf/compiler/code_generator_lite.h"
+-#include "google/protobuf/compiler/cpp/names.h"
+ #include "hpb_generator/context.h"
+ #include "hpb_generator/gen_enums.h"
+ #include "hpb_generator/gen_extensions.h"
+@@ -55,22 +54,6 @@ void WriteForwardDecls(const google::protobuf::FileDescriptor* file, Context& ct
+   WriteTypedefForwardingHeader(file, this_file_messages, ctx);
+ }
+ 
+-std::string ScalarGetters(const google::protobuf::Descriptor* message) {
+-  std::string res;
+-  for (int i = 0; i < message->field_count(); ++i) {
+-    const auto* field = message->field(i);
+-    if (field->is_repeated() || field->is_map() || field->is_extension()) {
+-      continue;
+-    }
+-    if (field->type() == google::protobuf::FieldDescriptor::TYPE_BOOL) {
+-      absl::StrAppend(
+-          &res, google::protobuf::FieldDescriptor::CppTypeName(field->cpp_type()), " ",
+-          field->name(), "() const { return msg_.", field->name(), "(); }\n");
+-    }
+-  }
+-  return res;
+-}
+-
+ void WriteHeader(const google::protobuf::FileDescriptor* file, Context& ctx) {
+   if (ctx.options().backend == Backend::CPP) {
+     EmitFileWarning(file, ctx);
+@@ -122,10 +105,7 @@ void WriteHeader(const google::protobuf::FileDescriptor* file, Context& ctx) {
+     const auto msgs = SortedMessages(file);
+     for (auto message : msgs) {
+       ctx.Emit({{"type", QualifiedClassName(message)},
+-                {"cpp_backend_type",
+-                 google::protobuf::compiler::cpp::QualifiedClassName(message)},
+                 {"class_name", ClassName(message)},
+-                {"scalar_getters", ScalarGetters(message)},
+                 {"namespace", absl::StrCat(absl::StrReplaceAll(file->package(),
+                                                                {{".", "::"}}),
+                                            "::protos")}},
+@@ -143,11 +123,12 @@ void WriteHeader(const google::protobuf::FileDescriptor* file, Context& ctx) {
+ 
+                    $class_name$() = default;
+ 
+-                  $scalar_getters$
++                  private:
++                   $class_name$($type$* msg) : msg_(msg) {}
+ 
+-                      private : $cpp_backend_type$ msg_;
++                   $type$* msg_;
+ 
+-                   const $cpp_backend_type$* msg() const { return &msg_; }
++                   $type$* msg() const { return msg_; }
+ 
+                    friend struct ::hpb::internal::PrivateAccess;
+                  };
+@@ -326,9 +307,6 @@ void WriteHeaderMessageForwardDecls(const google::protobuf::FileDescriptor* file
+   if (ctx.options().backend == Backend::UPB) {
+     ctx.Emit({{"upb_filename", UpbCFilename(file)}},
+              "#include \"$upb_filename$\"\n");
+-  } else if (ctx.options().backend == Backend::CPP) {
+-    ctx.Emit({{"cpp_header", ProtoFilename(file)}},
+-             "#include \"$cpp_header$\"\n");
+   }
+   WriteForwardDecls(file, ctx);
+   // Import forward-declaration of types in dependencies.
+diff --git a/hpb_generator/names.cc b/hpb_generator/names.cc
+index 84166322f..1e4cbae7c 100644
+--- a/hpb_generator/names.cc
++++ b/hpb_generator/names.cc
+@@ -110,11 +110,6 @@ std::string UpbCFilename(const google::protobuf::FileDescriptor* file) {
+   return compiler::StripProto(file->name()) + ".upb.h";
+ }
+ 
+-// TODO: use canonical b/467723537
+-std::string ProtoFilename(const google::protobuf::FileDescriptor* file) {
+-  return compiler::StripProto(file->name()) + ".proto.h";
+-}
+-
+ std::string CppHeaderFilename(const google::protobuf::FileDescriptor* file) {
+   return absl::StrCat(compiler::StripProto(file->name()), ".hpb.h");
+ }
+diff --git a/hpb_generator/names.h b/hpb_generator/names.h
+index 000f6cdd1..9e24a4614 100644
+--- a/hpb_generator/names.h
++++ b/hpb_generator/names.h
+@@ -25,7 +25,6 @@ std::string QualifiedInternalClassName(const google::protobuf::Descriptor* descr
+ 
+ std::string CppSourceFilename(const google::protobuf::FileDescriptor* file);
+ std::string UpbCFilename(const google::protobuf::FileDescriptor* file);
+-std::string ProtoFilename(const google::protobuf::FileDescriptor* file);
+ std::string CppHeaderFilename(const google::protobuf::FileDescriptor* file);
+ 
+ void WriteStartNamespace(const google::protobuf::FileDescriptor* file, Context& ctx);
+diff --git a/hpb_generator/tests/BUILD b/hpb_generator/tests/BUILD
+index 92b05a38b..16a376bf8 100644
+--- a/hpb_generator/tests/BUILD
++++ b/hpb_generator/tests/BUILD
+@@ -135,21 +135,6 @@ hpb_proto_library(
+     deps = [":basic_editions_proto"],
+ )
+ 
+-proto_library(
+-    name = "trivial_proto",
+-    srcs = [
+-        "trivial.proto",
+-    ],
+-)
+-
+-hpb_proto_library(
+-    name = "trivial_hpb_proto",
+-    visibility = [
+-        "//hpb:__subpackages__",
+-    ],
+-    deps = [":trivial_proto"],
+-)
+-
+ proto_library(
+     name = "set_alias_proto",
+     srcs = ["set_alias.proto"],
+diff --git a/hpb_generator/tests/trivial.proto b/hpb_generator/tests/trivial.proto
+deleted file mode 100644
+index 7a401edbf..000000000
+--- a/hpb_generator/tests/trivial.proto
++++ /dev/null
+@@ -1,20 +0,0 @@
+-// Protocol Buffers - Google's data interchange format
+-// Copyright 2025 Google LLC.  All rights reserved.
+-//
+-// Use of this source code is governed by a BSD-style
+-// license that can be found in the LICENSE file or at
+-// https://developers.google.com/open-source/licenses/bsd
+-
+-edition = "2024";
+-
+-package hpb_unittest;
+-
+-message Trivial {
+-  bool b = 1;
+-}
+-
+-enum TrivialPainting {
+-  TRIVIAL_PAINTING_UNSPECIFIED = 0;
+-  TRIVIAL_PAINTING_BOUGUEREAU = 1;
+-  TRIVIAL_PAINTING_SARGENT = 2;
+-}

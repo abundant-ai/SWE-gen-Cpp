@@ -1,23 +1,18 @@
-When the process is running under a non-"C" locale (e.g., after calling `std::locale::global(std::locale(""))` and having `LC_ALL=en_US.UTF-8` or `LC_ALL=nl_BE.UTF-8`), yaml-cpp’s YAML output incorrectly formats numeric scalars using locale-specific thousands separators and decimal punctuation.
+When the process global locale is set to a non-"C" locale (e.g. via `std::locale::global(std::locale(""))` with `LC_ALL=en_US.UTF-8`), YAML emission of numeric scalars incorrectly uses locale-specific formatting. For example, emitting the integer `2112` can produce `2,112` under `en_US.UTF-8` or `2.112` under `nl_BE.UTF-8`. This output is not valid plain integer YAML in many parsers: `2,112` is parsed as a string ("2,112"), and `2.112` may be interpreted as a floating-point value.
 
-For example, the following program:
+The emitter must produce locale-independent YAML scalars by default. Specifically, any internal `std::stringstream` (or equivalent stream) used for producing YAML output should be imbued with the classic "C" locale so that integers and floating-point values are formatted using `.` as the decimal separator and without thousands separators, regardless of the process global locale.
+
+Reproduction example:
 
 ```cpp
-int main(){
-  std::locale::global(std::locale(""));
-  YAML::Emitter out;
-  out << 2112;
-  std::cout << out.c_str() << "\n";
-}
+std::locale::global(std::locale(""));
+YAML::Emitter out;
+out << 2112;
+std::cout << out.c_str() << "\n";
 ```
 
-can emit `2,112` under `en_US.UTF-8` and `2.112` under `nl_BE.UTF-8`.
+Expected behavior: the output for `2112` is `2112` (no grouping separators), and more generally numeric output is stable and independent of `LC_ALL` / the global C++ locale.
 
-This output is not valid as an integer scalar in a portable way: `2,112` is parsed as a plain string (`"2,112"`) by yaml-cpp, and `2.112` may be interpreted as a floating-point value by other YAML parsers. The same locale-sensitive formatting can affect other numeric emissions performed through yaml-cpp’s output pipeline.
+Actual behavior: the emitted scalar can include locale-specific separators (e.g. `2,112` or `2.112`), changing the YAML meaning.
 
-Numeric emission must be locale-independent and follow the YAML expectations regardless of the user’s global locale. In particular:
-- Emitting integer values (e.g., streaming `2112` into `YAML::Emitter`, and emitting numeric scalars from `YAML::Node`/conversion paths) must produce `2112` with no thousands separator.
-- Floating-point emission must use `.` as the decimal separator and must not introduce locale-specific grouping.
-- These guarantees must hold even if the application has set a non-"C" global locale via `std::locale::global`.
-
-Implement this by ensuring that any `std::stringstream` (or equivalent standard iostream formatting machinery) used internally to generate YAML text is imbued with the classic "C" locale so that numeric formatting is stable and not affected by environment locale settings. The change should cover all code paths that format scalars for output so that locale-dependent punctuation cannot leak into emitted YAML.
+Implement the fix so that the default behavior of `YAML::Emitter` (and any other YAML emitting/serialization APIs that rely on stringstreams) uses the "C" locale for output formatting, even if the user changes the global locale. This should cover both integers and floating-point values and should ensure consistent emission for nodes and emit helpers that serialize scalars through streams.

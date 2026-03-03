@@ -1,0 +1,112 @@
+diff --git a/doc/basics.md b/doc/basics.md
+index 9e1e27e7..a4020fc0 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -272,7 +272,7 @@ for (dom::key_value_pair field : object) {
+ Minifying JSON strings without parsing
+ ----------------------
+ 
+-In some cases, you may have valid JSON strings that you do not wish to parse but that you wish to minify. That is, you wish to remove all unnecessary spaces. We have a fast function for this purpose (`simdjson::minify(const char * input, size_t length, const char * output, size_t& new_length)`). This function does not validate your content, and it does not parse it.  It is much faster than parsing the string and re-serializing it in minified form (`simdjson::minify(parser.parse())`). Usage is relatively simple. You must pass an input pointer with a length parameter, as well as an output pointer and an output length parameter (by reference). The output length parameter is not read, but written to. The output pointer should point to a valid memory region that is slightly overallocated (by `simdjson::SIMDJSON_PADDING`) compared to the original string length. The input pointer and input length are read, but not written to.
++In some cases, you may have valid JSON strings that you do not wish to parse but that you wish to minify. That is, you wish to remove all unnecessary spaces. We have a fast function for this purpose (`simdjson::minify(const char * input, size_t length, const char * output, size_t& new_length)`). This function does not validate your content, and it does not parse it.  It is much faster than parsing the string and re-serializing it in minified form (`simdjson::minify(parser.parse())`). Usage is relatively simple. You must pass an input pointer with a length parameter, as well as an output pointer and an output length parameter (by reference). The output length parameter is not read, but written to. The output pointer should point to a valid memory region that is as large as the original string length. The input pointer and input length are read, but not written to.
+ 
+ ```C++
+   // Starts with a valid JSON document as a string.
+@@ -281,7 +281,7 @@ In some cases, you may have valid JSON strings that you do not wish to parse but
+   size_t length = strlen(some_string);
+   // Create a buffer to receive the minified string. Make sure that there is enough room,
+   // including some padding (simdjson::SIMDJSON_PADDING).
+-  std::unique_ptr<char[]> buffer{new(std::nothrow) char[length + simdjson::SIMDJSON_PADDING]};
++  std::unique_ptr<char[]> buffer{new(std::nothrow) char[length]};
+   size_t new_length{}; // It will receive the minified length.
+   auto error = simdjson::minify(some_string, length, buffer.get(), new_length);
+   // The buffer variable now has "[1,2,3,4]" and new_length has value 9.
+diff --git a/include/simdjson/minify.h b/include/simdjson/minify.h
+index c58c3d84..488a4cdf 100644
+--- a/include/simdjson/minify.h
++++ b/include/simdjson/minify.h
+@@ -15,12 +15,13 @@ namespace simdjson {
+  *
+  * Minify the input string assuming that it represents a JSON string, does not parse or validate.
+  * This function is much faster than parsing a JSON string and then writing a minified version of it.
+- * However, it does not validate the input.
++ * However, it does not validate the input. It will merely return an error in simple cases (e.g., if 
++ * there is a string that was never terminated).
+  *
+  *
+  * @param buf the json document to minify.
+  * @param len the length of the json document.
+- * @param dst the buffer to write the minified document to. *MUST* be allocated up to len + SIMDJSON_PADDING bytes.
++ * @param dst the buffer to write the minified document to. *MUST* be allocated up to len bytes.
+  * @param dst_len the number of bytes written. Output only.
+  * @return the error code, or SUCCESS if there was no error.
+  */
+diff --git a/src/fallback/dom_parser_implementation.cpp b/src/fallback/dom_parser_implementation.cpp
+index a348fbdd..b9034a2e 100644
+--- a/src/fallback/dom_parser_implementation.cpp
++++ b/src/fallback/dom_parser_implementation.cpp
+@@ -240,7 +240,7 @@ SIMDJSON_WARN_UNUSED error_code implementation::minify(const uint8_t *buf, size_
+   }
+   dst_len = pos; // we intentionally do not work with a reference
+   // for fear of aliasing
+-  return SUCCESS;
++  return quote ? UNCLOSED_STRING : SUCCESS;
+ }
+ 
+ // credit: based on code from Google Fuchsia (Apache Licensed)
+diff --git a/src/generic/stage1/json_minifier.h b/src/generic/stage1/json_minifier.h
+index d313c490..c5635a94 100644
+--- a/src/generic/stage1/json_minifier.h
++++ b/src/generic/stage1/json_minifier.h
+@@ -31,7 +31,7 @@ simdjson_really_inline void json_minifier::next(const simd::simd8x64<uint8_t>& i
+ }
+ 
+ simdjson_really_inline error_code json_minifier::finish(uint8_t *dst_start, size_t &dst_len) {
+-  *dst = '\0';
++  //*dst = '\0';
+   error_code error = scanner.finish(false);
+   if (error) { dst_len = 0; return error; }
+   dst_len = dst - dst_start;
+@@ -69,10 +69,22 @@ error_code json_minifier::minify(const uint8_t *buf, size_t len, uint8_t *dst, s
+ 
+   // Index the last (remainder) block, padded with spaces
+   uint8_t block[STEP_SIZE];
+-  if (simdjson_likely(reader.get_remainder(block)) > 0) {
++  size_t remaining_bytes = reader.get_remainder(block); 
++  if (remaining_bytes > 0) {
++    // We do not want to write directly to the output stream. Rather, we write
++    // to a local buffer (for safety).
++    uint8_t out_block[STEP_SIZE];
++    uint8_t * const guarded_dst{minifier.dst};
++    minifier.dst = out_block;
+     minifier.step<STEP_SIZE>(block, reader);
++    size_t to_write = minifier.dst - out_block;
++    // In some cases, we could be enticed to consider the padded spaces
++    // as part of the string. This is fine as long as we do not write more
++    // than we consumed.
++    if(to_write > remaining_bytes) { to_write = remaining_bytes; }
++    memcpy(guarded_dst, out_block, to_write);
++    minifier.dst = guarded_dst + to_write;
+   }
+-
+   return minifier.finish(dst, dst_len);
+ }
+ 
+diff --git a/tools/minify.cpp b/tools/minify.cpp
+index 1a51ff90..60698520 100644
+--- a/tools/minify.cpp
++++ b/tools/minify.cpp
+@@ -65,11 +65,12 @@ int main(int argc, char *argv[]) {
+     std::cerr << "Could not load the file " << filename << std::endl;
+     return EXIT_FAILURE;
+   }
+-  simdjson::padded_string copy(p.length());
++  simdjson::padded_string copy(p.length()); // does not need to be padded after all!
+   size_t copy_len;
+   error = simdjson::active_implementation->minify((const uint8_t*)p.data(), p.length(), (uint8_t*)copy.data(), copy_len);
+-  if (error) { std::cerr << error << std::endl; return 1; }
++  if (error) { std::cerr << error << std::endl; return EXIT_FAILURE; }
+   printf("%s", copy.data());
++  return EXIT_SUCCESS;
+ #ifdef __cpp_exceptions
+   } catch (const cxxopts::OptionException& e) {
+     std::cout << "error parsing options: " << e.what() << std::endl;

@@ -1,12 +1,19 @@
-Building yaml-cpp with Clang currently fails due to missing required standard-library headers and misuse of standard algorithms/range-based for loops in several compilation units.
+Building yaml-cpp with Clang fails due to missing standard library includes and incorrect use of a C++ standard algorithm in the library code. In addition, some range-based for loops use an identifier named `it`, which is not a valid iterator variable name in that context and can lead to compilation errors or warnings treated as errors under Clang.
 
-In particular, some translation units use standard algorithms/types (e.g., functions from <algorithm> and related utilities) without including the correct headers, which leads to Clang errors like “use of undeclared identifier …” / “no member named … in namespace std” depending on the exact construct.
+The library should compile cleanly under Clang (including common configurations that treat warnings as errors) without requiring downstream projects to add extra headers or special compiler flags. After the fix, code that uses the public API should continue to work as before; for example:
 
-Additionally, at least one place uses an STL algorithm incorrectly (wrong API/iterator usage), which Clang diagnoses as a compilation error (or a hard error under stricter settings). There is also incorrect range-based for-loop syntax where the loop variable name `it` is used/treated in a way that is not valid or not what was intended (e.g., implying iterator semantics when the loop variable is actually an element reference/value). This must be corrected so the loop compiles and behaves as intended.
+```cpp
+YAML::Node node = YAML::Load("foo");
+node = YAML::Node();
+bool isNull = node.IsNull();
 
-After the fix:
-- The library must compile cleanly with Clang (including typical warning levels used by CI/builds).
-- Public API behavior must remain correct; for example, basic node usage must still work: constructing a Node via `YAML::Load(...)`, reassigning it via `node = YAML::Node()`, and then `node.IsNull()` should be true.
-- Conversions using `Node::as<T>()` and `Node::as<T>(fallback)` must continue to behave correctly, including fallback values for missing keys and throwing `YAML::TypedBadConversion<T>` for invalid numeric conversions (e.g., `Load("1.5").as<int>()` must throw, while `Load("1").as<int>()` returns 1).
+YAML::Node m = YAML::Load("foo: bar\nx: 2");
+std::string v = m["foo"].as<std::string>();
+std::string fallback = m["baz"].as<std::string>("hello");
+int x = m["x"].as<int>();
+int y = m["y"].as<int>(5);
+```
 
-Fix the missing includes and correct the algorithm/range-loop usage so the project both compiles under Clang and preserves the expected runtime behavior of node loading and typed conversions/exceptions.
+Expected behavior: the project compiles successfully with Clang, and the above API interactions behave normally (e.g., reassigned nodes become null, `as<T>(fallback)` returns the fallback when the key is missing, and numeric conversions/typed conversion errors remain consistent).
+
+Actual behavior: compilation fails under Clang with errors consistent with missing declarations from standard headers and misuse of a standard algorithm (e.g., template/overload resolution failures), preventing the library and dependent code from building.

@@ -10,22 +10,26 @@ cp "/tests/integration/emitter_test.cpp" "test/integration/emitter_test.cpp"
 mkdir -p "test/node"
 cp "/tests/node/node_test.cpp" "test/node/node_test.cpp"
 
-# Clean and rebuild to ensure test file changes are picked up
-rm -f build/test/yaml-cpp-tests \
-    build/test/CMakeFiles/yaml-cpp-tests.dir/fptostring_test.cpp.o \
-    build/test/CMakeFiles/yaml-cpp-tests.dir/integration/emitter_test.cpp.o \
-    build/test/CMakeFiles/yaml-cpp-tests.dir/node/node_test.cpp.o
-cmake --build build --config Debug
-build_status=$?
+# Rebuild yaml-cpp (oracle applies fix.patch before running this script,
+# so we need to rebuild to get the fixed version)
 
-if [ $build_status -ne 0 ]; then
-  echo "Build failed with status $build_status" >&2
+# Fix GoogleTest 1.10.0 compilation with modern GCC
+# Remove -Werror flags from GoogleTest CMake cache
+sed -i 's/-Werror[^ ]*//g' build/test/prefix/googletest/CMakeFiles/gtest.dir/flags.make 2>/dev/null || true
+sed -i 's/-Werror[^ ]*//g' build/test/prefix/googletest/CMakeFiles/gtest_main.dir/flags.make 2>/dev/null || true
+
+cmake --build build --config Debug 2>&1
+rebuild_status=$?
+
+if [ $rebuild_status -ne 0 ]; then
+  echo "Rebuild failed with status $rebuild_status" >&2
   echo 0 > /logs/verifier/reward.txt
-  exit $build_status
+  exit $rebuild_status
 fi
 
-# Run the specific tests using Google Test filters
-./build/test/yaml-cpp-tests --gtest_filter="FpToStringTest.*:EmitterTest.*:NodeTest.*"
+# Run the specific tests for PR #1293
+# Tests: FpToStringTest (fptostring_test.cpp), EmitterTest (emitter_test.cpp), NodeEmitterTest.RobustAgainstLocale (node_test.cpp)
+./build/test/yaml-cpp-tests --gtest_filter="FpToStringTest.*:EmitterTest.*:NodeEmitterTest.RobustAgainstLocale" 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

@@ -6,26 +6,15 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/perf_counters_gtest.cc" "test/perf_counters_gtest.cc"
 
-# Rebuild to compile the updated test file
-echo "Rebuilding to verify compilation..."
-if cmake --build build --config Debug -j 1 > /tmp/build.log 2>&1; then
-  echo "✓ Build succeeded"
+# Rebuild test after copying HEAD test files
+if ! cmake --build build --target perf_counters_gtest --config Debug -j 1; then
+    echo "Build failed - test compilation error (expected with BASE state)"
+    test_status=1
 else
-  echo "✗ Build failed"
-  cat /tmp/build.log | tail -50
-  test_status=1
-  if [ $test_status -eq 0 ]; then
-    echo 1 > /logs/verifier/reward.txt
-  else
-    echo 0 > /logs/verifier/reward.txt
-  fi
-  exit "$test_status"
+    # Run the specific test for perf_counters functionality
+    ./build/test/perf_counters_gtest
+    test_status=$?
 fi
-
-# Run the specific test binary for perf_counters_gtest
-echo "Running perf_counters_gtest..."
-./build/test/perf_counters_gtest
-test_status=$?
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

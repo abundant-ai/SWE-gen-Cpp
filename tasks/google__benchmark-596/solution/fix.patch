@@ -1,0 +1,214 @@
+diff --git a/src/complexity.cc b/src/complexity.cc
+index 97bf6e0..02fe3fe 100644
+--- a/src/complexity.cc
++++ b/src/complexity.cc
+@@ -26,6 +26,7 @@ namespace benchmark {
+ 
+ // Internal function to calculate the different scalability forms
+ BigOFunc* FittingCurve(BigO complexity) {
++  static const double kLog2E = 1.44269504088896340736;
+   switch (complexity) {
+     case oN:
+       return [](int64_t n) -> double { return static_cast<double>(n); };
+@@ -34,9 +35,11 @@ BigOFunc* FittingCurve(BigO complexity) {
+     case oNCubed:
+       return [](int64_t n) -> double { return std::pow(n, 3); };
+     case oLogN:
+-      return [](int64_t n) { return log2(n); };
++      /* Note: can't use log2 because Android's GNU STL lacks it */
++      return [](int64_t n) { return kLog2E * log(n); };
+     case oNLogN:
+-      return [](int64_t n) { return n * log2(n); };
++      /* Note: can't use log2 because Android's GNU STL lacks it */
++      return [](int64_t n) { return kLog2E * n * log(n); };
+     case o1:
+     default:
+       return [](int64_t) { return 1.0; };
+diff --git a/src/internal_macros.h b/src/internal_macros.h
+index 500f0ab..b7e9203 100644
+--- a/src/internal_macros.h
++++ b/src/internal_macros.h
+@@ -3,6 +3,9 @@
+ 
+ #include "benchmark/benchmark.h"
+ 
++/* Needed to detect STL */
++#include <cstdlib>
++
+ // clang-format off
+ 
+ #ifndef __has_feature
+@@ -69,6 +72,10 @@
+ #define BENCHMARK_OS_SOLARIS 1
+ #endif
+ 
++#if defined(__ANDROID__) && defined(__GLIBCXX__)
++#define BENCHMARK_STL_ANDROID_GNUSTL 1
++#endif
++
+ #if !__has_feature(cxx_exceptions) && !defined(__cpp_exceptions) \
+      && !defined(__EXCEPTIONS)
+   #define BENCHMARK_HAS_NO_EXCEPTIONS
+diff --git a/src/string_util.cc b/src/string_util.cc
+index ebc3ace..05ac5b4 100644
+--- a/src/string_util.cc
++++ b/src/string_util.cc
+@@ -169,4 +169,93 @@ void ReplaceAll(std::string* str, const std::string& from,
+   }
+ }
+ 
++#ifdef BENCHMARK_STL_ANDROID_GNUSTL
++/*
++ * GNU STL in Android NDK lacks support for some C++11 functions, including
++ * stoul, stoi, stod. We reimplement them here using C functions strtoul,
++ * strtol, strtod. Note that reimplemented functions are in benchmark::
++ * namespace, not std:: namespace.
++ */
++unsigned long stoul(const std::string& str, size_t* pos, int base) {
++  /* Record previous errno */
++  const int oldErrno = errno;
++  errno = 0;
++
++  const char* strStart = str.c_str();
++  char* strEnd = const_cast<char*>(strStart);
++  const unsigned long result = strtoul(strStart, &strEnd, base);
++
++  const int strtoulErrno = errno;
++  /* Restore previous errno */
++  errno = oldErrno;
++
++  /* Check for errors and return */
++  if (strtoulErrno == ERANGE) {
++    throw std::out_of_range(
++      "stoul failed: " + str + " is outside of range of unsigned long");
++  } else if (strEnd == strStart || strtoulErrno != 0) {
++    throw std::invalid_argument(
++      "stoul failed: " + str + " is not an integer");
++  }
++  if (pos != nullptr) {
++    *pos = static_cast<size_t>(strEnd - strStart);
++  }
++  return result;
++}
++
++int stoi(const std::string& str, size_t* pos, int base) {
++  /* Record previous errno */
++  const int oldErrno = errno;
++  errno = 0;
++
++  const char* strStart = str.c_str();
++  char* strEnd = const_cast<char*>(strStart);
++  const long result = strtol(strStart, &strEnd, base);
++
++  const int strtolErrno = errno;
++  /* Restore previous errno */
++  errno = oldErrno;
++
++  /* Check for errors and return */
++  if (strtolErrno == ERANGE || long(int(result)) != result) {
++    throw std::out_of_range(
++      "stoul failed: " + str + " is outside of range of int");
++  } else if (strEnd == strStart || strtolErrno != 0) {
++    throw std::invalid_argument(
++      "stoul failed: " + str + " is not an integer");
++  }
++  if (pos != nullptr) {
++    *pos = static_cast<size_t>(strEnd - strStart);
++  }
++  return int(result);
++}
++
++double stod(const std::string& str, size_t* pos) {
++  /* Record previous errno */
++  const int oldErrno = errno;
++  errno = 0;
++
++  const char* strStart = str.c_str();
++  char* strEnd = const_cast<char*>(strStart);
++  const double result = strtod(strStart, &strEnd);
++
++  /* Restore previous errno */
++  const int strtodErrno = errno;
++  errno = oldErrno;
++
++  /* Check for errors and return */
++  if (strtodErrno == ERANGE) {
++    throw std::out_of_range(
++      "stoul failed: " + str + " is outside of range of int");
++  } else if (strEnd == strStart || strtodErrno != 0) {
++    throw std::invalid_argument(
++      "stoul failed: " + str + " is not an integer");
++  }
++  if (pos != nullptr) {
++    *pos = static_cast<size_t>(strEnd - strStart);
++  }
++  return result;
++}
++#endif
++
+ }  // end namespace benchmark
+diff --git a/src/string_util.h b/src/string_util.h
+index ca49c4f..4a55012 100644
+--- a/src/string_util.h
++++ b/src/string_util.h
+@@ -34,6 +34,23 @@ inline std::string StrCat(Args&&... args) {
+ void ReplaceAll(std::string* str, const std::string& from,
+                 const std::string& to);
+ 
++#ifdef BENCHMARK_STL_ANDROID_GNUSTL
++/*
++ * GNU STL in Android NDK lacks support for some C++11 functions, including
++ * stoul, stoi, stod. We reimplement them here using C functions strtoul,
++ * strtol, strtod. Note that reimplemented functions are in benchmark::
++ * namespace, not std:: namespace.
++ */
++unsigned long stoul(const std::string& str, size_t* pos = nullptr,
++                           int base = 10);
++int stoi(const std::string& str, size_t* pos = nullptr, int base = 10);
++double stod(const std::string& str, size_t* pos = nullptr);
++#else
++using std::stoul;
++using std::stoi;
++using std::stod;
++#endif
++
+ }  // end namespace benchmark
+ 
+ #endif  // BENCHMARK_STRING_UTIL_H_
+diff --git a/src/sysinfo.cc b/src/sysinfo.cc
+index d19d0ef..73064b9 100644
+--- a/src/sysinfo.cc
++++ b/src/sysinfo.cc
+@@ -225,7 +225,7 @@ int CountSetBitsInCPUMap(std::string Val) {
+   auto CountBits = [](std::string Part) {
+     using CPUMask = std::bitset<sizeof(std::uintptr_t) * CHAR_BIT>;
+     Part = "0x" + Part;
+-    CPUMask Mask(std::stoul(Part, nullptr, 16));
++    CPUMask Mask(benchmark::stoul(Part, nullptr, 16));
+     return static_cast<int>(Mask.count());
+   };
+   size_t Pos;
+@@ -408,7 +408,7 @@ int GetNumCPUs() {
+     if (ln.size() >= Key.size() && ln.compare(0, Key.size(), Key) == 0) {
+       NumCPUs++;
+       if (!value.empty()) {
+-        int CurID = std::stoi(value);
++        int CurID = benchmark::stoi(value);
+         MaxID = std::max(CurID, MaxID);
+       }
+     }
+@@ -481,12 +481,12 @@ double GetCPUCyclesPerSecond() {
+     // which would cause infinite looping in WallTime_Init.
+     if (startsWithKey(ln, "cpu MHz")) {
+       if (!value.empty()) {
+-        double cycles_per_second = std::stod(value) * 1000000.0;
++        double cycles_per_second = benchmark::stod(value) * 1000000.0;
+         if (cycles_per_second > 0) return cycles_per_second;
+       }
+     } else if (startsWithKey(ln, "bogomips")) {
+       if (!value.empty()) {
+-        bogo_clock = std::stod(value) * 1000000.0;
++        bogo_clock = benchmark::stod(value) * 1000000.0;
+         if (bogo_clock < 0.0) bogo_clock = error_value;
+       }
+     }

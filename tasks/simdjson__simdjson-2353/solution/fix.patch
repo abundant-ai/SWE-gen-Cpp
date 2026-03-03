@@ -1,0 +1,271 @@
+diff --git a/doc/basics.md b/doc/basics.md
+index e2e39643..56f8c400 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -1243,7 +1243,6 @@ int main() {
+ You may also conditionally fill in `std::optional` values.
+ 
+ ```C++
+-
+   padded_string json =
+       R"( { "car1": { "make": "Toyota", "model": "Camry",  "year": 2018,
+        "tire_pressure": [ 40.1, 39.9 ] }
+@@ -1258,6 +1257,23 @@ You may also conditionally fill in `std::optional` values.
+   // error is simdjson::SUCCESS
+ ```
+ 
++You can also deserialized to map-like types with keys that can be constructed
++from `std::string_view` instances:
++
++
++```C++
++  padded_string json =
++      R"( { "car1": { "make": "Toyota", "model": "Camry",  "year": 2018,
++       "tire_pressure": [ 40.1, 39.9 ] }
++})"_padded;
++  ondemand::parser parser;
++  ondemand::document doc = parser.iterate(json);
++  std:map<std::string,Car> cars;
++  error = doc.get<std:map<std::string,Car>>().get(cars);
++  // car has value car1->Car{"Toyota", "Camry", 2018, {40.1f, 39.9f}}
++  // error is simdjson::SUCCESS
++```
++
+ And so forth.
+ 
+ Advanced users may want to overwrite the defaults provided by the simdjson library.
+diff --git a/include/simdjson/concepts.h b/include/simdjson/concepts.h
+index 649314bc..ffe344c0 100644
+--- a/include/simdjson/concepts.h
++++ b/include/simdjson/concepts.h
+@@ -32,14 +32,30 @@ SIMDJSON_IMPL_CONCEPT(op_append, operator+=)
+ #undef SIMDJSON_IMPL_CONCEPT
+ } // namespace details
+ 
++
++template <typename T>
++concept string_view_like = std::is_convertible_v<T, std::string_view> &&
++                           !std::is_convertible_v<T, const char*>;
++
++template<typename T>
++concept constructible_from_string_view = std::is_constructible_v<T, std::string_view>
++                                        && !std::is_same_v<T, std::string_view>
++                                        && std::is_default_constructible_v<T>;
++
++template<typename M>
++concept string_view_keyed_map = string_view_like<typename M::key_type>
++              && requires(std::remove_cvref_t<M>& m, typename M::key_type sv, typename M::mapped_type v) {
++    { m.emplace(sv, v) } -> std::same_as<std::pair<typename M::iterator, bool>>;
++};
++
+ /// Check if T is a container that we can append to, including:
+ ///   std::vector, std::deque, std::list, std::string, ...
+ template <typename T>
+ concept appendable_containers =
+-    details::supports_emplace_back<T> || details::supports_emplace<T> ||
++    (details::supports_emplace_back<T> || details::supports_emplace<T> ||
+     details::supports_push_back<T> || details::supports_push<T> ||
+     details::supports_add<T> || details::supports_append<T> ||
+-    details::supports_insert<T>;
++    details::supports_insert<T>) && !string_view_keyed_map<T>;
+ 
+ /// Insert into the container however possible
+ template <appendable_containers T, typename... Args>
+@@ -107,6 +123,8 @@ concept optional_type = requires(std::remove_cvref_t<T> obj) {
+   { static_cast<bool>(obj) } -> std::same_as<bool>; // convertible to bool
+ };
+ 
++
++
+ } // namespace concepts
+ } // namespace simdjson
+ #endif // SIMDJSON_SUPPORTS_DESERIALIZATION
+diff --git a/include/simdjson/generic/ondemand/document.h b/include/simdjson/generic/ondemand/document.h
+index c109f15b..50d3523f 100644
+--- a/include/simdjson/generic/ondemand/document.h
++++ b/include/simdjson/generic/ondemand/document.h
+@@ -239,20 +239,27 @@ public:
+     if constexpr (custom_deserializable<T, document>) {
+         return deserialize(*this, out);
+     } else {
+-#endif // SIMDJSON_SUPPORTS_DESERIALIZATION
+-      // Unless the simdjson library or the user provides an inline implementation, calling this method should
+-      // immediately fail.
+-      static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
+-        "The supported types are ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
+-        "int64_t, double, and bool. We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
+-        " get_object(), get_array(), get_raw_json_string(), or get_string() instead of the get template."
+-        " You may also add support for custom types, see our documentation.");
++      static_assert(!sizeof(T), "The get<T> method with type T is not implemented by the simdjson library. "
++        "And you do not seem to have added support for it. Indeed, we have that "
++        "simdjson::custom_deserializable<T> is false and the type T is not a default type "
++        "such as ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
++        "int64_t, double, or bool.");
+       static_cast<void>(out); // to get rid of unused errors
+       return UNINITIALIZED;
+-#if SIMDJSON_SUPPORTS_DESERIALIZATION
+     }
+-#endif
++#else // SIMDJSON_SUPPORTS_DESERIALIZATION
++    // Unless the simdjson library or the user provides an inline implementation, calling this method should
++    // immediately fail.
++    static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
++      "The supported types are ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
++      "int64_t, double, and bool. We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
++      " get_object(), get_array(), get_raw_json_string(), or get_string() instead of the get template."
++      " You may also add support for custom types, see our documentation.");
++    static_cast<void>(out); // to get rid of unused errors
++    return UNINITIALIZED;
++#endif // SIMDJSON_SUPPORTS_DESERIALIZATION
+   }
++
+   /** @overload template<typename T> error_code get(T &out) & noexcept */
+   template<typename T> simdjson_deprecated simdjson_inline error_code get(T &out) && noexcept;
+ 
+@@ -814,20 +821,27 @@ public:
+     if constexpr (custom_deserializable<T, document_reference>) {
+         return deserialize(*this, out);
+     } else {
+-#endif // SIMDJSON_SUPPORTS_DESERIALIZATION
+-      // Unless the simdjson library or the user provides an inline implementation, calling this method should
+-      // immediately fail.
+-      static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
+-        "The supported types are ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
+-        "int64_t, double, and bool. We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
+-        " get_object(), get_array(), get_raw_json_string(), or get_string() instead of the get template."
+-        " You may also add support for custom types, see our documentation.");
++      static_assert(!sizeof(T), "The get<T> method with type T is not implemented by the simdjson library. "
++        "And you do not seem to have added support for it. Indeed, we have that "
++        "simdjson::custom_deserializable<T> is false and the type T is not a default type "
++        "such as ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
++        "int64_t, double, or bool.");
+       static_cast<void>(out); // to get rid of unused errors
+       return UNINITIALIZED;
+-#if SIMDJSON_SUPPORTS_DESERIALIZATION
+     }
+-#endif
++#else // SIMDJSON_SUPPORTS_DESERIALIZATION
++    // Unless the simdjson library or the user provides an inline implementation, calling this method should
++    // immediately fail.
++    static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
++      "The supported types are ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
++      "int64_t, double, and bool. We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
++      " get_object(), get_array(), get_raw_json_string(), or get_string() instead of the get template."
++      " You may also add support for custom types, see our documentation.");
++    static_cast<void>(out); // to get rid of unused errors
++    return UNINITIALIZED;
++#endif // SIMDJSON_SUPPORTS_DESERIALIZATION
+   }
++
+   /** @overload template<typename T> error_code get(T &out) & noexcept */
+   template<typename T> simdjson_inline error_code get(T &out) && noexcept;
+   simdjson_inline simdjson_result<std::string_view> raw_json() noexcept;
+diff --git a/include/simdjson/generic/ondemand/std_deserialize.h b/include/simdjson/generic/ondemand/std_deserialize.h
+index ce8b9fa3..1a9bf112 100644
+--- a/include/simdjson/generic/ondemand/std_deserialize.h
++++ b/include/simdjson/generic/ondemand/std_deserialize.h
+@@ -55,6 +55,16 @@ error_code tag_invoke(deserialize_tag, auto &val, T &out) noexcept {
+   return SUCCESS;
+ }
+ 
++template <concepts::constructible_from_string_view T, typename ValT>
++  requires(!require_custom_serialization<T>)
++error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept(std::is_nothrow_constructible_v<T, std::string_view>) {
++  std::string_view str;
++  SIMDJSON_TRY(val.get_string().get(str));
++  out = T{str};
++  return SUCCESS;
++}
++
++
+ /**
+  * STL containers have several constructors including one that takes a single
+  * size argument. Thus, some compilers (Visual Studio) will not be able to
+@@ -100,6 +110,39 @@ error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept(false) {
+ }
+ 
+ 
++/**
++ * We want to support std::map and std::unordered_map but only for
++ * string-keyed types.
++ */
++ template <concepts::string_view_keyed_map T, typename ValT>
++ requires(!require_custom_serialization<T>)
++error_code tag_invoke(deserialize_tag, ValT &val, T &out) noexcept(false) {
++  using value_type = typename std::remove_cvref_t<T>::mapped_type;
++  static_assert(
++     deserializable<value_type, ValT>,
++     "The specified value type inside the container must itself be deserializable");
++  static_assert(
++      std::is_default_constructible_v<value_type>,
++      "The specified value type inside the container must default constructible.");
++ SIMDJSON_IMPLEMENTATION::ondemand::object obj;
++ SIMDJSON_TRY(val.get_object().get(obj));
++ for (auto field : obj) {
++    std::string_view key;
++    SIMDJSON_TRY(field.unescaped_key().get(key));
++    value_type this_value;
++    SIMDJSON_TRY(field.value().get<value_type>().get(this_value));
++    [[maybe_unused]] std::pair<typename T::iterator, bool> result = out.emplace(key, this_value);
++    // unclear what to do if the key already exists
++    // if (result.second == false) {
++    //   // key already exists
++    // }
++ }
++ (void)out;
++ return SUCCESS;
++}
++
++
++
+ 
+ /**
+  * This CPO (Customization Point Object) will help deserialize into
+diff --git a/include/simdjson/generic/ondemand/value.h b/include/simdjson/generic/ondemand/value.h
+index 7fa9d1ad..3ecc786f 100644
+--- a/include/simdjson/generic/ondemand/value.h
++++ b/include/simdjson/generic/ondemand/value.h
+@@ -70,22 +70,28 @@ public:
+     noexcept
+ #endif
+  {
+-#if SIMDJSON_SUPPORTS_DESERIALIZATION
+-    if constexpr (custom_deserializable<T, value>) {
++  #if SIMDJSON_SUPPORTS_DESERIALIZATION
++  if constexpr (custom_deserializable<T, value>) {
+       return deserialize(*this, out);
+-    } else {
+-#endif // SIMDJSON_SUPPORTS_DESERIALIZATION
+-      // Unless the simdjson library or the user provides an inline implementation, calling this method should
+-      // immediately fail.
+-      static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
+-        "The supported types are ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
+-        "int64_t, double, and bool. We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
+-        " get_object(), get_array(), get_raw_json_string(), or get_string() instead of the get template."
+-        " You may also add support for custom types, see our documentation.");
+-      static_cast<void>(out); // to get rid of unused errors
+-      return UNINITIALIZED;
+-#if SIMDJSON_SUPPORTS_DESERIALIZATION
+-    }
++  } else {
++    static_assert(!sizeof(T), "The get<T> method with type T is not implemented by the simdjson library. "
++      "And you do not seem to have added support for it. Indeed, we have that "
++      "simdjson::custom_deserializable<T> is false and the type T is not a default type "
++      "such as ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
++      "int64_t, double, or bool.");
++    static_cast<void>(out); // to get rid of unused errors
++    return UNINITIALIZED;
++  }
++#else // SIMDJSON_SUPPORTS_DESERIALIZATION
++    // Unless the simdjson library or the user provides an inline implementation, calling this method should
++    // immediately fail.
++    static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
++      "The supported types are ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
++      "int64_t, double, and bool. We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
++      " get_object(), get_array(), get_raw_json_string(), or get_string() instead of the get template."
++      " You may also add support for custom types, see our documentation.");
++    static_cast<void>(out); // to get rid of unused errors
++    return UNINITIALIZED;
+ #endif
+   }
+ 

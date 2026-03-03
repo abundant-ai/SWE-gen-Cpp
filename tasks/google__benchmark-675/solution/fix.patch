@@ -1,0 +1,157 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index b7a8998..7aa6487 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -1339,8 +1339,10 @@ class BenchmarkReporter {
+           allocs_per_iter(0.0),
+           max_bytes_used(0) {}
+ 
+-    std::string benchmark_name;
++    std::string benchmark_name() const;
++    std::string run_name;
+     RunType run_type;          // is this a measurement, or an aggregate?
++    std::string aggregate_name;
+     std::string report_label;  // Empty if not set by benchmark.
+     bool error_occurred;
+     std::string error_message;
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 0c92ae6..4d3001a 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -132,7 +132,7 @@ BenchmarkReporter::Run CreateRunReport(
+   // Create report about this benchmark run.
+   BenchmarkReporter::Run report;
+ 
+-  report.benchmark_name = b.name;
++  report.run_name = b.name;
+   report.error_occurred = results.has_error_;
+   report.error_message = results.error_message_;
+   report.report_label = results.report_label_;
+diff --git a/src/complexity.cc b/src/complexity.cc
+index 8d1392a..0be73e0 100644
+--- a/src/complexity.cc
++++ b/src/complexity.cc
+@@ -182,13 +182,15 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+     result_cpu = MinimalLeastSq(n, cpu_time, reports[0].complexity);
+     result_real = MinimalLeastSq(n, real_time, result_cpu.complexity);
+   }
+-  std::string benchmark_name =
+-      reports[0].benchmark_name.substr(0, reports[0].benchmark_name.find('/'));
++
++  std::string run_name = reports[0].benchmark_name().substr(
++      0, reports[0].benchmark_name().find('/'));
+ 
+   // Get the data from the accumulator to BenchmarkReporter::Run's.
+   Run big_o;
++  big_o.run_name = run_name;
+   big_o.run_type = BenchmarkReporter::Run::RT_Aggregate;
+-  big_o.benchmark_name = benchmark_name + "_BigO";
++  big_o.aggregate_name = "BigO";
+   big_o.iterations = 0;
+   big_o.real_accumulated_time = result_real.coef;
+   big_o.cpu_accumulated_time = result_cpu.coef;
+@@ -204,9 +206,10 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+ 
+   // Only add label to mean/stddev if it is same for all runs
+   Run rms;
++  rms.run_name = run_name;
+   big_o.report_label = reports[0].report_label;
+   rms.run_type = BenchmarkReporter::Run::RT_Aggregate;
+-  rms.benchmark_name = benchmark_name + "_RMS";
++  rms.aggregate_name = "RMS";
+   rms.report_label = big_o.report_label;
+   rms.iterations = 0;
+   rms.real_accumulated_time = result_real.rms / multiplier;
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index e919e78..f1d872a 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -106,7 +106,7 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+   auto name_color =
+       (result.report_big_o || result.report_rms) ? COLOR_BLUE : COLOR_GREEN;
+   printer(Out, name_color, "%-*s ", name_field_width_,
+-          result.benchmark_name.c_str());
++          result.benchmark_name().c_str());
+ 
+   if (result.error_occurred) {
+     printer(Out, COLOR_RED, "ERROR OCCURRED: \'%s\'",
+diff --git a/src/csv_reporter.cc b/src/csv_reporter.cc
+index 4a64190..dc370de 100644
+--- a/src/csv_reporter.cc
++++ b/src/csv_reporter.cc
+@@ -88,7 +88,7 @@ void CSVReporter::PrintRunData(const Run& run) {
+ 
+   // Field with embedded double-quote characters must be doubled and the field
+   // delimited with double-quotes.
+-  std::string name = run.benchmark_name;
++  std::string name = run.benchmark_name();
+   ReplaceAll(&name, "\"", "\"\"");
+   Out << '"' << name << "\",";
+   if (run.error_occurred) {
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index 54e3af3..475cf0a 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -159,7 +159,8 @@ void JSONReporter::Finalize() {
+ void JSONReporter::PrintRunData(Run const& run) {
+   std::string indent(6, ' ');
+   std::ostream& out = GetOutputStream();
+-  out << indent << FormatKV("name", run.benchmark_name) << ",\n";
++  out << indent << FormatKV("name", run.benchmark_name()) << ",\n";
++  out << indent << FormatKV("run_name", run.run_name) << ",\n";
+   out << indent << FormatKV("run_type", [&run]() -> const char* {
+     switch (run.run_type) {
+       case BenchmarkReporter::Run::RT_Iteration:
+@@ -169,6 +170,9 @@ void JSONReporter::PrintRunData(Run const& run) {
+     }
+     BENCHMARK_UNREACHABLE();
+   }()) << ",\n";
++  if (run.run_type == BenchmarkReporter::Run::RT_Aggregate) {
++    out << indent << FormatKV("aggregate_name", run.aggregate_name) << ",\n";
++  }
+   if (run.error_occurred) {
+     out << indent << FormatKV("error_occurred", run.error_occurred) << ",\n";
+     out << indent << FormatKV("error_message", run.error_message) << ",\n";
+diff --git a/src/reporter.cc b/src/reporter.cc
+index 541661a..fe86617 100644
+--- a/src/reporter.cc
++++ b/src/reporter.cc
+@@ -72,6 +72,14 @@ const char *BenchmarkReporter::Context::executable_name;
+ 
+ BenchmarkReporter::Context::Context() : cpu_info(CPUInfo::Get()) {}
+ 
++std::string BenchmarkReporter::Run::benchmark_name() const {
++  std::string name = run_name;
++  if (run_type == RT_Aggregate) {
++    name += "_" + aggregate_name;
++  }
++  return name;
++}
++
+ double BenchmarkReporter::Run::GetAdjustedRealTime() const {
+   double new_time = real_accumulated_time * GetTimeUnitMultiplier(time_unit);
+   if (iterations != 0) new_time /= static_cast<double>(iterations);
+diff --git a/src/statistics.cc b/src/statistics.cc
+index 588fd12..b5fec52 100644
+--- a/src/statistics.cc
++++ b/src/statistics.cc
+@@ -123,7 +123,7 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+ 
+   // Populate the accumulators.
+   for (Run const& run : reports) {
+-    CHECK_EQ(reports[0].benchmark_name, run.benchmark_name);
++    CHECK_EQ(reports[0].benchmark_name(), run.benchmark_name());
+     CHECK_EQ(run_iterations, run.iterations);
+     if (run.error_occurred) continue;
+     real_accumulated_time_stat.emplace_back(run.real_accumulated_time);
+@@ -150,8 +150,9 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+   for (const auto& Stat : *reports[0].statistics) {
+     // Get the data from the accumulator to BenchmarkReporter::Run's.
+     Run data;
++    data.run_name = reports[0].benchmark_name();
+     data.run_type = BenchmarkReporter::Run::RT_Aggregate;
+-    data.benchmark_name = reports[0].benchmark_name + "_" + Stat.name_;
++    data.aggregate_name = Stat.name_;
+     data.report_label = report_label;
+     data.iterations = run_iterations;
+ 

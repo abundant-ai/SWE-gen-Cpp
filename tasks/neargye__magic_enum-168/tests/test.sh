@@ -6,22 +6,23 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/test.cpp" "test/test.cpp"
 
-# Remove emoji character from Language enum definition to avoid compilation errors
-# Emojis are not valid identifiers in C++ even with NONASCII flag due to lexical analysis limitations
-sed -i 's/, 😃 = 40//' test/test.cpp
-sed -i '/😃/d' test/test.cpp
-
-# Rebuild tests with updated test files
+# Clean and reconfigure build to pick up new test file
 cd build
+rm -rf test/CMakeFiles/test-cpp17.dir
 cmake .. -DMAGIC_ENUM_OPT_BUILD_TESTS=ON -DMAGIC_ENUM_OPT_ENABLE_NONASCII=OFF
+cmake --build . --target test-cpp17
+build_status=$?
 
-# Build only the test targets for test.cpp (not all targets including examples which may fail)
-cmake --build . --target test-cpp17 || true
-cmake --build . --target test-cpp20 || true
-
-# Run only the test targets for test.cpp (the specific tests for this PR)
-ctest -R "^test-" -V
-test_status=$?
+# If build fails, the test fails
+if [ $build_status -ne 0 ]; then
+  test_status=1
+else
+  # Run the specific test executable for test.cpp
+  # The test is built for multiple C++ standards, we'll run the C++17 version
+  cd test
+  ./test-cpp17
+  test_status=$?
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

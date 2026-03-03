@@ -1,0 +1,485 @@
+diff --git a/benchmark/find_tweet/nlohmann_json.h b/benchmark/find_tweet/nlohmann_json.h
+index 3987e31c..0d7a7c8d 100644
+--- a/benchmark/find_tweet/nlohmann_json.h
++++ b/benchmark/find_tweet/nlohmann_json.h
+@@ -13,7 +13,7 @@ struct nlohmann_json {
+     auto root = nlohmann::json::parse(json.data(), json.data() + json.size());
+     for (auto tweet : root["statuses"]) {
+       if (tweet["id"] == find_id) {
+-        result = tweet["text"];
++        result = to_string(tweet["text"]);
+         return true;
+       }
+     }
+diff --git a/benchmark/top_tweet/nlohmann_json.h b/benchmark/top_tweet/nlohmann_json.h
+index b16b203f..c9321a34 100644
+--- a/benchmark/top_tweet/nlohmann_json.h
++++ b/benchmark/top_tweet/nlohmann_json.h
+@@ -26,8 +26,8 @@ struct nlohmann_json {
+       }
+     }
+ 
+-    result.text = top_tweet["text"];
+-    result.screen_name = top_tweet["user"]["screen_name"];
++    result.text = to_string(top_tweet["text"]);
++    result.screen_name = to_string(top_tweet["user"]["screen_name"]);
+     return result.retweet_count != -1;
+   }
+ };
+diff --git a/include/simdjson/generic/ondemand/amalgamated.h b/include/simdjson/generic/ondemand/amalgamated.h
+index e1ba5649..06186c1e 100644
+--- a/include/simdjson/generic/ondemand/amalgamated.h
++++ b/include/simdjson/generic/ondemand/amalgamated.h
+@@ -27,6 +27,7 @@
+ // Inline definitions
+ #include "simdjson/generic/ondemand/array-inl.h"
+ #include "simdjson/generic/ondemand/array_iterator-inl.h"
++#include "simdjson/generic/ondemand/value-inl.h"
+ #include "simdjson/generic/ondemand/document-inl.h"
+ #include "simdjson/generic/ondemand/document_stream-inl.h"
+ #include "simdjson/generic/ondemand/field-inl.h"
+@@ -39,7 +40,6 @@
+ #include "simdjson/generic/ondemand/raw_json_string-inl.h"
+ #include "simdjson/generic/ondemand/serialization-inl.h"
+ #include "simdjson/generic/ondemand/token_iterator-inl.h"
+-#include "simdjson/generic/ondemand/value-inl.h"
+ #include "simdjson/generic/ondemand/value_iterator-inl.h"
+ 
+-#include "simdjson/generic/ondemand/tag_invoke.h"
+\ No newline at end of file
++#include "simdjson/generic/ondemand/tag_invoke.h"
+diff --git a/include/simdjson/generic/ondemand/deserialize.h b/include/simdjson/generic/ondemand/deserialize.h
+index faa17ffb..ca00bbad 100644
+--- a/include/simdjson/generic/ondemand/deserialize.h
++++ b/include/simdjson/generic/ondemand/deserialize.h
+@@ -67,6 +67,14 @@ class document;
+ }
+ } // namespace SIMDJSON_IMPLEMENTATION
+ 
++struct deserialize_tag;
++
++template <typename T, typename ValT = SIMDJSON_IMPLEMENTATION::ondemand::value>
++concept deserializable = tag_invocable<deserialize_tag, ValT&, T&>;
++
++template <typename T, typename ValT = SIMDJSON_IMPLEMENTATION::ondemand::value>
++concept nothrow_deserializable = nothrow_tag_invocable<deserialize_tag, ValT&, T&>;
++
+ /// Deserialize Tag
+ inline constexpr struct deserialize_tag {
+   using value_type = SIMDJSON_IMPLEMENTATION::ondemand::value;
+@@ -74,26 +82,21 @@ inline constexpr struct deserialize_tag {
+ 
+   // Customization Point for value
+   template <typename T>
+-    requires tag_invocable<deserialize_tag, std::type_identity<T>, value_type&>
+-  [[nodiscard]] constexpr simdjson_result<T>
+-  operator()(std::type_identity<T>, value_type &object) const
+-      noexcept(nothrow_tag_invocable<deserialize_tag, std::type_identity<T>, value_type&>) {
+-    return tag_invoke(*this, std::type_identity<T>{}, object);
++    requires deserializable<T, value_type>
++  [[nodiscard]] constexpr /* error_code */ auto operator()(value_type &object, T& output) const noexcept(nothrow_deserializable<T, value_type>) {
++    return tag_invoke(*this, object, output);
+   }
+ 
+   // Customization Point for document
+   template <typename T>
+-    requires tag_invocable<deserialize_tag, std::type_identity<T>, document_type&>
+-  [[nodiscard]] constexpr simdjson_result<T>
+-  operator()(std::type_identity<T>, document_type &object) const
+-      noexcept(nothrow_tag_invocable<deserialize_tag, std::type_identity<T>, document_type&>) {
+-    return tag_invoke(*this, std::type_identity<T>{}, object);
++    requires deserializable<T, document_type>
++  [[nodiscard]] constexpr /* error_code */ auto operator()(document_type &object, T& output) const noexcept(nothrow_deserializable<T, document_type>) {
++    return tag_invoke(*this, object, output);
+   }
+ 
+   // default implementations can also be done here
+ } deserialize{};
+ 
+-
+ #endif
+ 
+ } // namespace simdjson
+diff --git a/include/simdjson/generic/ondemand/document-inl.h b/include/simdjson/generic/ondemand/document-inl.h
+index be246536..cb70c22c 100644
+--- a/include/simdjson/generic/ondemand/document-inl.h
++++ b/include/simdjson/generic/ondemand/document-inl.h
+@@ -13,6 +13,7 @@
+ #include "simdjson/generic/ondemand/object-inl.h"
+ #include "simdjson/generic/ondemand/raw_json_string.h"
+ #include "simdjson/generic/ondemand/value.h"
++#include "simdjson/generic/ondemand/value-inl.h"
+ #include "simdjson/generic/ondemand/value_iterator-inl.h"
+ #include "simdjson/generic/ondemand/deserialize.h"
+ #endif // SIMDJSON_CONDITIONAL_INCLUDE
+@@ -168,9 +169,16 @@ template<> simdjson_inline simdjson_result<int64_t> document::get() & noexcept {
+ template<> simdjson_inline simdjson_result<bool> document::get() & noexcept { return get_bool(); }
+ template<> simdjson_inline simdjson_result<value> document::get() & noexcept { return get_value(); }
+ 
+-template<typename T> simdjson_inline error_code document::get(T &out) & noexcept {
+-  return get<T>().get(out);
+-}
++template<> simdjson_inline error_code document::get(array& out) & noexcept { return get_array().get(out); }
++template<> simdjson_inline error_code document::get(object& out) & noexcept { return get_object().get(out); }
++template<> simdjson_inline error_code document::get(raw_json_string& out) & noexcept { return get_raw_json_string().get(out); }
++template<> simdjson_inline error_code document::get(std::string_view& out) & noexcept { return get_string(false).get(out); }
++template<> simdjson_inline error_code document::get(double& out) & noexcept { return get_double().get(out); }
++template<> simdjson_inline error_code document::get(uint64_t& out) & noexcept { return get_uint64().get(out); }
++template<> simdjson_inline error_code document::get(int64_t& out) & noexcept { return get_int64().get(out); }
++template<> simdjson_inline error_code document::get(bool& out) & noexcept { return get_bool().get(out); }
++template<> simdjson_inline error_code document::get(value& out) & noexcept { return get_value().get(out); }
++
+ 
+ #if SIMDJSON_EXCEPTIONS
+ template <class T>
+diff --git a/include/simdjson/generic/ondemand/document.h b/include/simdjson/generic/ondemand/document.h
+index e305b00d..70b4c36d 100644
+--- a/include/simdjson/generic/ondemand/document.h
++++ b/include/simdjson/generic/ondemand/document.h
+@@ -5,6 +5,7 @@
+ #include "simdjson/generic/ondemand/base.h"
+ #include "simdjson/generic/ondemand/json_iterator.h"
+ #include "simdjson/generic/ondemand/deserialize.h"
++#include "simdjson/generic/ondemand/value.h"
+ #endif // SIMDJSON_CONDITIONAL_INCLUDE
+ 
+ 
+@@ -180,28 +181,18 @@ public:
+    * @returns A value of the given type, parsed from the JSON.
+    * @returns INCORRECT_TYPE If the JSON value is not the given type.
+    */
+-  template<typename T> simdjson_inline simdjson_result<T> get() &
++  template <typename T>
++  simdjson_inline simdjson_result<T> get() &
+ #ifdef __cpp_concepts
+-    noexcept(tag_invocable<deserialize_tag, std::type_identity<T>, document&> ? nothrow_tag_invocable<deserialize_tag, std::type_identity<T>, document&> : true)
++    noexcept(deserializable<T, document> ? nothrow_deserializable<T, document> : true)
+ #else
+     noexcept
+ #endif
+   {
+-#ifdef __cpp_concepts
+-    if constexpr (tag_invocable<deserialize_tag, std::type_identity<T>, document&>) {
+-      return deserialize(std::type_identity<T>{}, *this);
+-    } else {
+-#endif // __cpp_concepts
+-    // Unless the simdjson library or the user provides an inline implementation, calling this method should
+-    // immediately fail.
+-    static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
+-      "The supported types are ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
+-      "int64_t, double, and bool. We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
+-      " get_object(), get_array(), get_raw_json_string(), or get_string() instead of the get template."
+-      " You may also add support for custom types, see our documentation.");
+-#ifdef __cpp_concepts
+-      }
+-#endif
++    static_assert(std::is_default_constructible<T>::value, "Cannot initialize the specified type.");
++    T out{};
++    SIMDJSON_TRY(get<T>(out));
++    return out;
+   }
+   /**
+    * @overload template<typename T> simdjson_result<T> get() & noexcept
+@@ -214,10 +205,13 @@ public:
+    * is provided.
+    */
+   template<typename T>
++  simdjson_inline simdjson_result<T> get() &&
+ #ifdef __cpp_concepts
+-    requires (!tag_invocable<deserialize_tag, std::type_identity<T>, document&>)
++    noexcept(deserializable<T, document> ? nothrow_deserializable<T, document> : true)
++#else
++    noexcept
+ #endif
+-  simdjson_inline simdjson_result<T> get() && noexcept {
++  {
+       static_assert(!std::is_same<T, array>::value && !std::is_same<T, object>::value, "You should never hold either an ondemand::array or ondemand::object without a corresponding ondemand::document being alive; that would be Undefined Behaviour.");
+       return static_cast<document&>(*this).get<T>();
+   }
+@@ -233,7 +227,32 @@ public:
+    * @returns INCORRECT_TYPE If the JSON value is not an object.
+    * @returns SUCCESS If the parse succeeded and the out parameter was set to the value.
+    */
+-  template<typename T> simdjson_inline error_code get(T &out) & noexcept;
++  template<typename T>
++  simdjson_inline error_code get(T &out) &
++#ifdef __cpp_concepts
++    noexcept(deserializable<T, document> ? nothrow_deserializable<T, document> : true)
++#else
++    noexcept
++#endif
++  {
++#ifdef __cpp_concepts
++    if constexpr (deserializable<T, document>) {
++        return deserialize(*this, out);
++    } else {
++#endif // __cpp_concepts
++      // Unless the simdjson library or the user provides an inline implementation, calling this method should
++      // immediately fail.
++      static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
++        "The supported types are ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
++        "int64_t, double, and bool. We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
++        " get_object(), get_array(), get_raw_json_string(), or get_string() instead of the get template."
++        " You may also add support for custom types, see our documentation.");
++      static_cast<void>(out); // to get rid of unused errors
++      return UNINITIALIZED;
++#ifdef __cpp_concepts
++    }
++#endif
++  }
+   /** @overload template<typename T> error_code get(T &out) & noexcept */
+   template<typename T> simdjson_inline error_code get(T &out) && noexcept;
+ 
+diff --git a/include/simdjson/generic/ondemand/tag_invoke.h b/include/simdjson/generic/ondemand/tag_invoke.h
+index 0608d386..3b140a6b 100644
+--- a/include/simdjson/generic/ondemand/tag_invoke.h
++++ b/include/simdjson/generic/ondemand/tag_invoke.h
+@@ -3,6 +3,7 @@
+ #ifndef SIMDJSON_CONDITIONAL_INCLUDE
+ #define SIMDJSON_TAG_INVOKE_H
+ #include "simdjson/generic/ondemand/base.h"
++#include "simdjson/generic/ondemand/deserialize.h"
+ #endif // SIMDJSON_CONDITIONAL_INCLUDE
+ #ifdef __has_include
+ #if __has_include(<version>)
+@@ -22,49 +23,39 @@ namespace simdjson {
+ namespace SIMDJSON_IMPLEMENTATION {
+ namespace ondemand {
+ 
+-template <typename T>
+-  requires std::unsigned_integral<T>
+-simdjson_result<T> tag_invoke(deserialize_tag, std::type_identity<T>, auto &val) noexcept {
++template <std::unsigned_integral T>
++error_code tag_invoke(deserialize_tag, auto &val, T& out) noexcept {
+   uint64_t x;
+   SIMDJSON_TRY(val.get_uint64().get(x));
+   if(x > (std::numeric_limits<T>::max)() || x < (std::numeric_limits<T>::min)()) {
+     return NUMBER_OUT_OF_RANGE;
+   }
+-  return static_cast<T>(x);
++  out = static_cast<T>(x);
++  return SUCCESS;
+ }
+ 
+-template <typename T>
+-  requires std::floating_point<T>
+-simdjson_result<T> tag_invoke(deserialize_tag, std::type_identity<T>, auto &val) noexcept {
++template <std::floating_point T>
++error_code tag_invoke(deserialize_tag, auto &val, T& out) noexcept {
+   double x;
+   SIMDJSON_TRY(val.get_double().get(x));
+-  return static_cast<T>(x);
++  out = static_cast<T>(x);
++  return SUCCESS;
+ }
+ 
+-template <typename T>
+-  requires std::signed_integral<T>
+-simdjson_result<T> tag_invoke(deserialize_tag, std::type_identity<T>, auto &val) noexcept {
++template <std::signed_integral T>
++error_code tag_invoke(deserialize_tag, auto &val, T& out) noexcept {
+   int64_t x;
+   SIMDJSON_TRY(val.get_int64().get(x));
+   if(x > (std::numeric_limits<T>::max)() || x < (std::numeric_limits<T>::min)()) {
+     return NUMBER_OUT_OF_RANGE;
+   }
+-  return static_cast<T>(x);
++  out = static_cast<T>(x);
++  return SUCCESS;
+ }
+ 
+-template <typename T>
+-  requires std::same_as<T, std::string>
+-simdjson_result<T> tag_invoke(deserialize_tag, std::type_identity<T>, auto &val) noexcept {
+-  T s;
+-  SIMDJSON_TRY(val.get_string(s));
+-  return s;
+-}
+-
+-template <class jsonval>
+-simdjson_result<std::string> tag_invoke(deserialize_tag, std::type_identity<std::string>, jsonval &val) noexcept {
+-  std::string s;
+-  SIMDJSON_TRY(val.get_string(s));
+-  return s;
++error_code tag_invoke(deserialize_tag, auto &val, std::string& out) noexcept {
++  SIMDJSON_TRY(val.get_string(out));
++  return SUCCESS;
+ }
+ 
+ /**
+@@ -75,33 +66,31 @@ simdjson_result<std::string> tag_invoke(deserialize_tag, std::type_identity<std:
+  * doc.get<std::vector<int>>().
+  */
+ 
+-template <typename T, class jsonval>
+-simdjson_result<std::vector<T>> tag_invoke(deserialize_tag, std::type_identity<std::vector<T>>, jsonval &val) noexcept {
+-  std::vector<T> vec;
++template <typename T, typename AllocT = std::allocator<T>>
++error_code tag_invoke(deserialize_tag, auto &val, std::vector<T, AllocT>& out) noexcept {
+   array array;
+   SIMDJSON_TRY(val.get_array().get(array));
+   for (auto v : array) {
+     T value;
+     SIMDJSON_TRY(v.get<T>().get(value));
+-    vec.push_back(value);
++    out.push_back(value);
+   }
+-  return vec;
++  return SUCCESS;
+ }
+ 
+-template <typename T, class jsonval>
+-simdjson_result<std::list<T>> tag_invoke(deserialize_tag, std::type_identity<std::list<T>>, jsonval &val) noexcept {
+-  std::list<T> vec;
++template <typename T, typename AllocT = std::allocator<T>>
++error_code tag_invoke(deserialize_tag, auto &val, std::list<T, AllocT>& out) noexcept {
+   array array;
+   SIMDJSON_TRY(val.get_array().get(array));
+   for (auto v : array) {
+     T value;
+     SIMDJSON_TRY(v.get<T>().get(value));
+-    vec.push_back(value);
++    out.push_back(value);
+   }
+-  return vec;
++  return SUCCESS;
+ }
+ }
+ }
+ }
+ #endif // __cpp_concepts
+-#endif // SIMDJSON_TAG_INVOKE_H
+\ No newline at end of file
++#endif // SIMDJSON_TAG_INVOKE_H
+diff --git a/include/simdjson/generic/ondemand/value-inl.h b/include/simdjson/generic/ondemand/value-inl.h
+index 8fbb4f8e..2b84810c 100644
+--- a/include/simdjson/generic/ondemand/value-inl.h
++++ b/include/simdjson/generic/ondemand/value-inl.h
+@@ -91,9 +91,16 @@ template<> simdjson_inline simdjson_result<uint64_t> value::get() noexcept { ret
+ template<> simdjson_inline simdjson_result<int64_t> value::get() noexcept { return get_int64(); }
+ template<> simdjson_inline simdjson_result<bool> value::get() noexcept { return get_bool(); }
+ 
+-template<typename T> simdjson_inline error_code value::get(T &out) noexcept {
+-  return get<T>().get(out);
+-}
++
++template<> simdjson_inline error_code value::get(array& out) noexcept { return get_array().get(out); }
++template<> simdjson_inline error_code value::get(object& out) noexcept { return get_object().get(out); }
++template<> simdjson_inline error_code value::get(raw_json_string& out) noexcept { return get_raw_json_string().get(out); }
++template<> simdjson_inline error_code value::get(std::string_view& out) noexcept { return get_string(false).get(out); }
++template<> simdjson_inline error_code value::get(number& out) noexcept { return get_number().get(out); }
++template<> simdjson_inline error_code value::get(double& out) noexcept { return get_double().get(out); }
++template<> simdjson_inline error_code value::get(uint64_t& out) noexcept { return get_uint64().get(out); }
++template<> simdjson_inline error_code value::get(int64_t& out) noexcept { return get_int64().get(out); }
++template<> simdjson_inline error_code value::get(bool& out) noexcept { return get_bool().get(out); }
+ 
+ #if SIMDJSON_EXCEPTIONS
+ template <class T>
+@@ -417,6 +424,12 @@ simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::o
+   return first.is_null();
+ }
+ 
++template<> simdjson_inline error_code simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>::get<SIMDJSON_IMPLEMENTATION::ondemand::value>(SIMDJSON_IMPLEMENTATION::ondemand::value &out) noexcept {
++  if (error()) { return error(); }
++  out = first;
++  return SUCCESS;
++}
++
+ template<typename T> simdjson_inline simdjson_result<T> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>::get() noexcept {
+   if (error()) { return error(); }
+   return first.get<T>();
+@@ -430,11 +443,6 @@ template<> simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::va
+   if (error()) { return error(); }
+   return std::move(first);
+ }
+-template<> simdjson_inline error_code simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>::get<SIMDJSON_IMPLEMENTATION::ondemand::value>(SIMDJSON_IMPLEMENTATION::ondemand::value &out) noexcept {
+-  if (error()) { return error(); }
+-  out = first;
+-  return SUCCESS;
+-}
+ 
+ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::json_type> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>::type() noexcept {
+   if (error()) { return error(); }
+diff --git a/include/simdjson/generic/ondemand/value.h b/include/simdjson/generic/ondemand/value.h
+index 40f65f43..6e95aa8c 100644
+--- a/include/simdjson/generic/ondemand/value.h
++++ b/include/simdjson/generic/ondemand/value.h
+@@ -8,6 +8,8 @@
+ #include "simdjson/generic/ondemand/deserialize.h"
+ #endif // SIMDJSON_CONDITIONAL_INCLUDE
+ 
++#include <type_traits>
++
+ namespace simdjson {
+ 
+ namespace SIMDJSON_IMPLEMENTATION {
+@@ -39,28 +41,18 @@ public:
+   template <typename T>
+   simdjson_inline simdjson_result<T> get()
+ #ifdef __cpp_concepts
+-    noexcept(tag_invocable<deserialize_tag, std::type_identity<T>, value&> ? nothrow_tag_invocable<deserialize_tag, std::type_identity<T>, value&> : true)
++    noexcept(deserializable<T, value> ? nothrow_deserializable<T, value> : true)
+ #else
+     noexcept
+ #endif
+- {
+-#ifdef __cpp_concepts
+-  if constexpr (tag_invocable<deserialize_tag, std::type_identity<T>, value&>) {
+-    return deserialize(std::type_identity<T>{}, *this);
+-  } else {
+-#endif // __cpp_concepts
+-    // Unless the simdjson library or the user provides an inline implementation, calling this method should
+-    // immediately fail.
+-    static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
+-      "The supported types are ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
+-      "int64_t, double, and bool. We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
+-      " get_object(), get_array(), get_raw_json_string(), or get_string() instead of the get template."
+-      " You may also add support for custom types, see our documentation.");
+-#ifdef __cpp_concepts
+-      }
+-#endif
++  {
++    static_assert(std::is_default_constructible<T>::value, "The specified type is not default constructible.");
++    T out{};
++    SIMDJSON_TRY(get<T>(out));
++    return out;
+   }
+ 
++
+   /**
+    * Get this value as the given type.
+    *
+@@ -70,7 +62,32 @@ public:
+    * @returns INCORRECT_TYPE If the JSON value is not an object.
+    * @returns SUCCESS If the parse succeeded and the out parameter was set to the value.
+    */
+-  template<typename T> simdjson_inline error_code get(T &out) noexcept;
++  template <typename T>
++  simdjson_inline error_code get(T &out)
++#ifdef __cpp_concepts
++    noexcept(deserializable<T, value> ? nothrow_deserializable<T, value> : true)
++#else
++    noexcept
++#endif
++ {
++#ifdef __cpp_concepts
++    if constexpr (deserializable<T, value>) {
++      return deserialize(*this, out);
++    } else {
++#endif // __cpp_concepts
++      // Unless the simdjson library or the user provides an inline implementation, calling this method should
++      // immediately fail.
++      static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
++        "The supported types are ondemand::object, ondemand::array, raw_json_string, std::string_view, uint64_t, "
++        "int64_t, double, and bool. We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
++        " get_object(), get_array(), get_raw_json_string(), or get_string() instead of the get template."
++        " You may also add support for custom types, see our documentation.");
++      static_cast<void>(out); // to get rid of unused errors
++      return UNINITIALIZED;
++#ifdef __cpp_concepts
++    }
++#endif
++  }
+ 
+   /**
+    * Cast this JSON value to an array.

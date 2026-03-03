@@ -1,5 +1,0 @@
-Running clang-tidy over the project reports a warning about an array decaying to a pointer (typically triggered when an array is passed to an API expecting a pointer, causing the array type information to be lost). Under stricter builds where warnings are treated as errors (e.g., with -Werror and pedantic settings), this warning can fail the build.
-
-The codebase currently has multiple occurrences where a fixed-size array is being used in a context that causes implicit array-to-pointer decay, and clang-tidy flags this as problematic. This needs to be corrected so the code no longer relies on implicit decay and instead passes an explicit pointer (or otherwise uses an interface that preserves the intended type) in each of the affected locations.
-
-After the change, clang-tidy should no longer emit the “decaying array to pointer” warning for these call sites, and the project should build cleanly with strict compilation flags. The fix must be applied consistently across all affected call sites (not just one), so that running clang-tidy across the codebase does not leave the same warning in other modules.

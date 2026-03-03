@@ -8,55 +8,36 @@ cp "/tests/benchmark_name_gtest.cc" "test/benchmark_name_gtest.cc"
 mkdir -p "test"
 cp "/tests/options_test.cc" "test/options_test.cc"
 
-# Rebuild the tests to pick up the updated test files
-echo "Rebuilding benchmark_name_gtest test..."
-if cmake --build build --target benchmark_name_gtest --config Debug -j 1 > /tmp/build_name.log 2>&1; then
-  echo "✓ benchmark_name_gtest rebuild succeeded"
-else
-  echo "✗ benchmark_name_gtest rebuild failed"
-  cat /tmp/build_name.log | tail -50
-  test_status=1
-  if [ $test_status -eq 0 ]; then
-    echo 1 > /logs/verifier/reward.txt
-  else
-    echo 0 > /logs/verifier/reward.txt
-  fi
-  exit "$test_status"
+# Initialize test_status
+test_status=0
+
+# Rebuild tests with the fixed test files
+cd /app/src
+cmake --build build --config Debug --target benchmark_name_gtest -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark_name_gtest"
+    test_status=1
 fi
 
-echo "Rebuilding options_test..."
-if cmake --build build --target options_test --config Debug -j 1 > /tmp/build_options.log 2>&1; then
-  echo "✓ options_test rebuild succeeded"
-else
-  echo "✗ options_test rebuild failed"
-  cat /tmp/build_options.log | tail -50
-  test_status=1
-  if [ $test_status -eq 0 ]; then
-    echo 1 > /logs/verifier/reward.txt
-  else
-    echo 0 > /logs/verifier/reward.txt
-  fi
-  exit "$test_status"
+if [ $test_status -eq 0 ]; then
+    cmake --build build --config Debug --target options_test -j 1
+    if [ $? -ne 0 ]; then
+        echo "Failed to build options_test"
+        test_status=1
+    fi
 fi
 
-# Run the specific GoogleTests
-echo "Running benchmark_name_gtest..."
-./build/test/benchmark_name_gtest
-test_status=$?
+# Run the specific tests for this PR only if both built successfully
+if [ $test_status -eq 0 ]; then
+    cd /app/src/build
+    ./test/benchmark_name_gtest
+    test_status=$?
 
-if [ $test_status -ne 0 ]; then
-  echo "✗ benchmark_name_gtest failed"
-  if [ $test_status -eq 0 ]; then
-    echo 1 > /logs/verifier/reward.txt
-  else
-    echo 0 > /logs/verifier/reward.txt
-  fi
-  exit "$test_status"
+    if [ $test_status -eq 0 ]; then
+        ./test/options_test
+        test_status=$?
+    fi
 fi
-
-echo "Running options_test..."
-./build/test/options_test
-test_status=$?
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

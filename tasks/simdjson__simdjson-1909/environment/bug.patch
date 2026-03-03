@@ -1,0 +1,729 @@
+diff --git a/.github/workflows/macos-11.yml b/.github/workflows/macos-11.yml
+new file mode 100644
+index 00000000..579bdd0d
+--- /dev/null
++++ b/.github/workflows/macos-11.yml
+@@ -0,0 +1,34 @@
++name: Macos (Xcode 11)
++
++on: [push, pull_request]
++
++jobs:
++  macos-build:
++    if: >-
++      ! contains(toJSON(github.event.commits.*.message), '[skip ci]') &&
++      ! contains(toJSON(github.event.commits.*.message), '[skip github]')
++    runs-on: macos-latest
++    steps:
++      - uses: actions/checkout@v3
++      - uses: actions/cache@v3
++        with:
++          path: dependencies/.cache
++          key: ${{ hashFiles('dependencies/CMakeLists.txt') }}
++      - name: Use cmake
++        run: |
++          xcversion select 11.7
++          mkdir builddebug &&
++          cd builddebug &&
++          cmake -DCMAKE_BUILD_TYPE=Debug -DSIMDJSON_GOOGLE_BENCHMARKS=OFF -DSIMDJSON_DEVELOPER_MODE=ON -DBUILD_SHARED_LIBS=OFF ..  &&
++          cmake --build .   &&
++          ctest -j --output-on-failure -LE explicitonly   &&
++          cd .. &&
++          mkdir build &&
++          cd build &&
++          cmake  -DSIMDJSON_GOOGLE_BENCHMARKS=ON -DSIMDJSON_DEVELOPER_MODE=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX:PATH=destination ..  &&
++          cmake --build .   &&
++          ctest -j --output-on-failure -LE explicitonly   &&
++          cmake --install . &&
++          echo -e '#include <simdjson.h>\nint main(int argc,char**argv) {simdjson::dom::parser parser;simdjson::dom::element tweets = parser.load(argv[1]); }' > tmp.cpp && c++ -Idestination/include -Ldestination/lib -std=c++17 -Wl,-rpath,destination/lib -o linkandrun tmp.cpp -lsimdjson && ./linkandrun jsonexamples/twitter.json &&
++          cd ../tests/installation_tests/find &&
++          mkdir build && cd build && cmake -DCMAKE_INSTALL_PREFIX:PATH=../../../build/destination .. &&  cmake --build .
+diff --git a/benchmark/json2msgpack/simdjson_ondemand.h b/benchmark/json2msgpack/simdjson_ondemand.h
+index 3c4daa4c..e1d7b2ab 100644
+--- a/benchmark/json2msgpack/simdjson_ondemand.h
++++ b/benchmark/json2msgpack/simdjson_ondemand.h
+@@ -74,11 +74,10 @@ simdjson2msgpack::to_msgpack(const simdjson::padded_string &json,
+       write_byte(0xc2 + doc.get_bool());
+       break;
+     case simdjson::ondemand::json_type::null:
+-      // We check that the value is indeed null
+-      // otherwise: an error is thrown.
+-      if(doc.is_null()) {
+-        write_byte(0xc0);
+-      }
++      write_byte(0xc0);
++      // As a side effect, the is_null call advances the document's iterator
++      // so that the current_location check would work in all cases.
++      doc.is_null();
+       break;
+     case simdjson::ondemand::json_type::array:
+     case simdjson::ondemand::json_type::object:
+@@ -164,11 +163,7 @@ void simdjson2msgpack::recursive_processor(simdjson::ondemand::value element) {
+     write_byte(0xc2 + element.get_bool());
+     break;
+   case simdjson::ondemand::json_type::null:
+-    // We check that the value is indeed null
+-    // otherwise: an error is thrown.
+-    if(element.is_null()) {
+-      write_byte(0xc0);
+-    }
++    write_byte(0xc0);
+     break;
+   default:
+     SIMDJSON_UNREACHABLE();
+diff --git a/doc/basics.md b/doc/basics.md
+index 41938337..6a9ef33c 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -482,20 +482,8 @@ support for users who avoid exceptions. See [the simdjson error handling documen
+   std::cout << "Number of fields: " <<  count << std::endl; // Prints "Number of fields: 2"
+   ```
+ * **Tree Walking and JSON Element Types:** Sometimes you don't necessarily have a document
+-  with a known type, and are trying to generically inspect or walk over JSON elements.
+-  You can also represent arbitrary JSON values with
+-  `ondemand::value` instances: it can represent anything except a scalar document (lone number, string, null or Boolean). You can check for scalar documents with the method `scalar()`.
+-  You can query the type of a document or a value with the `type()` method.
+-  The `type()` method does not consume or validate documents and values, but it tells you whether they are
+-  - arrays (`json_type::array`),
+-  - objects (`json_type::object`)
+-  - numbers (`json_type::number`),
+-  - strings (`json_type::string`),
+-  - Booleans (`json_type::boolean`),
+-  - null (`json_type::null`).
+-
+-  You must still validate and consume the values (e.g., call `is_null()`) after calling `type()`.
+-   You may also access [raw strings](#raw-strings).
++  with a known type, and are trying to generically inspect or walk over JSON elements. To do that, you can use iterators and the `type()` method. You can also represent arbitrary JSON values with
++  `ondemand::value` instances: it can represent anything except a scalar document (lone number, string, null or Boolean). You can check for scalar documents with the method `scalar()`. You may also access [raw strings](#raw-strings).
+   For example, the following is a quick and dirty recursive function that verbosely prints the JSON document as JSON. This example also illustrates lifecycle requirements: the `document` instance holds the iterator. The document must remain in scope while you are accessing instances of `value`, `object` and `array`.
+   ```c++
+   void recursive_print_json(ondemand::value element) {
+@@ -544,11 +532,7 @@ support for users who avoid exceptions. See [the simdjson error handling documen
+       cout << element.get_bool();
+       break;
+     case ondemand::json_type::null:
+-      // We check that the value is indeed null
+-      // otherwise: an error is thrown.
+-      if(element.is_null()) {
+-        cout << "null";
+-      }
++      cout << "null";
+       break;
+     }
+   }
+@@ -1126,7 +1110,7 @@ for (auto val : doc) {
+ std::cout << doc.current_location() << std::endl;   // Throws OUT_OF_BOUNDS
+ ```
+ 
+-Conversely, if `doc.current_location().error() == simdjson::SUCCESS`,
++Conversely, if `doc.current_location().error() == simdjson::SUCCESS`, 
+ then the document has more content.
+ 
+ Finally, the `current_location()` method may also be used even when no exceptions/errors
+diff --git a/include/simdjson/generic/ondemand/document-inl.h b/include/simdjson/generic/ondemand/document-inl.h
+index 596bad0f..90117b3c 100644
+--- a/include/simdjson/generic/ondemand/document-inl.h
++++ b/include/simdjson/generic/ondemand/document-inl.h
+@@ -94,7 +94,7 @@ simdjson_inline simdjson_result<raw_json_string> document::get_raw_json_string()
+ simdjson_inline simdjson_result<bool> document::get_bool() noexcept {
+   return get_root_value_iterator().get_root_bool();
+ }
+-simdjson_inline simdjson_result<bool> document::is_null() noexcept {
++simdjson_inline bool document::is_null() noexcept {
+   return get_root_value_iterator().is_root_null();
+ }
+ 
+@@ -354,7 +354,7 @@ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> simdjs
+   if (error()) { return error(); }
+   return first.get_value();
+ }
+-simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document>::is_null() noexcept {
++simdjson_inline bool simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document>::is_null() noexcept {
+   if (error()) { return error(); }
+   return first.is_null();
+ }
+@@ -504,7 +504,7 @@ simdjson_inline simdjson_result<std::string_view> document_reference::get_string
+ simdjson_inline simdjson_result<raw_json_string> document_reference::get_raw_json_string() noexcept { return doc->get_raw_json_string(); }
+ simdjson_inline simdjson_result<bool> document_reference::get_bool() noexcept { return doc->get_bool(); }
+ simdjson_inline simdjson_result<value> document_reference::get_value() noexcept { return doc->get_value(); }
+-simdjson_inline simdjson_result<bool> document_reference::is_null() noexcept { return doc->is_null(); }
++simdjson_inline bool document_reference::is_null() noexcept { return doc->is_null(); }
+ 
+ #if SIMDJSON_EXCEPTIONS
+ simdjson_inline document_reference::operator array() & noexcept(false) { return array(*doc); }
+@@ -636,7 +636,7 @@ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> simdjs
+   if (error()) { return error(); }
+   return first.get_value();
+ }
+-simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document_reference>::is_null() noexcept {
++simdjson_inline bool simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document_reference>::is_null() noexcept {
+   if (error()) { return error(); }
+   return first.is_null();
+ }
+@@ -648,7 +648,7 @@ simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::o
+   if (error()) { return error(); }
+   return first.is_scalar();
+ }
+-simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document_reference>::is_negative() noexcept {
++simdjson_inline bool simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document_reference>::is_negative() noexcept {
+   if (error()) { return error(); }
+   return first.is_negative();
+ }
+diff --git a/include/simdjson/generic/ondemand/document.h b/include/simdjson/generic/ondemand/document.h
+index eb401dba..6a926aae 100644
+--- a/include/simdjson/generic/ondemand/document.h
++++ b/include/simdjson/generic/ondemand/document.h
+@@ -126,14 +126,11 @@ public:
+   simdjson_inline simdjson_result<value> get_value() noexcept;
+ 
+   /**
+-   * Checks if this JSON value is null.  If and only if the value is
+-   * null, then it is consumed (we advance). If we find a token that
+-   * begins with 'n' but is not 'null', then an error is returned.
++   * Checks if this JSON value is null.
+    *
+    * @returns Whether the value is null.
+-   * @returns INCORRECT_TYPE If the JSON value begins with 'n' and is not 'null'.
+    */
+-  simdjson_inline simdjson_result<bool> is_null() noexcept;
++  simdjson_inline bool is_null() noexcept;
+ 
+   /**
+    * Get this value as the given type.
+@@ -366,9 +363,7 @@ public:
+   simdjson_inline simdjson_result<value> operator[](const char *key) & noexcept;
+ 
+   /**
+-   * Get the type of this JSON value. It does not validate or consume the value.
+-   * E.g., you must still call "is_null()" to check that a value is null even if
+-   * "type()" returns json_type::null.
++   * Get the type of this JSON value.
+    *
+    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
+    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
+@@ -600,7 +595,7 @@ public:
+   simdjson_inline simdjson_result<bool> get_bool() noexcept;
+   simdjson_inline simdjson_result<value> get_value() noexcept;
+ 
+-  simdjson_inline simdjson_result<bool> is_null() noexcept;
++  simdjson_inline bool is_null() noexcept;
+   simdjson_inline simdjson_result<std::string_view> raw_json() noexcept;
+   simdjson_inline operator document&() const noexcept;
+ 
+@@ -665,7 +660,7 @@ public:
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::raw_json_string> get_raw_json_string() noexcept;
+   simdjson_inline simdjson_result<bool> get_bool() noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> get_value() noexcept;
+-  simdjson_inline simdjson_result<bool> is_null() noexcept;
++  simdjson_inline bool is_null() noexcept;
+ 
+   template<typename T> simdjson_inline simdjson_result<T> get() & noexcept;
+   template<typename T> simdjson_inline simdjson_result<T> get() && noexcept;
+@@ -732,7 +727,7 @@ public:
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::raw_json_string> get_raw_json_string() noexcept;
+   simdjson_inline simdjson_result<bool> get_bool() noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> get_value() noexcept;
+-  simdjson_inline simdjson_result<bool> is_null() noexcept;
++  simdjson_inline bool is_null() noexcept;
+ 
+ #if SIMDJSON_EXCEPTIONS
+   simdjson_inline operator SIMDJSON_IMPLEMENTATION::ondemand::array() & noexcept(false);
+@@ -759,8 +754,8 @@ public:
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::json_type> type() noexcept;
+   simdjson_inline simdjson_result<bool> is_scalar() noexcept;
+   simdjson_inline simdjson_result<const char *> current_location() noexcept;
+-  simdjson_inline simdjson_result<int32_t> current_depth() const noexcept;
+-  simdjson_inline simdjson_result<bool> is_negative() noexcept;
++  simdjson_inline int32_t current_depth() const noexcept;
++  simdjson_inline bool is_negative() noexcept;
+   simdjson_inline simdjson_result<bool> is_integer() noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::number_type> get_number_type() noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::number> get_number() noexcept;
+diff --git a/include/simdjson/generic/ondemand/serialization.h b/include/simdjson/generic/ondemand/serialization.h
+index 64f16a2d..0d2eca69 100644
+--- a/include/simdjson/generic/ondemand/serialization.h
++++ b/include/simdjson/generic/ondemand/serialization.h
+@@ -4,27 +4,23 @@
+ namespace simdjson {
+ /**
+  * Create a string-view instance out of a document instance. The string-view instance
+- * contains JSON text that is suitable to be parsed as JSON again. It does not
+- * validate the content.
++ * contains JSON text that is suitable to be parsed as JSON again.
+  */
+ inline simdjson_result<std::string_view> to_json_string(SIMDJSON_IMPLEMENTATION::ondemand::document& x) noexcept;
+ /**
+  * Create a string-view instance out of a value instance. The string-view instance
+  * contains JSON text that is suitable to be parsed as JSON again. The value must
+- * not have been accessed previously. It does not
+- * validate the content.
++ * not have been accessed previously.
+  */
+ inline simdjson_result<std::string_view> to_json_string(SIMDJSON_IMPLEMENTATION::ondemand::value& x) noexcept;
+ /**
+  * Create a string-view instance out of an object instance. The string-view instance
+- * contains JSON text that is suitable to be parsed as JSON again. It does not
+- * validate the content.
++ * contains JSON text that is suitable to be parsed as JSON again.
+  */
+ inline simdjson_result<std::string_view> to_json_string(SIMDJSON_IMPLEMENTATION::ondemand::object& x) noexcept;
+ /**
+  * Create a string-view instance out of an array instance. The string-view instance
+- * contains JSON text that is suitable to be parsed as JSON again. It does not
+- * validate the content.
++ * contains JSON text that is suitable to be parsed as JSON again.
+  */
+ inline simdjson_result<std::string_view> to_json_string(SIMDJSON_IMPLEMENTATION::ondemand::array& x) noexcept;
+ inline simdjson_result<std::string_view> to_json_string(simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document> x);
+@@ -43,8 +39,7 @@ inline simdjson_result<std::string_view> to_json_string(simdjson_result<SIMDJSON
+ namespace simdjson { namespace SIMDJSON_IMPLEMENTATION { namespace ondemand {
+ 
+ /**
+- * Print JSON to an output stream.  It does not
+- * validate the content.
++ * Print JSON to an output stream.
+  *
+  * @param out The output stream.
+  * @param value The element.
+@@ -55,8 +50,7 @@ inline std::ostream& operator<<(std::ostream& out, simdjson::SIMDJSON_IMPLEMENTA
+ inline std::ostream& operator<<(std::ostream& out, simdjson::simdjson_result<simdjson::SIMDJSON_IMPLEMENTATION::ondemand::value> x);
+ #endif
+ /**
+- * Print JSON to an output stream. It does not
+- * validate the content.
++ * Print JSON to an output stream.
+  *
+  * @param out The output stream.
+  * @param value The array.
+@@ -67,8 +61,7 @@ inline std::ostream& operator<<(std::ostream& out, simdjson::SIMDJSON_IMPLEMENTA
+ inline std::ostream& operator<<(std::ostream& out, simdjson::simdjson_result<simdjson::SIMDJSON_IMPLEMENTATION::ondemand::array> x);
+ #endif
+ /**
+- * Print JSON to an output stream. It does not
+- * validate the content.
++ * Print JSON to an output stream.
+  *
+  * @param out The output stream.
+  * @param value The array.
+@@ -83,8 +76,7 @@ inline std::ostream& operator<<(std::ostream& out, simdjson::SIMDJSON_IMPLEMENTA
+ inline std::ostream& operator<<(std::ostream& out, simdjson::simdjson_result<simdjson::SIMDJSON_IMPLEMENTATION::ondemand::document_reference>&& x);
+ #endif
+ /**
+- * Print JSON to an output stream. It does not
+- * validate the content.
++ * Print JSON to an output stream.
+  *
+  * @param out The output stream.
+  * @param value The object.
+diff --git a/include/simdjson/generic/ondemand/value-inl.h b/include/simdjson/generic/ondemand/value-inl.h
+index 801bbcd7..813fcb69 100644
+--- a/include/simdjson/generic/ondemand/value-inl.h
++++ b/include/simdjson/generic/ondemand/value-inl.h
+@@ -54,9 +54,10 @@ simdjson_inline simdjson_result<int64_t> value::get_int64_in_string() noexcept {
+ simdjson_inline simdjson_result<bool> value::get_bool() noexcept {
+   return iter.get_bool();
+ }
+-simdjson_inline simdjson_result<bool> value::is_null() noexcept {
++simdjson_inline bool value::is_null() noexcept {
+   return iter.is_null();
+ }
++
+ template<> simdjson_inline simdjson_result<array> value::get() noexcept { return get_array(); }
+ template<> simdjson_inline simdjson_result<object> value::get() noexcept { return get_object(); }
+ template<> simdjson_inline simdjson_result<raw_json_string> value::get() noexcept { return get_raw_json_string(); }
+@@ -310,8 +311,8 @@ simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::o
+   if (error()) { return error(); }
+   return first.get_bool();
+ }
+-simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>::is_null() noexcept {
+-  if (error()) { return error(); }
++simdjson_inline bool simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>::is_null() noexcept {
++  if (error()) { return false; }
+   return first.is_null();
+ }
+ 
+@@ -403,7 +404,7 @@ simdjson_inline simdjson_result<const char *> simdjson_result<SIMDJSON_IMPLEMENT
+   return first.current_location();
+ }
+ 
+-simdjson_inline simdjson_result<int32_t> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>::current_depth() const noexcept {
++simdjson_inline int32_t simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>::current_depth() const noexcept {
+   if (error()) { return error(); }
+   return first.current_depth();
+ }
+diff --git a/include/simdjson/generic/ondemand/value.h b/include/simdjson/generic/ondemand/value.h
+index a3d5d663..0a948656 100644
+--- a/include/simdjson/generic/ondemand/value.h
++++ b/include/simdjson/generic/ondemand/value.h
+@@ -150,14 +150,11 @@ public:
+   simdjson_inline simdjson_result<bool> get_bool() noexcept;
+ 
+   /**
+-   * Checks if this JSON value is null. If and only if the value is
+-   * null, then it is consumed (we advance). If we find a token that
+-   * begins with 'n' but is not 'null', then an error is returned.
++   * Checks if this JSON value is null.
+    *
+    * @returns Whether the value is null.
+-   * @returns INCORRECT_TYPE If the JSON value begins with 'n' and is not 'null'.
+    */
+-  simdjson_inline simdjson_result<bool> is_null() noexcept;
++  simdjson_inline bool is_null() noexcept;
+ 
+ #if SIMDJSON_EXCEPTIONS
+   /**
+@@ -337,9 +334,7 @@ public:
+   simdjson_inline simdjson_result<value> operator[](const char *key) noexcept;
+ 
+   /**
+-   * Get the type of this JSON value. It does not validate or consume the value.
+-   * E.g., you must still call "is_null()" to check that a value is null even if
+-   * "type()" returns json_type::null.
++   * Get the type of this JSON value.
+    *
+    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
+    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
+@@ -588,7 +583,7 @@ public:
+   simdjson_inline simdjson_result<std::string_view> get_string() noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::raw_json_string> get_raw_json_string() noexcept;
+   simdjson_inline simdjson_result<bool> get_bool() noexcept;
+-  simdjson_inline simdjson_result<bool> is_null() noexcept;
++  simdjson_inline bool is_null() noexcept;
+ 
+   template<typename T> simdjson_inline simdjson_result<T> get() noexcept;
+ 
+@@ -681,7 +676,7 @@ public:
+   /** @copydoc simdjson_inline simdjson_result<const char *> current_location() noexcept */
+   simdjson_inline simdjson_result<const char *> current_location() noexcept;
+   /** @copydoc simdjson_inline int32_t current_depth() const noexcept */
+-  simdjson_inline simdjson_result<int32_t> current_depth() const noexcept;
++  simdjson_inline int32_t current_depth() const noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> at_pointer(std::string_view json_pointer) noexcept;
+ };
+ 
+diff --git a/include/simdjson/generic/ondemand/value_iterator-inl.h b/include/simdjson/generic/ondemand/value_iterator-inl.h
+index 98c4529d..c099c99d 100644
+--- a/include/simdjson/generic/ondemand/value_iterator-inl.h
++++ b/include/simdjson/generic/ondemand/value_iterator-inl.h
+@@ -468,11 +468,8 @@ simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::parse
+   if (error) { return incorrect_type_error("Not a boolean"); }
+   return simdjson_result<bool>(!not_true);
+ }
+-simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::parse_null(const uint8_t *json) const noexcept {
+-  bool is_null_string = !atomparsing::str4ncmp(json, "null") && jsoncharutils::is_structural_or_whitespace(json[4]);
+-  // if we start with 'n', we must be a null
+-  if(!is_null_string && json[0]=='n') { return incorrect_type_error("Not a null but starts with n"); }
+-  return is_null_string;
++simdjson_inline bool value_iterator::parse_null(const uint8_t *json) const noexcept {
++  return !atomparsing::str4ncmp(json, "null") && jsoncharutils::is_structural_or_whitespace(json[4]);
+ }
+ 
+ simdjson_warn_unused simdjson_inline simdjson_result<std::string_view> value_iterator::get_string() noexcept {
+@@ -519,11 +516,10 @@ simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::get_b
+   if(result.error() == SUCCESS) { advance_non_root_scalar("bool"); }
+   return result;
+ }
+-simdjson_inline simdjson_result<bool> value_iterator::is_null() noexcept {
+-  bool is_null_value;
+-  SIMDJSON_TRY(parse_null(peek_non_root_scalar("null")).get(is_null_value));
+-  if(is_null_value) { advance_non_root_scalar("null"); }
+-  return is_null_value;
++simdjson_inline bool value_iterator::is_null() noexcept {
++  auto result = parse_null(peek_non_root_scalar("null"));
++  if(result) { advance_non_root_scalar("null"); }
++  return result;
+ }
+ simdjson_inline bool value_iterator::is_negative() noexcept {
+   return numberparsing::is_negative(peek_non_root_scalar("numbersign"));
+diff --git a/include/simdjson/generic/ondemand/value_iterator.h b/include/simdjson/generic/ondemand/value_iterator.h
+index 7cd7a25e..1b1e012c 100644
+--- a/include/simdjson/generic/ondemand/value_iterator.h
++++ b/include/simdjson/generic/ondemand/value_iterator.h
+@@ -289,7 +289,7 @@ public:
+   simdjson_warn_unused simdjson_inline simdjson_result<double> get_double() noexcept;
+   simdjson_warn_unused simdjson_inline simdjson_result<double> get_double_in_string() noexcept;
+   simdjson_warn_unused simdjson_inline simdjson_result<bool> get_bool() noexcept;
+-  simdjson_warn_unused simdjson_inline simdjson_result<bool> is_null() noexcept;
++  simdjson_inline bool is_null() noexcept;
+   simdjson_warn_unused simdjson_inline bool is_negative() noexcept;
+   simdjson_warn_unused simdjson_inline simdjson_result<bool> is_integer() noexcept;
+   simdjson_warn_unused simdjson_inline simdjson_result<number_type> get_number_type() noexcept;
+@@ -350,7 +350,7 @@ protected:
+   inline std::string to_string() const noexcept;
+   simdjson_inline value_iterator(json_iterator *json_iter, depth_t depth, token_position start_index) noexcept;
+ 
+-  simdjson_inline simdjson_result<bool> parse_null(const uint8_t *json) const noexcept;
++  simdjson_inline bool parse_null(const uint8_t *json) const noexcept;
+   simdjson_inline simdjson_result<bool> parse_bool(const uint8_t *json) const noexcept;
+   simdjson_inline const uint8_t *peek_start() const noexcept;
+   simdjson_inline uint32_t peek_start_length() const noexcept;
+diff --git a/tests/dom/readme_examples.cpp b/tests/dom/readme_examples.cpp
+index 4abefd97..5a876199 100644
+--- a/tests/dom/readme_examples.cpp
++++ b/tests/dom/readme_examples.cpp
+@@ -160,11 +160,7 @@ namespace ondemand_treewalk {
+       cout << element.get_bool();
+       break;
+     case ondemand::json_type::null:
+-      // We check that the value is indeed null
+-      // otherwise: an error is thrown.
+-      if(element.is_null()) {
+-        cout << "null";
+-      }
++      cout << "null";
+       break;
+     }
+   }
+diff --git a/tests/ondemand/ondemand_error_tests.cpp b/tests/ondemand/ondemand_error_tests.cpp
+index 5f3af0e4..6234ffa1 100644
+--- a/tests/ondemand/ondemand_error_tests.cpp
++++ b/tests/ondemand/ondemand_error_tests.cpp
+@@ -119,9 +119,7 @@ namespace error_tests {
+     SUBTEST("simdjson_result<ondemand::value>", test_ondemand_doc(json, [&](auto doc) {
+       simdjson_result<ondemand::value> val = doc["val"];
+       // Get everything that can fail in both forward and backwards order
+-      bool is_null_value;
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, false );
++      ASSERT_EQUAL( val.is_null(), false );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
+@@ -133,18 +131,15 @@ namespace error_tests {
+       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
++      ASSERT_EQUAL( val.is_null(), false );
+       ASSERT_SUCCESS( val.get_bool() );
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, false );
+       TEST_SUCCEED();
+     }));
+     SUBTEST("ondemand::value", test_ondemand_doc(json, [&](auto doc) {
+       ondemand::value val;
+       ASSERT_SUCCESS( doc["val"].get(val) );
+       // Get everything that can fail in both forward and backwards order
+-      bool is_null_value;
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, false );
++      ASSERT_EQUAL( val.is_null(), false );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
+@@ -156,17 +151,14 @@ namespace error_tests {
+       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
++      ASSERT_EQUAL( val.is_null(), false );
+       ASSERT_SUCCESS( val.get_bool() );
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, false );
+       TEST_SUCCEED();
+     }));
+     json = R"(true)"_padded;
+     SUBTEST("simdjson_result<ondemand::document>", test_ondemand_doc(json, [&](simdjson_result<ondemand::document> val) {
+       // Get everything that can fail in both forward and backwards order
+-      bool is_null_value;
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, false );
++      ASSERT_EQUAL( val.is_null(), false );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
+@@ -178,17 +170,14 @@ namespace error_tests {
+       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
++      ASSERT_EQUAL( val.is_null(), false );
+       ASSERT_SUCCESS( val.get_bool());
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, false );
+       TEST_SUCCEED();
+     }));
+     SUBTEST("ondemand::document", test_ondemand_doc(json, [&](auto doc) {
+       ondemand::document val;
+       ASSERT_SUCCESS( std::move(doc).get(val) );      // Get everything that can fail in both forward and backwards order
+-      bool is_null_value;
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, false );
++      ASSERT_EQUAL( val.is_null(), false );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
+@@ -200,9 +189,8 @@ namespace error_tests {
+       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
++      ASSERT_EQUAL( val.is_null(), false );
+       ASSERT_SUCCESS( val.get_bool() );
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, false );
+       TEST_SUCCEED();
+     }));
+ 
+@@ -228,16 +216,13 @@ namespace error_tests {
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_bool(), INCORRECT_TYPE );
+-      bool is_null_value;
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, true );
++      ASSERT_EQUAL( val.is_null(), true );
+       TEST_SUCCEED();
+     }));
+     SUBTEST("ondemand::value", test_ondemand_doc(json, [&](auto doc) {
+       ondemand::value val;
+       ASSERT_SUCCESS( doc["val"].get(val) );
+       // Get everything that can fail in both forward and backwards order
+-
+       ASSERT_ERROR( val.get_bool(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+@@ -251,9 +236,7 @@ namespace error_tests {
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_bool(), INCORRECT_TYPE );
+-      bool is_null_value;
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, true );
++      ASSERT_EQUAL( val.is_null(), true );
+       TEST_SUCCEED();
+     }));
+     json = R"(null)"_padded;
+@@ -272,9 +255,7 @@ namespace error_tests {
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_bool(), INCORRECT_TYPE );
+-      bool is_null_value;
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, true );
++      ASSERT_EQUAL( val.is_null(), true );
+       TEST_SUCCEED();
+     }));
+     SUBTEST("ondemand::document", test_ondemand_doc(json, [&](auto doc) {
+@@ -293,9 +274,7 @@ namespace error_tests {
+       ASSERT_ERROR( val.get_string(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_array(), INCORRECT_TYPE );
+       ASSERT_ERROR( val.get_bool(), INCORRECT_TYPE );
+-      bool is_null_value;
+-      ASSERT_SUCCESS( val.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, true );
++      ASSERT_EQUAL( val.is_null(), true );
+       TEST_SUCCEED();
+     }));
+     TEST_SUCCEED();
+diff --git a/tests/ondemand/ondemand_json_pointer_tests.cpp b/tests/ondemand/ondemand_json_pointer_tests.cpp
+index bf0b93d3..179479de 100644
+--- a/tests/ondemand/ondemand_json_pointer_tests.cpp
++++ b/tests/ondemand/ondemand_json_pointer_tests.cpp
+@@ -71,7 +71,7 @@ namespace json_pointer_tests {
+                ASSERT_SUCCESS(val.get_bool().error());
+                break;
+             case ondemand::json_type::null:
+-               ASSERT_SUCCESS(val.is_null().error());
++               ASSERT_TRUE(val.is_null());
+                break;
+             default:
+                TEST_FAIL("unexpected type");
+diff --git a/tests/ondemand/ondemand_misc_tests.cpp b/tests/ondemand/ondemand_misc_tests.cpp
+index 2cb88d34..1a422f53 100644
+--- a/tests/ondemand/ondemand_misc_tests.cpp
++++ b/tests/ondemand/ondemand_misc_tests.cpp
+@@ -271,9 +271,7 @@ namespace misc_tests {
+       ASSERT_SUCCESS(global.get(global_object));
+       ondemand::value shadowable;
+       ASSERT_SUCCESS(global_object["shadowable"].get(shadowable));
+-      bool is_null_value;
+-      ASSERT_SUCCESS(shadowable.is_null().get(is_null_value));
+-      ASSERT_TRUE(!is_null_value);
++      ASSERT_TRUE(!shadowable.is_null());
+       ondemand::value badvalue;
+       auto error = global_object["writable"].get(badvalue);
+       if(error == SUCCESS) {
+diff --git a/tests/ondemand/ondemand_readme_examples.cpp b/tests/ondemand/ondemand_readme_examples.cpp
+index 1ee9377a..ae582c66 100644
+--- a/tests/ondemand/ondemand_readme_examples.cpp
++++ b/tests/ondemand/ondemand_readme_examples.cpp
+@@ -87,11 +87,7 @@ void recursive_print_json(ondemand::value element) {
+       cout << element.get_bool();
+       break;
+     case ondemand::json_type::null:
+-      // we check that the value is indeed null
+-      // otherwise: an error is thrown.
+-      if(element.is_null()) {
+-        cout << "null";
+-      }
++      cout << "null";
+       break;
+     }
+ }
+@@ -170,11 +166,7 @@ void recursive_print_json_breakline(ondemand::value element) {
+       cout << element.get_bool();
+       break;
+     case ondemand::json_type::null:
+-      // We check that the value is indeed null
+-      // otherwise: an error is thrown.
+-      if(element.is_null()) {
+-        cout << "null";
+-      }
++      cout << "null";
+       break;
+     }
+ }
+diff --git a/tests/ondemand/ondemand_scalar_tests.cpp b/tests/ondemand/ondemand_scalar_tests.cpp
+index 082369ee..8bc188e2 100644
+--- a/tests/ondemand/ondemand_scalar_tests.cpp
++++ b/tests/ondemand/ondemand_scalar_tests.cpp
+@@ -206,15 +206,11 @@ namespace scalar_tests {
+     SUBTEST("ondemand::document", test_ondemand_doc(json, [&](auto doc_result) {
+       ondemand::document doc;
+       ASSERT_SUCCESS( std::move(doc_result).get(doc) );
+-      bool is_null_value;
+-      ASSERT_SUCCESS( doc.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, true );
++      ASSERT_EQUAL( doc.is_null(), true );
+       return true;
+     }));
+     SUBTEST("simdjson_result<ondemand::document>", test_ondemand_doc(json, [&](auto doc_result) {
+-      bool is_null_value;
+-      ASSERT_SUCCESS( doc_result.is_null().get(is_null_value) );
+-      ASSERT_EQUAL( is_null_value, true );
++      ASSERT_EQUAL( doc_result.is_null(), true );
+       return true;
+     }));
+     json = "[null]"_padded;
+@@ -223,9 +219,7 @@ namespace scalar_tests {
+       for (auto value_result : doc_result) {
+         ondemand::value value;
+         ASSERT_SUCCESS( value_result.get(value) );
+-        bool is_null_value;
+-        ASSERT_SUCCESS( value.is_null().get(is_null_value) );
+-        ASSERT_EQUAL( is_null_value, true );
++        ASSERT_EQUAL( value.is_null(), true );
+         count++;
+       }
+       ASSERT_EQUAL( count, 1 );
+@@ -234,9 +228,7 @@ namespace scalar_tests {
+     SUBTEST("simdjson_result<ondemand::value>", test_ondemand_doc(json, [&](auto doc_result) {
+       int count = 0;
+       for (auto value_result : doc_result) {
+-        bool is_null_value;
+-        ASSERT_SUCCESS( value_result.is_null().get(is_null_value) );
+-        ASSERT_EQUAL( is_null_value, true );
++        ASSERT_EQUAL( value_result.is_null(), true );
+         count++;
+       }
+       ASSERT_EQUAL( count, 1 );
+diff --git a/tools/json2json.cpp b/tools/json2json.cpp
+index 0b776dc0..949aeb8d 100644
+--- a/tools/json2json.cpp
++++ b/tools/json2json.cpp
+@@ -63,8 +63,6 @@ int main(int argc, const char *argv[]) {
+     simdjson::ondemand::document doc;
+     error = parser.iterate(docdata).get(doc);
+     if(error != simdjson::SUCCESS) { std::cout << error << std::endl; return EXIT_FAILURE; }
+-    // This locates the document and captures a string_view instance, it does
+-    // not validate the document:
+     std::cout << doc;
+     // check if there is more content
+     const char * endofstream;

@@ -1,0 +1,359 @@
+diff --git a/.vscode/settings.json b/.vscode/settings.json
+index 839f4115..ed569dee 100644
+--- a/.vscode/settings.json
++++ b/.vscode/settings.json
+@@ -98,6 +98,8 @@
+         "queue": "cpp",
+         "shared_mutex": "cpp",
+         "ranges": "cpp",
+-        "span": "cpp"
++        "span": "cpp",
++        "__verbose_abort": "cpp",
++        "charconv": "cpp"
+     }
+ }
+\ No newline at end of file
+diff --git a/doc/basics.md b/doc/basics.md
+index a637c829..b4389ff1 100644
+--- a/doc/basics.md
++++ b/doc/basics.md
+@@ -29,7 +29,7 @@ An overview of what you need to know to use simdjson, with examples.
+   - [Newline-Delimited JSON (ndjson) and JSON lines](#newline-delimited-json-ndjson-and-json-lines)
+   - [Parsing Numbers Inside Strings](#parsing-numbers-inside-strings)
+   - [Dynamic Number Types](#dynamic-number-types)
+-  - [Raw Strings](#raw-strings)
++  - [Raw Strings From Keys](#raw-strings-from-keys)
+   - [General Direct Access to the Raw JSON String](#general-direct-access-to-the-raw-json-string)
+   - [Storing Directly into an Existing String Instance](#storing-directly-into-an-existing-string-instance)
+   - [Thread Safety](#thread-safety)
+@@ -222,7 +222,7 @@ walking through the original JSON text, merrily reading commas and colons and br
+ you get where you are going. This is the key to On Demand's performance: since it's just an iterator,
+ it lets you parse values as you use them. And particularly, it lets you *skip* values you do not want
+ to use. On Demand is also ideally suited when you want to capture part of the document without parsing it
+-immediately (e.g., see [Raw Strings](#raw-strings)).
++immediately (e.g., see [General Direct Access to the Raw JSON String](#general-direct-access-to-the-raw-json-string)).
+ 
+ We refer to "On Demand" as a front-end component since it is an interface between the
+ low-level parsing functions and the user. It hides much of the complexity of parsing JSON
+@@ -257,7 +257,7 @@ copy the data into their own favorite class instances (e.g., alternatives to `st
+ 
+ A `std::string_view` instance is effectively just a pointer to a region in memory representing
+ a string. In simdjson, we return `std::string_view` instances that either point within the
+-input string you parsed (when using [raw Strings](#raw-strings)), or to a temporary string buffer inside
++input string you parsed (see [General Direct Access to the Raw JSON String](#general-direct-access-to-the-raw-json-string)), or to a temporary string buffer inside
+ our parser class instances that is valid until the parser object is destroyed or you use it to parse another document.
+ When using `std::string_view` instances, it is your responsibility to ensure that
+ `std::string_view` instance does not outlive the pointed-to memory (e.g., either the input
+@@ -556,7 +556,7 @@ support for users who avoid exceptions. See [the simdjson error handling documen
+   - null (`json_type::null`).
+ 
+   You must still validate and consume the values (e.g., call `is_null()`) after calling `type()`.
+-   You may also access [raw strings](#raw-strings).
++   You may also access [the raw JSON string](#general-direct-access-to-the-raw-json-string).
+   For example, the following is a quick and dirty recursive function that verbosely prints the JSON document as JSON. This example also illustrates lifecycle requirements: the `document` instance holds the iterator. The document must remain in scope while you are accessing instances of `value`, `object` and `array`.
+   ```c++
+   void recursive_print_json(ondemand::value element) {
+@@ -1901,7 +1901,7 @@ It will output:
+ 9999999999999999999 negative: 0 is_integer: 1 large 64-bit integer: 9999999999999999999 large 64-bit integer: 9999999999999999999
+ ```
+ 
+-Raw Strings
++Raw Strings From Keys
+ -----------
+ 
+ It is sometimes useful to have access to a raw (unescaped) string: we make available a
+@@ -1937,10 +1937,25 @@ JSON string to a user-provided buffer:
+     }
+ ```
+ 
++Some users might prefer to have a direct access to an `std::string_view` instance
++pointing inside the source document. The `key_raw_json_token()` method serves this
++purpose. It provides a view on the key, including the starting quote character,
++and everything up to the next `:` character after the final quote character. E.g.,
++if the key is `"name"` then `key_raw_json_token()` returns an `std::string_view`  which
++begins with `"name"` and may containing trailing white-space characters.
++```C++
++  auto json = R"( {"name" : "Jack The Ripper \u0033"} )"_padded;
++  ondemand::parser parser;
++  ondemand::document doc = parser.iterate(json);
++  for (auto key_value : doc.get_object()) {
++    std::string_view keysv = key_value.key_raw_json_token(); // keysv is "\"name\" "
++  }
++```
++
+ 
+ General Direct Access to the Raw JSON String
+ --------------------------------
+-If your value is a string, the `raw_json_string` you with `get_raw_json_string()` gives you direct access to the unprocessed
++If your value is a string, the `raw_json_string` you get with `get_raw_json_string()` gives you direct access to the unprocessed
+ string. But the simdjson library allows you to have access to the raw underlying JSON
+ more generally, not just for strings.
+ 
+@@ -2385,7 +2400,29 @@ bool example() {
+ }
+ ```
+ 
++* Example 4: Passing an array to a function
++
++```C++
++
++#include "simdjson.h"
++#include <iostream>
++
++// prints the content of the array as hexadecimal 64-bit integers
++void f(simdjson::ondemand::array v) {
++  for(uint64_t val : v) {
++    std::cout << "0x" << std::hex << val << std::endl;
++  }
++}
++
+ 
++int main(void) {
++  simdjson::padded_string json = R"( [ 897314173811950000, 3122321 ])"_padded;
++  simdjson::ondemand::parser parser;
++  simdjson::ondemand::document doc = parser.iterate(json);
++  f(doc.get_array());
++  return EXIT_SUCCESS;
++}
++```
+ 
+ Performance Tips
+ --------
+diff --git a/include/simdjson/generic/ondemand/document-inl.h b/include/simdjson/generic/ondemand/document-inl.h
+index 8e8abd7c..1b6bb7b2 100644
+--- a/include/simdjson/generic/ondemand/document-inl.h
++++ b/include/simdjson/generic/ondemand/document-inl.h
+@@ -267,6 +267,13 @@ simdjson_inline simdjson_result<bool> document::is_scalar() noexcept {
+   return ! ((this_type == json_type::array) || (this_type == json_type::object));
+ }
+ 
++simdjson_inline simdjson_result<bool> document::is_string() noexcept {
++  json_type this_type;
++  auto error = type().get(this_type);
++  if(error) { return error; }
++  return (this_type == json_type::string);
++}
++
+ simdjson_inline bool document::is_negative() noexcept {
+   return get_root_value_iterator().is_root_negative();
+ }
+@@ -482,6 +489,10 @@ simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::o
+   return first.is_scalar();
+ }
+ 
++simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document>::is_string() noexcept {
++  if (error()) { return error(); }
++  return first.is_string();
++}
+ 
+ simdjson_inline bool simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document>::is_negative() noexcept {
+   if (error()) { return error(); }
+@@ -646,6 +657,7 @@ simdjson_inline simdjson_result<value> document_reference::find_field_unordered(
+ simdjson_inline simdjson_result<value> document_reference::find_field_unordered(const char *key) & noexcept { return doc->find_field_unordered(key); }
+ simdjson_inline simdjson_result<json_type> document_reference::type() noexcept { return doc->type(); }
+ simdjson_inline simdjson_result<bool> document_reference::is_scalar() noexcept { return doc->is_scalar(); }
++simdjson_inline simdjson_result<bool> document_reference::is_string() noexcept { return doc->is_string(); }
+ simdjson_inline simdjson_result<const char *> document_reference::current_location() noexcept { return doc->current_location(); }
+ simdjson_inline int32_t document_reference::current_depth() const noexcept { return doc->current_depth(); }
+ simdjson_inline bool document_reference::is_negative() noexcept { return doc->is_negative(); }
+@@ -785,6 +797,10 @@ simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::o
+   if (error()) { return error(); }
+   return first.is_scalar();
+ }
++simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document_reference>::is_string() noexcept {
++  if (error()) { return error(); }
++  return first.is_string();
++}
+ simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::document_reference>::is_negative() noexcept {
+   if (error()) { return error(); }
+   return first.is_negative();
+diff --git a/include/simdjson/generic/ondemand/document.h b/include/simdjson/generic/ondemand/document.h
+index 1b784326..99d6f17c 100644
+--- a/include/simdjson/generic/ondemand/document.h
++++ b/include/simdjson/generic/ondemand/document.h
+@@ -432,6 +432,14 @@ public:
+    */
+   simdjson_inline simdjson_result<bool> is_scalar() noexcept;
+ 
++  /**
++   * Checks whether the document is a string.
++   *
++   * @returns true if the type is string
++   * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
++   */
++  simdjson_inline simdjson_result<bool> is_string() noexcept;
++
+   /**
+    * Checks whether the document is a negative number.
+    *
+@@ -690,6 +698,7 @@ public:
+ 
+   simdjson_inline simdjson_result<json_type> type() noexcept;
+   simdjson_inline simdjson_result<bool> is_scalar() noexcept;
++  simdjson_inline simdjson_result<bool> is_string() noexcept;
+ 
+   simdjson_inline simdjson_result<const char *> current_location() noexcept;
+   simdjson_inline int32_t current_depth() const noexcept;
+@@ -764,6 +773,7 @@ public:
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> find_field_unordered(const char *key) & noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::json_type> type() noexcept;
+   simdjson_inline simdjson_result<bool> is_scalar() noexcept;
++  simdjson_inline simdjson_result<bool> is_string() noexcept;
+   simdjson_inline simdjson_result<const char *> current_location() noexcept;
+   simdjson_inline int32_t current_depth() const noexcept;
+   simdjson_inline bool at_end() const noexcept;
+@@ -833,6 +843,7 @@ public:
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> find_field_unordered(const char *key) & noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::json_type> type() noexcept;
+   simdjson_inline simdjson_result<bool> is_scalar() noexcept;
++  simdjson_inline simdjson_result<bool> is_string() noexcept;
+   simdjson_inline simdjson_result<const char *> current_location() noexcept;
+   simdjson_inline simdjson_result<int32_t> current_depth() const noexcept;
+   simdjson_inline simdjson_result<bool> is_negative() noexcept;
+diff --git a/include/simdjson/generic/ondemand/field-inl.h b/include/simdjson/generic/ondemand/field-inl.h
+index c7d189ce..061f1860 100644
+--- a/include/simdjson/generic/ondemand/field-inl.h
++++ b/include/simdjson/generic/ondemand/field-inl.h
+@@ -43,6 +43,12 @@ simdjson_inline raw_json_string field::key() const noexcept {
+   return first;
+ }
+ 
++
++simdjson_inline std::string_view field::key_raw_json_token() const noexcept {
++  SIMDJSON_ASSUME(first.buf != nullptr); // We would like to call .alive() by Visual Studio won't let us.
++  return std::string_view(reinterpret_cast<const char*>(first.buf-1), second.iter._json_iter->token.peek(-1) - first.buf + 1);
++}
++
+ simdjson_inline value &field::value() & noexcept {
+   return second;
+ }
+@@ -76,10 +82,17 @@ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::raw_json_stri
+   if (error()) { return error(); }
+   return first.key();
+ }
++
++simdjson_inline simdjson_result<std::string_view> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::key_raw_json_token() noexcept {
++  if (error()) { return error(); }
++  return first.key_raw_json_token();
++}
++
+ simdjson_inline simdjson_result<std::string_view> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::unescaped_key(bool allow_replacement) noexcept {
+   if (error()) { return error(); }
+   return first.unescaped_key(allow_replacement);
+ }
++
+ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::value() noexcept {
+   if (error()) { return error(); }
+   return std::move(first.value());
+diff --git a/include/simdjson/generic/ondemand/field.h b/include/simdjson/generic/ondemand/field.h
+index 2be04fee..082f401b 100644
+--- a/include/simdjson/generic/ondemand/field.h
++++ b/include/simdjson/generic/ondemand/field.h
+@@ -42,6 +42,11 @@ public:
+    * an unescaped C string: e.g., key() == "test".
+    */
+   simdjson_inline raw_json_string key() const noexcept;
++  /**
++   * Get the unprocessed key as a string_view. This includes the quotes and may include
++   * some spaces after the last quote.
++   */
++  simdjson_inline std::string_view key_raw_json_token() const noexcept;
+   /**
+    * Get the field value.
+    */
+@@ -74,6 +79,7 @@ public:
+ 
+   simdjson_inline simdjson_result<std::string_view> unescaped_key(bool allow_replacement = false) noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::raw_json_string> key() noexcept;
++  simdjson_inline simdjson_result<std::string_view> key_raw_json_token() noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> value() noexcept;
+ };
+ 
+diff --git a/include/simdjson/generic/ondemand/json_iterator.h b/include/simdjson/generic/ondemand/json_iterator.h
+index 68ff4f14..36335dbf 100644
+--- a/include/simdjson/generic/ondemand/json_iterator.h
++++ b/include/simdjson/generic/ondemand/json_iterator.h
+@@ -300,6 +300,7 @@ protected:
+   friend class raw_json_string;
+   friend class parser;
+   friend class value_iterator;
++  friend class field;
+   template <typename... Args>
+   friend simdjson_inline void logger::log_line(const json_iterator &iter, const char *title_prefix, const char *title, std::string_view detail, int delta, int depth_delta, logger::log_level level, Args&&... args) noexcept;
+   template <typename... Args>
+diff --git a/include/simdjson/generic/ondemand/value-inl.h b/include/simdjson/generic/ondemand/value-inl.h
+index bcd4656d..34e671ee 100644
+--- a/include/simdjson/generic/ondemand/value-inl.h
++++ b/include/simdjson/generic/ondemand/value-inl.h
+@@ -183,6 +183,14 @@ simdjson_inline simdjson_result<bool> value::is_scalar() noexcept {
+   return ! ((this_type == json_type::array) || (this_type == json_type::object));
+ }
+ 
++simdjson_inline simdjson_result<bool> value::is_string() noexcept {
++  json_type this_type;
++  auto error = type().get(this_type);
++  if(error) { return error; }
++  return (this_type == json_type::string);
++}
++
++
+ simdjson_inline bool value::is_negative() noexcept {
+   return iter.is_negative();
+ }
+@@ -396,6 +404,10 @@ simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::o
+   if (error()) { return error(); }
+   return first.is_scalar();
+ }
++simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>::is_string() noexcept {
++  if (error()) { return error(); }
++  return first.is_string();
++}
+ simdjson_inline simdjson_result<bool> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value>::is_negative() noexcept {
+   if (error()) { return error(); }
+   return first.is_negative();
+diff --git a/include/simdjson/generic/ondemand/value.h b/include/simdjson/generic/ondemand/value.h
+index 720692ed..249ff1cb 100644
+--- a/include/simdjson/generic/ondemand/value.h
++++ b/include/simdjson/generic/ondemand/value.h
+@@ -401,6 +401,13 @@ public:
+    * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
+    */
+   simdjson_inline simdjson_result<bool> is_scalar() noexcept;
++  /**
++   * Checks whether the value is a string.
++   *
++   * @returns true if the type is string
++   * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
++   */
++  simdjson_inline simdjson_result<bool> is_string() noexcept;
+ 
+   /**
+    * Checks whether the value is a negative number.
+@@ -615,6 +622,7 @@ protected:
+   friend class object;
+   friend struct simdjson_result<value>;
+   friend struct simdjson_result<field>;
++  friend class field;
+ };
+ 
+ } // namespace ondemand
+@@ -729,6 +737,7 @@ public:
+    */
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::json_type> type() noexcept;
+   simdjson_inline simdjson_result<bool> is_scalar() noexcept;
++  simdjson_inline simdjson_result<bool> is_string() noexcept;
+   simdjson_inline simdjson_result<bool> is_negative() noexcept;
+   simdjson_inline simdjson_result<bool> is_integer() noexcept;
+   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::number_type> get_number_type() noexcept;
+diff --git a/include/simdjson/generic/ondemand/value_iterator.h b/include/simdjson/generic/ondemand/value_iterator.h
+index e36cb70d..a18e1700 100644
+--- a/include/simdjson/generic/ondemand/value_iterator.h
++++ b/include/simdjson/generic/ondemand/value_iterator.h
+@@ -469,6 +469,7 @@ protected:
+   friend class object;
+   friend class array;
+   friend class value;
++  friend class field;
+ }; // value_iterator
+ 
+ } // namespace ondemand

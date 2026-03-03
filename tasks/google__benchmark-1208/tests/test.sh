@@ -10,38 +10,57 @@ cp "/tests/fixture_test.cc" "test/fixture_test.cc"
 mkdir -p "test"
 cp "/tests/skip_with_error_test.cc" "test/skip_with_error_test.cc"
 
-# Rebuild with the fixed test files
-echo "Rebuilding with fixed test files..."
-rm -rf build
-cmake -B build -G Ninja \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=14 \
-    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
-    -DBENCHMARK_ENABLE_TESTING=ON \
-    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
-    -DBENCHMARK_ENABLE_WERROR=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# Initialize test_status
+test_status=0
 
-# Build everything to ensure all dependencies are correct
-cmake --build build --config Debug -j 1
-
-# Run the specific tests
-./build/test/benchmark_test --benchmark_min_time=0.01
-status1=$?
-
-./build/test/fixture_test --benchmark_min_time=0.01
-status2=$?
-
-./build/test/skip_with_error_test --benchmark_min_time=0.01
-status3=$?
-
-# Check if all tests passed
-if [ $status1 -eq 0 ] && [ $status2 -eq 0 ] && [ $status3 -eq 0 ]; then
-    test_status=0
-else
+# Rebuild the benchmark library first to pick up any source changes from fix.patch
+cd /app/src
+cmake --build build --config Debug --target benchmark -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark library"
     test_status=1
+fi
+
+# Rebuild the test targets with the fixed files
+cmake --build build --config Debug --target benchmark_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build benchmark_test"
+    test_status=1
+fi
+
+cmake --build build --config Debug --target fixture_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build fixture_test"
+    test_status=1
+fi
+
+cmake --build build --config Debug --target skip_with_error_test -j 1
+if [ $? -ne 0 ]; then
+    echo "Failed to build skip_with_error_test"
+    test_status=1
+fi
+
+# Run the tests only if they built successfully
+if [ $test_status -eq 0 ]; then
+    cd /app/src/build
+
+    ./test/benchmark_test --benchmark_min_time=0.01
+    if [ $? -ne 0 ]; then
+        echo "benchmark_test failed"
+        test_status=1
+    fi
+
+    ./test/fixture_test --benchmark_min_time=0.01
+    if [ $? -ne 0 ]; then
+        echo "fixture_test failed"
+        test_status=1
+    fi
+
+    ./test/skip_with_error_test --benchmark_min_time=0.01
+    if [ $? -ne 0 ]; then
+        echo "skip_with_error_test failed"
+        test_status=1
+    fi
 fi
 
 if [ $test_status -eq 0 ]; then

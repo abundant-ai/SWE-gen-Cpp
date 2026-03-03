@@ -28,21 +28,34 @@ cp "/tests/user_counters_tabular_test.cc" "test/user_counters_tabular_test.cc"
 mkdir -p "test"
 cp "/tests/user_counters_test.cc" "test/user_counters_test.cc"
 
-# Rebuild the project to pick up the copied test files
-cmake --build build --config Debug -j 1
+# Rebuild with the fixed test files
+echo "Rebuilding with fixed test files..."
+rm -rf build
+cmake -B build -G Ninja \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_CXX_STANDARD=14 \
+    -DBENCHMARK_DOWNLOAD_DEPENDENCIES=ON \
+    -DBENCHMARK_ENABLE_TESTING=ON \
+    -DBENCHMARK_ENABLE_GTEST_TESTS=ON \
+    -DBENCHMARK_ENABLE_WERROR=OFF \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-# Run the specific tests for this PR with their required flags
-./build/test/basic_test --benchmark_min_time=0.01s && \
-./build/test/complexity_test --benchmark_min_time=1000000x && \
-./build/test/diagnostics_test --benchmark_min_time=0.01s && \
-./build/test/link_main_test --benchmark_min_time=0.01s && \
-./build/test/memory_manager_test --benchmark_min_time=0.01s && \
-./build/test/perf_counters_test --benchmark_min_time=0.01s --benchmark_perf_counters=CYCLES,INSTRUCTIONS && \
-./build/test/reporter_output_test --benchmark_min_time=0.01s && \
-./build/test/skip_with_error_test --benchmark_min_time=0.01s && \
-./build/test/user_counters_tabular_test --benchmark_counters_tabular=true --benchmark_min_time=0.01s && \
-./build/test/user_counters_test --benchmark_min_time=0.01s
+# Build the specific test targets
+cmake --build build --config Debug -j 1
+if [ $? -ne 0 ]; then
+    echo "Build failed!"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+# Run the specific tests using ctest
+echo "Running tests..."
+cd build
+ctest -R "^(basic_benchmark|complexity_benchmark|diagnostics_test|link_main_test|memory_manager_test|perf_counters_test|reporter_output_test|skip_with_error_test|user_counters_tabular_test|user_counters_test)$" -VV --output-on-failure
 test_status=$?
+cd ..
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

@@ -1,7 +1,7 @@
-yaml-cpp incorrectly handles certain multi-document edge cases when parsing a YAML stream.
+yaml-cpp’s document parsing has two related correctness issues when loading YAML streams.
 
-1) Empty documents at the end of a stream are skipped
-A YAML stream may contain multiple documents separated/terminated by document markers. When the stream consists of multiple empty documents such as:
+1) Empty documents at the end of a multi-document stream are incorrectly skipped.
+A YAML stream may contain multiple empty documents separated/terminated by document boundary markers. For example, the stream:
 
 ```
 ...
@@ -9,21 +9,19 @@ A YAML stream may contain multiple documents separated/terminated by document ma
 ...
 ```
 
-yaml-cpp currently returns fewer documents than expected (it effectively collapses/truncates trailing empty documents and only produces a single empty document). The expected behavior is that each document end marker corresponds to an empty document, so the stream above should yield 3 documents, each representing an empty/null document.
+represents three empty documents. Currently, when parsing such input as a stream of documents, yaml-cpp incorrectly drops trailing empty documents and reports fewer documents than are actually present (e.g., it only yields a single empty document instead of three). The parser should preserve and emit each empty document, including those that occur at the end of the stream.
 
-This needs to be fixed so APIs that iterate/parse a stream of documents do not drop empty documents at the end.
+2) Unexpected leftover tokens after a document are not rejected, causing invalid inputs to be accepted as multiple documents.
+Given input such as:
 
-2) Flow sequence followed by extra characters is parsed as multiple documents instead of being rejected
-When parsing a single document like:
-
-```cpp
-YAML::Node node = YAML::Load("[foo]_bar");
+```
+[foo]_bar
 ```
 
-yaml-cpp currently parses this as if it were multiple documents: the first document is the flow sequence `[foo]`, and then the remaining `_bar` becomes another scalar/document. This is incorrect for a single-document load.
+yaml-cpp currently parses this as if it were multiple documents: the first document is the flow sequence `[foo]`, and the remaining `_bar` is treated as another document/scalar. This is incorrect: after completing a document, yaml-cpp should detect that there are unexpected extra tokens remaining on the same document and fail parsing.
 
-Expected behavior: after parsing a complete document, yaml-cpp must validate that there are no unexpected extra tokens remaining in the stream (other than valid document separators/terminators and end-of-stream). For input like `[foo]_bar`, yaml-cpp should not silently accept it as multiple documents; it should raise a parsing error (e.g., throw a `YAML::ParserException`) indicating that unexpected content exists after the end of the document.
+When calling `YAML::Load("[foo]_bar")`, yaml-cpp should not successfully return a `Node` representing the sequence `["foo"]`. Instead, it should raise a parsing error (e.g., a `YAML::ParserException`) because there is non-whitespace content trailing immediately after the closing `]` that cannot start a new document without an explicit document boundary.
 
-After the fix:
-- Multi-document parsing must preserve empty documents, including at the end of the stream.
-- Single-document parsing via `YAML::Load` must reject inputs where extra non-separator content follows a valid document (e.g., `[foo]_bar`) by throwing `YAML::ParserException` rather than producing an additional document/scalar.
+Fix the parser so that:
+- Multi-document parsing yields the correct number of empty documents, including trailing empty documents.
+- Single-document loading rejects inputs where, after a document is parsed, the scanner still has unexpected tokens remaining (such as a plain scalar `_bar` immediately following a closed flow sequence), and `YAML::Load` throws a parser error for such inputs.

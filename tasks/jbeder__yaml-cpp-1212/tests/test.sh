@@ -5,11 +5,11 @@ cd /app/src
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test/cmake"
 cp "/tests/cmake/CMakeLists.txt" "test/cmake/CMakeLists.txt"
+mkdir -p "test/cmake"
 cp "/tests/cmake/main.cpp" "test/cmake/main.cpp"
 
-# Rebuild yaml-cpp (oracle applies fix.patch before running this script,
-# so we need to rebuild to get the fixed version)
-cmake --build build --config Debug --parallel 2>&1
+# Rebuild yaml-cpp with the fix applied (oracle applies fix.patch before running this script)
+cmake --build build --config Debug 2>&1
 rebuild_status=$?
 
 if [ $rebuild_status -ne 0 ]; then
@@ -18,8 +18,9 @@ if [ $rebuild_status -ne 0 ]; then
   exit $rebuild_status
 fi
 
-# Install yaml-cpp so the CMake consumer test can find it
-cmake --install build --prefix /usr/local 2>&1
+# Install yaml-cpp to a prefix so it can be found by the test
+CMAKE_INSTALL_PREFIX="/tmp/yaml-cpp-install"
+cmake --install build --prefix "${CMAKE_INSTALL_PREFIX}" --config Debug 2>&1
 install_status=$?
 
 if [ $install_status -ne 0 ]; then
@@ -28,18 +29,22 @@ if [ $install_status -ne 0 ]; then
   exit $install_status
 fi
 
-# Build the CMake consumer test
-cd test/cmake
-cmake -B build -DCMAKE_PREFIX_PATH=/usr/local 2>&1
-config_status=$?
+# Configure the CMake package test
+cmake \
+  -S test/cmake \
+  -B consumer-build \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_PREFIX_PATH="${CMAKE_INSTALL_PREFIX}" 2>&1
+configure_status=$?
 
-if [ $config_status -ne 0 ]; then
-  echo "CMake configuration failed with status $config_status" >&2
+if [ $configure_status -ne 0 ]; then
+  echo "CMake configuration failed with status $configure_status" >&2
   echo 0 > /logs/verifier/reward.txt
-  exit $config_status
+  exit $configure_status
 fi
 
-cmake --build build 2>&1
+# Build the CMake package test
+cmake --build consumer-build --config Debug 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

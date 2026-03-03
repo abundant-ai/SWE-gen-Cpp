@@ -1,0 +1,1095 @@
+diff --git a/include/benchmark/benchmark.h b/include/benchmark/benchmark.h
+index 7aa6487..b7a8998 100644
+--- a/include/benchmark/benchmark.h
++++ b/include/benchmark/benchmark.h
+@@ -1339,10 +1339,8 @@ class BenchmarkReporter {
+           allocs_per_iter(0.0),
+           max_bytes_used(0) {}
+ 
+-    std::string benchmark_name() const;
+-    std::string run_name;
++    std::string benchmark_name;
+     RunType run_type;          // is this a measurement, or an aggregate?
+-    std::string aggregate_name;
+     std::string report_label;  // Empty if not set by benchmark.
+     bool error_occurred;
+     std::string error_message;
+diff --git a/src/benchmark.cc b/src/benchmark.cc
+index 4d3001a..0c92ae6 100644
+--- a/src/benchmark.cc
++++ b/src/benchmark.cc
+@@ -132,7 +132,7 @@ BenchmarkReporter::Run CreateRunReport(
+   // Create report about this benchmark run.
+   BenchmarkReporter::Run report;
+ 
+-  report.run_name = b.name;
++  report.benchmark_name = b.name;
+   report.error_occurred = results.has_error_;
+   report.error_message = results.error_message_;
+   report.report_label = results.report_label_;
+diff --git a/src/complexity.cc b/src/complexity.cc
+index 0be73e0..8d1392a 100644
+--- a/src/complexity.cc
++++ b/src/complexity.cc
+@@ -182,15 +182,13 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+     result_cpu = MinimalLeastSq(n, cpu_time, reports[0].complexity);
+     result_real = MinimalLeastSq(n, real_time, result_cpu.complexity);
+   }
+-
+-  std::string run_name = reports[0].benchmark_name().substr(
+-      0, reports[0].benchmark_name().find('/'));
++  std::string benchmark_name =
++      reports[0].benchmark_name.substr(0, reports[0].benchmark_name.find('/'));
+ 
+   // Get the data from the accumulator to BenchmarkReporter::Run's.
+   Run big_o;
+-  big_o.run_name = run_name;
+   big_o.run_type = BenchmarkReporter::Run::RT_Aggregate;
+-  big_o.aggregate_name = "BigO";
++  big_o.benchmark_name = benchmark_name + "_BigO";
+   big_o.iterations = 0;
+   big_o.real_accumulated_time = result_real.coef;
+   big_o.cpu_accumulated_time = result_cpu.coef;
+@@ -206,10 +204,9 @@ std::vector<BenchmarkReporter::Run> ComputeBigO(
+ 
+   // Only add label to mean/stddev if it is same for all runs
+   Run rms;
+-  rms.run_name = run_name;
+   big_o.report_label = reports[0].report_label;
+   rms.run_type = BenchmarkReporter::Run::RT_Aggregate;
+-  rms.aggregate_name = "RMS";
++  rms.benchmark_name = benchmark_name + "_RMS";
+   rms.report_label = big_o.report_label;
+   rms.iterations = 0;
+   rms.real_accumulated_time = result_real.rms / multiplier;
+diff --git a/src/console_reporter.cc b/src/console_reporter.cc
+index f1d872a..e919e78 100644
+--- a/src/console_reporter.cc
++++ b/src/console_reporter.cc
+@@ -106,7 +106,7 @@ void ConsoleReporter::PrintRunData(const Run& result) {
+   auto name_color =
+       (result.report_big_o || result.report_rms) ? COLOR_BLUE : COLOR_GREEN;
+   printer(Out, name_color, "%-*s ", name_field_width_,
+-          result.benchmark_name().c_str());
++          result.benchmark_name.c_str());
+ 
+   if (result.error_occurred) {
+     printer(Out, COLOR_RED, "ERROR OCCURRED: \'%s\'",
+diff --git a/src/csv_reporter.cc b/src/csv_reporter.cc
+index dc370de..4a64190 100644
+--- a/src/csv_reporter.cc
++++ b/src/csv_reporter.cc
+@@ -88,7 +88,7 @@ void CSVReporter::PrintRunData(const Run& run) {
+ 
+   // Field with embedded double-quote characters must be doubled and the field
+   // delimited with double-quotes.
+-  std::string name = run.benchmark_name();
++  std::string name = run.benchmark_name;
+   ReplaceAll(&name, "\"", "\"\"");
+   Out << '"' << name << "\",";
+   if (run.error_occurred) {
+diff --git a/src/json_reporter.cc b/src/json_reporter.cc
+index 475cf0a..54e3af3 100644
+--- a/src/json_reporter.cc
++++ b/src/json_reporter.cc
+@@ -159,8 +159,7 @@ void JSONReporter::Finalize() {
+ void JSONReporter::PrintRunData(Run const& run) {
+   std::string indent(6, ' ');
+   std::ostream& out = GetOutputStream();
+-  out << indent << FormatKV("name", run.benchmark_name()) << ",\n";
+-  out << indent << FormatKV("run_name", run.run_name) << ",\n";
++  out << indent << FormatKV("name", run.benchmark_name) << ",\n";
+   out << indent << FormatKV("run_type", [&run]() -> const char* {
+     switch (run.run_type) {
+       case BenchmarkReporter::Run::RT_Iteration:
+@@ -170,9 +169,6 @@ void JSONReporter::PrintRunData(Run const& run) {
+     }
+     BENCHMARK_UNREACHABLE();
+   }()) << ",\n";
+-  if (run.run_type == BenchmarkReporter::Run::RT_Aggregate) {
+-    out << indent << FormatKV("aggregate_name", run.aggregate_name) << ",\n";
+-  }
+   if (run.error_occurred) {
+     out << indent << FormatKV("error_occurred", run.error_occurred) << ",\n";
+     out << indent << FormatKV("error_message", run.error_message) << ",\n";
+diff --git a/src/reporter.cc b/src/reporter.cc
+index fe86617..541661a 100644
+--- a/src/reporter.cc
++++ b/src/reporter.cc
+@@ -72,14 +72,6 @@ const char *BenchmarkReporter::Context::executable_name;
+ 
+ BenchmarkReporter::Context::Context() : cpu_info(CPUInfo::Get()) {}
+ 
+-std::string BenchmarkReporter::Run::benchmark_name() const {
+-  std::string name = run_name;
+-  if (run_type == RT_Aggregate) {
+-    name += "_" + aggregate_name;
+-  }
+-  return name;
+-}
+-
+ double BenchmarkReporter::Run::GetAdjustedRealTime() const {
+   double new_time = real_accumulated_time * GetTimeUnitMultiplier(time_unit);
+   if (iterations != 0) new_time /= static_cast<double>(iterations);
+diff --git a/src/statistics.cc b/src/statistics.cc
+index b5fec52..588fd12 100644
+--- a/src/statistics.cc
++++ b/src/statistics.cc
+@@ -123,7 +123,7 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+ 
+   // Populate the accumulators.
+   for (Run const& run : reports) {
+-    CHECK_EQ(reports[0].benchmark_name(), run.benchmark_name());
++    CHECK_EQ(reports[0].benchmark_name, run.benchmark_name);
+     CHECK_EQ(run_iterations, run.iterations);
+     if (run.error_occurred) continue;
+     real_accumulated_time_stat.emplace_back(run.real_accumulated_time);
+@@ -150,9 +150,8 @@ std::vector<BenchmarkReporter::Run> ComputeStats(
+   for (const auto& Stat : *reports[0].statistics) {
+     // Get the data from the accumulator to BenchmarkReporter::Run's.
+     Run data;
+-    data.run_name = reports[0].benchmark_name();
+     data.run_type = BenchmarkReporter::Run::RT_Aggregate;
+-    data.aggregate_name = Stat.name_;
++    data.benchmark_name = reports[0].benchmark_name + "_" + Stat.name_;
+     data.report_label = report_label;
+     data.iterations = run_iterations;
+ 
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index f15ce20..4269991 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -137,9 +137,6 @@ add_test(user_counters_tabular_test user_counters_tabular_test --benchmark_count
+ compile_output_test(user_counters_thousands_test)
+ add_test(user_counters_thousands_test user_counters_thousands_test --benchmark_min_time=0.01)
+ 
+-compile_output_test(memory_manager_test)
+-add_test(memory_manager_test memory_manager_test --benchmark_min_time=0.01)
+-
+ check_cxx_compiler_flag(-std=c++03 BENCHMARK_HAS_CXX03_FLAG)
+ if (BENCHMARK_HAS_CXX03_FLAG)
+   compile_benchmark_test(cxx03_test)
+diff --git a/test/complexity_test.cc b/test/complexity_test.cc
+index 323ddfe..d09a2f8 100644
+--- a/test/complexity_test.cc
++++ b/test/complexity_test.cc
+@@ -12,10 +12,9 @@ namespace {
+ #define ADD_COMPLEXITY_CASES(...) \
+   int CONCAT(dummy, __LINE__) = AddComplexityTest(__VA_ARGS__)
+ 
+-int AddComplexityTest(std::string test_name, std::string big_o_test_name,
+-                      std::string rms_test_name, std::string big_o) {
+-  SetSubstitutions({{"%name", test_name},
+-                    {"%bigo_name", big_o_test_name},
++int AddComplexityTest(std::string big_o_test_name, std::string rms_test_name,
++                      std::string big_o) {
++  SetSubstitutions({{"%bigo_name", big_o_test_name},
+                     {"%rms_name", rms_test_name},
+                     {"%bigo_str", "[ ]* %float " + big_o},
+                     {"%bigo", big_o},
+@@ -26,18 +25,14 @@ int AddComplexityTest(std::string test_name, std::string big_o_test_name,
+        {"^%bigo_name", MR_Not},  // Assert we we didn't only matched a name.
+        {"^%rms_name %rms %rms[ ]*$", MR_Next}});
+   AddCases(TC_JSONOut, {{"\"name\": \"%bigo_name\",$"},
+-                        {"\"run_name\": \"%name\",$", MR_Next},
+                         {"\"run_type\": \"aggregate\",$", MR_Next},
+-                        {"\"aggregate_name\": \"BigO\",$", MR_Next},
+                         {"\"cpu_coefficient\": %float,$", MR_Next},
+                         {"\"real_coefficient\": %float,$", MR_Next},
+                         {"\"big_o\": \"%bigo\",$", MR_Next},
+                         {"\"time_unit\": \"ns\"$", MR_Next},
+                         {"}", MR_Next},
+                         {"\"name\": \"%rms_name\",$"},
+-                        {"\"run_name\": \"%name\",$", MR_Next},
+                         {"\"run_type\": \"aggregate\",$", MR_Next},
+-                        {"\"aggregate_name\": \"RMS\",$", MR_Next},
+                         {"\"rms\": %float$", MR_Next},
+                         {"}", MR_Next}});
+   AddCases(TC_CSVOut, {{"^\"%bigo_name\",,%float,%float,%bigo,,,,,$"},
+@@ -66,7 +61,6 @@ BENCHMARK(BM_Complexity_O1)->Range(1, 1 << 18)->Complexity([](int64_t) {
+   return 1.0;
+ });
+ 
+-const char *one_test_name = "BM_Complexity_O1";
+ const char *big_o_1_test_name = "BM_Complexity_O1_BigO";
+ const char *rms_o_1_test_name = "BM_Complexity_O1_RMS";
+ const char *enum_big_o_1 = "\\([0-9]+\\)";
+@@ -77,16 +71,13 @@ const char *auto_big_o_1 = "(\\([0-9]+\\))|(lgN)";
+ const char *lambda_big_o_1 = "f\\(N\\)";
+ 
+ // Add enum tests
+-ADD_COMPLEXITY_CASES(one_test_name, big_o_1_test_name, rms_o_1_test_name,
+-                     enum_big_o_1);
++ADD_COMPLEXITY_CASES(big_o_1_test_name, rms_o_1_test_name, enum_big_o_1);
+ 
+ // Add auto enum tests
+-ADD_COMPLEXITY_CASES(one_test_name, big_o_1_test_name, rms_o_1_test_name,
+-                     auto_big_o_1);
++ADD_COMPLEXITY_CASES(big_o_1_test_name, rms_o_1_test_name, auto_big_o_1);
+ 
+ // Add lambda tests
+-ADD_COMPLEXITY_CASES(one_test_name, big_o_1_test_name, rms_o_1_test_name,
+-                     lambda_big_o_1);
++ADD_COMPLEXITY_CASES(big_o_1_test_name, rms_o_1_test_name, lambda_big_o_1);
+ 
+ // ========================================================================= //
+ // --------------------------- Testing BigO O(N) --------------------------- //
+@@ -123,19 +114,16 @@ BENCHMARK(BM_Complexity_O_N)
+     ->Range(1 << 10, 1 << 16)
+     ->Complexity();
+ 
+-const char *n_test_name = "BM_Complexity_O_N";
+ const char *big_o_n_test_name = "BM_Complexity_O_N_BigO";
+ const char *rms_o_n_test_name = "BM_Complexity_O_N_RMS";
+ const char *enum_auto_big_o_n = "N";
+ const char *lambda_big_o_n = "f\\(N\\)";
+ 
+ // Add enum tests
+-ADD_COMPLEXITY_CASES(n_test_name, big_o_n_test_name, rms_o_n_test_name,
+-                     enum_auto_big_o_n);
++ADD_COMPLEXITY_CASES(big_o_n_test_name, rms_o_n_test_name, enum_auto_big_o_n);
+ 
+ // Add lambda tests
+-ADD_COMPLEXITY_CASES(n_test_name, big_o_n_test_name, rms_o_n_test_name,
+-                     lambda_big_o_n);
++ADD_COMPLEXITY_CASES(big_o_n_test_name, rms_o_n_test_name, lambda_big_o_n);
+ 
+ // ========================================================================= //
+ // ------------------------- Testing BigO O(N*lgN) ------------------------- //
+@@ -162,19 +150,18 @@ BENCHMARK(BM_Complexity_O_N_log_N)
+     ->Range(1 << 10, 1 << 16)
+     ->Complexity();
+ 
+-const char *n_lg_n_test_name = "BM_Complexity_O_N_log_N";
+ const char *big_o_n_lg_n_test_name = "BM_Complexity_O_N_log_N_BigO";
+ const char *rms_o_n_lg_n_test_name = "BM_Complexity_O_N_log_N_RMS";
+ const char *enum_auto_big_o_n_lg_n = "NlgN";
+ const char *lambda_big_o_n_lg_n = "f\\(N\\)";
+ 
+ // Add enum tests
+-ADD_COMPLEXITY_CASES(n_lg_n_test_name, big_o_n_lg_n_test_name,
+-                     rms_o_n_lg_n_test_name, enum_auto_big_o_n_lg_n);
++ADD_COMPLEXITY_CASES(big_o_n_lg_n_test_name, rms_o_n_lg_n_test_name,
++                     enum_auto_big_o_n_lg_n);
+ 
+ // Add lambda tests
+-ADD_COMPLEXITY_CASES(n_lg_n_test_name, big_o_n_lg_n_test_name,
+-                     rms_o_n_lg_n_test_name, lambda_big_o_n_lg_n);
++ADD_COMPLEXITY_CASES(big_o_n_lg_n_test_name, rms_o_n_lg_n_test_name,
++                     lambda_big_o_n_lg_n);
+ 
+ // ========================================================================= //
+ // --------------------------- TEST CASES END ------------------------------ //
+diff --git a/test/display_aggregates_only_test.cc b/test/display_aggregates_only_test.cc
+index 3c36d3f..46ab2e3 100644
+--- a/test/display_aggregates_only_test.cc
++++ b/test/display_aggregates_only_test.cc
+@@ -19,22 +19,19 @@ BENCHMARK(BM_SummaryRepeat)->Repetitions(3)->DisplayAggregatesOnly();
+ int main(int argc, char* argv[]) {
+   const std::string output = GetFileReporterOutput(argc, argv);
+ 
+-  if (SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3") != 6 ||
+-      SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3\"") != 3 ||
+-      SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3_mean\"") != 1 ||
+-      SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3_median\"") !=
+-          1 ||
+-      SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3_stddev\"") !=
+-          1) {
++  if (SubstrCnt(output, "BM_SummaryRepeat/repeats:3") != 6 ||
++      SubstrCnt(output, "\"BM_SummaryRepeat/repeats:3\"") != 3 ||
++      SubstrCnt(output, "\"BM_SummaryRepeat/repeats:3_mean\"") != 1 ||
++      SubstrCnt(output, "\"BM_SummaryRepeat/repeats:3_median\"") != 1 ||
++      SubstrCnt(output, "\"BM_SummaryRepeat/repeats:3_stddev\"") != 1) {
+     std::cout << "Precondition mismatch. Expected to only find 6 "
+                  "occurrences of \"BM_SummaryRepeat/repeats:3\" substring:\n"
+-                 "\"name\": \"BM_SummaryRepeat/repeats:3\", "
+-                 "\"name\": \"BM_SummaryRepeat/repeats:3\", "
+-                 "\"name\": \"BM_SummaryRepeat/repeats:3\", "
+-                 "\"name\": \"BM_SummaryRepeat/repeats:3_mean\", "
+-                 "\"name\": \"BM_SummaryRepeat/repeats:3_median\", "
+-                 "\"name\": \"BM_SummaryRepeat/repeats:3_stddev\"\nThe entire "
+-                 "output:\n";
++                 "\"BM_SummaryRepeat/repeats:3\", "
++                 "\"BM_SummaryRepeat/repeats:3\", "
++                 "\"BM_SummaryRepeat/repeats:3\", "
++                 "\"BM_SummaryRepeat/repeats:3_mean\", "
++                 "\"BM_SummaryRepeat/repeats:3_median\", "
++                 "\"BM_SummaryRepeat/repeats:3_stddev\"\nThe entire output:\n";
+     std::cout << output;
+     return 1;
+   }
+diff --git a/test/memory_manager_test.cc b/test/memory_manager_test.cc
+index 94be608..4e71b64 100644
+--- a/test/memory_manager_test.cc
++++ b/test/memory_manager_test.cc
+@@ -21,7 +21,6 @@ BENCHMARK(BM_empty);
+ 
+ ADD_CASES(TC_ConsoleOut, {{"^BM_empty %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_empty\",$"},
+-                       {"\"run_name\": \"BM_empty\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"iterations\": %int,$", MR_Next},
+                        {"\"real_time\": %float,$", MR_Next},
+diff --git a/test/register_benchmark_test.cc b/test/register_benchmark_test.cc
+index 3ac5b21..18de6d6 100644
+--- a/test/register_benchmark_test.cc
++++ b/test/register_benchmark_test.cc
+@@ -30,8 +30,8 @@ struct TestCase {
+ 
+   void CheckRun(Run const& run) const {
+     // clang-format off
+-    CHECK(name == run.benchmark_name()) << "expected " << name << " got "
+-                                      << run.benchmark_name();
++    CHECK(name == run.benchmark_name) << "expected " << name << " got "
++                                      << run.benchmark_name;
+     if (label) {
+       CHECK(run.report_label == label) << "expected " << label << " got "
+                                        << run.report_label;
+diff --git a/test/report_aggregates_only_test.cc b/test/report_aggregates_only_test.cc
+index 9646b9b..8eb8bde 100644
+--- a/test/report_aggregates_only_test.cc
++++ b/test/report_aggregates_only_test.cc
+@@ -19,18 +19,15 @@ BENCHMARK(BM_SummaryRepeat)->Repetitions(3)->ReportAggregatesOnly();
+ int main(int argc, char* argv[]) {
+   const std::string output = GetFileReporterOutput(argc, argv);
+ 
+-  if (SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3") != 3 ||
+-      SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3_mean\"") != 1 ||
+-      SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3_median\"") !=
+-          1 ||
+-      SubstrCnt(output, "\"name\": \"BM_SummaryRepeat/repeats:3_stddev\"") !=
+-          1) {
++  if (SubstrCnt(output, "BM_SummaryRepeat/repeats:3") != 3 ||
++      SubstrCnt(output, "\"BM_SummaryRepeat/repeats:3_mean\"") != 1 ||
++      SubstrCnt(output, "\"BM_SummaryRepeat/repeats:3_median\"") != 1 ||
++      SubstrCnt(output, "\"BM_SummaryRepeat/repeats:3_stddev\"") != 1) {
+     std::cout << "Precondition mismatch. Expected to only find three "
+                  "occurrences of \"BM_SummaryRepeat/repeats:3\" substring:\n"
+-                 "\"name\": \"BM_SummaryRepeat/repeats:3_mean\", "
+-                 "\"name\": \"BM_SummaryRepeat/repeats:3_median\", "
+-                 "\"name\": \"BM_SummaryRepeat/repeats:3_stddev\"\nThe entire "
+-                 "output:\n";
++                 "\"BM_SummaryRepeat/repeats:3_mean\", "
++                 "\"BM_SummaryRepeat/repeats:3_median\", "
++                 "\"BM_SummaryRepeat/repeats:3_stddev\"\nThe entire output:\n";
+     std::cout << output;
+     return 1;
+   }
+diff --git a/test/reporter_output_test.cc b/test/reporter_output_test.cc
+index 91e505d..8045cfc 100644
+--- a/test/reporter_output_test.cc
++++ b/test/reporter_output_test.cc
+@@ -65,7 +65,6 @@ BENCHMARK(BM_basic);
+ 
+ ADD_CASES(TC_ConsoleOut, {{"^BM_basic %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_basic\",$"},
+-                       {"\"run_name\": \"BM_basic\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"iterations\": %int,$", MR_Next},
+                        {"\"real_time\": %float,$", MR_Next},
+@@ -88,7 +87,6 @@ BENCHMARK(BM_bytes_per_second);
+ ADD_CASES(TC_ConsoleOut,
+           {{"^BM_bytes_per_second %console_report +%float[kM]{0,1}B/s$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_bytes_per_second\",$"},
+-                       {"\"run_name\": \"BM_bytes_per_second\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"iterations\": %int,$", MR_Next},
+                        {"\"real_time\": %float,$", MR_Next},
+@@ -112,7 +110,6 @@ BENCHMARK(BM_items_per_second);
+ ADD_CASES(TC_ConsoleOut,
+           {{"^BM_items_per_second %console_report +%float[kM]{0,1} items/s$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_items_per_second\",$"},
+-                       {"\"run_name\": \"BM_items_per_second\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"iterations\": %int,$", MR_Next},
+                        {"\"real_time\": %float,$", MR_Next},
+@@ -135,7 +132,6 @@ BENCHMARK(BM_label);
+ 
+ ADD_CASES(TC_ConsoleOut, {{"^BM_label %console_report some label$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_label\",$"},
+-                       {"\"run_name\": \"BM_label\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"iterations\": %int,$", MR_Next},
+                        {"\"real_time\": %float,$", MR_Next},
+@@ -158,7 +154,6 @@ void BM_error(benchmark::State& state) {
+ BENCHMARK(BM_error);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_error[ ]+ERROR OCCURRED: 'message'$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_error\",$"},
+-                       {"\"run_name\": \"BM_error\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"error_occurred\": true,$", MR_Next},
+                        {"\"error_message\": \"message\",$", MR_Next}});
+@@ -177,7 +172,6 @@ void BM_no_arg_name(benchmark::State& state) {
+ BENCHMARK(BM_no_arg_name)->Arg(3);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_no_arg_name/3 %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_no_arg_name/3\",$"},
+-                       {"\"run_name\": \"BM_no_arg_name/3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_no_arg_name/3\",%csv_report$"}});
+ 
+@@ -192,7 +186,6 @@ void BM_arg_name(benchmark::State& state) {
+ BENCHMARK(BM_arg_name)->ArgName("first")->Arg(3);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_arg_name/first:3 %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_arg_name/first:3\",$"},
+-                       {"\"run_name\": \"BM_arg_name/first:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_arg_name/first:3\",%csv_report$"}});
+ 
+@@ -207,10 +200,8 @@ void BM_arg_names(benchmark::State& state) {
+ BENCHMARK(BM_arg_names)->Args({2, 5, 4})->ArgNames({"first", "", "third"});
+ ADD_CASES(TC_ConsoleOut,
+           {{"^BM_arg_names/first:2/5/third:4 %console_report$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_arg_names/first:2/5/third:4\",$"},
+-           {"\"run_name\": \"BM_arg_names/first:2/5/third:4\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_arg_names/first:2/5/third:4\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_arg_names/first:2/5/third:4\",%csv_report$"}});
+ 
+ // ========================================================================= //
+@@ -245,23 +236,15 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Repeat/repeats:2 %console_report$"},
+                           {"^BM_Repeat/repeats:2_median %console_report$"},
+                           {"^BM_Repeat/repeats:2_stddev %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:2\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:2\"", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:2\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:2_mean\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"mean\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:2_median\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"median\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:2_stddev\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+-                       {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"stddev\",$", MR_Next}});
++                       {"\"run_type\": \"aggregate\",$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_Repeat/repeats:2\",%csv_report$"},
+                       {"^\"BM_Repeat/repeats:2\",%csv_report$"},
+                       {"^\"BM_Repeat/repeats:2_mean\",%csv_report$"},
+@@ -276,26 +259,17 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Repeat/repeats:3 %console_report$"},
+                           {"^BM_Repeat/repeats:3_median %console_report$"},
+                           {"^BM_Repeat/repeats:3_stddev %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:3\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3_mean\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"mean\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3_median\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"median\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:3_stddev\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+-                       {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"stddev\",$", MR_Next}});
++                       {"\"run_type\": \"aggregate\",$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_Repeat/repeats:3\",%csv_report$"},
+                       {"^\"BM_Repeat/repeats:3\",%csv_report$"},
+                       {"^\"BM_Repeat/repeats:3\",%csv_report$"},
+@@ -312,29 +286,19 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Repeat/repeats:4 %console_report$"},
+                           {"^BM_Repeat/repeats:4_median %console_report$"},
+                           {"^BM_Repeat/repeats:4_stddev %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:4\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4_mean\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"mean\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4_median\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"median\",$", MR_Next},
+                        {"\"name\": \"BM_Repeat/repeats:4_stddev\",$"},
+-                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+-                       {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"stddev\",$", MR_Next}});
++                       {"\"run_type\": \"aggregate\",$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_Repeat/repeats:4\",%csv_report$"},
+                       {"^\"BM_Repeat/repeats:4\",%csv_report$"},
+                       {"^\"BM_Repeat/repeats:4\",%csv_report$"},
+@@ -352,7 +316,6 @@ void BM_RepeatOnce(benchmark::State& state) {
+ BENCHMARK(BM_RepeatOnce)->Repetitions(1)->ReportAggregatesOnly();
+ ADD_CASES(TC_ConsoleOut, {{"^BM_RepeatOnce/repeats:1 %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_RepeatOnce/repeats:1\",$"},
+-                       {"\"run_name\": \"BM_RepeatOnce/repeats:1\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_RepeatOnce/repeats:1\",%csv_report$"}});
+ 
+@@ -367,20 +330,13 @@ ADD_CASES(TC_ConsoleOut,
+            {"^BM_SummaryRepeat/repeats:3_mean %console_report$"},
+            {"^BM_SummaryRepeat/repeats:3_median %console_report$"},
+            {"^BM_SummaryRepeat/repeats:3_stddev %console_report$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{".*BM_SummaryRepeat/repeats:3 ", MR_Not},
+-           {"\"name\": \"BM_SummaryRepeat/repeats:3_mean\",$"},
+-           {"\"run_name\": \"BM_SummaryRepeat/repeats:3\",$", MR_Next},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"mean\",$", MR_Next},
+-           {"\"name\": \"BM_SummaryRepeat/repeats:3_median\",$"},
+-           {"\"run_name\": \"BM_SummaryRepeat/repeats:3\",$", MR_Next},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"median\",$", MR_Next},
+-           {"\"name\": \"BM_SummaryRepeat/repeats:3_stddev\",$"},
+-           {"\"run_name\": \"BM_SummaryRepeat/repeats:3\",$", MR_Next},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"stddev\",$", MR_Next}});
++ADD_CASES(TC_JSONOut, {{".*BM_SummaryRepeat/repeats:3 ", MR_Not},
++                       {"\"name\": \"BM_SummaryRepeat/repeats:3_mean\",$"},
++                       {"\"run_type\": \"aggregate\",$", MR_Next},
++                       {"\"name\": \"BM_SummaryRepeat/repeats:3_median\",$"},
++                       {"\"run_type\": \"aggregate\",$", MR_Next},
++                       {"\"name\": \"BM_SummaryRepeat/repeats:3_stddev\",$"},
++                       {"\"run_type\": \"aggregate\",$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{".*BM_SummaryRepeat/repeats:3 ", MR_Not},
+                       {"^\"BM_SummaryRepeat/repeats:3_mean\",%csv_report$"},
+                       {"^\"BM_SummaryRepeat/repeats:3_median\",%csv_report$"},
+@@ -399,20 +355,13 @@ ADD_CASES(TC_ConsoleOut,
+            {"^BM_SummaryDisplay/repeats:2_mean %console_report$"},
+            {"^BM_SummaryDisplay/repeats:2_median %console_report$"},
+            {"^BM_SummaryDisplay/repeats:2_stddev %console_report$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{".*BM_SummaryDisplay/repeats:2 ", MR_Not},
+-           {"\"name\": \"BM_SummaryDisplay/repeats:2_mean\",$"},
+-           {"\"run_name\": \"BM_SummaryDisplay/repeats:2\",$", MR_Next},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"mean\",$", MR_Next},
+-           {"\"name\": \"BM_SummaryDisplay/repeats:2_median\",$"},
+-           {"\"run_name\": \"BM_SummaryDisplay/repeats:2\",$", MR_Next},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"median\",$", MR_Next},
+-           {"\"name\": \"BM_SummaryDisplay/repeats:2_stddev\",$"},
+-           {"\"run_name\": \"BM_SummaryDisplay/repeats:2\",$", MR_Next},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"stddev\",$", MR_Next}});
++ADD_CASES(TC_JSONOut, {{".*BM_SummaryDisplay/repeats:2 ", MR_Not},
++                       {"\"name\": \"BM_SummaryDisplay/repeats:2_mean\",$"},
++                       {"\"run_type\": \"aggregate\",$", MR_Next},
++                       {"\"name\": \"BM_SummaryDisplay/repeats:2_median\",$"},
++                       {"\"run_type\": \"aggregate\",$", MR_Next},
++                       {"\"name\": \"BM_SummaryDisplay/repeats:2_stddev\",$"},
++                       {"\"run_type\": \"aggregate\",$", MR_Next}});
+ ADD_CASES(TC_CSVOut,
+           {{".*BM_SummaryDisplay/repeats:2 ", MR_Not},
+            {"^\"BM_SummaryDisplay/repeats:2_mean\",%csv_report$"},
+@@ -433,23 +382,16 @@ ADD_CASES(TC_ConsoleOut,
+            {"^BM_RepeatTimeUnit/repeats:3_mean %console_us_report$"},
+            {"^BM_RepeatTimeUnit/repeats:3_median %console_us_report$"},
+            {"^BM_RepeatTimeUnit/repeats:3_stddev %console_us_report$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{".*BM_RepeatTimeUnit/repeats:3 ", MR_Not},
+-           {"\"name\": \"BM_RepeatTimeUnit/repeats:3_mean\",$"},
+-           {"\"run_name\": \"BM_RepeatTimeUnit/repeats:3\",$", MR_Next},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"mean\",$", MR_Next},
+-           {"\"time_unit\": \"us\",?$"},
+-           {"\"name\": \"BM_RepeatTimeUnit/repeats:3_median\",$"},
+-           {"\"run_name\": \"BM_RepeatTimeUnit/repeats:3\",$", MR_Next},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"median\",$", MR_Next},
+-           {"\"time_unit\": \"us\",?$"},
+-           {"\"name\": \"BM_RepeatTimeUnit/repeats:3_stddev\",$"},
+-           {"\"run_name\": \"BM_RepeatTimeUnit/repeats:3\",$", MR_Next},
+-           {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"stddev\",$", MR_Next},
+-           {"\"time_unit\": \"us\",?$"}});
++ADD_CASES(TC_JSONOut, {{".*BM_RepeatTimeUnit/repeats:3 ", MR_Not},
++                       {"\"name\": \"BM_RepeatTimeUnit/repeats:3_mean\",$"},
++                       {"\"run_type\": \"aggregate\",$", MR_Next},
++                       {"\"time_unit\": \"us\",?$"},
++                       {"\"name\": \"BM_RepeatTimeUnit/repeats:3_median\",$"},
++                       {"\"run_type\": \"aggregate\",$", MR_Next},
++                       {"\"time_unit\": \"us\",?$"},
++                       {"\"name\": \"BM_RepeatTimeUnit/repeats:3_stddev\",$"},
++                       {"\"run_type\": \"aggregate\",$", MR_Next},
++                       {"\"time_unit\": \"us\",?$"}});
+ ADD_CASES(TC_CSVOut,
+           {{".*BM_RepeatTimeUnit/repeats:3 ", MR_Not},
+            {"^\"BM_RepeatTimeUnit/repeats:3_mean\",%csv_us_report$"},
+@@ -483,30 +425,19 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_UserStats/repeats:3 %console_report$"},
+                           {"^BM_UserStats/repeats:3_stddev %console_report$"},
+                           {"^BM_UserStats/repeats:3_ %console_report$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_UserStats/repeats:3\",$"},
+-                       {"\"run_name\": \"BM_UserStats/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_UserStats/repeats:3\",$"},
+-                       {"\"run_name\": \"BM_UserStats/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_UserStats/repeats:3\",$"},
+-                       {"\"run_name\": \"BM_UserStats/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"name\": \"BM_UserStats/repeats:3_mean\",$"},
+-                       {"\"run_name\": \"BM_UserStats/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"mean\",$", MR_Next},
+                        {"\"name\": \"BM_UserStats/repeats:3_median\",$"},
+-                       {"\"run_name\": \"BM_UserStats/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"median\",$", MR_Next},
+                        {"\"name\": \"BM_UserStats/repeats:3_stddev\",$"},
+-                       {"\"run_name\": \"BM_UserStats/repeats:3\",$", MR_Next},
+                        {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"stddev\",$", MR_Next},
+                        {"\"name\": \"BM_UserStats/repeats:3_\",$"},
+-                       {"\"run_name\": \"BM_UserStats/repeats:3\",$", MR_Next},
+-                       {"\"run_type\": \"aggregate\",$", MR_Next},
+-                       {"\"aggregate_name\": \"\",$", MR_Next}});
++                       {"\"run_type\": \"aggregate\",$", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_UserStats/repeats:3\",%csv_report$"},
+                       {"^\"BM_UserStats/repeats:3\",%csv_report$"},
+                       {"^\"BM_UserStats/repeats:3\",%csv_report$"},
+diff --git a/test/skip_with_error_test.cc b/test/skip_with_error_test.cc
+index 0657977..39785fb 100644
+--- a/test/skip_with_error_test.cc
++++ b/test/skip_with_error_test.cc
+@@ -33,8 +33,8 @@ struct TestCase {
+   typedef benchmark::BenchmarkReporter::Run Run;
+ 
+   void CheckRun(Run const& run) const {
+-    CHECK(name == run.benchmark_name())
+-        << "expected " << name << " got " << run.benchmark_name();
++    CHECK(name == run.benchmark_name)
++        << "expected " << name << " got " << run.benchmark_name;
+     CHECK(error_occurred == run.error_occurred);
+     CHECK(error_message == run.error_message);
+     if (error_occurred) {
+diff --git a/test/user_counters_tabular_test.cc b/test/user_counters_tabular_test.cc
+index 030e989..88cb3d2 100644
+--- a/test/user_counters_tabular_test.cc
++++ b/test/user_counters_tabular_test.cc
+@@ -69,21 +69,19 @@ void BM_Counters_Tabular(benchmark::State& state) {
+   });
+ }
+ BENCHMARK(BM_Counters_Tabular)->ThreadRange(1, 16);
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_Tabular/threads:%int\",$"},
+-           {"\"run_name\": \"BM_Counters_Tabular/threads:%int\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"Bar\": %float,$", MR_Next},
+-           {"\"Bat\": %float,$", MR_Next},
+-           {"\"Baz\": %float,$", MR_Next},
+-           {"\"Foo\": %float,$", MR_Next},
+-           {"\"Frob\": %float,$", MR_Next},
+-           {"\"Lob\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_Tabular/threads:%int\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"Bar\": %float,$", MR_Next},
++                       {"\"Bat\": %float,$", MR_Next},
++                       {"\"Baz\": %float,$", MR_Next},
++                       {"\"Foo\": %float,$", MR_Next},
++                       {"\"Frob\": %float,$", MR_Next},
++                       {"\"Lob\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_Tabular/threads:%int\",%csv_report,"
+                        "%float,%float,%float,%float,%float,%float$"}});
+ // VS2013 does not allow this function to be passed as a lambda argument
+@@ -116,22 +114,19 @@ void BM_CounterRates_Tabular(benchmark::State& state) {
+   });
+ }
+ BENCHMARK(BM_CounterRates_Tabular)->ThreadRange(1, 16);
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_CounterRates_Tabular/threads:%int\",$"},
+-           {"\"run_name\": \"BM_CounterRates_Tabular/threads:%int\",$",
+-            MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"Bar\": %float,$", MR_Next},
+-           {"\"Bat\": %float,$", MR_Next},
+-           {"\"Baz\": %float,$", MR_Next},
+-           {"\"Foo\": %float,$", MR_Next},
+-           {"\"Frob\": %float,$", MR_Next},
+-           {"\"Lob\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_CounterRates_Tabular/threads:%int\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"Bar\": %float,$", MR_Next},
++                       {"\"Bat\": %float,$", MR_Next},
++                       {"\"Baz\": %float,$", MR_Next},
++                       {"\"Foo\": %float,$", MR_Next},
++                       {"\"Frob\": %float,$", MR_Next},
++                       {"\"Lob\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_CounterRates_Tabular/threads:%int\",%csv_report,"
+                        "%float,%float,%float,%float,%float,%float$"}});
+ // VS2013 does not allow this function to be passed as a lambda argument
+@@ -164,18 +159,16 @@ void BM_CounterSet0_Tabular(benchmark::State& state) {
+   });
+ }
+ BENCHMARK(BM_CounterSet0_Tabular)->ThreadRange(1, 16);
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_CounterSet0_Tabular/threads:%int\",$"},
+-           {"\"run_name\": \"BM_CounterSet0_Tabular/threads:%int\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"Bar\": %float,$", MR_Next},
+-           {"\"Baz\": %float,$", MR_Next},
+-           {"\"Foo\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_CounterSet0_Tabular/threads:%int\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"Bar\": %float,$", MR_Next},
++                       {"\"Baz\": %float,$", MR_Next},
++                       {"\"Foo\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_CounterSet0_Tabular/threads:%int\",%csv_report,"
+                        "%float,,%float,%float,,"}});
+ // VS2013 does not allow this function to be passed as a lambda argument
+@@ -199,18 +192,16 @@ void BM_CounterSet1_Tabular(benchmark::State& state) {
+   });
+ }
+ BENCHMARK(BM_CounterSet1_Tabular)->ThreadRange(1, 16);
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_CounterSet1_Tabular/threads:%int\",$"},
+-           {"\"run_name\": \"BM_CounterSet1_Tabular/threads:%int\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"Bar\": %float,$", MR_Next},
+-           {"\"Baz\": %float,$", MR_Next},
+-           {"\"Foo\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_CounterSet1_Tabular/threads:%int\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"Bar\": %float,$", MR_Next},
++                       {"\"Baz\": %float,$", MR_Next},
++                       {"\"Foo\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_CounterSet1_Tabular/threads:%int\",%csv_report,"
+                        "%float,,%float,%float,,"}});
+ // VS2013 does not allow this function to be passed as a lambda argument
+@@ -238,18 +229,16 @@ void BM_CounterSet2_Tabular(benchmark::State& state) {
+   });
+ }
+ BENCHMARK(BM_CounterSet2_Tabular)->ThreadRange(1, 16);
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_CounterSet2_Tabular/threads:%int\",$"},
+-           {"\"run_name\": \"BM_CounterSet2_Tabular/threads:%int\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"Bat\": %float,$", MR_Next},
+-           {"\"Baz\": %float,$", MR_Next},
+-           {"\"Foo\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_CounterSet2_Tabular/threads:%int\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"Bat\": %float,$", MR_Next},
++                       {"\"Baz\": %float,$", MR_Next},
++                       {"\"Foo\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_CounterSet2_Tabular/threads:%int\",%csv_report,"
+                        ",%float,%float,%float,,"}});
+ // VS2013 does not allow this function to be passed as a lambda argument
+diff --git a/test/user_counters_test.cc b/test/user_counters_test.cc
+index 57d07d9..2c7a7b1 100644
+--- a/test/user_counters_test.cc
++++ b/test/user_counters_test.cc
+@@ -32,7 +32,6 @@ BENCHMARK(BM_Counters_Simple);
+ ADD_CASES(TC_ConsoleOut,
+           {{"^BM_Counters_Simple %console_report bar=%hrfloat foo=%hrfloat$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_Simple\",$"},
+-                       {"\"run_name\": \"BM_Counters_Simple\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"iterations\": %int,$", MR_Next},
+                        {"\"real_time\": %float,$", MR_Next},
+@@ -71,19 +70,17 @@ BENCHMARK(BM_Counters_WithBytesAndItemsPSec);
+ ADD_CASES(TC_ConsoleOut,
+           {{"^BM_Counters_WithBytesAndItemsPSec %console_report "
+             "bar=%hrfloat foo=%hrfloat +%hrfloatB/s +%hrfloat items/s$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_WithBytesAndItemsPSec\",$"},
+-           {"\"run_name\": \"BM_Counters_WithBytesAndItemsPSec\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"bytes_per_second\": %float,$", MR_Next},
+-           {"\"items_per_second\": %float,$", MR_Next},
+-           {"\"bar\": %float,$", MR_Next},
+-           {"\"foo\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_WithBytesAndItemsPSec\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"bytes_per_second\": %float,$", MR_Next},
++                       {"\"items_per_second\": %float,$", MR_Next},
++                       {"\"bar\": %float,$", MR_Next},
++                       {"\"foo\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_WithBytesAndItemsPSec\","
+                        "%csv_bytes_items_report,%float,%float$"}});
+ // VS2013 does not allow this function to be passed as a lambda argument
+@@ -115,7 +112,6 @@ ADD_CASES(
+     TC_ConsoleOut,
+     {{"^BM_Counters_Rate %console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+ ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_Rate\",$"},
+-                       {"\"run_name\": \"BM_Counters_Rate\",$", MR_Next},
+                        {"\"run_type\": \"iteration\",$", MR_Next},
+                        {"\"iterations\": %int,$", MR_Next},
+                        {"\"real_time\": %float,$", MR_Next},
+@@ -148,17 +144,15 @@ void BM_Counters_Threads(benchmark::State& state) {
+ BENCHMARK(BM_Counters_Threads)->ThreadRange(1, 8);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_Threads/threads:%int %console_report "
+                            "bar=%hrfloat foo=%hrfloat$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_Threads/threads:%int\",$"},
+-           {"\"run_name\": \"BM_Counters_Threads/threads:%int\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"bar\": %float,$", MR_Next},
+-           {"\"foo\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_Threads/threads:%int\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"bar\": %float,$", MR_Next},
++                       {"\"foo\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(
+     TC_CSVOut,
+     {{"^\"BM_Counters_Threads/threads:%int\",%csv_report,%float,%float$"}});
+@@ -184,17 +178,15 @@ void BM_Counters_AvgThreads(benchmark::State& state) {
+ BENCHMARK(BM_Counters_AvgThreads)->ThreadRange(1, 8);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_AvgThreads/threads:%int "
+                            "%console_report bar=%hrfloat foo=%hrfloat$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_AvgThreads/threads:%int\",$"},
+-           {"\"run_name\": \"BM_Counters_AvgThreads/threads:%int\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"bar\": %float,$", MR_Next},
+-           {"\"foo\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_AvgThreads/threads:%int\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"bar\": %float,$", MR_Next},
++                       {"\"foo\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(
+     TC_CSVOut,
+     {{"^\"BM_Counters_AvgThreads/threads:%int\",%csv_report,%float,%float$"}});
+@@ -223,8 +215,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_AvgThreadsRate/threads:%int "
+                            "%console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_AvgThreadsRate/threads:%int\",$"},
+-           {"\"run_name\": \"BM_Counters_AvgThreadsRate/threads:%int\",$",
+-            MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+@@ -258,17 +248,15 @@ void BM_Counters_IterationInvariant(benchmark::State& state) {
+ BENCHMARK(BM_Counters_IterationInvariant);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_IterationInvariant %console_report "
+                            "bar=%hrfloat foo=%hrfloat$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_IterationInvariant\",$"},
+-           {"\"run_name\": \"BM_Counters_IterationInvariant\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"bar\": %float,$", MR_Next},
+-           {"\"foo\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_IterationInvariant\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"bar\": %float,$", MR_Next},
++                       {"\"foo\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(TC_CSVOut,
+           {{"^\"BM_Counters_IterationInvariant\",%csv_report,%float,%float$"}});
+ // VS2013 does not allow this function to be passed as a lambda argument
+@@ -300,8 +288,6 @@ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_kIsIterationInvariantRate "
+                            "%console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_kIsIterationInvariantRate\",$"},
+-           {"\"run_name\": \"BM_Counters_kIsIterationInvariantRate\",$",
+-            MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+@@ -338,17 +324,15 @@ void BM_Counters_AvgIterations(benchmark::State& state) {
+ BENCHMARK(BM_Counters_AvgIterations);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_AvgIterations %console_report "
+                            "bar=%hrfloat foo=%hrfloat$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_AvgIterations\",$"},
+-           {"\"run_name\": \"BM_Counters_AvgIterations\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"bar\": %float,$", MR_Next},
+-           {"\"foo\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_AvgIterations\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"bar\": %float,$", MR_Next},
++                       {"\"foo\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(TC_CSVOut,
+           {{"^\"BM_Counters_AvgIterations\",%csv_report,%float,%float$"}});
+ // VS2013 does not allow this function to be passed as a lambda argument
+@@ -376,17 +360,15 @@ void BM_Counters_kAvgIterationsRate(benchmark::State& state) {
+ BENCHMARK(BM_Counters_kAvgIterationsRate);
+ ADD_CASES(TC_ConsoleOut, {{"^BM_Counters_kAvgIterationsRate "
+                            "%console_report bar=%hrfloat/s foo=%hrfloat/s$"}});
+-ADD_CASES(TC_JSONOut,
+-          {{"\"name\": \"BM_Counters_kAvgIterationsRate\",$"},
+-           {"\"run_name\": \"BM_Counters_kAvgIterationsRate\",$", MR_Next},
+-           {"\"run_type\": \"iteration\",$", MR_Next},
+-           {"\"iterations\": %int,$", MR_Next},
+-           {"\"real_time\": %float,$", MR_Next},
+-           {"\"cpu_time\": %float,$", MR_Next},
+-           {"\"time_unit\": \"ns\",$", MR_Next},
+-           {"\"bar\": %float,$", MR_Next},
+-           {"\"foo\": %float$", MR_Next},
+-           {"}", MR_Next}});
++ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Counters_kAvgIterationsRate\",$"},
++                       {"\"run_type\": \"iteration\",$", MR_Next},
++                       {"\"iterations\": %int,$", MR_Next},
++                       {"\"real_time\": %float,$", MR_Next},
++                       {"\"cpu_time\": %float,$", MR_Next},
++                       {"\"time_unit\": \"ns\",$", MR_Next},
++                       {"\"bar\": %float,$", MR_Next},
++                       {"\"foo\": %float$", MR_Next},
++                       {"}", MR_Next}});
+ ADD_CASES(TC_CSVOut, {{"^\"BM_Counters_kAvgIterationsRate\",%csv_report,"
+                        "%float,%float$"}});
+ // VS2013 does not allow this function to be passed as a lambda argument
+diff --git a/test/user_counters_thousands_test.cc b/test/user_counters_thousands_test.cc
+index 2c64dc4..6e02829 100644
+--- a/test/user_counters_thousands_test.cc
++++ b/test/user_counters_thousands_test.cc
+@@ -51,7 +51,6 @@ ADD_CASES(
+     });
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Thousands/repeats:2\",$"},
+-           {"\"run_name\": \"BM_Counters_Thousands/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+@@ -65,7 +64,6 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Thousands/repeats:2\",$"},
+-           {"\"run_name\": \"BM_Counters_Thousands/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"iteration\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+@@ -79,9 +77,7 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Thousands/repeats:2_mean\",$"},
+-           {"\"run_name\": \"BM_Counters_Thousands/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"mean\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -94,9 +90,7 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Thousands/repeats:2_median\",$"},
+-           {"\"run_name\": \"BM_Counters_Thousands/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"median\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},
+@@ -109,9 +103,7 @@ ADD_CASES(TC_JSONOut,
+            {"}", MR_Next}});
+ ADD_CASES(TC_JSONOut,
+           {{"\"name\": \"BM_Counters_Thousands/repeats:2_stddev\",$"},
+-           {"\"run_name\": \"BM_Counters_Thousands/repeats:2\",$", MR_Next},
+            {"\"run_type\": \"aggregate\",$", MR_Next},
+-           {"\"aggregate_name\": \"stddev\",$", MR_Next},
+            {"\"iterations\": %int,$", MR_Next},
+            {"\"real_time\": %float,$", MR_Next},
+            {"\"cpu_time\": %float,$", MR_Next},

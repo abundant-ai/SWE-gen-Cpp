@@ -1,0 +1,505 @@
+diff --git a/python/convert.c b/python/convert.c
+index 63ae5dff9..4aeb6548f 100644
+--- a/python/convert.c
++++ b/python/convert.c
+@@ -61,12 +61,21 @@ PyObject* PyUpb_UpbToPy(upb_MessageValue val, const upb_FieldDef* f,
+   }
+ }
+ 
++// TODO: raise error in 2026 Q1 release
++static void WarnBool(const upb_FieldDef* f) {
++  static int bool_warning_count = 100;
++  if (bool_warning_count > 0) {
++    --bool_warning_count;
++    PyErr_WarnFormat(PyExc_DeprecationWarning, 3,
++                     "Field %s: Expected an int, got a boolean. This "
++                     "will be rejected in 7.34.0, please fix it before that",
++                     upb_FieldDef_FullName(f));
++  }
++}
++
+ static bool PyUpb_GetInt64(PyObject* obj, const upb_FieldDef* f, int64_t* val) {
+   if (PyBool_Check(obj)) {
+-    PyErr_Format(PyExc_TypeError,
+-                 "Field %s: Expected an int, got a boolean.",
+-                 upb_FieldDef_FullName(f));
+-    return false;
++    WarnBool(f);
+   }
+   // We require that the value is either an integer or has an __index__
+   // conversion.
+@@ -89,10 +98,7 @@ static bool PyUpb_GetInt64(PyObject* obj, const upb_FieldDef* f, int64_t* val) {
+ static bool PyUpb_GetUint64(PyObject* obj, const upb_FieldDef* f,
+                             uint64_t* val) {
+   if (PyBool_Check(obj)) {
+-    PyErr_Format(PyExc_TypeError,
+-                 "Field %s: Expected an int, got a boolean.",
+-                 upb_FieldDef_FullName(f));
+-    return false;
++    WarnBool(f);
+   }
+   // We require that the value is either an integer or has an __index__
+   // conversion.
+@@ -193,10 +199,7 @@ static bool PyUpb_PyToUpbEnum(PyObject* obj, const upb_FieldDef* f,
+     return true;
+   } else {
+     if (PyBool_Check(obj)) {
+-      PyErr_Format(PyExc_TypeError,
+-                   "Field %s: Expected an int, got a boolean.",
+-                   upb_FieldDef_FullName(f));
+-      return false;
++      WarnBool(f);
+     }
+     int32_t i32;
+     if (!PyUpb_GetInt32(obj, f, &i32)) return false;
+diff --git a/python/google/protobuf/internal/message_test.py b/python/google/protobuf/internal/message_test.py
+index bed69ee61..34f517adc 100755
+--- a/python/google/protobuf/internal/message_test.py
++++ b/python/google/protobuf/internal/message_test.py
+@@ -1477,31 +1477,19 @@ class MessageTest(unittest.TestCase):
+         'TestAllTypes.NestedMessage', nested.__class__.__qualname__
+     )
+ 
+-  def create_bool_to_int(self, message_module, **kwargs):
+-    with self.assertRaises(TypeError) as e:
+-      m = message_module.TestAllTypes(**kwargs)
+-    self.assertIn('bool', str(e.exception))
+-    return None
+-
+-  def assign_bool_to_int(self, msg, field_name, value):
+-    old_value = getattr(msg, field_name)
+-    with self.assertRaises(TypeError) as e:
+-      setattr(msg, field_name, value)
+-    self.assertIn('bool', str(e.exception))
+-    self.assertEqual(getattr(msg, field_name), old_value)
+-
+-  def assign_bool_to_map_or_extension(self, msg, field_name, key, value):
+-    with self.assertRaises(TypeError) as e:
+-      getattr(msg, field_name)[key] = value
+-    self.assertIn('bool', str(e.exception))
+-
+   def testAssignBoolToEnum(self, message_module):
+-    m = self.create_bool_to_int(message_module, optional_nested_enum=True)
+-    if m is not None:
+-      self.assertEqual(m.optional_nested_enum, 1)
++    # TODO: change warning into error in 2026 Q1
++    # with self.assertRaises(TypeError):
++    with warnings.catch_warnings(record=True) as w:
++      m = message_module.TestAllTypes(optional_nested_enum=True)
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.optional_nested_enum, 1)
+ 
+     m = message_module.TestAllTypes(optional_nested_enum=2)
+-    self.assign_bool_to_int(m, 'optional_nested_enum', True)
++    with warnings.catch_warnings(record=True) as w:
++      m.optional_nested_enum = True
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.optional_nested_enum, 1)
+ 
+     with warnings.catch_warnings(record=True) as w:
+       m.optional_nested_enum = 2
+@@ -1509,28 +1497,38 @@ class MessageTest(unittest.TestCase):
+     self.assertEqual(m.optional_nested_enum, 2)
+ 
+   def testBoolToRepeatedEnum(self, message_module):
+-    m = self.create_bool_to_int(message_module, repeated_nested_enum=[True])
+-    if m is not None:
+-      self.assertEqual(m.repeated_nested_enum, [1])
++    with warnings.catch_warnings(record=True) as w:
++      m = message_module.TestAllTypes(repeated_nested_enum=[True])
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.repeated_nested_enum, [1])
+ 
+     m = message_module.TestAllTypes()
+-    with self.assertRaises(TypeError) as e:
+-      m = message_module.TestAllTypes(repeated_nested_enum=[True])
+-    self.assertIn('bool', str(e.exception))
+-    self.assertEqual(m.repeated_nested_enum, [])
++    with warnings.catch_warnings(record=True) as w:
++      m.repeated_nested_enum.append(True)
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.repeated_nested_enum, [1])
+ 
+   def testBoolToOneofEnum(self, message_module):
+     m = unittest_pb2.TestOneof2()
+-    self.assign_bool_to_int(m, 'foo_enum', True)
++    with warnings.catch_warnings(record=True) as w:
++      m.foo_enum = True
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.foo_enum, 1)
+ 
+   def testBoolToMapEnum(self, message_module):
+     m = map_unittest_pb2.TestMap()
+-    self.assign_bool_to_map_or_extension(m, 'map_int32_enum', 10, True)
++    with warnings.catch_warnings(record=True) as w:
++      m.map_int32_enum[10] = True
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.map_int32_enum[10], 1)
+ 
+   def testBoolToExtensionEnum(self, message_module):
+     m = unittest_pb2.TestAllExtensions()
+-    self.assign_bool_to_map_or_extension(
+-        m, 'Extensions', unittest_pb2.optional_nested_enum_extension, True
++    with warnings.catch_warnings(record=True) as w:
++      m.Extensions[unittest_pb2.optional_nested_enum_extension] = True
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(
++        m.Extensions[unittest_pb2.optional_nested_enum_extension], 1
+     )
+ 
+   def testClosedEnumExtension(self, message_module):
+@@ -1549,12 +1547,16 @@ class MessageTest(unittest.TestCase):
+     )
+ 
+   def testAssignBoolToInt(self, message_module):
+-    m = self.create_bool_to_int(message_module, optional_int32=True)
+-    if m is not None:
+-      self.assertEqual(m.optional_int32, 1)
++    with warnings.catch_warnings(record=True) as w:
++      m = message_module.TestAllTypes(optional_int32=True)
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.optional_int32, 1)
+ 
+     m = message_module.TestAllTypes(optional_uint32=123)
+-    self.assign_bool_to_int(m, 'optional_uint32', True)
++    with warnings.catch_warnings(record=True) as w:
++      m.optional_uint32 = True
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.optional_uint32, 1)
+ 
+     with warnings.catch_warnings(record=True) as w:
+       m.optional_uint32 = 321
+@@ -1562,30 +1564,42 @@ class MessageTest(unittest.TestCase):
+     self.assertEqual(m.optional_uint32, 321)
+ 
+   def testAssignBoolToRepeatedInt(self, message_module):
+-    m = self.create_bool_to_int(message_module, repeated_int64=[True])
+-    if m is not None:
+-      self.assertEqual(m.repeated_int64, [1])
++    with warnings.catch_warnings(record=True) as w:
++      m = message_module.TestAllTypes(repeated_int64=[True])
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.repeated_int64, [1])
+ 
+     m = message_module.TestAllTypes()
+-    with self.assertRaises(TypeError) as e:
++    with warnings.catch_warnings(record=True) as w:
+       m.repeated_int64.append(True)
+-    self.assertIn('bool', str(e.exception))
+-    self.assertEqual(m.repeated_int64, [])
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.repeated_int64, [1])
+ 
+   def testAssignBoolToOneofInt(self, message_module):
+     m = unittest_pb2.TestOneof2()
+-    self.assign_bool_to_int(m, 'foo_int', True)
++    with warnings.catch_warnings(record=True) as w:
++      m.foo_int = True
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.foo_int, 1)
+ 
+   def testAssignBoolToMapInt(self, message_module):
+     m = map_unittest_pb2.TestMap()
+-    self.assign_bool_to_map_or_extension(m, 'map_int32_int32', 10, True)
+-    self.assign_bool_to_map_or_extension(m, 'map_int32_int32', True, 1)
++    with warnings.catch_warnings(record=True) as w:
++      m.map_int32_int32[10] = True
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.map_int32_int32[10], 1)
++
++    with warnings.catch_warnings(record=True) as w:
++      m.map_int32_int32[True] = 1
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.map_int32_int32[1], 1)
+ 
+   def testAssignBoolToExtensionInt(self, message_module):
+     m = unittest_pb2.TestAllExtensions()
+-    self.assign_bool_to_map_or_extension(
+-        m, 'Extensions', unittest_pb2.optional_int32_extension, True
+-    )
++    with warnings.catch_warnings(record=True) as w:
++      m.Extensions[unittest_pb2.optional_int32_extension] = True
++      self.assertIn('bool', str(w[0].message))
++    self.assertEqual(m.Extensions[unittest_pb2.optional_int32_extension], 1)
+ 
+ 
+ @testing_refleaks.TestCase
+diff --git a/python/google/protobuf/internal/type_checkers.py b/python/google/protobuf/internal/type_checkers.py
+index 1d318e289..17e814ed9 100755
+--- a/python/google/protobuf/internal/type_checkers.py
++++ b/python/google/protobuf/internal/type_checkers.py
+@@ -32,6 +32,10 @@ from google.protobuf.internal import encoder
+ from google.protobuf.internal import wire_format
+ 
+ _FieldDescriptor = descriptor.FieldDescriptor
++# TODO: Remove this warning count after 34.0
++# Assign bool to int/enum warnings will print 100 times at most which should
++# be enough for users to notice and do not cause timeout.
++_BoolWarningCount = 100
+ 
+ def TruncateToFourByteFloat(original):
+   return struct.unpack('<f', struct.pack('<f', original))[0]
+@@ -141,15 +145,20 @@ class IntValueChecker(object):
+   """Checker used for integer fields.  Performs type-check and range check."""
+ 
+   def CheckValue(self, proposed_value):
+-    if type(proposed_value) == bool:
++    global _BoolWarningCount
++    if type(proposed_value) == bool and _BoolWarningCount > 0:
++      _BoolWarningCount -= 1
+       message = (
+-          '%.1024r has type %s, but expected one of: (int).'
++          '%.1024r has type %s, but expected one of: %s. This warning '
++          'will turn into error in 7.34.0, please fix it before that.'
+           % (
+               proposed_value,
+               type(proposed_value),
++              (int,),
+           )
+       )
+-      raise TypeError(message)
++      # TODO: Raise errors in 2026 Q1 release
++      warnings.warn(message)
+ 
+     if not hasattr(proposed_value, '__index__') or (
+         type(proposed_value).__module__ == 'numpy' and
+@@ -177,16 +186,20 @@ class EnumValueChecker(object):
+     self._enum_type = enum_type
+ 
+   def CheckValue(self, proposed_value):
+-    if type(proposed_value) == bool:
++    global _BoolWarningCount
++    if type(proposed_value) == bool and _BoolWarningCount > 0:
++      _BoolWarningCount -= 1
+       message = (
+-          '%.1024r has type %s, but expected one of: (int).'
++          '%.1024r has type %s, but expected one of: %s. This warning '
++          'will turn into error in 7.34.0, please fix it before that.'
+           % (
+               proposed_value,
+               type(proposed_value),
++              (int,),
+           )
+       )
+-      raise TypeError(message)
+-
++      # TODO: Raise errors in 2026 Q1 release
++      warnings.warn(message)
+     if not isinstance(proposed_value, numbers.Integral):
+       message = ('%.1024r has type %s, but expected one of: %s' %
+                  (proposed_value, type(proposed_value), (int,)))
+diff --git a/python/google/protobuf/pyext/map_container.cc b/python/google/protobuf/pyext/map_container.cc
+index 3748c0af1..d6483b368 100644
+--- a/python/google/protobuf/pyext/map_container.cc
++++ b/python/google/protobuf/pyext/map_container.cc
+@@ -108,21 +108,25 @@ static bool PythonToMapKey(MapContainer* self, PyObject* obj, MapKey* key,
+   switch (field_descriptor->cpp_type()) {
+     case FieldDescriptor::CPPTYPE_INT32: {
+       PROTOBUF_CHECK_GET_INT32(obj, value, false);
++      CheckIntegerWithBool(obj, field_descriptor);
+       key->SetInt32Value(value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_INT64: {
+       PROTOBUF_CHECK_GET_INT64(obj, value, false);
++      CheckIntegerWithBool(obj, field_descriptor);
+       key->SetInt64Value(value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT32: {
+       PROTOBUF_CHECK_GET_UINT32(obj, value, false);
++      CheckIntegerWithBool(obj, field_descriptor);
+       key->SetUInt32Value(value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT64: {
+       PROTOBUF_CHECK_GET_UINT64(obj, value, false);
++      CheckIntegerWithBool(obj, field_descriptor);
+       key->SetUInt64Value(value);
+       break;
+     }
+@@ -210,21 +214,25 @@ static bool PythonToMapValueRef(MapContainer* self, PyObject* obj,
+   switch (field_descriptor->cpp_type()) {
+     case FieldDescriptor::CPPTYPE_INT32: {
+       PROTOBUF_CHECK_GET_INT32(obj, value, false);
++      CheckIntegerWithBool(obj, field_descriptor);
+       value_ref->SetInt32Value(value);
+       return true;
+     }
+     case FieldDescriptor::CPPTYPE_INT64: {
+       PROTOBUF_CHECK_GET_INT64(obj, value, false);
++      CheckIntegerWithBool(obj, field_descriptor);
+       value_ref->SetInt64Value(value);
+       return true;
+     }
+     case FieldDescriptor::CPPTYPE_UINT32: {
+       PROTOBUF_CHECK_GET_UINT32(obj, value, false);
++      CheckIntegerWithBool(obj, field_descriptor);
+       value_ref->SetUInt32Value(value);
+       return true;
+     }
+     case FieldDescriptor::CPPTYPE_UINT64: {
+       PROTOBUF_CHECK_GET_UINT64(obj, value, false);
++      CheckIntegerWithBool(obj, field_descriptor);
+       value_ref->SetUInt64Value(value);
+       return true;
+     }
+@@ -253,6 +261,7 @@ static bool PythonToMapValueRef(MapContainer* self, PyObject* obj,
+     }
+     case FieldDescriptor::CPPTYPE_ENUM: {
+       PROTOBUF_CHECK_GET_INT32(obj, value, false);
++      CheckIntegerWithBool(obj, field_descriptor);
+       if (allow_unknown_enum_values) {
+         value_ref->SetEnumValue(value);
+         return true;
+diff --git a/python/google/protobuf/pyext/message.cc b/python/google/protobuf/pyext/message.cc
+index 9c62ae324..11dbd1b62 100644
+--- a/python/google/protobuf/pyext/message.cc
++++ b/python/google/protobuf/pyext/message.cc
+@@ -515,7 +515,6 @@ bool CheckAndGetInteger(PyObject* arg, T* value) {
+   // This definition includes everything with a valid __index__() implementation
+   // and shouldn't cast the net too wide.
+   if (!strcmp(Py_TYPE(arg)->tp_name, "numpy.ndarray") ||
+-      (!strcmp(Py_TYPE(arg)->tp_name, "bool")) ||
+       ABSL_PREDICT_FALSE(!PyIndex_Check(arg))) {
+     FormatTypeError(arg, "int");
+     return false;
+@@ -600,6 +599,18 @@ bool CheckAndGetBool(PyObject* arg, bool* value) {
+   return true;
+ }
+ 
++void CheckIntegerWithBool(PyObject* arg, const FieldDescriptor* field_des) {
++  static int bool_warning_count = 100;
++  if (bool_warning_count > 0 && (!strcmp(Py_TYPE(arg)->tp_name, "bool"))) {
++    --bool_warning_count;
++    std::string error_msg =
++        absl::StrCat(field_des->full_name(),
++                     ": Expected an int, got a boolean. This "
++                     "will be rejected in 7.34.0, please fix it before that");
++    PyErr_WarnEx(PyExc_DeprecationWarning, error_msg.c_str(), 3);
++  }
++}
++
+ // Checks whether the given object (which must be "bytes" or "unicode") contains
+ // valid UTF-8.
+ bool IsValidUTF8(PyObject* obj) {
+@@ -2322,21 +2333,25 @@ int InternalSetNonOneofScalar(Message* message,
+   switch (field_descriptor->cpp_type()) {
+     case FieldDescriptor::CPPTYPE_INT32: {
+       PROTOBUF_CHECK_GET_INT32(arg, value, -1);
++      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetInt32(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_INT64: {
+       PROTOBUF_CHECK_GET_INT64(arg, value, -1);
++      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetInt64(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT32: {
+       PROTOBUF_CHECK_GET_UINT32(arg, value, -1);
++      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetUInt32(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT64: {
+       PROTOBUF_CHECK_GET_UINT64(arg, value, -1);
++      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetUInt64(message, field_descriptor, value);
+       break;
+     }
+@@ -2364,6 +2379,7 @@ int InternalSetNonOneofScalar(Message* message,
+     }
+     case FieldDescriptor::CPPTYPE_ENUM: {
+       PROTOBUF_CHECK_GET_INT32(arg, value, -1);
++      CheckIntegerWithBool(arg, field_descriptor);
+       if (!field_descriptor->legacy_enum_field_treated_as_closed()) {
+         reflection->SetEnumValue(message, field_descriptor, value);
+       } else {
+diff --git a/python/google/protobuf/pyext/message.h b/python/google/protobuf/pyext/message.h
+index 85e2b33ce..0a5f907d8 100644
+--- a/python/google/protobuf/pyext/message.h
++++ b/python/google/protobuf/pyext/message.h
+@@ -313,6 +313,9 @@ PyObject* CheckString(PyObject* arg, const FieldDescriptor* descriptor);
+ bool CheckAndSetString(PyObject* arg, Message* message,
+                        const FieldDescriptor* descriptor,
+                        const Reflection* reflection, bool append, int index);
++// TODO: raise error in 2026 Q1 release
++// FormatTypeError(arg, "int");
++void CheckIntegerWithBool(PyObject* arg, const FieldDescriptor* field_des);
+ PyObject* ToStringObject(const FieldDescriptor* descriptor,
+                          absl::string_view value);
+ 
+diff --git a/python/google/protobuf/pyext/repeated_scalar_container.cc b/python/google/protobuf/pyext/repeated_scalar_container.cc
+index aa82734ad..3fcfe4145 100644
+--- a/python/google/protobuf/pyext/repeated_scalar_container.cc
++++ b/python/google/protobuf/pyext/repeated_scalar_container.cc
+@@ -88,21 +88,25 @@ static int AssignItem(PyObject* pself, Py_ssize_t index, PyObject* arg) {
+   switch (field_descriptor->cpp_type()) {
+     case FieldDescriptor::CPPTYPE_INT32: {
+       PROTOBUF_CHECK_GET_INT32(arg, value, -1);
++      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetRepeatedInt32(message, field_descriptor, index, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_INT64: {
+       PROTOBUF_CHECK_GET_INT64(arg, value, -1);
++      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetRepeatedInt64(message, field_descriptor, index, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT32: {
+       PROTOBUF_CHECK_GET_UINT32(arg, value, -1);
++      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetRepeatedUInt32(message, field_descriptor, index, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT64: {
+       PROTOBUF_CHECK_GET_UINT64(arg, value, -1);
++      CheckIntegerWithBool(arg, field_descriptor);
+       reflection->SetRepeatedUInt64(message, field_descriptor, index, value);
+       break;
+     }
+@@ -130,6 +134,7 @@ static int AssignItem(PyObject* pself, Py_ssize_t index, PyObject* arg) {
+     }
+     case FieldDescriptor::CPPTYPE_ENUM: {
+       PROTOBUF_CHECK_GET_INT32(arg, value, -1);
++      CheckIntegerWithBool(arg, field_descriptor);
+       if (!field_descriptor->legacy_enum_field_treated_as_closed()) {
+         reflection->SetRepeatedEnumValue(message, field_descriptor, index,
+                                          value);
+@@ -313,21 +318,25 @@ PyObject* Append(RepeatedScalarContainer* self, PyObject* item) {
+   switch (field_descriptor->cpp_type()) {
+     case FieldDescriptor::CPPTYPE_INT32: {
+       PROTOBUF_CHECK_GET_INT32(item, value, nullptr);
++      CheckIntegerWithBool(item, field_descriptor);
+       reflection->AddInt32(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_INT64: {
+       PROTOBUF_CHECK_GET_INT64(item, value, nullptr);
++      CheckIntegerWithBool(item, field_descriptor);
+       reflection->AddInt64(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT32: {
+       PROTOBUF_CHECK_GET_UINT32(item, value, nullptr);
++      CheckIntegerWithBool(item, field_descriptor);
+       reflection->AddUInt32(message, field_descriptor, value);
+       break;
+     }
+     case FieldDescriptor::CPPTYPE_UINT64: {
+       PROTOBUF_CHECK_GET_UINT64(item, value, nullptr);
++      CheckIntegerWithBool(item, field_descriptor);
+       reflection->AddUInt64(message, field_descriptor, value);
+       break;
+     }
+@@ -355,6 +364,7 @@ PyObject* Append(RepeatedScalarContainer* self, PyObject* item) {
+     }
+     case FieldDescriptor::CPPTYPE_ENUM: {
+       PROTOBUF_CHECK_GET_INT32(item, value, nullptr);
++      CheckIntegerWithBool(item, field_descriptor);
+       if (!field_descriptor->legacy_enum_field_treated_as_closed()) {
+         reflection->AddEnumValue(message, field_descriptor, value);
+       } else {

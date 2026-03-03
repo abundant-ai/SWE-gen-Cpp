@@ -1,0 +1,105 @@
+diff --git a/include/simdjson/dom/document_stream-inl.h b/include/simdjson/dom/document_stream-inl.h
+index 664ae723..43817584 100644
+--- a/include/simdjson/dom/document_stream-inl.h
++++ b/include/simdjson/dom/document_stream-inl.h
+@@ -73,7 +73,7 @@ simdjson_really_inline document_stream::document_stream(
+   : parser{&_parser},
+     buf{_buf},
+     len{_len},
+-    batch_size{_batch_size <= MINIMAL_BATCH_SIZE ? MINIMAL_BATCH_SIZE : _batch_size},
++    batch_size{_batch_size},
+     error{SUCCESS}
+ #ifdef SIMDJSON_THREADS_ENABLED
+     , use_thread(_parser.threaded) // we need to make a copy because _parser.threaded can change
+diff --git a/include/simdjson/dom/parser-inl.h b/include/simdjson/dom/parser-inl.h
+index 946ce0ee..6cc7cc43 100644
+--- a/include/simdjson/dom/parser-inl.h
++++ b/include/simdjson/dom/parser-inl.h
+@@ -83,7 +83,6 @@ inline simdjson_result<document_stream> parser::load_many(const std::string &pat
+   size_t len;
+   auto _error = read_file(path).get(len);
+   if (_error) { return _error; }
+-  if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
+   return document_stream(*this, (const uint8_t*)loaded_bytes.get(), len, batch_size);
+ }
+ 
+@@ -113,7 +112,6 @@ simdjson_really_inline simdjson_result<element> parser::parse(const padded_strin
+ }
+ 
+ inline simdjson_result<document_stream> parser::parse_many(const uint8_t *buf, size_t len, size_t batch_size) noexcept {
+-  if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
+   return document_stream(*this, buf, len, batch_size);
+ }
+ inline simdjson_result<document_stream> parser::parse_many(const char *buf, size_t len, size_t batch_size) noexcept {
+diff --git a/include/simdjson/dom/parser.h b/include/simdjson/dom/parser.h
+index 75484a08..7855fd9f 100644
+--- a/include/simdjson/dom/parser.h
++++ b/include/simdjson/dom/parser.h
+@@ -21,12 +21,6 @@ class element;
+ 
+ /** The default batch size for parser.parse_many() and parser.load_many() */
+ static constexpr size_t DEFAULT_BATCH_SIZE = 1000000;
+-/**
+- * Some adversary might try to set the batch size to 0 or 1, which might cause problems.
+- * We set a minimum of 32B since anything else is highly likely to be an error. In practice,
+- * most users will want a much larger batch size.
+- */
+-static constexpr size_t MINIMAL_BATCH_SIZE = 32;
+ 
+ /**
+  * A persistent document parser.
+@@ -255,10 +249,7 @@ public:
+    * @param batch_size The batch size to use. MUST be larger than the largest document. The sweet
+    *                   spot is cache-related: small enough to fit in cache, yet big enough to
+    *                   parse as many documents as possible in one tight loop.
+-   *                   Defaults to 1MB (as simdjson::dom::DEFAULT_BATCH_SIZE), which has been a reasonable sweet
+-   *                   spot in our tests.
+-   *                   If you set the batch_size to a value smaller than simdjson::dom::MINIMAL_BATCH_SIZE
+-   *                   (currently 32B), it will be replaced by simdjson::dom::MINIMAL_BATCH_SIZE.
++   *                   Defaults to 1MB (as simdjson::dom::DEFAULT_BATCH_SIZE), which has been a reasonable sweet spot in our tests.
+    * @return The stream, or an error. An empty input will yield 0 documents rather than an EMPTY error. Errors:
+    *         - IO_ERROR if there was an error opening or reading the file.
+    *         - MEMALLOC if the parser does not have enough capacity and memory allocation fails.
+diff --git a/tests/document_stream_tests.cpp b/tests/document_stream_tests.cpp
+index 72373155..c1e4167c 100644
+--- a/tests/document_stream_tests.cpp
++++ b/tests/document_stream_tests.cpp
+@@ -135,16 +135,10 @@ namespace document_stream_tests {
+ 
+   bool small_window() {
+     std::cout << "Running " << __func__ << std::endl;
+-    char input[2049];
+-    input[0] = '[';
+-    for(size_t i = 1; i < 1024; i++) {
+-      input[2*i+1]= '1';
+-      input[2*i+2]= i < 1023 ? ',' : ']';
+-    }
+-    auto json = simdjson::padded_string(input,2049);
++    auto json = R"({"error":[],"result":{"token":"xxx"}}{"error":[],"result":{"token":"xxx"}})"_padded;
+     simdjson::dom::parser parser;
+     size_t count = 0;
+-    size_t window_size = 1024; // deliberately too small
++    size_t window_size = 10; // deliberately too small
+     simdjson::dom::document_stream stream;
+     ASSERT_SUCCESS( parser.parse_many(json, window_size).get(stream) );
+     for (auto doc : stream) {
+@@ -164,17 +158,11 @@ namespace document_stream_tests {
+ #ifdef SIMDJSON_THREADS_ENABLED
+   bool threaded_disabled() {
+     std::cout << "Running " << __func__ << std::endl;
+-    char input[2049];
+-    input[0] = '[';
+-    for(size_t i = 1; i < 1024; i++) {
+-      input[2*i+1]= '1';
+-      input[2*i+2]= i < 1023 ? ',' : ']';
+-    }
+-    auto json = simdjson::padded_string(input,2049);
++    auto json = R"({"error":[],"result":{"token":"xxx"}}{"error":[],"result":{"token":"xxx"}})"_padded;
+     simdjson::dom::parser parser;
+     parser.threaded = false;
+     size_t count = 0;
+-    size_t window_size = 1024; // deliberately too small
++    size_t window_size = 10; // deliberately too small
+     simdjson::dom::document_stream stream;
+     ASSERT_SUCCESS( parser.parse_many(json, window_size).get(stream) );
+     for (auto doc : stream) {
