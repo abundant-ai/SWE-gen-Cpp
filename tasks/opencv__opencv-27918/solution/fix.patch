@@ -1,0 +1,303 @@
+diff --git a/modules/core/include/opencv2/core.hpp b/modules/core/include/opencv2/core.hpp
+index 29cb0bf532..4f6497e87c 100644
+--- a/modules/core/include/opencv2/core.hpp
++++ b/modules/core/include/opencv2/core.hpp
+@@ -480,10 +480,9 @@ The function LUT fills the output array with values from the look-up table. Indi
+ are taken from the input array. That is, the function processes each element of src as follows:
+ \f[\texttt{dst} (I)  \leftarrow \texttt{lut(src(I) + d)}\f]
+ where
+-\f[d =  \fork{0}{if \(\texttt{src}\) has depth \(\texttt{CV_8U}\)}{128}{if \(\texttt{src}\) has depth \(\texttt{CV_8S}\)}\f]
+-@note CV_16F/CV_16BF/CV_Bool/CV_64U/CV_64S/CV_32U are not supported for lut.
+-@param src input array of 8-bit elements.
+-@param lut look-up table of 256 elements; in case of multi-channel input array, the table should
++\f[d =  \forkthree{0}{if \(\texttt{src}\) has depth \(\texttt{CV_8U}\) or \(\texttt{CV_16U}\)}{128}{if \(\texttt{src}\) has depth \(\texttt{CV_8S}\)}{32768}{if \(\texttt{src}\) has depth \(\texttt{CV_16S}\)}\f]
++@param src input array of 8-bit or 16-bit integer elements.
++@param lut look-up table of 256 elements (if src has depth CV_8U or CV_8S) or 65536 elements(if src has depth CV_16U or CV_16S); in case of multi-channel input array, the table should
+ either have a single channel (in this case the same table is used for all channels) or the same
+ number of channels as in the input array.
+ @param dst output array of the same size and number of channels as src, and the same depth as lut.
+diff --git a/modules/core/src/hal_replacement.hpp b/modules/core/src/hal_replacement.hpp
+index 80ef146687..541789a6d8 100644
+--- a/modules/core/src/hal_replacement.hpp
++++ b/modules/core/src/hal_replacement.hpp
+@@ -332,6 +332,32 @@ inline int hal_ni_lut(const uchar *src_data, size_t src_step, size_t src_type, c
+ #define cv_hal_lut hal_ni_lut
+ //! @endcond
+ 
++/**
++Lookup table replacement
++Table consists of 65536 elements of a size from 1 to 8 bytes having 1 channel or src_channels
++For 16s input typea 32768 is added to LUT index
++Destination should have the same element type and number of channels as lookup table elements
++@param src_data Source image data
++@param src_step Source image step
++@param src_type Source image type
++@param lut_data Pointer to lookup table
++@param lut_channel_size Size of each channel in bytes
++@param lut_channels Number of channels in lookup table
++@param dst_data Destination data
++@param dst_step Destination step
++@param width Width of images
++@param height Height of images
++@sa LUT
++*/
++//! @addtogroup core_hal_interface_lut16 Lookup table for 16 bit index
++//! @{
++inline int hal_ni_lut16(const ushort *src_data, size_t src_step, size_t src_type, const uchar* lut_data, size_t lut_channel_size, size_t lut_channels, uchar *dst_data, size_t dst_step, int width, int height) { return CV_HAL_ERROR_NOT_IMPLEMENTED; }
++//! @}
++
++//! @cond IGNORED
++#define cv_hal_lut16 hal_ni_lut16
++//! @endcond
++
+ /**
+ Hamming norm of a vector
+ @param a pointer to vector data
+diff --git a/modules/core/src/lut.cpp b/modules/core/src/lut.cpp
+index 42be796a88..b32edcad2a 100644
+--- a/modules/core/src/lut.cpp
++++ b/modules/core/src/lut.cpp
+@@ -6,6 +6,7 @@
+ #include "precomp.hpp"
+ #include "opencl_kernels_core.hpp"
+ #include "convert.hpp"
++#include <sys/types.h>
+ 
+ /****************************************************************************************\
+ *                                    LUT Transform                                       *
+@@ -14,8 +15,8 @@
+ namespace cv
+ {
+ 
+-template<typename T> static void
+-LUT8u_( const uchar* src, const T* lut, T* dst, int len, int cn, int lutcn )
++template<typename Ti, typename T> static void
++LUT_( const Ti* src, const T* lut, T* dst, const int len, const int cn, const int lutcn )
+ {
+     if( lutcn == 1 )
+     {
+@@ -30,72 +31,56 @@ LUT8u_( const uchar* src, const T* lut, T* dst, int len, int cn, int lutcn )
+     }
+ }
+ 
+-static void LUT8u_8u( const uchar* src, const uchar* lut, uchar* dst, int len, int cn, int lutcn )
+-{
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
+-}
+-
+-static void LUT8u_8s( const uchar* src, const schar* lut, schar* dst, int len, int cn, int lutcn )
+-{
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
+-}
+-
+-static void LUT8u_16u( const uchar* src, const ushort* lut, ushort* dst, int len, int cn, int lutcn )
+-{
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
+-}
+-
+-static void LUT8u_16s( const uchar* src, const short* lut, short* dst, int len, int cn, int lutcn )
+-{
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
+-}
+-
+-static void LUT8u_32u( const uchar* src, const uint* lut, uint* dst, int len, int cn, int lutcn )
+-{
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
+-}
+-
+-static void LUT8u_32s( const uchar* src, const int* lut, int* dst, int len, int cn, int lutcn )
+-{
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
+-}
+-
+-static void LUT8u_64u( const uchar* src, const uint64_t* lut, uint64_t* dst, int len, int cn, int lutcn )
+-{
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
+-}
+-
+-static void LUT8u_64s( const uchar* src, const int64_t* lut, int64_t* dst, int len, int cn, int lutcn )
+-{
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
+-}
+-
+-static void LUT8u_16f( const uchar* src, const hfloat* lut, hfloat* dst, int len, int cn, int lutcn )
+-{
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
+-}
++typedef void (*LUTFunc)( const uchar* src, const uchar* lut, uchar* dst, int len, int cn, int lutcn );
+ 
+-static void LUT8u_32f( const uchar* src, const float* lut, float* dst, int len, int cn, int lutcn )
++static LUTFunc getLUTFunc(const int srcDepth, const int dstDepth)
+ {
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
+-}
++    LUTFunc ret = nullptr;
++    if((srcDepth == CV_8U) || (srcDepth == CV_8S))
++    {
++        switch(dstDepth)
++        {
++            case CV_8U:   ret = (LUTFunc)LUT_<uint8_t, uint8_t>;   break;
++            case CV_8S:   ret = (LUTFunc)LUT_<uint8_t, int8_t>;    break;
++            case CV_16U:  ret = (LUTFunc)LUT_<uint8_t, uint16_t>;  break;
++            case CV_16S:  ret = (LUTFunc)LUT_<uint8_t, int16_t>;   break;
++            case CV_32S:  ret = (LUTFunc)LUT_<uint8_t, int32_t>;   break;
++            case CV_32F:  ret = (LUTFunc)LUT_<uint8_t, int32_t>;   break; // float
++            case CV_64F:  ret = (LUTFunc)LUT_<uint8_t, int64_t>;   break; // double
++            case CV_16F:  ret = (LUTFunc)LUT_<uint8_t, int16_t>;   break; // hfloat
++            case CV_16BF: ret = (LUTFunc)LUT_<uint8_t, int16_t>;   break; // bfloat
++            case CV_Bool: ret = (LUTFunc)LUT_<uint8_t, uint8_t>;   break; // bool
++            case CV_64U:  ret = (LUTFunc)LUT_<uint8_t, uint64_t>;  break;
++            case CV_64S:  ret = (LUTFunc)LUT_<uint8_t, int64_t>;   break;
++            case CV_32U:  ret = (LUTFunc)LUT_<uint8_t, uint32_t>;  break;
++            default:      ret = nullptr;                           break;
++        }
++    }
++    else if((srcDepth == CV_16U) || (srcDepth == CV_16S))
++    {
++        switch(dstDepth)
++        {
++            case CV_8U:   ret = (LUTFunc)LUT_<uint16_t, uint8_t>;  break;
++            case CV_8S:   ret = (LUTFunc)LUT_<uint16_t, int8_t>;   break;
++            case CV_16U:  ret = (LUTFunc)LUT_<uint16_t, uint16_t>; break;
++            case CV_16S:  ret = (LUTFunc)LUT_<uint16_t, int16_t>;  break;
++            case CV_32S:  ret = (LUTFunc)LUT_<uint16_t, int32_t>;  break;
++            case CV_32F:  ret = (LUTFunc)LUT_<uint16_t, int32_t>;  break; // float
++            case CV_64F:  ret = (LUTFunc)LUT_<uint16_t, int64_t>;  break; // double
++            case CV_16F:  ret = (LUTFunc)LUT_<uint16_t, int16_t>;  break; // hfloat
++            case CV_16BF: ret = (LUTFunc)LUT_<uint16_t, int16_t>;  break; // bfloat
++            case CV_Bool: ret = (LUTFunc)LUT_<uint16_t, uint8_t>;  break; // bool
++            case CV_64U:  ret = (LUTFunc)LUT_<uint16_t, uint64_t>; break;
++            case CV_64S:  ret = (LUTFunc)LUT_<uint16_t, int64_t>;  break;
++            case CV_32U:  ret = (LUTFunc)LUT_<uint16_t, uint32_t>; break;
++            default:      ret = nullptr;                           break;
++        }
++    }
+ 
+-static void LUT8u_64f( const uchar* src, const double* lut, double* dst, int len, int cn, int lutcn )
+-{
+-    LUT8u_( src, lut, dst, len, cn, lutcn );
++    CV_CheckTrue(ret != nullptr, "An unexpected type combination was specified.");
++    return ret;
+ }
+ 
+-typedef void (*LUTFunc)( const uchar* src, const uchar* lut, uchar* dst, int len, int cn, int lutcn );
+-
+-static LUTFunc lutTab[CV_DEPTH_MAX] =
+-{
+-    (LUTFunc)LUT8u_8u, (LUTFunc)LUT8u_8s, (LUTFunc)LUT8u_16u, (LUTFunc)LUT8u_16s,
+-    (LUTFunc)LUT8u_32s, (LUTFunc)LUT8u_32f, (LUTFunc)LUT8u_64f, (LUTFunc)LUT8u_16f,
+-    // new data types in 5.x
+-    /*bf16*/ (LUTFunc)LUT8u_16f, /*bool*/(LUTFunc)LUT8u_8u, (LUTFunc)LUT8u_64u,
+-    (LUTFunc)LUT8u_64s, (LUTFunc)LUT8u_32u
+-};
+-
+ #ifdef HAVE_OPENCL
+ 
+ static bool ocl_LUT(InputArray _src, InputArray _lut, OutputArray _dst)
+@@ -125,24 +110,19 @@ static bool ocl_LUT(InputArray _src, InputArray _lut, OutputArray _dst)
+ class LUTParallelBody : public ParallelLoopBody
+ {
+ public:
+-    bool* ok;
+     const Mat& src_;
+     const Mat& lut_;
+     Mat& dst_;
+ 
+-    LUTFunc func;
++    LUTFunc func_;
+ 
+-    LUTParallelBody(const Mat& src, const Mat& lut, Mat& dst, bool* _ok)
+-        : ok(_ok), src_(src), lut_(lut), dst_(dst)
++    LUTParallelBody(const Mat& src, const Mat& lut, Mat& dst, LUTFunc func)
++        : src_(src), lut_(lut), dst_(dst), func_(func)
+     {
+-        func = lutTab[lut.depth()];
+-        *ok = (func != NULL);
+     }
+ 
+     void operator()( const cv::Range& range ) const CV_OVERRIDE
+     {
+-        CV_Assert(*ok);
+-
+         const int row0 = range.start;
+         const int row1 = range.end;
+ 
+@@ -158,7 +138,7 @@ public:
+         int len = (int)it.size;
+ 
+         for( size_t i = 0; i < it.nplanes; i++, ++it )
+-            func(ptrs[0], lut_.ptr(), ptrs[1], len, cn, lutcn);
++            func_(ptrs[0], lut_.ptr(), ptrs[1], len, cn, lutcn);
+     }
+ private:
+     LUTParallelBody(const LUTParallelBody&);
+@@ -173,40 +153,48 @@ void cv::LUT( InputArray _src, InputArray _lut, OutputArray _dst )
+ 
+     int cn = _src.channels(), depth = _src.depth();
+     int lutcn = _lut.channels();
++    const size_t lut_size = _lut.total();
+ 
+-    CV_Assert( (lutcn == cn || lutcn == 1) &&
+-        _lut.total() == 256 && _lut.isContinuous() &&
+-        (depth == CV_8U || depth == CV_8S) );
++    CV_Assert( (lutcn == cn || lutcn == 1) && _lut.isContinuous() &&
++        (
++            ((lut_size == 256) && ((depth == CV_8U)||(depth == CV_8S))) ||
++            ((lut_size == 65536) && ((depth == CV_16U)||(depth == CV_16S)))
++        )
++    );
+ 
+-    CV_OCL_RUN(_dst.isUMat() && _src.dims() <= 2,
++    CV_OCL_RUN(_dst.isUMat() && _src.dims() <= 2 && (lut_size == 256),
+                ocl_LUT(_src, _lut, _dst))
+ 
+     Mat src = _src.getMat(), lut = _lut.getMat();
+     _dst.createSameSize(_src, CV_MAKETYPE(_lut.depth(), cn));
+     Mat dst = _dst.getMat();
+ 
+-    CALL_HAL(LUT, cv_hal_lut, src.data, src.step, src.type(), lut.data,
+-             lut.elemSize1(), lutcn, dst.data, dst.step, src.cols, src.rows);
++    if(lut_size == 256)
++    {
++        CALL_HAL(LUT, cv_hal_lut, src.data, src.step, src.type(), lut.data,
++                 lut.elemSize1(), lutcn, dst.data, dst.step, src.cols, src.rows);
++    }
++    else
++    {
++        CALL_HAL(LUT16, cv_hal_lut16, src.ptr<ushort>(), src.step, src.type(), lut.data,
++                 lut.elemSize1(), lutcn, dst.data, dst.step, src.cols, src.rows);
++    }
++
++    const LUTFunc func = getLUTFunc(src.depth(), dst.depth());
++    CV_Assert( func != nullptr );
+ 
+     if (_src.dims() <= 2)
+     {
+-        bool ok = false;
+-        LUTParallelBody body(src, lut, dst, &ok);
+-        if (ok)
+-        {
+-            Range all(0, dst.rows);
+-            if (dst.total() >= (size_t)(1<<18))
+-                parallel_for_(all, body, (double)std::max((size_t)1, dst.total()>>16));
+-            else
+-                body(all);
+-            if (ok)
+-                return;
+-        }
++        LUTParallelBody body(src, lut, dst, func);
++        Range all(0, dst.rows);
++        if (dst.total() >= (size_t)(1<<18))
++            parallel_for_(all, body, (double)std::max((size_t)1, dst.total()>>16));
++        else
++            body(all);
++
++        return;
+     }
+ 
+-    LUTFunc func = lutTab[lut.depth()];
+-    CV_Assert( func != 0 );
+-
+     const Mat* arrays[] = {&src, &dst, 0};
+     uchar* ptrs[2] = {};
+     NAryMatIterator it(arrays, ptrs);

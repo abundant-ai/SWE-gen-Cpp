@@ -1,0 +1,264 @@
+diff --git a/modules/dnn/misc/java/gen_dict.json b/modules/dnn/misc/java/gen_dict.json
+index 5b011dbf18..65ecfdc25e 100644
+--- a/modules/dnn/misc/java/gen_dict.json
++++ b/modules/dnn/misc/java/gen_dict.json
+@@ -11,20 +11,11 @@
+         },
+         "vector_MatShape": {
+             "j_type": "List<MatOfInt>",
+-            "jn_type": "long",
+-            "jni_type": "jlong",
++            "jn_type": "List<MatOfInt>",
++            "jni_type": "jobject",
+             "jni_var": "std::vector< MatShape > %(n)s",
+-            "suffix": "J",
+-            "v_type": "Mat",
+-            "j_import": "org.opencv.core.MatOfInt"
+-        },
+-        "vector_vector_MatShape": {
+-            "j_type": "List<List<MatOfInt>>",
+-            "jn_type": "long",
+-            "jni_type": "jlong",
+-            "jni_var": "std::vector< std::vector<MatShape> > %(n)s",
+-            "suffix": "J",
+-            "v_type": "vector_Mat",
++            "suffix": "Ljava_util_List",
++            "v_type": "vector_MatShape",
+             "j_import": "org.opencv.core.MatOfInt"
+         },
+         "vector_size_t": {
+diff --git a/modules/dnn/misc/java/src/cpp/dnn_converters.cpp b/modules/dnn/misc/java/src/cpp/dnn_converters.cpp
+index 3fd181e229..95184c0e90 100644
+--- a/modules/dnn/misc/java/src/cpp/dnn_converters.cpp
++++ b/modules/dnn/misc/java/src/cpp/dnn_converters.cpp
+@@ -5,7 +5,6 @@
+ // Author: abratchik
+ 
+ #include "dnn_converters.hpp"
+-#include "converters.h"
+ 
+ #define LOG_TAG "org.opencv.dnn"
+ 
+@@ -21,61 +20,26 @@ void MatShape_to_Mat(MatShape& matshape, cv::Mat& mat)
+     mat = cv::Mat(matshape, true);
+ }
+ 
+-void Mat_to_vector_MatShape(cv::Mat& mat, std::vector<MatShape>& v_matshape)
++std::vector<MatShape> List_to_vector_MatShape(JNIEnv* env, jobject list)
+ {
+-    v_matshape.clear();
+-    if(mat.type() == CV_32SC2 && mat.cols == 1)
+-    {
+-        v_matshape.reserve(mat.rows);
+-        for(int i=0; i<mat.rows; i++)
+-        {
+-            cv::Vec<int, 2> a = mat.at< cv::Vec<int, 2> >(i, 0);
+-            long long addr = (((long long)a[0])<<32) | (a[1]&0xffffffff);
+-            cv::Mat& m = *( (cv::Mat*) addr );
+-            MatShape matshape = (MatShape) m;
+-            v_matshape.push_back(matshape);
+-        }
+-    } else {
+-        LOGD("Mat_to_vector_MatShape() FAILED: mat.type() == CV_32SC2 && mat.cols == 1");
+-    }
+-}
+-
+-void vector_MatShape_to_Mat(std::vector<MatShape>& v_matshape, cv::Mat& mat)
+-{
+-    int count = (int)v_matshape.size();
+-    mat.create(count, 1, CV_32SC2);
+-    for(int i=0; i<count; i++)
+-    {
+-        cv::Mat temp_mat = cv::Mat(v_matshape[i], true);
+-        long long addr = (long long) new cv::Mat(temp_mat);
+-        mat.at< cv::Vec<int, 2> >(i, 0) = cv::Vec<int, 2>(addr>>32, addr&0xffffffff);
+-    }
+-}
++    static jclass juArrayList       = ARRAYLIST(env);
++    jmethodID m_size       = LIST_SIZE(env, juArrayList);
++    jmethodID m_get        = LIST_GET(env, juArrayList);
+ 
+-void Mat_to_vector_vector_MatShape(cv::Mat& mat, std::vector< std::vector< MatShape > >& vv_matshape)
+-{
+-    std::vector<cv::Mat> vm;
+-    vm.reserve( mat.rows );
+-    Mat_to_vector_Mat(mat, vm);
+-    for(size_t i=0; i<vm.size(); i++)
+-    {
+-        std::vector<MatShape> vmatshape;
+-        Mat_to_vector_MatShape(vm[i], vmatshape);
+-        vv_matshape.push_back(vmatshape);
+-    }
+-}
++    static jclass jMatOfInt = MATOFINT(env);
+ 
+-void vector_vector_MatShape_to_Mat(std::vector< std::vector< MatShape > >& vv_matshape, cv::Mat& mat)
+-{
+-    std::vector<cv::Mat> vm;
+-    vm.reserve( vv_matshape.size() );
+-    for(size_t i=0; i<vv_matshape.size(); i++)
++    jint len = env->CallIntMethod(list, m_size);
++    std::vector<MatShape> result;
++    result.reserve(len);
++    for (jint i=0; i<len; i++)
+     {
+-        cv::Mat m;
+-        vector_MatShape_to_Mat(vv_matshape[i], m);
+-        vm.push_back(m);
++        jobject element = static_cast<jobject>(env->CallObjectMethod(list, m_get, i));
++        cv::Mat& mat = *((cv::Mat*) GETNATIVEOBJ(env, jMatOfInt, element) );
++        MatShape matshape = (MatShape) mat;
++        result.push_back(matshape);
++        env->DeleteLocalRef(element);
+     }
+-    vector_Mat_to_Mat(vm, mat);
++    return result;
+ }
+ 
+ jobject vector_Ptr_Layer_to_List(JNIEnv* env, std::vector<cv::Ptr<cv::dnn::Layer> >& vs)
+diff --git a/modules/dnn/misc/java/src/cpp/dnn_converters.hpp b/modules/dnn/misc/java/src/cpp/dnn_converters.hpp
+index f8971d7ca6..e1f63e0a00 100644
+--- a/modules/dnn/misc/java/src/cpp/dnn_converters.hpp
++++ b/modules/dnn/misc/java/src/cpp/dnn_converters.hpp
+@@ -22,11 +22,7 @@ void Mat_to_MatShape(cv::Mat& mat, MatShape& matshape);
+ 
+ void MatShape_to_Mat(MatShape& matshape, cv::Mat& mat);
+ 
+-void Mat_to_vector_MatShape(cv::Mat& mat, std::vector<MatShape>& v_matshape);
+-void vector_MatShape_to_Mat(std::vector<MatShape>& v_matshape, cv::Mat& mat);
+-
+-void Mat_to_vector_vector_MatShape(cv::Mat& mat, std::vector< std::vector< MatShape > >& vv_matshape);
+-void vector_vector_MatShape_to_Mat(std::vector< std::vector< MatShape > >& vv_matshape, cv::Mat& mat);
++std::vector<MatShape> List_to_vector_MatShape(JNIEnv* env, jobject list);
+ 
+ jobject vector_Ptr_Layer_to_List(JNIEnv* env, std::vector<cv::Ptr<cv::dnn::Layer> >& vs);
+ 
+diff --git a/modules/dnn/misc/java/test/DnnListRegressionTest.java b/modules/dnn/misc/java/test/DnnListRegressionTest.java
+index c4c7b0a7d9..4c357aff86 100644
+--- a/modules/dnn/misc/java/test/DnnListRegressionTest.java
++++ b/modules/dnn/misc/java/test/DnnListRegressionTest.java
+@@ -116,36 +116,4 @@ public class DnnListRegressionTest extends OpenCVTestCase {
+             fail("Net getFLOPS failed: " + e.getMessage());
+         }
+     }
+-
+-    public void testGetLayersShapes() {
+-        List<MatOfInt> netInputShapes = new ArrayList();
+-        netInputShapes.add(new MatOfInt(1, 3, 224, 224));
+-
+-        MatOfInt layersIds = new MatOfInt();
+-        List<List<MatOfInt>> inLayersShapes = new ArrayList();
+-        List<List<MatOfInt>> outLayersShapes = new ArrayList();
+-        try {
+-            net.getLayersShapes(netInputShapes, layersIds, inLayersShapes, outLayersShapes);
+-
+-            assertEquals(layersIds.total(), inLayersShapes.size());
+-            assertEquals(layersIds.total(), outLayersShapes.size());
+-
+-            // Layer ID for "conv2d0_pre_relu/conv"
+-            int layerId = 1;
+-
+-            MatOfInt expectedInShape = new MatOfInt(1, 3, 224, 224);
+-            MatOfInt expectedOutShape = new MatOfInt(1, 64, 112, 112);
+-
+-            // Test inLayersShapes
+-            MatOfInt actualInShape = inLayersShapes.get(layerId).get(0);
+-            assertMatEqual(expectedInShape, actualInShape);
+-
+-            // Test outLayersShapes
+-            MatOfInt actualOutShape = outLayersShapes.get(layerId).get(0);
+-            assertMatEqual(expectedOutShape, actualOutShape);
+-
+-        } catch(Exception e) {
+-            fail("Net getLayersShapes failed: " + e.getMessage());
+-        }
+-    }
+ }
+diff --git a/modules/java/generator/src/java/org/opencv/utils/Converters.java b/modules/java/generator/src/java/org/opencv/utils/Converters.java
+index a6af223cf1..146ed70256 100644
+--- a/modules/java/generator/src/java/org/opencv/utils/Converters.java
++++ b/modules/java/generator/src/java/org/opencv/utils/Converters.java
+@@ -7,7 +7,6 @@ import org.opencv.core.CvType;
+ import org.opencv.core.Mat;
+ import org.opencv.core.MatOfByte;
+ import org.opencv.core.MatOfDMatch;
+-import org.opencv.core.MatOfInt;
+ import org.opencv.core.MatOfKeyPoint;
+ import org.opencv.core.MatOfPoint;
+ import org.opencv.core.MatOfPoint2f;
+@@ -839,75 +838,4 @@ public class Converters {
+             rs.add(new RotatedRect(new Point(buff[5 * i], buff[5 * i + 1]), new Size(buff[5 * i + 2], buff[5 * i + 3]), buff[5 * i + 4]));
+         }
+     }
+-
+-    // vector_MatShape
+-    public static Mat vector_MatShape_to_Mat(List<MatOfInt> matOfInts) {
+-        Mat res;
+-        int count = (matOfInts != null) ? matOfInts.size() : 0;
+-        if (count > 0) {
+-            res = new Mat(count, 1, CvType.CV_32SC2);
+-            int[] buff = new int[count * 2];
+-            for (int i = 0; i < count; i++) {
+-                long addr = matOfInts.get(i).nativeObj;
+-                buff[i * 2] = (int) (addr >> 32);
+-                buff[i * 2 + 1] = (int) (addr & 0xffffffff);
+-            }
+-            res.put(0, 0, buff);
+-        } else {
+-            res = new Mat();
+-        }
+-        return res;
+-    }
+-
+-    public static void Mat_to_vector_MatShape(Mat m, List<MatOfInt> matOfInts) {
+-        if (matOfInts == null)
+-            throw new IllegalArgumentException("matOfInts == null");
+-        int count = m.rows();
+-        if (CvType.CV_32SC2 != m.type() || m.cols() != 1)
+-            throw new IllegalArgumentException(
+-                    "CvType.CV_32SC2 != m.type() ||  m.cols()!=1\n" + m);
+-
+-        matOfInts.clear();
+-        int[] buff = new int[count * 2];
+-        m.get(0, 0, buff);
+-        for (int i = 0; i < count; i++) {
+-            long addr = (((long) buff[i * 2]) << 32) | (((long) buff[i * 2 + 1]) & 0xffffffffL);
+-            matOfInts.add(MatOfInt.fromNativeAddr(addr));
+-        }
+-    }
+-
+-    // vector_vector_MatShape
+-    public static Mat vector_vector_MatShape_to_Mat(List<List<MatOfInt>> vecMatOfInts, List<Mat> mats) {
+-        Mat res;
+-        int lCount = (vecMatOfInts != null) ? vecMatOfInts.size() : 0;
+-        if (lCount > 0) {
+-            for (List<MatOfInt> matList : vecMatOfInts) {
+-                Mat mat = vector_MatShape_to_Mat(matList);
+-                mats.add(mat);
+-            }
+-            res = vector_Mat_to_Mat(mats);
+-        } else {
+-            res = new Mat();
+-        }
+-        return res;
+-    }
+-
+-    public static void Mat_to_vector_vector_MatShape(Mat m, List<List<MatOfInt>> vecMatOfInts) {
+-        if (vecMatOfInts == null)
+-            throw new IllegalArgumentException("Output List can't be null");
+-
+-        if (m == null)
+-            throw new IllegalArgumentException("Input Mat can't be null");
+-
+-        vecMatOfInts.clear();
+-        List<Mat> mats = new ArrayList<Mat>(m.rows());
+-        Mat_to_vector_Mat(m, mats);
+-        for (Mat mi : mats) {
+-            List<MatOfInt> rowList = new ArrayList<MatOfInt>(mi.rows());
+-            Mat_to_vector_MatShape(mi, rowList);
+-            vecMatOfInts.add(rowList);
+-            mi.release();
+-        }
+-        mats.clear();
+-    }
+ }

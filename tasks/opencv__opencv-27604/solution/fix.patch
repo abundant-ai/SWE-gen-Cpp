@@ -1,0 +1,452 @@
+diff --git a/modules/core/include/opencv2/core/fast_math.hpp b/modules/core/include/opencv2/core/fast_math.hpp
+index 6f0ad67bc4..e136327207 100644
+--- a/modules/core/include/opencv2/core/fast_math.hpp
++++ b/modules/core/include/opencv2/core/fast_math.hpp
+@@ -201,6 +201,10 @@ cvRound( double value )
+ {
+ #if defined CV_INLINE_ROUND_DBL
+     CV_INLINE_ROUND_DBL(value);
++#elif defined _MSC_VER && defined _M_ARM64
++    float64x1_t v = vdup_n_f64(value);
++    int64x1_t r = vcvtn_s64_f64(v);
++    return static_cast<int>(vget_lane_s64(r, 0));
+ #elif ((defined _MSC_VER && defined _M_X64) || (defined __GNUC__ && defined __SSE2__)) && !defined(__CUDACC__)
+     __m128d t = _mm_set_sd( value );
+     return _mm_cvtsd_si32(t);
+@@ -323,6 +327,10 @@ CV_INLINE int cvRound(float value)
+ {
+ #if defined CV_INLINE_ROUND_FLT
+     CV_INLINE_ROUND_FLT(value);
++#elif defined _MSC_VER && defined _M_ARM64
++    float32x2_t v = vdup_n_f32(value);
++    int32x2_t r = vcvtn_s32_f32(v);
++    return vget_lane_s32(r, 0);
+ #elif ((defined _MSC_VER && defined _M_X64) || (defined __GNUC__ && defined __SSE2__)) && !defined(__CUDACC__)
+     __m128 t = _mm_set_ss( value );
+     return _mm_cvtss_si32(t);
+diff --git a/modules/core/src/persistence_json.cpp b/modules/core/src/persistence_json.cpp
+index 9d05650814..c63acb8c10 100644
+--- a/modules/core/src/persistence_json.cpp
++++ b/modules/core/src/persistence_json.cpp
+@@ -419,10 +419,19 @@ public:
+             CV_PARSE_ERROR_CPP( "Key must start with \'\"\'" );
+ 
+         char * beg = ptr + 1;
+-
++        std::string key_name;
+         do {
+-            ++ptr;
+-            CV_PERSISTENCE_CHECK_END_OF_BUFFER_BUG_CPP();
++            if (*ptr == '\\') { // skip the next character if current is back slash
++                ++ptr;
++                CV_PERSISTENCE_CHECK_END_OF_BUFFER_BUG_CPP();
++                key_name += *ptr;
++                ++ptr;
++                CV_PERSISTENCE_CHECK_END_OF_BUFFER_BUG_CPP();
++            } else {
++                ++ptr;
++                CV_PERSISTENCE_CHECK_END_OF_BUFFER_BUG_CPP();
++                if (*ptr != '\\' && *ptr != '"') key_name += *ptr;
++            }
+         } while( cv_isprint(*ptr) && *ptr != '"' );
+ 
+         if( *ptr != '"' )
+@@ -430,7 +439,7 @@ public:
+ 
+         if( ptr == beg )
+             CV_PARSE_ERROR_CPP( "Key is empty" );
+-        value_placeholder = fs->addNode(collection, std::string(beg, (size_t)(ptr - beg)), FileNode::NONE);
++        value_placeholder = fs->addNode(collection, key_name, FileNode::NONE);
+ 
+         ptr++;
+         ptr = skipSpaces( ptr );
+diff --git a/modules/imgcodecs/src/grfmt_jpeg.cpp b/modules/imgcodecs/src/grfmt_jpeg.cpp
+index 9b2ab59b2b..810ae1d63b 100644
+--- a/modules/imgcodecs/src/grfmt_jpeg.cpp
++++ b/modules/imgcodecs/src/grfmt_jpeg.cpp
+@@ -247,8 +247,43 @@ bool  JpegDecoder::readHeader()
+         if (state->cinfo.src != 0)
+         {
+             jpeg_save_markers(&state->cinfo, APP1, 0xffff);
++            jpeg_save_markers(&state->cinfo, APP2, 0xffff);
+             jpeg_read_header( &state->cinfo, TRUE );
+ 
++            const std::streamsize EXIF_HEADER_SIZE = 6;   // "Exif\0\0"
++            const std::streamsize XMP_HEADER_SIZE  = 29;  // "http://ns.adobe.com/xap/1.0/"
++            const std::streamsize ICC_HEADER_SIZE  = 14;  // "ICC_PROFILE\0" + seq/total
++
++            for (jpeg_saved_marker_ptr cmarker = state->cinfo.marker_list; cmarker != nullptr; cmarker = cmarker->next)
++            {
++                // Handle APP1 marker: could be Exif or XMP
++                if (cmarker->marker == APP1 && cmarker->data_length > EXIF_HEADER_SIZE)
++                {
++                    unsigned char* data = cmarker->data;
++
++                    // Check for Exif data
++                    if (std::memcmp(data, "Exif\0\0", EXIF_HEADER_SIZE) == 0)
++                    {
++                        m_exif.parseExif(data + EXIF_HEADER_SIZE, cmarker->data_length - EXIF_HEADER_SIZE);
++                    }
++                    // Check for XMP metadata
++                    else if (m_read_options && cmarker->data_length >= XMP_HEADER_SIZE &&
++                        std::memcmp(data, "http://ns.adobe.com/xap/1.0/", XMP_HEADER_SIZE) == 0)
++                    {
++                        std::vector<uchar>& xmp = m_metadata[IMAGE_METADATA_XMP];
++                        xmp.insert(xmp.end(), data, data + cmarker->data_length);
++                    }
++                }
++
++                // Handle APP2 marker: typically contains ICC profile data
++                if (m_read_options && cmarker->marker == APP2 && cmarker->data_length > ICC_HEADER_SIZE)
++                {
++                    const unsigned char* data = cmarker->data;
++                    std::vector<uchar>& iccp = m_metadata[IMAGE_METADATA_ICCP];
++                    iccp.insert(iccp.end(), data + ICC_HEADER_SIZE, data + cmarker->data_length);
++                }
++            }
++
+             state->cinfo.scale_num=1;
+             state->cinfo.scale_denom = m_scale_denom;
+             m_scale_denom=1; // trick! to know which decoder used scale_denom see imread_
+@@ -469,29 +504,6 @@ bool  JpegDecoder::readData( Mat& img )
+                 }
+             }
+ 
+-            // Check for Exif marker APP1
+-            jpeg_saved_marker_ptr exif_marker = NULL;
+-            jpeg_saved_marker_ptr cmarker = cinfo->marker_list;
+-            while( cmarker && exif_marker == NULL )
+-            {
+-                if (cmarker->marker == APP1)
+-                    exif_marker = cmarker;
+-
+-                cmarker = cmarker->next;
+-            }
+-
+-            // Parse Exif data
+-            if( exif_marker )
+-            {
+-                const std::streamsize offsetToTiffHeader = 6; //bytes from Exif size field to the first TIFF header
+-
+-                if (exif_marker->data_length > offsetToTiffHeader)
+-                {
+-                    m_exif.parseExif(exif_marker->data + offsetToTiffHeader, exif_marker->data_length - offsetToTiffHeader);
+-                }
+-            }
+-
+-
+             jpeg_start_decompress( cinfo );
+ 
+             if( doDirectRead)
+@@ -602,6 +614,8 @@ JpegEncoder::JpegEncoder()
+     m_buf_supported = true;
+     m_support_metadata.assign((size_t)IMAGE_METADATA_MAX + 1, false);
+     m_support_metadata[(size_t)IMAGE_METADATA_EXIF] = true;
++    m_support_metadata[(size_t)IMAGE_METADATA_XMP] = true;
++    m_support_metadata[(size_t)IMAGE_METADATA_ICCP] = true;
+ }
+ 
+ 
+@@ -831,6 +845,26 @@ bool JpegEncoder::write( const Mat& img, const std::vector<int>& params )
+                 memcpy(data + app1_exif_prefix_size, metadata_exif.data(), exif_size);
+                 jpeg_write_marker(&cinfo, JPEG_APP0 + 1, data, (unsigned)data_size);
+             }
++
++            const std::vector<uchar>& metadata_xmp = m_metadata[IMAGE_METADATA_XMP];
++            size_t xmp_size = metadata_xmp.size();
++            if (xmp_size > 0u) {
++                jpeg_write_marker(&cinfo, JPEG_APP0 + 1, metadata_xmp.data(), (unsigned)xmp_size);
++            }
++
++            const std::vector<uchar>& metadata_iccp = m_metadata[IMAGE_METADATA_ICCP];
++            size_t iccp_size = metadata_iccp.size();
++            if (iccp_size > 0u) {
++                const char app1_iccp_prefix[] = {'I','C','C','_','P','R','O','F','I','L','E','\0','\1','\1'};
++                size_t app1_iccp_prefix_size = sizeof(app1_iccp_prefix);
++                size_t data_size = iccp_size + app1_iccp_prefix_size;
++
++                std::vector<uchar> metadata_app1(data_size);
++                uchar* data = metadata_app1.data();
++                memcpy(data, app1_iccp_prefix, app1_iccp_prefix_size);
++                memcpy(data + app1_iccp_prefix_size, metadata_iccp.data(), iccp_size);
++                jpeg_write_marker(&cinfo, JPEG_APP0 + 2, data, (unsigned)data_size);
++            }
+         }
+ 
+         if( doDirectWrite )
+diff --git a/modules/imgcodecs/src/grfmt_png.cpp b/modules/imgcodecs/src/grfmt_png.cpp
+index 5adf71323e..55e5f7ff11 100644
+--- a/modules/imgcodecs/src/grfmt_png.cpp
++++ b/modules/imgcodecs/src/grfmt_png.cpp
+@@ -648,7 +648,11 @@ bool  PngDecoder::readData( Mat& img )
+ 
+                 png_charp icc_name;
+                 int compression_type;
++#if (PNG_LIBPNG_VER_MAJOR*10000 + PNG_LIBPNG_VER_MINOR*100 + PNG_LIBPNG_VER_RELEASE >= 10500)
+                 png_bytep icc_profile;
++#else
++                png_charp icc_profile;
++#endif
+                 png_uint_32 icc_length;
+ 
+                 if (png_get_iCCP(m_png_ptr, m_info_ptr, &icc_name, &compression_type, &icc_profile, &icc_length)) {
+@@ -1028,7 +1032,11 @@ bool  PngEncoder::write( const Mat& img, const std::vector<int>& params )
+                     if (!m_metadata.empty()) {
+                         std::vector<uchar>& exif = m_metadata[IMAGE_METADATA_EXIF];
+                         if (!exif.empty()) {
++#ifdef PNG_eXIf_SUPPORTED
+                             png_set_eXIf_1(png_ptr, info_ptr, static_cast<png_uint_32>(exif.size()), exif.data());
++#else
++                            CV_LOG_WARNING(NULL, "Libpng is too old and does not support EXIF.");
++#endif
+                         }
+ 
+                         std::vector<uchar>& xmp = m_metadata[IMAGE_METADATA_XMP];
+@@ -1045,7 +1053,7 @@ bool  PngEncoder::write( const Mat& img, const std::vector<int>& params )
+                         std::vector<uchar> iccp = m_metadata[IMAGE_METADATA_ICCP];
+                         if (!iccp.empty()) {
+                             // PNG standard requires a profile name (null-terminated, max 79 characters, printable Latin-1)
+-                            const char* iccp_profile_name = "ICC Profile";
++                            char iccp_profile_name[] = "ICC Profile";
+ 
+                             // Compression type must be 0 (deflate) as per libpng docs
+                             int compression_type = PNG_COMPRESSION_TYPE_BASE;
+@@ -1056,7 +1064,11 @@ bool  PngEncoder::write( const Mat& img, const std::vector<int>& params )
+                             png_set_iCCP(png_ptr, info_ptr,
+                                 iccp_profile_name,
+                                 compression_type,
++#if (PNG_LIBPNG_VER_MAJOR*10000 + PNG_LIBPNG_VER_MINOR*100 + PNG_LIBPNG_VER_RELEASE >= 10500)
+                                 reinterpret_cast<png_const_bytep>(iccp.data()),
++#else
++                                reinterpret_cast<png_charp>(iccp.data()),
++#endif
+                                 static_cast<png_uint_32>(iccp.size()));
+                         }
+                     }
+diff --git a/modules/imgproc/src/connectedcomponents.cpp b/modules/imgproc/src/connectedcomponents.cpp
+index d402ea91c3..e6285bdecd 100644
+--- a/modules/imgproc/src/connectedcomponents.cpp
++++ b/modules/imgproc/src/connectedcomponents.cpp
+@@ -261,13 +261,24 @@ namespace cv{
+ 
+     template<typename LabelT>
+     inline static
+-    void flattenL(LabelT *P, const int start, const int nElem, LabelT& k){
++    void checkLabelTypeOverflowBeforeIncrement(const LabelT numLabels) {
++        constexpr LabelT maxLabelTypeValue = std::numeric_limits<LabelT>::max();
++        CV_CheckLT(
++            numLabels,
++            maxLabelTypeValue,
++            "Total number of labels overflowed label type. Try using CV_32S instead of CV_16U as ltype");
++    }
++
++    template<typename LabelT>
++    inline static
++    void flattenLParallel(LabelT *P, const int start, const int nElem, LabelT& k){
+         for (int i = start; i < start + nElem; ++i){
+             if (P[i] < i){//node that point to root
+                 P[i] = P[P[i]];
+             }
+             else{ //for root node
+                 P[i] = k;
++                checkLabelTypeOverflowBeforeIncrement(k);
+                 k = k + 1;
+             }
+         }
+@@ -353,6 +364,7 @@ namespace cv{
+ // Action 2: New label (the block has foreground pixels and is not connected to anything else)
+ #define ACTION_2 img_labels_row[c] = label; \
+                     P_[label] = label; \
++                    checkLabelTypeOverflowBeforeIncrement(label); \
+                     label = label + 1;
+ //Action 3: Assign label of block P
+ #define ACTION_3 img_labels_row[c] = img_labels_row_prev_prev[c - 2];
+@@ -1160,7 +1172,7 @@ namespace cv{
+             LabelT nLabels = 1;
+             for (int i = 0; i < h; i = chunksSizeAndLabels[i]) {
+                 CV_DbgAssert(i + 1 < chunksSizeAndLabelsSize);
+-                flattenL(P.data(), stripeFirstLabel8Connectivity<LabelT>(i, w), chunksSizeAndLabels[i + 1], nLabels);
++                flattenLParallel(P.data(), stripeFirstLabel8Connectivity<LabelT>(i, w), chunksSizeAndLabels[i + 1], nLabels);
+             }
+ 
+             //Array for statistics data
+@@ -1261,6 +1273,7 @@ namespace cv{
+                 // Action 2: New label (the block has foreground pixels and is not connected to anything else)
+                 #define ACTION_2 img_labels_row[c] = lunique; \
+                                  P[lunique] = lunique;        \
++                                 checkLabelTypeOverflowBeforeIncrement(lunique); \
+                                  lunique = lunique + 1;
+                 //Action 3: Assign label of block P
+                 #define ACTION_3 img_labels_row[c] = img_labels_row_prev_prev[c - 2];
+@@ -1789,7 +1802,7 @@ namespace cv{
+             mergeLabels(imgLabels, P, chunksSizeAndLabels.data());
+ 
+             for (int i = 0; i < h; i = chunksSizeAndLabels[i]) {
+-                flattenL(P, stripeFirstLabel4Connectivity<int>(i, w), chunksSizeAndLabels[i + 1], nLabels);
++                flattenLParallel(P, stripeFirstLabel4Connectivity<int>(i, w), chunksSizeAndLabels[i + 1], nLabels);
+             }
+ 
+             //Array for statistics dataof threads
+@@ -1854,6 +1867,7 @@ namespace cv{
+ #define ACTION_1 img_labels_row[c] = 0;
+ #define ACTION_2 img_labels_row[c] = lunique; \
+                                      P[lunique] = lunique;        \
++                                     checkLabelTypeOverflowBeforeIncrement(lunique); \
+                                      lunique = lunique + 1; // new label
+ #define ACTION_3 img_labels_row[c] = img_labels_row_prev[c]; // x <- q
+ #define ACTION_4 img_labels_row[c] = img_labels_row[c - 1]; // x <- s
+@@ -2052,6 +2066,7 @@ namespace cv{
+                                             //new label
+                                             imgLabels_row[c] = label;
+                                             P_[label] = label;
++                                            checkLabelTypeOverflowBeforeIncrement(label);
+                                             label = label + 1;
+                                         }
+                                     }
+@@ -2135,6 +2150,7 @@ namespace cv{
+                                     //new label
+                                     imgLabels_row[c] = label;
+                                     P_[label] = label;
++                                    checkLabelTypeOverflowBeforeIncrement(label);
+                                     label = label + 1;
+                                 }
+                             }
+@@ -2320,7 +2336,7 @@ namespace cv{
+                 mergeLabels8Connectivity(imgLabels, P, chunksSizeAndLabels.data());
+ 
+                 for (int i = 0; i < h; i = chunksSizeAndLabels[i]){
+-                    flattenL(P, stripeFirstLabel8Connectivity<int>(i, w), chunksSizeAndLabels[i + 1], nLabels);
++                    flattenLParallel(P, stripeFirstLabel8Connectivity<int>(i, w), chunksSizeAndLabels[i + 1], nLabels);
+                 }
+             }
+             else{
+@@ -2331,7 +2347,7 @@ namespace cv{
+                 mergeLabels4Connectivity(imgLabels, P, chunksSizeAndLabels.data());
+ 
+                 for (int i = 0; i < h; i = chunksSizeAndLabels[i]){
+-                    flattenL(P, stripeFirstLabel4Connectivity<int>(i, w), chunksSizeAndLabels[i + 1], nLabels);
++                    flattenLParallel(P, stripeFirstLabel4Connectivity<int>(i, w), chunksSizeAndLabels[i + 1], nLabels);
+                 }
+             }
+ 
+@@ -2433,6 +2449,7 @@ namespace cv{
+                                             //new label
+                                             imgLabels_row[c] = lunique;
+                                             P[lunique] = lunique;
++                                            checkLabelTypeOverflowBeforeIncrement(lunique);
+                                             lunique = lunique + 1;
+                                         }
+                                     }
+@@ -2483,6 +2500,7 @@ namespace cv{
+                                     //new label
+                                     imgLabels_row[c] = lunique;
+                                     P[lunique] = lunique;
++                                    checkLabelTypeOverflowBeforeIncrement(lunique);
+                                     lunique = lunique + 1;
+                                 }
+                             }
+@@ -3108,6 +3126,7 @@ namespace cv{
+                                                         //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                                         imgLabels_row[c] = label;
+                                                         P_[label] = label;
++                                                        checkLabelTypeOverflowBeforeIncrement(label);
+                                                         label = label + 1;
+                                                         continue;
+                                                     }
+@@ -3130,6 +3149,7 @@ namespace cv{
+                                                     //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                                     imgLabels_row[c] = label;
+                                                     P_[label] = label;
++                                                    checkLabelTypeOverflowBeforeIncrement(label);
+                                                     label = label + 1;
+                                                     continue;
+                                                 }
+@@ -3483,6 +3503,7 @@ namespace cv{
+                                                         //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                                         imgLabels_row[c] = label;
+                                                         P_[label] = label;
++                                                        checkLabelTypeOverflowBeforeIncrement(label);
+                                                         label = label + 1;
+                                                         continue;
+                                                     }
+@@ -3507,6 +3528,7 @@ namespace cv{
+                                             //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                             imgLabels_row[c] = label;
+                                             P_[label] = label;
++                                            checkLabelTypeOverflowBeforeIncrement(label);
+                                             label = label + 1;
+                                             continue;
+                                         }
+@@ -3550,6 +3572,7 @@ namespace cv{
+                                                 //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                                 imgLabels_row[c] = label;
+                                                 P_[label] = label;
++                                                checkLabelTypeOverflowBeforeIncrement(label);
+                                                 label = label + 1;
+                                                 continue;
+                                             }
+@@ -3561,6 +3584,7 @@ namespace cv{
+                                         //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                         imgLabels_row[c] = label;
+                                         P_[label] = label;
++                                        checkLabelTypeOverflowBeforeIncrement(label);
+                                         label = label + 1;
+                                         continue;
+                                     }
+@@ -4260,7 +4284,7 @@ namespace cv{
+             LabelT nLabels = 1;
+             for (int i = 0; i < h; i = chunksSizeAndLabels[i]){
+                 CV_DbgAssert(i + 1 < chunksSizeAndLabelsSize);
+-                flattenL(P.data(), stripeFirstLabel8Connectivity<LabelT>(i, w), chunksSizeAndLabels[i + 1], nLabels);
++                flattenLParallel(P.data(), stripeFirstLabel8Connectivity<LabelT>(i, w), chunksSizeAndLabels[i + 1], nLabels);
+             }
+ 
+             //Array for statistics data
+@@ -4865,6 +4889,7 @@ namespace cv{
+                                                     //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                                     imgLabels_row[c] = lunique;
+                                                     P[lunique] = lunique;
++                                                    checkLabelTypeOverflowBeforeIncrement(lunique);
+                                                     lunique = lunique + 1;
+                                                     continue;
+                                                 }
+@@ -4887,6 +4912,7 @@ namespace cv{
+                                                 //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                                 imgLabels_row[c] = lunique;
+                                                 P[lunique] = lunique;
++                                                checkLabelTypeOverflowBeforeIncrement(lunique);
+                                                 lunique = lunique + 1;
+                                                 continue;
+                                             }
+@@ -5240,6 +5266,7 @@ namespace cv{
+                                                     //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                                     imgLabels_row[c] = lunique;
+                                                     P[lunique] = lunique;
++                                                    checkLabelTypeOverflowBeforeIncrement(lunique);
+                                                     lunique = lunique + 1;
+                                                     continue;
+                                                 }
+@@ -5264,6 +5291,7 @@ namespace cv{
+                                         //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                         imgLabels_row[c] = lunique;
+                                         P[lunique] = lunique;
++                                        checkLabelTypeOverflowBeforeIncrement(lunique);
+                                         lunique = lunique + 1;
+                                         continue;
+                                     }
+@@ -5307,6 +5335,7 @@ namespace cv{
+                                             //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                             imgLabels_row[c] = lunique;
+                                             P[lunique] = lunique;
++                                            checkLabelTypeOverflowBeforeIncrement(lunique);
+                                             lunique = lunique + 1;
+                                             continue;
+                                         }
+@@ -5318,6 +5347,7 @@ namespace cv{
+                                     //Action_2: New label (the block has foreground pixels and is not connected to anything else)
+                                     imgLabels_row[c] = lunique;
+                                     P[lunique] = lunique;
++                                    checkLabelTypeOverflowBeforeIncrement(lunique);
+                                     lunique = lunique + 1;
+                                     continue;
+                                 }

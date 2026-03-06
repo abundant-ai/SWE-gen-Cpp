@@ -1,0 +1,437 @@
+diff --git a/NEWS b/NEWS
+index 879b9332..7b81cb59 100644
+--- a/NEWS
++++ b/NEWS
+@@ -4,6 +4,12 @@
+ * The following DRAFT APIs have been marked as STABLE and will not change
+   anymore:
+   - ZMQ_MSG_T_SIZE context option (see doc/zmq_ctx_get.txt)
++  - ZMQ_THREAD_AFFINITY_CPU_ADD and ZMQ_THREAD_AFFINITY_CPU_REMOVE (Posix only)
++    context options, to add/remove CPUs to the affinity set of the I/O threads.
++    See doc/zmq_ctx_set.txt and doc/zmq_ctx_get.txt for details.
++  - ZMQ_THREAD_NAME_PREFIX (Posix only) context option, to add a specific
++    integer prefix to the background threads names, to easily identify them.
++    See doc/zmq_ctx_set.txt and doc/zmq_ctx_get.txt for details.
+   - ZMQ_GSSAPI_PRINCIPAL_NAMETYPE and ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE
+     socket options, for the corresponding GSSAPI features. Additional
+     definitions for principal name types:
+@@ -17,6 +23,17 @@
+     NOTE: requires the program to be ran as root OR with CAP_NET_RAW
+   - zmq_timers_* APIs. These functions can be used for cross-platforms timed
+     callbacks. See doc/zmq_timers.txt for details.
++  - The following socket monitor events:
++    - ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL: unknown errors during handshake.
++    - ZMQ_EVENT_HANDSHAKE_SUCCEEDED: Handshake completed with authentication.
++    - ZMQ_EVENT_HANDSHAKE_FAILED_PROTOCOL: Protocol errors with peers or ZAP.
++    - ZMQ_EVENT_HANDSHAKE_FAILED_AUTH: Failed authentication requests.
++    See doc/zmq_socket_monitor.txt for more details and error codes.
++  - zmq_stopwatch_intermediate which returns the time elapsed without stopping
++    the stopwatch.
++  - zmq_proxy_steerable command 'STATISTICS' to retrieve stats about the amount
++    of messages and bytes sent and received by the proxy.
++    See doc/zmq_proxy_steerable.txt for more information.
+ 
+ * The build-time configuration option to select the poller has been split, and
+   new API_POLLER (CMake) and --with-api-poller (autoconf) options will now
+diff --git a/doc/zmq_ctx_get.txt b/doc/zmq_ctx_get.txt
+index 1ff6871f..e69ff9fa 100644
+--- a/doc/zmq_ctx_get.txt
++++ b/doc/zmq_ctx_get.txt
+@@ -64,6 +64,24 @@ zero if the "block forever on context termination" gambit was disabled by
+ setting ZMQ_BLOCKY to false on all new contexts.
+ 
+ 
++ZMQ_THREAD_SCHED_POLICY: Get scheduling policy for I/O threads
++~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++The 'ZMQ_THREAD_SCHED_POLICY' argument returns the scheduling policy for
++internal context's thread pool.
++
++
++ZMQ_THREAD_PRIORITY: Get scheduling priority for I/O threads
++~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++The 'ZMQ_THREAD_PRIORITY' argument returns the scheduling priority for
++internal context's thread pool.
++
++
++ZMQ_THREAD_NAME_PREFIX: Get name prefix for I/O threads
++~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++The 'ZMQ_THREAD_NAME_PREFIX' argument gets the numeric prefix of each thread
++created for the internal context's thread pool.
++
++
+ ZMQ_MSG_T_SIZE: Get the zmq_msg_t size at runtime
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ The 'ZMQ_MSG_T_SIZE' argument returns the size of the zmq_msg_t structure at
+diff --git a/doc/zmq_proxy_steerable.txt b/doc/zmq_proxy_steerable.txt
+index 875b827a..85c87fc6 100644
+--- a/doc/zmq_proxy_steerable.txt
++++ b/doc/zmq_proxy_steerable.txt
+@@ -93,6 +93,21 @@ assert (zmq_send (control, "RESUME", 6, 0) == 0);
+ 
+ // terminate the proxy
+ assert (zmq_send (control, "TERMINATE", 9, 0) == 0);
++
++// check statistics
++assert (zmq_send (control, "STATISTICS", 10, 0) == 0);
++zmq_msg_t stats_msg;
++
++while (1) {
++    assert (zmq_msg_init (&stats_msg) == 0);
++    assert (zmq_recvmsg (control, &stats_msg, 0) == sizeof (uint64_t));
++    assert (rc == sizeof (uint64_t));
++    printf ("Stat: %lu\n", *(unsigned long int *)zmq_msg_data (&stats_msg));
++    if (!zmq_msg_get (&stats_msg, ZMQ_MORE))
++        break;
++    assert (zmq_msg_close (&stats_msg) == 0);
++}
++assert (zmq_msg_close (&stats_msg) == 0);
+ ---
+ 
+ 
+diff --git a/doc/zmq_socket_monitor.txt b/doc/zmq_socket_monitor.txt
+index ab0d892b..36f24660 100644
+--- a/doc/zmq_socket_monitor.txt
++++ b/doc/zmq_socket_monitor.txt
+@@ -99,20 +99,15 @@ ZMQ_EVENT_MONITOR_STOPPED
+ ~~~~~~~~~~~~~~~~~~~~~~~~~
+ Monitoring on this socket ended.
+ 
+-DRAFT events - subject to change without notice
+------------------------------------------------
+-
+ ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ Unspecified error during handshake.
+ The event value is an errno.
+-NOTE: in DRAFT state, not yet available in stable releases.
+ 
+ ZMQ_EVENT_HANDSHAKE_SUCCEEDED
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ The ZMTP security mechanism handshake succeeded.
+ The event value is unspecified.
+-NOTE: in DRAFT state, not yet available in stable releases.
+ 
+ ZMQ_EVENT_HANDSHAKE_FAILED_PROTOCOL
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+@@ -141,14 +136,12 @@ ZMQ_PROTOCOL_ERROR_ZAP_BAD_REQUEST_ID
+ ZMQ_PROTOCOL_ERROR_ZAP_BAD_VERSION
+ ZMQ_PROTOCOL_ERROR_ZAP_INVALID_STATUS_CODE
+ ZMQ_PROTOCOL_ERROR_ZAP_INVALID_METADATA
+-NOTE: in DRAFT state, not yet available in stable releases.
+ 
+ ZMQ_EVENT_HANDSHAKE_FAILED_AUTH
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ The ZMTP security mechanism handshake failed due to an authentication failure.
+ The event value is the status code returned by the ZAP handler (i.e. 300, 
+ 400 or 500).
+-NOTE: in DRAFT state, not yet available in stable releases.
+ 
+ 
+ 
+diff --git a/include/zmq.h b/include/zmq.h
+index f0a2c2f6..55a68cf4 100644
+--- a/include/zmq.h
++++ b/include/zmq.h
+@@ -216,6 +216,9 @@ ZMQ_EXPORT void zmq_version (int *major_, int *minor_, int *patch_);
+ #define ZMQ_THREAD_SCHED_POLICY 4
+ #define ZMQ_MAX_MSGSZ 5
+ #define ZMQ_MSG_T_SIZE 6
++#define ZMQ_THREAD_AFFINITY_CPU_ADD 7
++#define ZMQ_THREAD_AFFINITY_CPU_REMOVE 8
++#define ZMQ_THREAD_NAME_PREFIX 9
+ 
+ /*  Default for new contexts                                                  */
+ #define ZMQ_IO_THREADS_DFLT 1
+@@ -437,6 +440,38 @@ ZMQ_EXPORT const char *zmq_msg_gets (const zmq_msg_t *msg_,
+ #define ZMQ_EVENT_DISCONNECTED 0x0200
+ #define ZMQ_EVENT_MONITOR_STOPPED 0x0400
+ #define ZMQ_EVENT_ALL 0xFFFF
++/*  Unspecified system errors during handshake. Event value is an errno.      */
++#define ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL 0x0800
++/*  Handshake complete successfully with successful authentication (if        *
++ *  enabled). Event value is unused.                                          */
++#define ZMQ_EVENT_HANDSHAKE_SUCCEEDED 0x1000
++/*  Protocol errors between ZMTP peers or between server and ZAP handler.     *
++ *  Event value is one of ZMQ_PROTOCOL_ERROR_*                                */
++#define ZMQ_EVENT_HANDSHAKE_FAILED_PROTOCOL 0x2000
++/*  Failed authentication requests. Event value is the numeric ZAP status     *
++ *  code, i.e. 300, 400 or 500.                                               */
++#define ZMQ_EVENT_HANDSHAKE_FAILED_AUTH 0x4000
++#define ZMQ_PROTOCOL_ERROR_ZMTP_UNSPECIFIED 0x10000000
++#define ZMQ_PROTOCOL_ERROR_ZMTP_UNEXPECTED_COMMAND 0x10000001
++#define ZMQ_PROTOCOL_ERROR_ZMTP_INVALID_SEQUENCE 0x10000002
++#define ZMQ_PROTOCOL_ERROR_ZMTP_KEY_EXCHANGE 0x10000003
++#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_UNSPECIFIED 0x10000011
++#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_MESSAGE 0x10000012
++#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_HELLO 0x10000013
++#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_INITIATE 0x10000014
++#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_ERROR 0x10000015
++#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_READY 0x10000016
++#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_WELCOME 0x10000017
++#define ZMQ_PROTOCOL_ERROR_ZMTP_INVALID_METADATA 0x10000018
++// the following two may be due to erroneous configuration of a peer
++#define ZMQ_PROTOCOL_ERROR_ZMTP_CRYPTOGRAPHIC 0x11000001
++#define ZMQ_PROTOCOL_ERROR_ZMTP_MECHANISM_MISMATCH 0x11000002
++#define ZMQ_PROTOCOL_ERROR_ZAP_UNSPECIFIED 0x20000000
++#define ZMQ_PROTOCOL_ERROR_ZAP_MALFORMED_REPLY 0x20000001
++#define ZMQ_PROTOCOL_ERROR_ZAP_BAD_REQUEST_ID 0x20000002
++#define ZMQ_PROTOCOL_ERROR_ZAP_BAD_VERSION 0x20000003
++#define ZMQ_PROTOCOL_ERROR_ZAP_INVALID_STATUS_CODE 0x20000004
++#define ZMQ_PROTOCOL_ERROR_ZAP_INVALID_METADATA 0x20000005
+ 
+ ZMQ_EXPORT void *zmq_socket (void *, int type_);
+ ZMQ_EXPORT int zmq_close (void *s_);
+@@ -575,11 +610,9 @@ ZMQ_EXPORT int zmq_timers_execute (void *timers);
+ /*  Starts the stopwatch. Returns the handle to the watch.                    */
+ ZMQ_EXPORT void *zmq_stopwatch_start (void);
+ 
+-#ifdef ZMQ_BUILD_DRAFT_API
+ /*  Returns the number of microseconds elapsed since the stopwatch was        */
+ /*  started, but does not stop or deallocate the stopwatch.                   */
+ ZMQ_EXPORT unsigned long zmq_stopwatch_intermediate (void *watch_);
+-#endif
+ 
+ /*  Stops the stopwatch. Returns the number of microseconds elapsed since     */
+ /*  the stopwatch was started, and deallocates that watch.                    */
+@@ -620,48 +653,7 @@ ZMQ_EXPORT void zmq_threadclose (void *thread_);
+ #define ZMQ_MULTICAST_LOOP 96
+ #define ZMQ_ROUTER_NOTIFY 97
+ 
+-
+-/*  DRAFT 0MQ socket events and monitoring                                    */
+-/*  Unspecified system errors during handshake. Event value is an errno.      */
+-#define ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL 0x0800
+-/*  Handshake complete successfully with successful authentication (if        *
+- *  enabled). Event value is unused.                                          */
+-#define ZMQ_EVENT_HANDSHAKE_SUCCEEDED 0x1000
+-/*  Protocol errors between ZMTP peers or between server and ZAP handler.     *
+- *  Event value is one of ZMQ_PROTOCOL_ERROR_*                                */
+-#define ZMQ_EVENT_HANDSHAKE_FAILED_PROTOCOL 0x2000
+-/*  Failed authentication requests. Event value is the numeric ZAP status     *
+- *  code, i.e. 300, 400 or 500.                                               */
+-#define ZMQ_EVENT_HANDSHAKE_FAILED_AUTH 0x4000
+-
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_UNSPECIFIED 0x10000000
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_UNEXPECTED_COMMAND 0x10000001
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_INVALID_SEQUENCE 0x10000002
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_KEY_EXCHANGE 0x10000003
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_UNSPECIFIED 0x10000011
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_MESSAGE 0x10000012
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_HELLO 0x10000013
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_INITIATE 0x10000014
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_ERROR 0x10000015
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_READY 0x10000016
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_WELCOME 0x10000017
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_INVALID_METADATA 0x10000018
+-
+-// the following two may be due to erroneous configuration of a peer
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_CRYPTOGRAPHIC 0x11000001
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MECHANISM_MISMATCH 0x11000002
+-
+-#define ZMQ_PROTOCOL_ERROR_ZAP_UNSPECIFIED 0x20000000
+-#define ZMQ_PROTOCOL_ERROR_ZAP_MALFORMED_REPLY 0x20000001
+-#define ZMQ_PROTOCOL_ERROR_ZAP_BAD_REQUEST_ID 0x20000002
+-#define ZMQ_PROTOCOL_ERROR_ZAP_BAD_VERSION 0x20000003
+-#define ZMQ_PROTOCOL_ERROR_ZAP_INVALID_STATUS_CODE 0x20000004
+-#define ZMQ_PROTOCOL_ERROR_ZAP_INVALID_METADATA 0x20000005
+-
+ /*  DRAFT Context options                                                     */
+-#define ZMQ_THREAD_AFFINITY_CPU_ADD 7
+-#define ZMQ_THREAD_AFFINITY_CPU_REMOVE 8
+-#define ZMQ_THREAD_NAME_PREFIX 9
+ #define ZMQ_ZERO_COPY_RECV 10
+ 
+ /*  DRAFT Socket methods.                                                     */
+diff --git a/src/ctx.cpp b/src/ctx.cpp
+index 30aa443e..67acf03f 100644
+--- a/src/ctx.cpp
++++ b/src/ctx.cpp
+@@ -271,8 +271,7 @@ int zmq::ctx_t::get (int option_)
+     else if (option_ == ZMQ_ZERO_COPY_RECV) {
+         rc = _zero_copy;
+     } else {
+-        errno = EINVAL;
+-        rc = -1;
++        rc = thread_ctx_t::get (option_);
+     }
+     return rc;
+ }
+@@ -467,6 +466,25 @@ int zmq::thread_ctx_t::set (int option_, int optval_)
+     return rc;
+ }
+ 
++int zmq::thread_ctx_t::get (int option_)
++{
++    int rc = 0;
++    if (option_ == ZMQ_THREAD_PRIORITY) {
++        scoped_lock_t locker (_opt_sync);
++        rc = _thread_priority;
++    } else if (option_ == ZMQ_THREAD_SCHED_POLICY) {
++        scoped_lock_t locker (_opt_sync);
++        rc = _thread_sched_policy;
++    } else if (option_ == ZMQ_THREAD_NAME_PREFIX) {
++        scoped_lock_t locker (_opt_sync);
++        rc = atoi (_thread_name_prefix.c_str ());
++    } else {
++        errno = EINVAL;
++        rc = -1;
++    }
++    return rc;
++}
++
+ void zmq::ctx_t::send_command (uint32_t tid_, const command_t &command_)
+ {
+     _slots[tid_]->send (command_);
+diff --git a/src/ctx.hpp b/src/ctx.hpp
+index 5146ce76..dd17b666 100644
+--- a/src/ctx.hpp
++++ b/src/ctx.hpp
+@@ -70,6 +70,7 @@ class thread_ctx_t
+     void start_thread (thread_t &thread_, thread_fn *tfn_, void *arg_) const;
+ 
+     int set (int option_, int optval_);
++    int get (int option_);
+ 
+   protected:
+     //  Synchronisation of access to context options.
+diff --git a/src/proxy.cpp b/src/proxy.cpp
+index e36e4650..bac93b65 100644
+--- a/src/proxy.cpp
++++ b/src/proxy.cpp
+@@ -425,20 +425,16 @@ int zmq::proxy (class socket_base_t *frontend_,
+                     && memcmp (msg.data (), "TERMINATE", 9) == 0)
+                     state = terminated;
+                 else {
+-#ifdef ZMQ_BUILD_DRAFT_API
+                     if (msg.size () == 10
+                         && memcmp (msg.data (), "STATISTICS", 10) == 0) {
+                         rc = reply_stats (control_, &frontend_stats,
+                                           &backend_stats);
+                         CHECK_RC_EXIT_ON_FAILURE ();
+                     } else {
+-#endif
+                         //  This is an API error, we assert
+                         puts ("E: invalid command sent to proxy");
+                         zmq_assert (false);
+-#ifdef ZMQ_BUILD_DRAFT_API
+                     }
+-#endif
+                 }
+             }
+             control_in = false;
+@@ -604,7 +600,6 @@ int zmq::proxy (class socket_base_t *frontend_,
+                      && memcmp (msg.data (), "TERMINATE", 9) == 0)
+                 state = terminated;
+             else {
+-#ifdef ZMQ_BUILD_DRAFT_API
+                 if (msg.size () == 10
+                     && memcmp (msg.data (), "STATISTICS", 10) == 0) {
+                     rc =
+@@ -612,13 +607,10 @@ int zmq::proxy (class socket_base_t *frontend_,
+                     if (unlikely (rc < 0))
+                         return close_and_return (&msg, -1);
+                 } else {
+-#endif
+                     //  This is an API error, we assert
+                     puts ("E: invalid command sent to proxy");
+                     zmq_assert (false);
+-#ifdef ZMQ_BUILD_DRAFT_API
+                 }
+-#endif
+             }
+         }
+         //  Process a request
+diff --git a/src/stream_engine.cpp b/src/stream_engine.cpp
+index b6040291..4b13012d 100644
+--- a/src/stream_engine.cpp
++++ b/src/stream_engine.cpp
+@@ -950,9 +950,7 @@ void zmq::stream_engine_t::mechanism_ready ()
+         alloc_assert (_metadata);
+     }
+ 
+-#ifdef ZMQ_BUILD_DRAFT_API
+     _socket->event_handshake_succeeded (_endpoint, 0);
+-#endif
+ }
+ 
+ int zmq::stream_engine_t::pull_msg_from_session (msg_t *msg_)
+@@ -1068,7 +1066,6 @@ void zmq::stream_engine_t::error (error_reason_t reason_)
+         _session->push_msg (&disconnect_notification);
+     }
+ 
+-#ifdef ZMQ_BUILD_DRAFT_API
+     // protocol errors have been signaled already at the point where they occurred
+     if (reason_ != protocol_error
+         && (_mechanism == NULL
+@@ -1076,7 +1073,7 @@ void zmq::stream_engine_t::error (error_reason_t reason_)
+         int err = errno;
+         _socket->event_handshake_failed_no_detail (_endpoint, err);
+     }
+-#endif
++
+     _socket->event_disconnected (_endpoint, _s);
+     _session->flush ();
+     _session->engine_error (reason_);
+diff --git a/src/zmq_draft.h b/src/zmq_draft.h
+index 156ec85b..be1165aa 100644
+--- a/src/zmq_draft.h
++++ b/src/zmq_draft.h
+@@ -37,10 +37,6 @@
+ 
+ #ifndef ZMQ_BUILD_DRAFT_API
+ 
+-/*  Returns the number of microseconds elapsed since the stopwatch was        */
+-/*  started, but does not stop or deallocate the stopwatch.                   */
+-unsigned long zmq_stopwatch_intermediate (void *watch_);
+-
+ /*  DRAFT Socket types.                                                       */
+ #define ZMQ_SERVER 12
+ #define ZMQ_CLIENT 13
+@@ -57,47 +53,7 @@ unsigned long zmq_stopwatch_intermediate (void *watch_);
+ #define ZMQ_MULTICAST_LOOP 96
+ #define ZMQ_ROUTER_NOTIFY 97
+ 
+-/*  DRAFT 0MQ socket events and monitoring                                    */
+-/*  Unspecified system errors during handshake. Event value is an errno.      */
+-#define ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL 0x0800
+-/*  Handshake complete successfully with successful authentication (if        *
+- *  enabled). Event value is unused.                                          */
+-#define ZMQ_EVENT_HANDSHAKE_SUCCEEDED 0x1000
+-/*  Protocol errors between ZMTP peers or between server and ZAP handler.     *
+- *  Event value is one of ZMQ_PROTOCOL_ERROR_*                                */
+-#define ZMQ_EVENT_HANDSHAKE_FAILED_PROTOCOL 0x2000
+-/*  Failed authentication requests. Event value is the numeric ZAP status     *
+- *  code, i.e. 300, 400 or 500.                                               */
+-#define ZMQ_EVENT_HANDSHAKE_FAILED_AUTH 0x4000
+-
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_UNSPECIFIED 0x10000000
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_UNEXPECTED_COMMAND 0x10000001
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_INVALID_SEQUENCE 0x10000002
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_KEY_EXCHANGE 0x10000003
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_UNSPECIFIED 0x10000011
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_MESSAGE 0x10000012
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_HELLO 0x10000013
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_INITIATE 0x10000014
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_ERROR 0x10000015
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_READY 0x10000016
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MALFORMED_COMMAND_WELCOME 0x10000017
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_INVALID_METADATA 0x10000018
+-
+-// the following two may be due to erroneous configuration of a peer
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_CRYPTOGRAPHIC 0x11000001
+-#define ZMQ_PROTOCOL_ERROR_ZMTP_MECHANISM_MISMATCH 0x11000002
+-
+-#define ZMQ_PROTOCOL_ERROR_ZAP_UNSPECIFIED 0x20000000
+-#define ZMQ_PROTOCOL_ERROR_ZAP_MALFORMED_REPLY 0x20000001
+-#define ZMQ_PROTOCOL_ERROR_ZAP_BAD_REQUEST_ID 0x20000002
+-#define ZMQ_PROTOCOL_ERROR_ZAP_BAD_VERSION 0x20000003
+-#define ZMQ_PROTOCOL_ERROR_ZAP_INVALID_STATUS_CODE 0x20000004
+-#define ZMQ_PROTOCOL_ERROR_ZAP_INVALID_METADATA 0x20000005
+-
+ /*  DRAFT Context options                                                     */
+-#define ZMQ_THREAD_AFFINITY_CPU_ADD 7
+-#define ZMQ_THREAD_AFFINITY_CPU_REMOVE 8
+-#define ZMQ_THREAD_NAME_PREFIX 9
+ #define ZMQ_ZERO_COPY_RECV 10
+ 
+ /*  DRAFT Socket methods.                                                     */

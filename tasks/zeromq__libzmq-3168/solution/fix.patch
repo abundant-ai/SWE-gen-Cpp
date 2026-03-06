@@ -1,0 +1,544 @@
+diff --git a/.gitignore b/.gitignore
+index 36e0d177..03284747 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,12 +1,13 @@
+ syntax: glob # for hg-git users
+ /Makefile
+ builds/Makefile
+-builds/msvc/Makefile
++builds/deprecated-msvc/Makefile
+ configure
+ doc/Makefile
+ Makefile.in
+ configure
+ libtool
++libunity.a
+ config
+ config.status
+ config.log
+@@ -141,8 +142,21 @@ test_bind_after_connect_tcp
+ test_sodium
+ test_zmq_poll_fd
+ test_reconnect_ivl
++test_address_tipc
++test_app_meta
++test_security_zap
++test_socket_null
++test_xpub_verbose
++test_mock_pub_sub
++unittest_ip_resolver
++unittest_mtrie
++unittest_poller
++unittest_udp_address
++unittest_ypipe
+ tests/test*.log
+ tests/test*.trs
++unittests/unittest*.log
++unittests/unittest*.trs
+ src/platform.hpp*
+ src/stamp-h1
+ local_lat
+diff --git a/Makefile.am b/Makefile.am
+index b7bd8f9d..4b7f08bd 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -295,6 +295,12 @@ src_libzmq_la_LDFLAGS = \
+ 	@LIBZMQ_EXTRA_LDFLAGS@ \
+ 	-Wl,--version-script=$(srcdir)/src/libzmq.vers
+ else
++if ON_GNU
++src_libzmq_la_LDFLAGS = \
++	-version-info @LTVER@ \
++	@LIBZMQ_EXTRA_LDFLAGS@ \
++	-Wl,--version-script=$(srcdir)/src/libzmq.vers
++else
+ src_libzmq_la_LDFLAGS = \
+ 	-version-info @LTVER@ \
+ 	@LIBZMQ_EXTRA_LDFLAGS@ \
+@@ -303,6 +309,7 @@ endif
+ endif
+ endif
+ endif
++endif
+ 
+ src_libzmq_la_CPPFLAGS = $(CODE_COVERAGE_CPPFLAGS) $(LIBUNWIND_CFLAGS)
+ src_libzmq_la_CFLAGS = $(CODE_COVERAGE_CFLAGS) $(LIBUNWIND_CFLAGS)
+@@ -438,6 +445,7 @@ test_apps = \
+ 	tests/test_bind_after_connect_tcp \
+ 	tests/test_sodium \
+ 	tests/test_reconnect_ivl \
++	tests/test_mock_pub_sub \
+ 	tests/test_socket_null
+ 
+ UNITY_CPPFLAGS = -I$(top_srcdir)/external/unity -DUNITY_USE_COMMAND_LINE_ARGS -DUNITY_EXCLUDE_FLOAT
+@@ -692,6 +700,10 @@ tests_test_reconnect_ivl_SOURCES = tests/test_reconnect_ivl.cpp
+ tests_test_reconnect_ivl_LDADD = src/libzmq.la ${UNITY_LIBS}
+ tests_test_reconnect_ivl_CPPFLAGS = ${UNITY_CPPFLAGS}
+ 
++tests_test_mock_pub_sub_SOURCES = tests/test_mock_pub_sub.cpp
++tests_test_mock_pub_sub_LDADD = src/libzmq.la ${UNITY_LIBS}
++tests_test_mock_pub_sub_CPPFLAGS = ${UNITY_CPPFLAGS}
++
+ if HAVE_CURVE
+ 
+ test_apps += \
+@@ -856,12 +868,12 @@ if HAVE_VMCI
+ test_apps += test_pair_vmci test_reqrep_vmci
+ 
+ test_pair_vmci_SOURCES = tests/test_pair_vmci.cpp
+-test_pair_vmci_LDADD = libzmq.la
++test_pair_vmci_LDADD = src/libzmq.la
+ test_pair_vmci_LDFLAGS = @LIBZMQ_VMCI_LDFLAGS@
+ test_pair_vmci_CXXFLAGS = @LIBZMQ_VMCI_CXXFLAGS@
+ 
+ test_reqrep_vmci_SOURCES = tests/test_reqrep_vmci.cpp
+-test_reqrep_vmci_LDADD = libzmq.la
++test_reqrep_vmci_LDADD = src/libzmq.la
+ test_reqrep_vmci_LDFLAGS = @LIBZMQ_VMCI_LDFLAGS@
+ test_reqrep_vmci_CXXFLAGS = @LIBZMQ_VMCI_CXXFLAGS@
+ 
+diff --git a/configure.ac b/configure.ac
+index 8f199986..2e323b6b 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -207,6 +207,12 @@ case "${host_os}" in
+         ;;
+     *freebsd*)
+         # Define on FreeBSD to enable all library features
++        case "${host_os}" in
++            # On Debian/kFreeBSD with gnu set the --version-script flag
++            kfreebsd*-gnu*)
++                libzmq_on_gnu="yes"
++            ;;
++        esac
+         CPPFLAGS="-D__BSD_VISIBLE $CPPFLAGS"
+         AC_DEFINE(ZMQ_HAVE_FREEBSD, 1, [Have FreeBSD OS])
+         ;;
+diff --git a/src/msg.cpp b/src/msg.cpp
+index 16ad1e54..5e32341b 100644
+--- a/src/msg.cpp
++++ b/src/msg.cpp
+@@ -444,6 +444,43 @@ bool zmq::msg_t::is_leave () const
+     return _u.base.type == type_leave;
+ }
+ 
++bool zmq::msg_t::is_ping () const
++{
++    return (_u.base.flags & CMD_TYPE_MASK) == ping;
++}
++
++bool zmq::msg_t::is_pong () const
++{
++    return (_u.base.flags & CMD_TYPE_MASK) == pong;
++}
++
++size_t zmq::msg_t::command_body_size () const
++{
++    if (this->is_ping () || this->is_pong ())
++        return this->size () - ping_cmd_name_size;
++    if (this->is_subscribe ())
++        return this->size () - sub_cmd_name_size;
++    if (this->is_cancel ())
++        return this->size () - cancel_cmd_name_size;
++
++    return 0;
++}
++
++void *zmq::msg_t::command_body ()
++{
++    unsigned char *data = NULL;
++    if (this->is_ping () || this->is_pong ())
++        data =
++          static_cast<unsigned char *> (this->data ()) + ping_cmd_name_size;
++    if (this->is_subscribe ())
++        data = static_cast<unsigned char *> (this->data ()) + sub_cmd_name_size;
++    if (this->is_cancel ())
++        data =
++          static_cast<unsigned char *> (this->data ()) + cancel_cmd_name_size;
++
++    return data;
++}
++
+ void zmq::msg_t::add_refs (int refs_)
+ {
+     zmq_assert (refs_ >= 0);
+diff --git a/src/msg.hpp b/src/msg.hpp
+index e595ef3f..c4407c28 100644
+--- a/src/msg.hpp
++++ b/src/msg.hpp
+@@ -39,6 +39,9 @@
+ #include "atomic_counter.hpp"
+ #include "metadata.hpp"
+ 
++//  bits 2-5
++#define CMD_TYPE_MASK 0x1c
++
+ //  Signature for free function to deallocate the message content.
+ //  Note that it has to be declared as "C" so that it is the same as
+ //  zmq_free_fn defined in zmq.h.
+@@ -75,6 +78,12 @@ class msg_t
+     {
+         more = 1,    //  Followed by more parts
+         command = 2, //  Command frame (see ZMTP spec)
++        //  Command types, use only bits 2-5 and compare with ==, not bitwise,
++        //  a command can never be of more that one type at the same time
++        ping = 4,
++        pong = 8,
++        subscribe = 12,
++        cancel = 16,
+         credential = 32,
+         routing_id = 64,
+         shared = 128
+@@ -115,6 +124,22 @@ class msg_t
+     bool is_delimiter () const;
+     bool is_join () const;
+     bool is_leave () const;
++    bool is_ping () const;
++    bool is_pong () const;
++
++    //  These are called on each message received by the session_base class,
++    //  so get them inlined to avoid the overhead of 2 function calls per msg
++    inline bool is_subscribe () const
++    {
++        return (_u.base.flags & CMD_TYPE_MASK) == subscribe;
++    }
++    inline bool is_cancel () const
++    {
++        return (_u.base.flags & CMD_TYPE_MASK) == cancel;
++    }
++
++    size_t command_body_size () const;
++    void *command_body ();
+     bool is_vsm () const;
+     bool is_cmsg () const;
+     bool is_lmsg () const;
+@@ -145,6 +170,12 @@ class msg_t
+         max_vsm_size =
+           msg_t_size - (sizeof (metadata_t *) + 3 + 16 + sizeof (uint32_t))
+     };
++    enum
++    {
++        ping_cmd_name_size = 5,   // 4PING
++        cancel_cmd_name_size = 7, // 6CANCEL
++        sub_cmd_name_size = 10    // 9SUBSCRIBE
++    };
+ 
+   private:
+     zmq::atomic_counter_t *refcnt ();
+diff --git a/src/pgm_sender.cpp b/src/pgm_sender.cpp
+index 9d2f5afa..1fc71521 100644
+--- a/src/pgm_sender.cpp
++++ b/src/pgm_sender.cpp
+@@ -51,6 +51,10 @@ zmq::pgm_sender_t::pgm_sender_t (io_thread_t *parent_,
+     more_flag (false),
+     pgm_socket (false, options_),
+     options (options_),
++    handle (static_cast<handle_t> (NULL)),
++    uplink_handle (static_cast<handle_t> (NULL)),
++    rdata_notify_handle (static_cast<handle_t> (NULL)),
++    pending_notify_handle (static_cast<handle_t> (NULL)),
+     out_buffer (NULL),
+     out_buffer_size (0),
+     write_size (0)
+diff --git a/src/session_base.cpp b/src/session_base.cpp
+index db899eab..c924a814 100644
+--- a/src/session_base.cpp
++++ b/src/session_base.cpp
+@@ -163,7 +163,9 @@ int zmq::session_base_t::pull_msg (msg_t *msg_)
+ 
+ int zmq::session_base_t::push_msg (msg_t *msg_)
+ {
+-    if (msg_->flags () & msg_t::command)
++    //  pass subscribe/cancel to the sockets
++    if ((msg_->flags () & msg_t::command) && !msg_->is_subscribe ()
++        && !msg_->is_cancel ())
+         return 0;
+     if (_pipe && _pipe->write (msg_)) {
+         int rc = msg_->init ();
+diff --git a/src/stream_engine.cpp b/src/stream_engine.cpp
+index 94ceff20..9dc96696 100644
+--- a/src/stream_engine.cpp
++++ b/src/stream_engine.cpp
+@@ -1038,18 +1038,20 @@ void zmq::stream_engine_t::timer_event (int id_)
+ int zmq::stream_engine_t::produce_ping_message (msg_t *msg_)
+ {
+     int rc = 0;
++    // 16-bit TTL + \4PING == 7
++    const size_t ping_ttl_len = msg_t::ping_cmd_name_size + 2;
+     zmq_assert (_mechanism != NULL);
+ 
+-    // 16-bit TTL + \4PING == 7
+-    rc = msg_->init_size (7);
++    rc = msg_->init_size (ping_ttl_len);
+     errno_assert (rc == 0);
+     msg_->set_flags (msg_t::command);
+     // Copy in the command message
+-    memcpy (msg_->data (), "\4PING", 5);
++    memcpy (msg_->data (), "\4PING", msg_t::ping_cmd_name_size);
+ 
+     uint16_t ttl_val = htons (_options.heartbeat_ttl);
+-    memcpy ((static_cast<uint8_t *> (msg_->data ())) + 5, &ttl_val,
+-            sizeof (ttl_val));
++    memcpy ((static_cast<uint8_t *> (msg_->data ()))
++              + msg_t::ping_cmd_name_size,
++            &ttl_val, sizeof (ttl_val));
+ 
+     rc = _mechanism->encode (msg_);
+     _next_msg = &stream_engine_t::pull_and_encode;
+@@ -1075,11 +1077,17 @@ int zmq::stream_engine_t::produce_pong_message (msg_t *msg_)
+ 
+ int zmq::stream_engine_t::process_heartbeat_message (msg_t *msg_)
+ {
+-    if (memcmp (msg_->data (), "\4PING", 5) == 0) {
++    if (msg_->is_ping ()) {
++        // 16-bit TTL + \4PING == 7
++        const size_t ping_ttl_len = msg_t::ping_cmd_name_size + 2;
++        const size_t ping_max_ctx_len = 16;
+         uint16_t remote_heartbeat_ttl;
++
+         // Get the remote heartbeat TTL to setup the timer
+         memcpy (&remote_heartbeat_ttl,
+-                static_cast<uint8_t *> (msg_->data ()) + 5, 2);
++                static_cast<uint8_t *> (msg_->data ())
++                  + msg_t::ping_cmd_name_size,
++                ping_ttl_len - msg_t::ping_cmd_name_size);
+         remote_heartbeat_ttl = ntohs (remote_heartbeat_ttl);
+         // The remote heartbeat is in 10ths of a second
+         // so we multiply it by 100 to get the timer interval in ms.
+@@ -1095,14 +1103,18 @@ int zmq::stream_engine_t::process_heartbeat_message (msg_t *msg_)
+         //  here and store it. Truncate it if it's too long.
+         //  Given the engine goes straight to out_event, sequential PINGs will
+         //  not be a problem.
+-        size_t context_len = msg_->size () - 7 > 16 ? 16 : msg_->size () - 7;
+-        int rc = _pong_msg.init_size (5 + context_len);
++        size_t context_len = msg_->size () - ping_ttl_len > ping_max_ctx_len
++                               ? ping_max_ctx_len
++                               : msg_->size () - ping_ttl_len;
++        int rc = _pong_msg.init_size (msg_t::ping_cmd_name_size + context_len);
+         errno_assert (rc == 0);
+         _pong_msg.set_flags (msg_t::command);
+-        memcpy (_pong_msg.data (), "\4PONG", 5);
++        memcpy (_pong_msg.data (), "\4PONG", msg_t::ping_cmd_name_size);
+         if (context_len > 0)
+-            memcpy ((static_cast<uint8_t *> (_pong_msg.data ())) + 5,
+-                    (static_cast<uint8_t *> (msg_->data ())) + 7, context_len);
++            memcpy ((static_cast<uint8_t *> (_pong_msg.data ()))
++                      + msg_t::ping_cmd_name_size,
++                    (static_cast<uint8_t *> (msg_->data ())) + ping_ttl_len,
++                    context_len);
+ 
+         _next_msg = &stream_engine_t::produce_pong_message;
+         out_event ();
+@@ -1115,15 +1127,28 @@ int zmq::stream_engine_t::process_command_message (msg_t *msg_)
+ {
+     const uint8_t cmd_name_size =
+       *(static_cast<const uint8_t *> (msg_->data ()));
++    const size_t ping_name_size = msg_t::ping_cmd_name_size - 1;
++    const size_t sub_name_size = msg_t::sub_cmd_name_size - 1;
++    const size_t cancel_name_size = msg_t::cancel_cmd_name_size - 1;
+     //  Malformed command
+-    if (msg_->size () < cmd_name_size + sizeof (cmd_name_size))
++    if (unlikely (msg_->size () < cmd_name_size + sizeof (cmd_name_size)))
+         return -1;
+ 
+-    const uint8_t *cmd_name =
+-      (static_cast<const uint8_t *> (msg_->data ())) + 1;
+-    if (cmd_name_size == 4
+-        && (memcmp (cmd_name, "PING", cmd_name_size) == 0
+-            || memcmp (cmd_name, "PONG", cmd_name_size) == 0))
++    uint8_t *cmd_name = (static_cast<uint8_t *> (msg_->data ())) + 1;
++    if (cmd_name_size == ping_name_size
++        && memcmp (cmd_name, "PING", cmd_name_size) == 0)
++        msg_->set_flags (zmq::msg_t::ping);
++    if (cmd_name_size == ping_name_size
++        && memcmp (cmd_name, "PONG", cmd_name_size) == 0)
++        msg_->set_flags (zmq::msg_t::pong);
++    if (cmd_name_size == sub_name_size
++        && memcmp (cmd_name, "SUBSCRIBE", cmd_name_size) == 0)
++        msg_->set_flags (zmq::msg_t::subscribe);
++    if (cmd_name_size == cancel_name_size
++        && memcmp (cmd_name, "CANCEL", cmd_name_size) == 0)
++        msg_->set_flags (zmq::msg_t::cancel);
++
++    if (msg_->is_ping () || msg_->is_pong ())
+         return process_heartbeat_message (msg_);
+ 
+     return 0;
+diff --git a/src/xpub.cpp b/src/xpub.cpp
+index d35a26c0..c63939ff 100644
+--- a/src/xpub.cpp
++++ b/src/xpub.cpp
+@@ -88,57 +88,89 @@ void zmq::xpub_t::xread_activated (pipe_t *pipe_)
+     //  There are some subscriptions waiting. Let's process them.
+     msg_t sub;
+     while (pipe_->read (&sub)) {
+-        //  Apply the subscription to the trie
+-        const unsigned char *const data =
+-          static_cast<const unsigned char *> (sub.data ());
+-        const size_t size = sub.size ();
+         metadata_t *metadata = sub.metadata ();
+-        if (size > 0 && (*data == 0 || *data == 1)) {
+-            if (_manual) {
+-                // Store manual subscription to use on termination
+-                if (*data == 0)
+-                    _manual_subscriptions.rm (data + 1, size - 1, pipe_);
+-                else
+-                    _manual_subscriptions.add (data + 1, size - 1, pipe_);
++        unsigned char *msg_data = static_cast<unsigned char *> (sub.data ()),
++                      *data = NULL;
++        size_t size = 0;
++        bool subscribe = false;
+ 
+-                _pending_pipes.push_back (pipe_);
+-                _pending_data.push_back (blob_t (data, size));
+-                if (metadata)
+-                    metadata->add_ref ();
+-                _pending_metadata.push_back (metadata);
+-                _pending_flags.push_back (0);
+-            } else {
+-                bool notify;
+-                if (*data == 0) {
+-                    mtrie_t::rm_result rm_result =
+-                      _subscriptions.rm (data + 1, size - 1, pipe_);
+-                    //  TODO reconsider what to do if rm_result == mtrie_t::not_found
+-                    notify =
+-                      rm_result != mtrie_t::values_remain || _verbose_unsubs;
+-                } else {
+-                    bool first_added =
+-                      _subscriptions.add (data + 1, size - 1, pipe_);
+-                    notify = first_added || _verbose_subs;
+-                }
+-
+-                //  If the request was a new subscription, or the subscription
+-                //  was removed, or verbose mode is enabled, store it so that
+-                //  it can be passed to the user on next recv call.
+-                if (options.type == ZMQ_XPUB && notify) {
+-                    _pending_data.push_back (blob_t (data, size));
+-                    if (metadata)
+-                        metadata->add_ref ();
+-                    _pending_metadata.push_back (metadata);
+-                    _pending_flags.push_back (0);
+-                }
++        //  Apply the subscription to the trie
++        if (sub.is_subscribe () || sub.is_cancel ()) {
++            data = static_cast<unsigned char *> (sub.command_body ());
++            size = sub.command_body_size ();
++            subscribe = sub.is_subscribe ();
++        } else if (sub.size () > 0) {
++            unsigned char first = *msg_data;
++            if (first == 0 || first == 1) {
++                data = msg_data + 1;
++                size = sub.size () - 1;
++                subscribe = first == 1;
+             }
+         } else {
+             //  Process user message coming upstream from xsub socket
+-            _pending_data.push_back (blob_t (data, size));
++            _pending_data.push_back (blob_t (msg_data, sub.size ()));
+             if (metadata)
+                 metadata->add_ref ();
+             _pending_metadata.push_back (metadata);
+             _pending_flags.push_back (sub.flags ());
++            sub.close ();
++            continue;
++        }
++
++        if (_manual) {
++            // Store manual subscription to use on termination
++            if (!subscribe)
++                _manual_subscriptions.rm (data, size, pipe_);
++            else
++                _manual_subscriptions.add (data, size, pipe_);
++
++            _pending_pipes.push_back (pipe_);
++
++            //  ZMTP 3.1 hack: we need to support sub/cancel commands, but
++            //  we can't give them back to userspace as it would be an API
++            //  breakage since the payload of the message is completely
++            //  different. Manually craft an old-style message instead.
++            data = data - 1;
++            size = size + 1;
++            if (subscribe)
++                *data = 1;
++            else
++                *data = 0;
++
++            _pending_data.push_back (blob_t (data, size));
++            if (metadata)
++                metadata->add_ref ();
++            _pending_metadata.push_back (metadata);
++            _pending_flags.push_back (0);
++        } else {
++            bool notify;
++            if (!subscribe) {
++                mtrie_t::rm_result rm_result =
++                  _subscriptions.rm (data, size, pipe_);
++                //  TODO reconsider what to do if rm_result == mtrie_t::not_found
++                notify = rm_result != mtrie_t::values_remain || _verbose_unsubs;
++            } else {
++                bool first_added = _subscriptions.add (data, size, pipe_);
++                notify = first_added || _verbose_subs;
++            }
++
++            //  If the request was a new subscription, or the subscription
++            //  was removed, or verbose mode is enabled, store it so that
++            //  it can be passed to the user on next recv call.
++            if (options.type == ZMQ_XPUB && notify) {
++                data = data - 1;
++                size = size + 1;
++                if (subscribe)
++                    *data = 1;
++                else
++                    *data = 0;
++
++                _pending_data.push_back (blob_t (data, size));
++                if (metadata)
++                    metadata->add_ref ();
++                _pending_metadata.push_back (metadata);
++                _pending_flags.push_back (0);
++            }
+         }
+         sub.close ();
+     }
+diff --git a/src/xsub.cpp b/src/xsub.cpp
+index 2de77a49..a9ff5f81 100644
+--- a/src/xsub.cpp
++++ b/src/xsub.cpp
+@@ -96,18 +96,32 @@ int zmq::xsub_t::xsend (msg_t *msg_)
+     size_t size = msg_->size ();
+     unsigned char *data = static_cast<unsigned char *> (msg_->data ());
+ 
+-    if (size > 0 && *data == 1) {
++    if (msg_->is_subscribe () || (size > 0 && *data == 1)) {
+         //  Process subscribe message
+         //  This used to filter out duplicate subscriptions,
+         //  however this is alread done on the XPUB side and
+         //  doing it here as well breaks ZMQ_XPUB_VERBOSE
+         //  when there are forwarding devices involved.
+-        _subscriptions.add (data + 1, size - 1);
++        if (msg_->is_subscribe ()) {
++            data = static_cast<unsigned char *> (msg_->command_body ());
++            size = msg_->command_body_size ();
++        } else {
++            data = data + 1;
++            size = size - 1;
++        }
++        _subscriptions.add (data, size);
+         return _dist.send_to_all (msg_);
+     }
+-    if (size > 0 && *data == 0) {
++    if (msg_->is_cancel () || (size > 0 && *data == 0)) {
+         //  Process unsubscribe message
+-        if (_subscriptions.rm (data + 1, size - 1))
++        if (msg_->is_cancel ()) {
++            data = static_cast<unsigned char *> (msg_->command_body ());
++            size = msg_->command_body_size ();
++        } else {
++            data = data + 1;
++            size = size - 1;
++        }
++        if (_subscriptions.rm (data, size))
+             return _dist.send_to_all (msg_);
+     } else
+         //  User message sent upstream to XPUB socket

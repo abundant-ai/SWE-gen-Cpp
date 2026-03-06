@@ -1,0 +1,138 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index 330e8a332f..1cf387123c 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -1245,6 +1245,12 @@ CV__DNN_INLINE_NS_BEGIN
+         static Ptr<ResizeLayer> create(const LayerParams& params);
+     };
+ 
++    class CV_EXPORTS SizeLayer : public Layer
++    {
++    public:
++        static Ptr<SizeLayer> create(const LayerParams &params);
++    };
++
+     /**
+      * @brief Bilinear resize layer from https://github.com/cdmh/deeplab-public-ver2
+      *
+diff --git a/modules/dnn/src/init.cpp b/modules/dnn/src/init.cpp
+index 18c0a08485..56e8a9b85b 100644
+--- a/modules/dnn/src/init.cpp
++++ b/modules/dnn/src/init.cpp
+@@ -99,6 +99,7 @@ void initializeLayerFactory()
+     CV_DNN_REGISTER_LAYER_CLASS(Reshape,        ReshapeLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Reshape2,       Reshape2Layer);
+     CV_DNN_REGISTER_LAYER_CLASS(Resize,         ResizeLayer);
++    CV_DNN_REGISTER_LAYER_CLASS(Size,           SizeLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Shape,          ShapeLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Slice,          SliceLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Slice2,         Slice2Layer);
+diff --git a/modules/dnn/src/layers/size_layer.cpp b/modules/dnn/src/layers/size_layer.cpp
+new file mode 100644
+index 0000000000..266e67002d
+--- /dev/null
++++ b/modules/dnn/src/layers/size_layer.cpp
+@@ -0,0 +1,70 @@
++// This file is part of OpenCV project.
++// It is subject to the license terms in the LICENSE file found in the top-level directory
++// of this distribution and at http://opencv.org/license.html.
++// Copyright (C) 2025, BigVision LLC, all rights reserved.
++// Third party copyrights are property of their respective owners.
++
++#include "../precomp.hpp"
++#include "layers_common.hpp"
++#include <opencv2/dnn/shape_utils.hpp>
++
++namespace cv {
++namespace dnn {
++
++class SizeLayerImpl CV_FINAL : public SizeLayer
++{
++public:
++    SizeLayerImpl(const LayerParams& params)
++    {
++        setParamsFrom(params);
++    }
++
++    virtual bool supportBackend(int backendId) CV_OVERRIDE
++    {
++        return backendId == DNN_BACKEND_OPENCV;
++    }
++
++    bool getMemoryShapes(const std::vector<MatShape>& inputs,
++                         const int requiredOutputs,
++                         std::vector<MatShape>& outputs,
++                         std::vector<MatShape>& internals) const CV_OVERRIDE
++    {
++        outputs.assign(1, MatShape({1}));
++        return false;
++    }
++
++    void getTypes(const std::vector<MatType>& /*inputs*/,
++                  const int requiredOutputs,
++                  const int requiredInternals,
++                  std::vector<MatType>& outputs,
++                  std::vector<MatType>& internals) const CV_OVERRIDE
++    {
++        outputs.assign(requiredOutputs, MatType(CV_64S));
++        internals.assign(requiredInternals, MatType(CV_64S));
++    }
++
++    void forward(InputArrayOfArrays inputs_arr,
++                 OutputArrayOfArrays outputs_arr,
++                 OutputArrayOfArrays /*internals_arr*/) CV_OVERRIDE
++    {
++        std::vector<Mat> inputs, outputs;
++        inputs_arr.getMatVector(inputs);
++        outputs_arr.getMatVector(outputs);
++
++        CV_Assert(inputs.size() == 1);
++        const Mat& x = inputs[0];
++
++        const MatShape xShape = shape(x);
++        int64_t totalElems = static_cast<int64_t>(total(xShape));
++
++        outputs[0].create(1, 1, CV_64S);
++        outputs[0].at<int64_t>(0) = totalElems;
++    }
++};
++
++Ptr<SizeLayer> SizeLayer::create(const LayerParams& params)
++{
++    return Ptr<SizeLayer>(new SizeLayerImpl(params));
++}
++
++}}
+diff --git a/modules/dnn/src/onnx/onnx_importer2.cpp b/modules/dnn/src/onnx/onnx_importer2.cpp
+index 1ce93b4fb2..97345015f1 100644
+--- a/modules/dnn/src/onnx/onnx_importer2.cpp
++++ b/modules/dnn/src/onnx/onnx_importer2.cpp
+@@ -211,6 +211,7 @@ protected:
+     void parseRelu                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseTrilu                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseResize               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
++    void parseSize               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseReshape              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseScatter              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseShape                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+@@ -1595,6 +1596,12 @@ void ONNXImporter2::parseResize(LayerParams& layerParams, const opencv_onnx::Nod
+     addLayer(layerParams, node_proto, ninputs);
+ }
+ 
++void ONNXImporter2::parseSize(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
++{
++    layerParams.type = "Size";
++    addLayer(layerParams, node_proto);
++}
++
+ void ONNXImporter2::parseTrilu(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+ {
+     int ninputs = node_proto.input_size();
+@@ -2431,6 +2438,7 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI(int opset_version)
+     dispatch["Concat"] = &ONNXImporter2::parseConcat;
+     dispatch["If"] = &ONNXImporter2::parseIf;
+     dispatch["Resize"] = &ONNXImporter2::parseResize;
++    dispatch["Size"] = &ONNXImporter2::parseSize;
+     dispatch["Trilu"] = &ONNXImporter2::parseTrilu;
+     dispatch["Upsample"] = &ONNXImporter2::parseUpsample;
+     dispatch["SoftMax"] = dispatch["Softmax"] = dispatch["LogSoftmax"] = &ONNXImporter2::parseSoftMax;

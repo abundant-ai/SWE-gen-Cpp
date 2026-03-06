@@ -1,0 +1,234 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index 03de0d8eac..6af2155080 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -520,12 +520,6 @@ CV__DNN_INLINE_NS_BEGIN
+         static Ptr<IsNaNLayer> create(const LayerParams& params);
+     };
+ 
+-    class CV_EXPORTS IsInfLayer : public Layer
+-    {
+-    public:
+-        static Ptr<IsInfLayer> create(const LayerParams& params);
+-    };
+-
+     class CV_EXPORTS FlattenLayer : public Layer
+     {
+     public:
+diff --git a/modules/dnn/src/init.cpp b/modules/dnn/src/init.cpp
+index de5dc661a7..0079c5cdc2 100644
+--- a/modules/dnn/src/init.cpp
++++ b/modules/dnn/src/init.cpp
+@@ -110,7 +110,6 @@ void initializeLayerFactory()
+     CV_DNN_REGISTER_LAYER_CLASS(Transpose,      TransposeLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Unsqueeze,      UnsqueezeLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(IsNaN,          IsNaNLayer);
+-    CV_DNN_REGISTER_LAYER_CLASS(IsInf,          IsInfLayer);
+ 
+     CV_DNN_REGISTER_LAYER_CLASS(Convolution,    ConvolutionLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Deconvolution,  DeconvolutionLayer);
+diff --git a/modules/dnn/src/layers/is_inf_layer.cpp b/modules/dnn/src/layers/is_inf_layer.cpp
+deleted file mode 100644
+index 55798eb2e8..0000000000
+--- a/modules/dnn/src/layers/is_inf_layer.cpp
++++ /dev/null
+@@ -1,122 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-// Copyright (C) 2025, BigVision LLC, all rights reserved.
+-// Third party copyrights are property of their respective owners.
+-
+-#include "../precomp.hpp"
+-#include "layers_common.hpp"
+-#include "opencv2/core/fast_math.hpp"  // for cvIsInf
+-
+-namespace cv {
+-namespace dnn {
+-
+-/*
+-    IsInf layer, as defined in ONNX specification:
+-    https://onnx.ai/onnx/operators/onnx__IsInf.html
+-
+-    Opset's 10 to 20 are covered.
+-*/
+-
+-template <typename T, typename WT = T>
+-static inline void computeIsInfMask(const T* src, uchar* dst, const size_t count, const bool detectPositive, const bool detectNegative)
+-{
+-    if (detectPositive && detectNegative)
+-    {
+-        parallel_for_(Range(0, (int)count), [&](const Range& r){
+-            for (int i = r.start; i < r.end; ++i)
+-            {
+-                WT v = (WT)src[i];
+-                dst[i] = static_cast<uchar>(cvIsInf(v));
+-            }
+-        });
+-    }
+-    else if (detectPositive)
+-    {
+-        parallel_for_(Range(0, (int)count), [&](const Range& r){
+-            for (int i = r.start; i < r.end; ++i)
+-            {
+-                WT v = (WT)src[i];
+-                dst[i] = static_cast<uchar>(cvIsInf(v) && (v > 0));
+-            }
+-        });
+-    }
+-    else if (detectNegative)
+-    {
+-        parallel_for_(Range(0, (int)count), [&](const Range& r){
+-            for (int i = r.start; i < r.end; ++i)
+-            {
+-                WT v = (WT)src[i];
+-                dst[i] = static_cast<uchar>(cvIsInf(v) && (v < 0));
+-            }
+-        });
+-    }
+-    else
+-    {
+-        CV_Error_(Error::StsError, ("IsInf: Unsupported mode"));
+-    }
+-}
+-
+-class IsInfLayerImpl CV_FINAL : public IsInfLayer
+-{
+-    bool detect_pos = true, detect_neg = true;
+-
+-public:
+-    IsInfLayerImpl(const LayerParams& params)
+-    {
+-        setParamsFrom(params);
+-        detect_pos = params.get<bool>("detect_positive", true);
+-        detect_neg = params.get<bool>("detect_negative", true);
+-    }
+-
+-    bool supportBackend(int backendId) CV_OVERRIDE
+-    {
+-        return backendId == DNN_BACKEND_OPENCV;
+-    }
+-
+-    bool getMemoryShapes(const std::vector<MatShape>& inputs, int,
+-                         std::vector<MatShape>& outputs,
+-                         std::vector<MatShape>&) const CV_OVERRIDE
+-    {
+-        CV_Assert(inputs.size() == 1);
+-        outputs.assign(1, inputs[0]);
+-        return false;
+-    }
+-
+-    void getTypes(const std::vector<MatType>&, const int requiredOutputs,
+-                  const int requiredInternals, std::vector<MatType>& outputs,
+-                  std::vector<MatType>& internals) const CV_OVERRIDE
+-    {
+-        outputs.assign(requiredOutputs, CV_Bool);
+-        internals.assign(requiredInternals, MatType(-1));
+-    }
+-
+-    void forward(InputArrayOfArrays in, OutputArrayOfArrays out, OutputArrayOfArrays) CV_OVERRIDE
+-    {
+-        std::vector<Mat> inputs, outputs; in.getMatVector(inputs); out.getMatVector(outputs);
+-        CV_Assert(inputs.size() == 1 && outputs.size() == 1);
+-
+-        const Mat& X = inputs[0];
+-        Mat& Y = outputs[0];
+-
+-        const int defaultOutType = CV_BoolC1;
+-        const int outType = Y.empty() ? defaultOutType : Y.type();
+-        Y.create(X.dims, X.size.p, outType);
+-
+-        const int depth = CV_MAT_DEPTH(X.type());
+-        const size_t total = X.total();
+-        uchar* dst = Y.ptr<uchar>();
+-
+-        switch (depth) {
+-            case CV_32F: computeIsInfMask<float>(X.ptr<float>(), dst, total, detect_pos, detect_neg);    break;
+-            case CV_64F: computeIsInfMask<double>(X.ptr<double>(), dst, total, detect_pos, detect_neg);   break;
+-            case CV_16F: computeIsInfMask<hfloat, float>(X.ptr<hfloat>(), dst, total, detect_pos, detect_neg); break;
+-            case CV_16BF: computeIsInfMask<bfloat, float>(X.ptr<bfloat>(), dst, total, detect_pos, detect_neg); break;
+-            default: CV_Error_(Error::StsError, ("IsInf: Unsupported type depth=%d", depth));
+-        }
+-    }
+-};
+-
+-Ptr<IsInfLayer> IsInfLayer::create(const LayerParams& p) { return makePtr<IsInfLayerImpl>(p); }
+-
+-}} // namespace cv::dnn
+diff --git a/modules/dnn/src/onnx/onnx_importer2.cpp b/modules/dnn/src/onnx/onnx_importer2.cpp
+index 9e810e6166..d045ab8357 100644
+--- a/modules/dnn/src/onnx/onnx_importer2.cpp
++++ b/modules/dnn/src/onnx/onnx_importer2.cpp
+@@ -211,7 +211,6 @@ protected:
+     void parseRelu                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseTrilu                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseIsNaN                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+-    void parseIsInf                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseResize               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseSize               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseReshape              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+@@ -1618,12 +1617,6 @@ void ONNXImporter2::parseIsNaN(LayerParams& layerParams, const opencv_onnx::Node
+     addLayer(layerParams, node_proto);
+ }
+ 
+-void ONNXImporter2::parseIsInf(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+-{
+-    layerParams.type = "IsInf";
+-    addLayer(layerParams, node_proto);
+-}
+-
+ void ONNXImporter2::parseUpsample(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+ {
+     int n_inputs = node_proto.input_size();
+@@ -2455,7 +2448,6 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI(int opset_version)
+     dispatch["Size"] = &ONNXImporter2::parseSize;
+     dispatch["Trilu"] = &ONNXImporter2::parseTrilu;
+     dispatch["IsNaN"] = &ONNXImporter2::parseIsNaN;
+-    dispatch["IsInf"] = &ONNXImporter2::parseIsInf;
+     dispatch["Upsample"] = &ONNXImporter2::parseUpsample;
+     dispatch["SoftMax"] = dispatch["Softmax"] = dispatch["LogSoftmax"] = &ONNXImporter2::parseSoftMax;
+     dispatch["DetectionOutput"] = &ONNXImporter2::parseDetectionOutput;
+diff --git a/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp b/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp
+index 06c176e4f3..eabb6468d7 100644
+--- a/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp
++++ b/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp
+@@ -791,11 +791,11 @@ CASE(test_instancenorm_epsilon)
+ CASE(test_instancenorm_example)
+     // no filter
+ CASE(test_isinf)
+-    SKIP;
++    // no filter
+ CASE(test_isinf_negative)
+-    SKIP;
++    // no filter
+ CASE(test_isinf_positive)
+-    SKIP;
++    // no filter
+ CASE(test_isnan)
+     SKIP;
+ CASE(test_layer_normalization_2d_axis0)
+diff --git a/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp b/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp
+index 1b0fed6982..df588bc1d5 100644
+--- a/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp
++++ b/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp
+@@ -72,6 +72,3 @@
+ "test_mean_one_input",
+ "test_mean_two_inputs",
+ "test_isnan",
+-"test_isinf",
+-"test_isinf_negative",
+-"test_isinf_positive",
+diff --git a/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp b/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
+index 2dba4fdcd6..887f704e11 100644
+--- a/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
++++ b/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
+@@ -107,6 +107,9 @@
+ "test_identity_sequence",  // Issue:: Unkonwn error
+ "test_if_opt", // Issue::Failed to allocate 17059022683624350 bytes in function 'OutOfMemoryError'
+ "test_if_seq", // Issue::typeProto.has_tensor_type() in function 'dumpValueInfoProto'
++"test_isinf", // Issue::Can't create layer "onnx_node_output_0!y" of type "IsInf" in function 'getLayerInstance'
++"test_isinf_negative", //-- same as above ---
++"test_isinf_positive", //-- same as above ---
+ "test_loop11", // Issue::'Graph' is not supported in function 'getLayerParams'
+ "test_loop13_seq", // Issue::typeProto.has_tensor_type() in function 'populateNet'
+ "test_loop16_seq_none", // Issue::Failed to allocate 179812654996800 bytes in function 'OutOfMemoryError'

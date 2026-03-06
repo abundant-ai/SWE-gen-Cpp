@@ -1,0 +1,410 @@
+diff --git a/modules/video/include/opencv2/video/background_segm.hpp b/modules/video/include/opencv2/video/background_segm.hpp
+index 73409f27d4..e1dfa15a9a 100644
+--- a/modules/video/include/opencv2/video/background_segm.hpp
++++ b/modules/video/include/opencv2/video/background_segm.hpp
+@@ -71,21 +71,6 @@ public:
+      */
+     CV_WRAP virtual void apply(InputArray image, OutputArray fgmask, double learningRate=-1) = 0;
+ 
+-    /** @brief Computes a foreground mask with known foreground mask input.
+-
+-    @param image Next video frame. Floating point frame will be used without scaling and should be in range \f$[0,255]\f$.
+-    @param fgmask The output foreground mask as an 8-bit binary image.
+-    @param knownForegroundMask The mask for inputting already known foreground, allows model to ignore pixels.
+-    @param learningRate The value between 0 and 1 that indicates how fast the background model is
+-    learnt. Negative parameter value makes the algorithm to use some automatically chosen learning
+-    rate. 0 means that the background model is not updated at all, 1 means that the background model
+-    is completely reinitialized from the last frame.
+-
+-    @note This method has a default virtual implementation that throws a "not impemented" error.
+-    Foreground masking may not be supported by all background subtractors.
+-    */
+-    CV_WRAP virtual void apply(InputArray image, InputArray knownForegroundMask, OutputArray fgmask, double learningRate=-1) = 0;
+-
+     /** @brief Computes a background image.
+ 
+     @param backgroundImage The output background image.
+@@ -221,18 +206,6 @@ public:
+     is completely reinitialized from the last frame.
+      */
+     CV_WRAP virtual void apply(InputArray image, OutputArray fgmask, double learningRate=-1) CV_OVERRIDE = 0;
+-
+-    /** @brief Computes a foreground mask and skips known foreground in evaluation.
+-
+-    @param image Next video frame. Floating point frame will be used without scaling and should be in range \f$[0,255]\f$.
+-    @param fgmask The output foreground mask as an 8-bit binary image.
+-    @param knownForegroundMask The mask for inputting already known foreground, allows model to ignore pixels.
+-    @param learningRate The value between 0 and 1 that indicates how fast the background model is
+-    learnt. Negative parameter value makes the algorithm to use some automatically chosen learning
+-    rate. 0 means that the background model is not updated at all, 1 means that the background model
+-    is completely reinitialized from the last frame.
+-     */
+-    CV_WRAP virtual void apply(InputArray image, InputArray knownForegroundMask, OutputArray fgmask, double learningRate=-1) CV_OVERRIDE = 0;
+ };
+ 
+ /** @brief Creates MOG2 Background Subtractor
+diff --git a/modules/video/src/bgfg_KNN.cpp b/modules/video/src/bgfg_KNN.cpp
+index cdf4eb3a51..5ec2266921 100644
+--- a/modules/video/src/bgfg_KNN.cpp
++++ b/modules/video/src/bgfg_KNN.cpp
+@@ -132,8 +132,6 @@ public:
+     //! the update operator
+     void apply(InputArray image, OutputArray fgmask, double learningRate) CV_OVERRIDE;
+ 
+-    void apply(InputArray image, InputArray knownForegroundMask, OutputArray fgmask, double learningRate) CV_OVERRIDE;
+-
+     //! computes a background image which are the mean of all background gaussians
+     virtual void getBackgroundImage(OutputArray backgroundImage) const CV_OVERRIDE;
+ 
+@@ -528,9 +526,7 @@ public:
+                int _nkNN,
+                float _fTau,
+                bool _bShadowDetection,
+-               uchar _nShadowDetection,
+-               const Mat& _knownForegroundMask)
+-            :  knownForegroundMask(_knownForegroundMask)
++               uchar _nShadowDetection)
+     {
+         src = &_src;
+         dst = &_dst;
+@@ -591,17 +587,6 @@ public:
+                         m_nShortCounter,
+                         include
+                         );
+-                // Check that foreground mask exists
+-                if (!knownForegroundMask.empty()) {
+-                    // If input mask states pixel is foreground
+-                    if (knownForegroundMask.at<uchar>(y, x) > 0)
+-                    {
+-                        mask[x] = 255; // ensure output mask marks this pixel as FG
+-                        data += nchannels;
+-                        m_aModel += m_nN*3*ndata;
+-                        continue;
+-                    }
+-                }
+                 switch (result)
+                 {
+                     case 0:
+@@ -641,7 +626,6 @@ public:
+     int m_nkNN;
+     bool m_bShadowDetection;
+     uchar m_nShadowDetection;
+-    const Mat& knownForegroundMask;
+ };
+ 
+ #ifdef HAVE_OPENCL
+@@ -744,12 +728,7 @@ void BackgroundSubtractorKNNImpl::create_ocl_apply_kernel()
+ 
+ #endif
+ 
+-// Base 3 version class
+-void BackgroundSubtractorKNNImpl::apply(InputArray _image, OutputArray _fgmask, double learningRate) {
+-    apply(_image,  noArray(), _fgmask, learningRate);
+-}
+-
+-void BackgroundSubtractorKNNImpl::apply(InputArray _image, InputArray _knownForegroundMask, OutputArray _fgmask, double learningRate)
++void BackgroundSubtractorKNNImpl::apply(InputArray _image, OutputArray _fgmask, double learningRate)
+ {
+     CV_INSTRUMENT_REGION();
+ 
+@@ -778,14 +757,6 @@ void BackgroundSubtractorKNNImpl::apply(InputArray _image, InputArray _knownFore
+     _fgmask.create( image.size(), CV_8U );
+     Mat fgmask = _fgmask.getMat();
+ 
+-    Mat knownForegroundMask = _knownForegroundMask.getMat();
+-
+-    if(!knownForegroundMask.empty())
+-    {
+-    CV_Assert(knownForegroundMask.type() == CV_8UC1);
+-    CV_Assert(knownForegroundMask.size() == image.size());
+-    }
+-
+     ++nframes;
+     learningRate = learningRate >= 0 && nframes > 1 ? learningRate : 1./std::min( 2*nframes, history );
+     CV_Assert(learningRate >= 0);
+@@ -820,8 +791,7 @@ void BackgroundSubtractorKNNImpl::apply(InputArray _image, InputArray _knownFore
+                              nkNN,
+                              fTau,
+                              bShadowDetection,
+-                             nShadowDetection,
+-                             knownForegroundMask),
++                             nShadowDetection),
+                              image.total()/(double)(1 << 16));
+ 
+     nShortCounter++;//0,1,...,nShortUpdate-1
+diff --git a/modules/video/src/bgfg_gaussmix2.cpp b/modules/video/src/bgfg_gaussmix2.cpp
+index 48d8ee8286..00a65fcf8f 100644
+--- a/modules/video/src/bgfg_gaussmix2.cpp
++++ b/modules/video/src/bgfg_gaussmix2.cpp
+@@ -178,8 +178,6 @@ public:
+     //! the update operator
+     void apply(InputArray image, OutputArray fgmask, double learningRate) CV_OVERRIDE;
+ 
+-    void apply(InputArray image, InputArray knownForegroundMask, OutputArray fgmask, double learningRate) CV_OVERRIDE;
+-
+     //! computes a background image which are the mean of all background gaussians
+     virtual void getBackgroundImage(OutputArray backgroundImage) const CV_OVERRIDE;
+ 
+@@ -548,8 +546,7 @@ public:
+                 float _Tb, float _TB, float _Tg,
+                 float _varInit, float _varMin, float _varMax,
+                 float _prune, float _tau, bool _detectShadows,
+-                uchar _shadowVal, const Mat& _knownForegroundMask)
+-            :   knownForegroundMask(_knownForegroundMask)
++                uchar _shadowVal)
+     {
+         src = &_src;
+         dst = &_dst;
+@@ -593,18 +590,6 @@ public:
+ 
+             for( int x = 0; x < ncols; x++, data += nchannels, gmm += nmixtures, mean += nmixtures*nchannels )
+             {
+-
+-                // Check that foreground mask exists
+-                if (!knownForegroundMask.empty())
+-                {
+-                    // If input mask states pixel is foreground
+-                    if (knownForegroundMask.at<uchar>(y, x) > 0)
+-                    {
+-                        mask[x] = 255; // ensure output mask marks this pixel as FG
+-                        continue;
+-                    }
+-                }
+-
+                 //calculate distances to the modes (+ sort)
+                 //here we need to go in descending order!!!
+                 bool background = false;//return value -> true - the pixel classified as background
+@@ -781,7 +766,6 @@ public:
+ 
+     bool detectShadows;
+     uchar shadowVal;
+-    const Mat& knownForegroundMask;
+ };
+ 
+ #ifdef HAVE_OPENCL
+@@ -860,12 +844,7 @@ void BackgroundSubtractorMOG2Impl::create_ocl_apply_kernel()
+ 
+ #endif
+ 
+-// Base 3 version class
+-void BackgroundSubtractorMOG2Impl::apply(InputArray _image, OutputArray _fgmask, double learningRate) {
+-    apply(_image,  noArray(), _fgmask, learningRate);
+-}
+-
+-void BackgroundSubtractorMOG2Impl::apply(InputArray _image, InputArray _knownForegroundMask, OutputArray _fgmask, double learningRate)
++void BackgroundSubtractorMOG2Impl::apply(InputArray _image, OutputArray _fgmask, double learningRate)
+ {
+     CV_INSTRUMENT_REGION();
+ 
+@@ -888,14 +867,6 @@ void BackgroundSubtractorMOG2Impl::apply(InputArray _image, InputArray _knownFor
+     _fgmask.create( image.size(), CV_8U );
+     Mat fgmask = _fgmask.getMat();
+ 
+-    Mat knownForegroundMask = _knownForegroundMask.getMat();
+-
+-    if(!knownForegroundMask.empty())
+-    {
+-    CV_Assert(knownForegroundMask.type() == CV_8UC1);
+-    CV_Assert(knownForegroundMask.size() == image.size());
+-    }
+-
+     ++nframes;
+     learningRate = learningRate >= 0 && nframes > 1 ? learningRate : 1./std::min( 2*nframes, history );
+     CV_Assert(learningRate >= 0);
+@@ -908,7 +879,7 @@ void BackgroundSubtractorMOG2Impl::apply(InputArray _image, InputArray _knownFor
+                               (float)varThreshold,
+                               backgroundRatio, varThresholdGen,
+                               fVarInit, fVarMin, fVarMax, float(-learningRate*fCT), fTau,
+-                              bShadowDetection, nShadowDetection, knownForegroundMask),
++                              bShadowDetection, nShadowDetection),
+                               image.total()/(double)(1 << 16));
+ }
+ 
+diff --git a/modules/video/test/test_bgfg2.cpp b/modules/video/test/test_bgfg2.cpp
+deleted file mode 100644
+index eda022abf4..0000000000
+--- a/modules/video/test/test_bgfg2.cpp
++++ /dev/null
+@@ -1,108 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-
+-#include "test_precomp.hpp"
+-#include "opencv2/video/background_segm.hpp"
+-
+-namespace opencv_test { namespace {
+-
+-using namespace cv;
+-
+-///////////////////////// MOG2 //////////////////////////////
+-TEST(BackgroundSubtractorMOG2, KnownForegroundMaskShadowsTrue)
+-{
+-    Ptr<BackgroundSubtractorMOG2> mog2 = createBackgroundSubtractorMOG2(500, 16, true);
+-
+-    //Black Frame
+-    Mat input = Mat::zeros(480,640 , CV_8UC3);
+-
+-    //White Rectangle
+-    Mat knownFG = Mat::zeros(input.size(), CV_8U);
+-
+-    rectangle(knownFG, Rect(3,3,5,5), Scalar(255,255,255), -1);
+-
+-    Mat output;
+-    mog2->apply(input, knownFG, output);
+-
+-    for(int y = 3; y < 8; y++)
+-    {
+-        for (int x = 3; x < 8; x++){
+-            EXPECT_EQ(255,output.at<uchar>(y,x)) << "Expected foreground at (" << x << "," << y << ")";
+-        }
+-    }
+-}
+-
+-TEST(BackgroundSubtractorMOG2, KnownForegroundMaskShadowsFalse)
+-{
+-    Ptr<BackgroundSubtractorMOG2> mog2 = createBackgroundSubtractorMOG2(500, 16, false);
+-
+-    //Black Frame
+-    Mat input = Mat::zeros(480,640 , CV_8UC3);
+-
+-    //White Rectangle
+-    Mat knownFG = Mat::zeros(input.size(), CV_8U);
+-
+-    rectangle(knownFG, Rect(3,3,5,5), Scalar(255,255,255), FILLED);
+-
+-    Mat output;
+-    mog2->apply(input, knownFG, output);
+-
+-    for(int y = 3; y < 8; y++)
+-    {
+-        for (int x = 3; x < 8; x++){
+-            EXPECT_EQ(255,output.at<uchar>(y,x)) << "Expected foreground at (" << x << "," << y << ")";
+-        }
+-    }
+-}
+-
+-///////////////////////// KNN //////////////////////////////
+-
+-TEST(BackgroundSubtractorKNN, KnownForegroundMaskShadowsTrue)
+-{
+-    Ptr<BackgroundSubtractorKNN> knn = createBackgroundSubtractorKNN(500, 400.0, true);
+-
+-    //Black Frame
+-    Mat input = Mat::zeros(480,640 , CV_8UC3);
+-
+-    //White Rectangle
+-    Mat knownFG = Mat::zeros(input.size(), CV_8U);
+-
+-    rectangle(knownFG, Rect(3,3,5,5), Scalar(255,255,255), FILLED);
+-
+-    Mat output;
+-    knn->apply(input, knownFG, output);
+-
+-    for(int y = 3; y < 8; y++)
+-    {
+-        for (int x = 3; x < 8; x++){
+-            EXPECT_EQ(255,output.at<uchar>(y,x)) << "Expected foreground at (" << x << "," << y << ")";
+-        }
+-    }
+-}
+-
+-TEST(BackgroundSubtractorKNN, KnownForegroundMaskShadowsFalse)
+-{
+-    Ptr<BackgroundSubtractorKNN> knn = createBackgroundSubtractorKNN(500, 400.0, false);
+-
+-    //Black Frame
+-    Mat input = Mat::zeros(480,640 , CV_8UC3);
+-
+-    //White Rectangle
+-    Mat knownFG = Mat::zeros(input.size(), CV_8U);
+-
+-    rectangle(knownFG, Rect(3,3,5,5), Scalar(255,255,255), FILLED);
+-
+-    Mat output;
+-    knn->apply(input, knownFG, output);
+-
+-    for(int y = 3; y < 8; y++)
+-    {
+-        for (int x = 3; x < 8; x++){
+-            EXPECT_EQ(255,output.at<uchar>(y,x)) << "Expected foreground at (" << x << "," << y << ")";
+-        }
+-    }
+-}
+-
+-}} // namespace
+-/* End of file. */
+diff --git a/samples/python/background_subtractor_mask.py b/samples/python/background_subtractor_mask.py
+deleted file mode 100644
+index 5d4aae4701..0000000000
+--- a/samples/python/background_subtractor_mask.py
++++ /dev/null
+@@ -1,68 +0,0 @@
+-
+-'''
+-Showcases the use of background subtraction from a live video feed,
+-aswell as pass through of a known foreground parameter
+-'''
+-
+-# Python 2/3 compatibility
+-from __future__ import print_function
+-
+-import numpy as np
+-import cv2 as cv
+-
+-def main():
+-    cap = cv.VideoCapture(0)
+-    if not cap.isOpened:
+-        print("Capture source avaialable.")
+-        exit()
+-
+-    # Create background subtractor
+-    mog2_bg_subtractor = cv.createBackgroundSubtractorMOG2(history=300, varThreshold=50, detectShadows=False)
+-    knn_bg_subtractor = cv.createBackgroundSubtractorKNN(history=300, detectShadows=False)
+-
+-    frame_count = 0
+-    # Allows for a frame buffer for the mask to learn pre known foreground
+-    show_count = 10
+-
+-    while True:
+-        ret, frame = cap.read()
+-        if not ret:
+-            break
+-
+-        x = 100 + (frame_count % 10) * 3
+-
+-        frame = cv.resize(frame, (640, 480))
+-        aKnownForegroundMask = np.zeros(frame.shape[:2], dtype=np.uint8)
+-
+-        # Allow for models to "settle"/learn
+-        if frame_count > show_count:
+-            cv.rectangle(aKnownForegroundMask, (x,200), (x+50,300), 255, -1)
+-            cv.rectangle(aKnownForegroundMask, (540,180), (640,480), 255, -1)
+-
+-        #MOG2 Subtraction
+-        mog2_with_mask = mog2_bg_subtractor.apply(frame,knownForegroundMask=aKnownForegroundMask)
+-        mog2_without_mask = mog2_bg_subtractor.apply(frame)
+-
+-        #KNN Subtraction
+-        knn_with_mask = knn_bg_subtractor.apply(frame,knownForegroundMask=aKnownForegroundMask)
+-        knn_without_mask = knn_bg_subtractor.apply(frame)
+-
+-        # Display the 3 parameter apply and the 4 parameter apply for both subtractors
+-        cv.imshow("MOG2 With a Foreground Mask", mog2_with_mask)
+-        cv.imshow("MOG2 Without a Foreground Mask", mog2_without_mask)
+-        cv.imshow("KNN With a Foreground Mask", knn_with_mask)
+-        cv.imshow("KNN Without a Foreground Mask", knn_without_mask)
+-
+-        key = cv.waitKey(30)
+-        if key == 27:  # ESC
+-            break
+-
+-        frame_count += 1
+-
+-    cap.release()
+-    cv.destroyAllWindows()
+-
+-if __name__ == '__main__':
+-    print(__doc__)
+-    main()
+-    cv.destroyAllWindows()

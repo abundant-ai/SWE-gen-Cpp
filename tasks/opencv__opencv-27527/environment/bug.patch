@@ -1,0 +1,247 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index 08b7f7d24d..eb0d32079b 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -1364,12 +1364,6 @@ CV__DNN_INLINE_NS_BEGIN
+         static Ptr<TopKLayer> create(const LayerParams& params);
+     };
+ 
+-    class CV_EXPORTS TriluLayer : public Layer
+-    {
+-    public:
+-        static Ptr<TriluLayer> create(const LayerParams& params);
+-    };
+-
+ //! @}
+ //! @}
+ CV__DNN_INLINE_NS_END
+diff --git a/modules/dnn/src/init.cpp b/modules/dnn/src/init.cpp
+index 05f60b5a3e..8bad602431 100644
+--- a/modules/dnn/src/init.cpp
++++ b/modules/dnn/src/init.cpp
+@@ -186,7 +186,6 @@ void initializeLayerFactory()
+     CV_DNN_REGISTER_LAYER_CLASS(DepthToSpaceInt8, DepthToSpaceLayer)
+     CV_DNN_REGISTER_LAYER_CLASS(SpaceToDepthInt8, SpaceToDepthLayer)
+ 
+-    CV_DNN_REGISTER_LAYER_CLASS(Trilu,          TriluLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Crop,           CropLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Eltwise,        EltwiseLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(NaryEltwise,    NaryEltwiseLayer);
+diff --git a/modules/dnn/src/layers/trilu_layer.cpp b/modules/dnn/src/layers/trilu_layer.cpp
+deleted file mode 100644
+index 4a33177633..0000000000
+--- a/modules/dnn/src/layers/trilu_layer.cpp
++++ /dev/null
+@@ -1,85 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-
+-#include "../precomp.hpp"
+-#include <opencv2/dnn/shape_utils.hpp>
+-using namespace std;
+-namespace cv { namespace dnn {
+-
+-class TriluLayerImpl CV_FINAL : public TriluLayer {
+-    public:
+-        TriluLayerImpl(const LayerParams &params) {
+-            setParamsFrom(params);
+-            upperTri = params.get<bool>("upper", true);
+-        }
+-
+-        virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
+-                                    const int requiredOutputs,
+-                                    std::vector<MatShape> &outputs,
+-                                    std::vector<MatShape> &internals) const CV_OVERRIDE {
+-            outputs.assign(1, inputs[0]);
+-            return false;
+-        }
+-
+-
+-        void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE {
+-            std::vector<Mat> inputs, outputs;
+-            inputs_arr.getMatVector(inputs);
+-            outputs_arr.getMatVector(outputs);
+-            inputs[0].copyTo(outputs[0]);
+-            if (inputs[0].empty())
+-                return;
+-
+-            int k = inputs.size() > 1 ? inputs[1].at<int64>(0,0) : 0;
+-            const auto shape_input = shape(inputs[0]);
+-            const int cdims = std::max(int(shape_input.size()) - 2, 0);
+-            const int w = inputs[0].size[shape_input.size() - 1];
+-            const int h = shape_input.size() >= 2 ? inputs[0].size[shape_input.size() - 2] : 1;
+-
+-            const int m = std::min(h,w);
+-            int loops = 1;
+-            for (int i = 0; i < cdims; ++i)
+-                loops *= shape_input[i];
+-
+-            float *dst = outputs[0].ptr<float>();
+-            auto fn = [&](const Range &r) {
+-
+-                for (int i = r.start; i < r.end; i++) {
+-                    for(int l=0; l < m; l+=1) {
+-                        int cmin = upperTri ? 0 : (l + k + 1);
+-                        cmin = std::max(cmin, 0);
+-                        const int cmax = upperTri ? min(l + k -1, w-1) : w-1;
+-                        const int num_zeros = cmax - cmin + 1;
+-                        auto *cur_dst = dst + ((w * h) * i + (w * l + cmin));
+-                        if (cmin < w && num_zeros > 0)
+-                            std::memset(cur_dst, 0, sizeof(float) * num_zeros);
+-                    }
+-                }
+-            };
+-
+-            double nstripes = loops * h * w / 1024.0;
+-            parallel_for_(Range(0, loops), fn, nstripes);
+-        }
+-
+-
+-        void getTypes(const std::vector<MatType>& inputs,
+-            const int requiredOutputs,
+-            const int requiredInternals,
+-            std::vector<MatType>& outputs,
+-            std::vector<MatType>& internals) const CV_OVERRIDE
+-        {
+-            outputs.assign(1, CV_32F);
+-        }
+-
+-    private:
+-        bool upperTri;
+-};
+-
+-
+-Ptr<TriluLayer> TriluLayer::create(const LayerParams& params)
+-{
+-    return makePtr<TriluLayerImpl>(params);
+-}
+-
+-}}
+diff --git a/modules/dnn/src/onnx/onnx_importer2.cpp b/modules/dnn/src/onnx/onnx_importer2.cpp
+index 6ce21c37db..cb0279873a 100644
+--- a/modules/dnn/src/onnx/onnx_importer2.cpp
++++ b/modules/dnn/src/onnx/onnx_importer2.cpp
+@@ -204,7 +204,6 @@ protected:
+     void parseRange                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseReduce               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseRelu                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+-    void parseTrilu                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseResize               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseReshape              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseScatter              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+@@ -1555,14 +1554,6 @@ void ONNXImporter2::parseResize(LayerParams& layerParams, const opencv_onnx::Nod
+     addLayer(layerParams, node_proto, ninputs);
+ }
+ 
+-void ONNXImporter2::parseTrilu(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+-{
+-    int ninputs = node_proto.input_size();
+-    layerParams.type = "Trilu";
+-    addLayer(layerParams, node_proto, ninputs);
+-
+-}
+-
+ void ONNXImporter2::parseUpsample(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+ {
+     int n_inputs = node_proto.input_size();
+@@ -2373,7 +2364,6 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI(int opset_version)
+     dispatch["GatherElements"] = &ONNXImporter2::parseGatherElements;
+     dispatch["Concat"] = &ONNXImporter2::parseConcat;
+     dispatch["Resize"] = &ONNXImporter2::parseResize;
+-    dispatch["Trilu"] = &ONNXImporter2::parseTrilu;
+     dispatch["Upsample"] = &ONNXImporter2::parseUpsample;
+     dispatch["SoftMax"] = dispatch["Softmax"] = dispatch["LogSoftmax"] = &ONNXImporter2::parseSoftMax;
+     dispatch["DetectionOutput"] = &ONNXImporter2::parseDetectionOutput;
+diff --git a/modules/dnn/test/test_onnx_importer.cpp b/modules/dnn/test/test_onnx_importer.cpp
+index a852d4af0a..e9e93ef93a 100644
+--- a/modules/dnn/test/test_onnx_importer.cpp
++++ b/modules/dnn/test/test_onnx_importer.cpp
+@@ -1327,87 +1327,6 @@ TEST_P(Test_ONNX_layers, Split_EltwiseMax)
+ #endif
+     testONNXModels("split_max");
+ }
+-
+-TEST_P(Test_ONNX_layers, trilu_tril)
+-{
+-    testONNXModels("trilu_tril", npy, 0, 0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_tril_neg)
+-{
+-    testONNXModels("trilu_tril_neg", npy, 0, 0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_tril_one_row)
+-{
+-    testONNXModels("trilu_tril_one_row", npy, 0, 0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_tril_one_row1D)
+-{
+-    testONNXModels("trilu_tril_one_row1D", npy, 0, 0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_tril_out_neg)
+-{
+-    testONNXModels("trilu_tril_out_neg", npy, 0, 0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_tril_out_pos)
+-{
+-    testONNXModels("trilu_tril_out_pos", npy, 0, 0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_tril_pos)
+-{
+-    testONNXModels("trilu_tril_pos", npy, 0, 0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_tril_square)
+-{
+-    testONNXModels("trilu_tril_square", npy, 0, 0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_tril_square_neg)
+-{
+-    testONNXModels("trilu_tril_square_neg", npy, 0, 0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_triu)
+-{
+-    testONNXModels("trilu_triu", npy, 0, 0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_triu_one_row)
+-{
+-    testONNXModels("trilu_triu_one_row", npy, 0,0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_triu_out_neg)
+-{
+-    testONNXModels("trilu_triu_out_neg_out", npy, 0,0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_triu_out_pos)
+-{
+-   testONNXModels("trilu_triu_out_pos", npy, 0,0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_triu_pos)
+-{
+-    testONNXModels("trilu_triu_pos", npy, 0,0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_triu_square)
+-{
+-    testONNXModels("trilu_triu_square", npy, 0,0,false, true, 2);
+-}
+-
+-TEST_P(Test_ONNX_layers, trilu_triu_square_neg)
+-{
+-    testONNXModels("trilu_triu_square_neg", npy, 0,0,false, true, 2);
+-}
+-
+ // Fails with the new engine. Output shape [?, N, OutputSize] not supported by new graph engine
+ TEST_P(Test_ONNX_layers, LSTM_Activations)
+ {

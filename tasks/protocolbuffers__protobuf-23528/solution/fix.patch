@@ -1,0 +1,171 @@
+diff --git a/hpb/BUILD b/hpb/BUILD
+index e30486f18..2bfeff038 100644
+--- a/hpb/BUILD
++++ b/hpb/BUILD
+@@ -49,6 +49,7 @@ cc_library(
+         ":arena",
+         ":extension",
+         ":multibackend",
++        ":options",
+         ":ptr",
+         ":status",
+         "//hpb/internal",
+@@ -194,3 +195,13 @@ cc_library(
+         "@abseil-cpp//absl/base:core_headers",
+     ],
+ )
++
++cc_library(
++    name = "options",
++    hdrs = ["options.h"],
++    visibility = ["//visibility:public"],
++    deps = [
++        "//hpb:extension",
++        "//hpb:multibackend",
++    ],
++)
+diff --git a/hpb/backend/upb/BUILD b/hpb/backend/upb/BUILD
+index 97d5bd545..2f979fa6f 100644
+--- a/hpb/backend/upb/BUILD
++++ b/hpb/backend/upb/BUILD
+@@ -18,8 +18,10 @@ cc_library(
+         ":interop",
+         "//hpb:arena",
+         "//hpb:extension",
++        "//hpb:options",
+         "//hpb:ptr",
+         "//hpb:status",
++        "//hpb/backend:types",
+         "//hpb/internal",
+         "//hpb/internal:message_lock",
+         "//hpb/internal:template_help",
+diff --git a/hpb/backend/upb/upb.h b/hpb/backend/upb/upb.h
+index a5cc679f5..32bb82efb 100644
+--- a/hpb/backend/upb/upb.h
++++ b/hpb/backend/upb/upb.h
+@@ -13,11 +13,13 @@
+ #include "absl/status/statusor.h"
+ #include "absl/strings/string_view.h"
+ #include "hpb/arena.h"
++#include "hpb/backend/types.h"
+ #include "hpb/backend/upb/interop.h"
+ #include "hpb/extension.h"
+ #include "hpb/internal/internal.h"
+ #include "hpb/internal/message_lock.h"
+ #include "hpb/internal/template_help.h"
++#include "hpb/options.h"
+ #include "hpb/ptr.h"
+ #include "hpb/status.h"
+ #include "upb/mem/arena.h"
+@@ -106,6 +108,24 @@ absl::StatusOr<T> Parse(absl::string_view bytes,
+   return MessageDecodeError(status);
+ }
+ 
++template <typename T>
++hpb::StatusOr<T> Parse(absl::string_view bytes, ParseOptions options) {
++  int flags = 0;
++  if (options.alias_string) {
++    flags |= kUpb_DecodeOption_AliasString;
++  }
++  T message;
++  auto* arena = interop::upb::GetArena(&message);
++  upb_DecodeStatus status = upb_Decode(
++      bytes.data(), bytes.size(), interop::upb::GetMessage(&message),
++      interop::upb::GetMiniTable(&message),
++      internal::GetUpbExtensions(options.extension_registry), flags, arena);
++  if (status == kUpb_DecodeStatus_Ok) {
++    return hpb::StatusOr<T>(std::move(message));
++  }
++  return hpb::StatusOr<T>(internal::backend::Error(status));
++}
++
+ }  // namespace hpb::internal::backend::upb
+ 
+ #include "upb/port/undef.inc"
+diff --git a/hpb/hpb.h b/hpb/hpb.h
+index 6bcb89f11..5171810e8 100644
+--- a/hpb/hpb.h
++++ b/hpb/hpb.h
+@@ -17,7 +17,9 @@
+ #include "hpb/extension.h"
+ #include "hpb/internal/template_help.h"
+ #include "hpb/multibackend.h"
++#include "hpb/options.h"
+ #include "hpb/ptr.h"
++#include "hpb/status.h"
+ 
+ #if HPB_INTERNAL_BACKEND == HPB_INTERNAL_BACKEND_UPB
+ #include "hpb/backend/upb/upb.h"
+@@ -70,7 +72,16 @@ ABSL_MUST_USE_RESULT bool Parse(internal::PtrOrRaw<T> message,
+   return backend::Parse(message, bytes, extension_registry);
+ }
+ 
++// Note that the default extension registry is the the generated registry.
+ template <typename T>
++hpb::StatusOr<T> Parse(absl::string_view bytes, ParseOptions options) {
++  return backend::Parse<T>(bytes, options);
++}
++
++// Deprecated. Use the overload that returns hpb::StatusOr<T> instead.
++// Note that the default extension registry is the empty registry.
++template <typename T>
++ABSL_DEPRECATED("Prefer the overload that returns hpb::StatusOr<T>")
+ absl::StatusOr<T> Parse(absl::string_view bytes,
+                         const ExtensionRegistry& extension_registry =
+                             ExtensionRegistry::empty_registry()) {
+diff --git a/hpb/options.h b/hpb/options.h
+new file mode 100644
+index 000000000..bfb6dde6f
+--- /dev/null
++++ b/hpb/options.h
+@@ -0,0 +1,50 @@
++// Protocol Buffers - Google's data interchange format
++// Copyright 2025 Google LLC.  All rights reserved.
++//
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file or at
++// https://developers.google.com/open-source/licenses/bsd
++
++#ifndef GOOGLE_PROTOBUF_HPB_OPTIONS_H__
++#define GOOGLE_PROTOBUF_HPB_OPTIONS_H__
++
++#include "hpb/extension.h"
++#include "hpb/multibackend.h"
++
++namespace hpb {
++
++struct ParseOptions {
++  // If true, the parsed proto may alias the input string instead of copying.
++  // Aliased data could include string fields, unknown fields, and possibly
++  // other data.
++  //
++  // REQUIRES: the input string outlives the resulting proto.
++  bool alias_string = false;
++
++#if HPB_INTERNAL_BACKEND == HPB_INTERNAL_BACKEND_UPB
++  // For the upb backend, the user can determine which extension registry
++  // they wish to use. Unless there are compelling reasons to do otherwise,
++  // we recommend using the generated registry, which uses linker arrays
++  // and intelligently performs tree shaking when possible.
++  const ExtensionRegistry& extension_registry =
++      ExtensionRegistry::generated_registry();
++#endif
++};
++
++inline ParseOptions ParseOptionsDefault() { return ParseOptions(); }
++
++#if HPB_INTERNAL_BACKEND == HPB_INTERNAL_BACKEND_UPB
++// The empty registry is provided here as a convenience for extant users.
++// Prefer the generated registry.
++inline ParseOptions ParseOptionsWithEmptyRegistry() {
++  ParseOptions options{
++      .alias_string = false,
++      .extension_registry = ExtensionRegistry::empty_registry(),
++  };
++  return options;
++}
++#endif
++
++}  // namespace hpb
++
++#endif  // GOOGLE_PROTOBUF_HPB_OPTIONS_H__

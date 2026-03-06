@@ -1,0 +1,252 @@
+diff --git a/modules/imgcodecs/include/opencv2/imgcodecs.hpp b/modules/imgcodecs/include/opencv2/imgcodecs.hpp
+index 0b3fa0275e..2aeac8d60a 100644
+--- a/modules/imgcodecs/include/opencv2/imgcodecs.hpp
++++ b/modules/imgcodecs/include/opencv2/imgcodecs.hpp
+@@ -119,7 +119,6 @@ enum ImwriteFlags {
+        IMWRITE_JPEGXL_EFFORT       = 641,//!< For JPEG XL, encoder effort/speed level without affecting decoding speed; it is between 1 (fastest) and 10 (slowest). Default is 7.
+        IMWRITE_JPEGXL_DISTANCE     = 642,//!< For JPEG XL, distance level for lossy compression: target max butteraugli distance, lower = higher quality, 0 = lossless; range: 0 .. 25. Default is 1.
+        IMWRITE_JPEGXL_DECODING_SPEED = 643,//!< For JPEG XL, decoding speed tier for the provided options; minimum is 0 (slowest to decode, best quality/density), and maximum is 4 (fastest to decode, at the cost of some quality/density). Default is 0.
+-       IMWRITE_BMP_COMPRESSION     = 768,  //!< For BMP, use to specify compress parameter for 32bpp image. Default is IMWRITE_BMP_COMPRESSION_BITFIELDS. See cv::ImwriteBMPCompressionFlags.
+        IMWRITE_GIF_LOOP            = 1024, //!< Not functional since 4.12.0. Replaced by cv::Animation::loop_count.
+        IMWRITE_GIF_SPEED           = 1025, //!< Not functional since 4.12.0. Replaced by cv::Animation::durations.
+        IMWRITE_GIF_QUALITY         = 1026, //!< For GIF, it can be a quality from 1 to 8. Default is 2. See cv::ImwriteGifCompressionFlags.
+@@ -246,12 +245,6 @@ enum ImwriteHDRCompressionFlags {
+     IMWRITE_HDR_COMPRESSION_RLE = 1
+ };
+ 
+-//! Imwrite BMP specific values for IMWRITE_BMP_COMPRESSION parameter key.
+-enum ImwriteBMPCompressionFlags {
+-    IMWRITE_BMP_COMPRESSION_RGB = 0,       //!< Use BI_RGB. OpenCV v4.12.0 or before supports to encode with this compression only.
+-    IMWRITE_BMP_COMPRESSION_BITFIELDS = 3, //!< Use BI_BITFIELDS. OpenCV v4.13.0 or later can support to encode with this compression. (only for 32 BPP images)
+-};
+-
+ //! Imwrite GIF specific values for IMWRITE_GIF_QUALITY parameter key, if larger than 3, then its related to the size of the color table.
+ enum ImwriteGIFCompressionFlags {
+     IMWRITE_GIF_FAST_NO_DITHER       = 1,
+@@ -505,11 +498,6 @@ filename extension (see cv::imread for the list of extensions). In general, only
+ single-channel or 3-channel (with 'BGR' channel order) images
+ can be saved using this function, with these exceptions:
+ 
+-- With BMP encoder, 8-bit unsigned (CV_8U) images can be saved.
+-  - BMP images with an alpha channel can be saved using this function.
+-    To achieve this, create an 8-bit 4-channel (CV_8UC4) BGRA image, ensuring the alpha channel is the last component.
+-    Fully transparent pixels should have an alpha value of 0, while fully opaque pixels should have an alpha value of 255.
+-    OpenCV v4.13.0 or later use BI_BITFIELDS compression as default. See IMWRITE_BMP_COMPRESSION.
+ - With OpenEXR encoder, only 32-bit float (CV_32F) images can be saved. More than 4 channels can be saved. (imread can load it then.)
+   - 8-bit unsigned (CV_8U) images are not supported.
+ - With Radiance HDR encoder, non 64-bit float (CV_64F) images can be saved.
+diff --git a/modules/imgcodecs/src/grfmt_bmp.cpp b/modules/imgcodecs/src/grfmt_bmp.cpp
+index faff17811e..a8ca6a046a 100644
+--- a/modules/imgcodecs/src/grfmt_bmp.cpp
++++ b/modules/imgcodecs/src/grfmt_bmp.cpp
+@@ -42,7 +42,6 @@
+ 
+ #include "precomp.hpp"
+ #include "grfmt_bmp.hpp"
+-#include "opencv2/core/utils/logger.hpp"
+ 
+ namespace cv
+ {
+@@ -604,7 +603,6 @@ BmpEncoder::BmpEncoder()
+ {
+     m_description = "Windows bitmap (*.bmp;*.dib)";
+     m_buf_supported = true;
+-    m_supported_encode_key = {IMWRITE_BMP_COMPRESSION};
+ }
+ 
+ 
+@@ -617,12 +615,11 @@ ImageEncoder BmpEncoder::newEncoder() const
+     return makePtr<BmpEncoder>();
+ }
+ 
+-bool  BmpEncoder::write( const Mat& img, const std::vector<int>& params )
++bool  BmpEncoder::write( const Mat& img, const std::vector<int>& )
+ {
+     int width = img.cols, height = img.rows, channels = img.channels();
+     int fileStep = (width*channels + 3) & -4;
+     uchar zeropad[] = "\0\0\0\0";
+-
+     WLByteStream strm;
+ 
+     if( m_buf )
+@@ -633,35 +630,7 @@ bool  BmpEncoder::write( const Mat& img, const std::vector<int>& params )
+     else if( !strm.open( m_filename ))
+         return false;
+ 
+-    // sRGB colorspace requires BITMAPV5HEADER.
+-    // See https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-bitmapv5header
+-    bool useV5BitFields = true;
+-    for(size_t i = 0 ; i < params.size(); i++)
+-    {
+-        const int value = params[i+1];
+-        switch(params[i])
+-        {
+-            case IMWRITE_BMP_COMPRESSION:
+-            {
+-                switch(value) {
+-                    case IMWRITE_BMP_COMPRESSION_RGB:
+-                        useV5BitFields = false;
+-                        break;
+-                    case IMWRITE_BMP_COMPRESSION_BITFIELDS:
+-                        useV5BitFields = true;
+-                        break;
+-                    default:
+-                        useV5BitFields = true;
+-                        CV_LOG_WARNING(nullptr, cv::format("The value(%d) for IMWRITE_BMP_COMPRESSION must be one of ImwriteBMPCompressionFlags. It is fallbacked to true", value));
+-                        break;
+-                }
+-            }
+-            break;
+-        }
+-    }
+-    useV5BitFields &= (channels == 4); // BMP_BITFIELDS requires 32 bit per pixel.
+-
+-    int  bitmapHeaderSize = useV5BitFields ? 124 : 40;
++    int  bitmapHeaderSize = 40;
+     int  paletteSize = channels > 1 ? 0 : 1024;
+     int  headerSize = 14 /* fileheader */ + bitmapHeaderSize + paletteSize;
+     size_t fileSize = (size_t)fileStep*height + headerSize;
+@@ -684,36 +653,13 @@ bool  BmpEncoder::write( const Mat& img, const std::vector<int>& params )
+     CHECK_WRITE(strm.putDWord( height ));
+     CHECK_WRITE(strm.putWord( 1 ));
+     CHECK_WRITE(strm.putWord( channels << 3 ));
+-    CHECK_WRITE(strm.putDWord( useV5BitFields ? BMP_BITFIELDS : BMP_RGB ));
++    CHECK_WRITE(strm.putDWord( BMP_RGB ));
+     CHECK_WRITE(strm.putDWord( 0 ));
+     CHECK_WRITE(strm.putDWord( 0 ));
+     CHECK_WRITE(strm.putDWord( 0 ));
+     CHECK_WRITE(strm.putDWord( 0 ));
+     CHECK_WRITE(strm.putDWord( 0 ));
+ 
+-    if( useV5BitFields )
+-    {
+-        CHECK_WRITE(strm.putDWord( 0x00FF0000 )); // bV5RedMask
+-        CHECK_WRITE(strm.putDWord( 0x0000FF00 )); // bV5GreenMask
+-        CHECK_WRITE(strm.putDWord( 0x000000FF )); // bV5BlueMask
+-        CHECK_WRITE(strm.putDWord( 0xFF000000 )); // bV5AlphaMask
+-        CHECK_WRITE(strm.putBytes( "BGRs", 4)); // bV5CSType (sRGB)
+-        { // bV5Endpoints
+-            for(int index_rgb = 0; index_rgb < 3; index_rgb ++ ){ // Red/Green/Blue
+-                CHECK_WRITE(strm.putDWord( 0 )); // ciexyzX
+-                CHECK_WRITE(strm.putDWord( 0 )); // ciexyzY
+-                CHECK_WRITE(strm.putDWord( 0 )); // ciexyzZ
+-            }
+-        }
+-        CHECK_WRITE(strm.putDWord( 0 )); // bV5GammaRed
+-        CHECK_WRITE(strm.putDWord( 0 )); // bV5GammaGreen
+-        CHECK_WRITE(strm.putDWord( 0 )); // bV5GammaBlue
+-        CHECK_WRITE(strm.putDWord( 0 )); // bV5Intent
+-        CHECK_WRITE(strm.putDWord( 0 )); // bV5ProfileData
+-        CHECK_WRITE(strm.putDWord( 0 )); // bV5ProfileSize
+-        CHECK_WRITE(strm.putDWord( 0 )); // bV5Reserved
+-    }
+-
+     if( channels == 1 )
+     {
+         FillGrayPalette( palette, 8 );
+diff --git a/modules/imgcodecs/test/test_grfmt.cpp b/modules/imgcodecs/test/test_grfmt.cpp
+index 87d8780442..3ef0c9d6fb 100644
+--- a/modules/imgcodecs/test/test_grfmt.cpp
++++ b/modules/imgcodecs/test/test_grfmt.cpp
+@@ -360,16 +360,7 @@ TEST(Imgcodecs_Bmp, read_32bit_rgb)
+     const string root = cvtest::TS::ptr()->get_data_path();
+     const string filenameInput = root + "readwrite/test_32bit_rgb.bmp";
+ 
+-    Mat img;
+-    ASSERT_NO_THROW(img = cv::imread(filenameInput));
+-    ASSERT_FALSE(img.empty());
+-    ASSERT_EQ(CV_8UC3, img.type());
+-
+-    ASSERT_NO_THROW(img = cv::imread(filenameInput, IMREAD_UNCHANGED));
+-    ASSERT_FALSE(img.empty());
+-    ASSERT_EQ(CV_8UC3, img.type());
+-
+-    ASSERT_NO_THROW(img = cv::imread(filenameInput, IMREAD_COLOR | IMREAD_ANYCOLOR | IMREAD_ANYDEPTH));
++    const Mat img = cv::imread(filenameInput, IMREAD_UNCHANGED);
+     ASSERT_FALSE(img.empty());
+     ASSERT_EQ(CV_8UC3, img.type());
+ }
+@@ -436,55 +427,6 @@ TEST(Imgcodecs_Bmp, rgba_scale)
+     ASSERT_EQ(data[0], 255);
+ }
+ 
+-typedef testing::TestWithParam<ImwriteBMPCompressionFlags> Imgcodecs_bmp_compress;
+-TEST_P(Imgcodecs_bmp_compress, rgba32bpp)
+-{
+-    const ImwriteBMPCompressionFlags comp = GetParam();
+-
+-    RNG rng = theRNG();
+-    Mat src(256, 256, CV_8UC4);
+-    rng.fill(src, RNG::UNIFORM, Scalar(0,0,0,0), Scalar(255,255,255,255));
+-
+-    vector<uint8_t> buf;
+-    bool ret = false;
+-    ASSERT_NO_THROW(ret = cv::imencode(".bmp", src, buf, {IMWRITE_BMP_COMPRESSION, static_cast<int>(comp)}));
+-    ASSERT_TRUE(ret);
+-
+-    ASSERT_EQ(buf[0x0e], comp == IMWRITE_BMP_COMPRESSION_RGB ? 40 : 124 ); // the size of header
+-    ASSERT_EQ(buf[0x0f],  0);
+-    ASSERT_EQ(buf[0x1c], 32); // the number of bits per pixel = 32
+-    ASSERT_EQ(buf[0x1d],  0);
+-    ASSERT_EQ(buf[0x1e], static_cast<int>(comp)); // the compression method
+-    ASSERT_EQ(buf[0x1f],  0);
+-    ASSERT_EQ(buf[0x20],  0);
+-    ASSERT_EQ(buf[0x21],  0);
+-
+-    Mat dst;
+-    ASSERT_NO_THROW(dst = cv::imdecode(buf, IMREAD_UNCHANGED));
+-    ASSERT_FALSE(dst.empty());
+-
+-    if(comp == IMWRITE_BMP_COMPRESSION_RGB)
+-    {
+-        // If BI_RGB is used, output BMP file stores RGB image.
+-        ASSERT_EQ(CV_8UC3, dst.type());
+-        Mat srcBGR;
+-        cv::cvtColor(src, srcBGR, cv::COLOR_BGRA2BGR);
+-        EXPECT_PRED_FORMAT2(cvtest::MatComparator(0, 0), srcBGR, dst);
+-    }
+-    else
+-    {
+-        // If BI_BITFIELDS is used, output BMP file stores RGBA image.
+-        ASSERT_EQ(CV_8UC4, dst.type());
+-        EXPECT_PRED_FORMAT2(cvtest::MatComparator(0, 0), src, dst);
+-    }
+-
+-}
+-INSTANTIATE_TEST_CASE_P(All,
+-    Imgcodecs_bmp_compress,
+-    testing::Values(
+-        IMWRITE_BMP_COMPRESSION_RGB,
+-        IMWRITE_BMP_COMPRESSION_BITFIELDS));
+-
+ #ifdef HAVE_IMGCODEC_HDR
+ TEST(Imgcodecs_Hdr, regression)
+ {
+diff --git a/modules/imgcodecs/test/test_precomp.hpp b/modules/imgcodecs/test/test_precomp.hpp
+index 67c5e95168..d2095932e8 100644
+--- a/modules/imgcodecs/test/test_precomp.hpp
++++ b/modules/imgcodecs/test/test_precomp.hpp
+@@ -80,23 +80,6 @@ void PrintTo(const ImreadModes& val, std::ostream* os)
+     *os << "IMREAD_UNKNOWN(" << (int)v << ")";
+ }
+ 
+-static inline
+-void PrintTo(const ImwriteBMPCompressionFlags& val, std::ostream* os)
+-{
+-    switch(val)
+-    {
+-        case IMWRITE_BMP_COMPRESSION_RGB:
+-            *os << "IMWRITE_BMP_COMPRESSION_RGB";
+-            break;
+-        case IMWRITE_BMP_COMPRESSION_BITFIELDS:
+-            *os << "IMWRITE_BMP_COMPRESSION_BITFIELDS";
+-            break;
+-        default:
+-            *os << "IMWRITE_BMP_COMPRESSION_UNKNOWN(" << (int)val << ")";
+-            break;
+-    }
+-}
+-
+ } // namespace
+ 
+ #endif

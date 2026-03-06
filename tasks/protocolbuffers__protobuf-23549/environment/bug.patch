@@ -1,0 +1,154 @@
+diff --git a/hpb/backend/upb/interop.h b/hpb/backend/upb/interop.h
+index 8b54213a5..e4fb84d16 100644
+--- a/hpb/backend/upb/interop.h
++++ b/hpb/backend/upb/interop.h
+@@ -16,7 +16,6 @@
+ #include "hpb/internal/internal.h"
+ #include "hpb/ptr.h"
+ #include "upb/base/string_view.h"
+-#include "upb/base/upcast.h"
+ #include "upb/mem/arena.h"
+ #include "upb/message/message.h"
+ #include "upb/mini_table/message.h"
+@@ -86,26 +85,11 @@ upb_Arena* UnwrapArena(T&& arena) {
+  * TODO: b/361596328 - revisit GetArena for CHandles
+  * TODO: b/362743843 - consider passing in MiniTable to ensure match
+  */
+-// REMARK: This overload will be deleted soon. Prefer the overloads that take in
+-// the CMessageType or MiniTable.
+ template <typename T>
+ typename T::CProxy MakeCHandle(const upb_Message* msg, upb_Arena* arena) {
+   return internal::PrivateAccess::CProxy<T>(msg, arena);
+ }
+ 
+-/* Creates a Handle from a const upb message.
+- *
+- * The supplied arena must outlive the hpb handle.
+- * All messages reachable from from the upb message must
+- * outlive the hpb handle.
+- */
+-template <typename T>
+-typename T::CProxy MakeCHandle(
+-    const typename internal::AssociatedUpbTypes<T>::CMessageType* msg,
+-    upb_Arena* arena) {
+-  return internal::PrivateAccess::CProxy<T>(UPB_UPCAST(msg), arena);
+-}
+-
+ /**
+  * Creates a Handle to a mutable upb message.
+  *
+@@ -113,26 +97,11 @@ typename T::CProxy MakeCHandle(
+  * All messages reachable from from the upb message must
+  * outlive the hpb handle.
+  */
+-// REMARK: This overload will be deleted soon. Prefer the overloads that take in
+-// the CMessageType or MiniTable.
+ template <typename T>
+ typename T::Proxy MakeHandle(upb_Message* msg, upb_Arena* arena) {
+   return typename T::Proxy(msg, arena);
+ }
+ 
+-/* Creates a Handle from a mutable upb message.
+- *
+- * The supplied arena must outlive the hpb handle.
+- * All messages reachable from from the upb message must
+- * outlive the hpb handle.
+- */
+-template <typename T>
+-typename T::Proxy MakeHandle(
+-    typename internal::AssociatedUpbTypes<T>::CMessageType* msg,
+-    upb_Arena* arena) {
+-  return internal::PrivateAccess::Proxy<T>(UPB_UPCAST(msg), arena);
+-}
+-
+ /**
+  * Creates a message in the given arena and returns a handle to it.
+  *
+diff --git a/hpb/backend/upb/interop_test.cc b/hpb/backend/upb/interop_test.cc
+index 6fa67e6b2..5b72d5da0 100644
+--- a/hpb/backend/upb/interop_test.cc
++++ b/hpb/backend/upb/interop_test.cc
+@@ -32,25 +32,5 @@ TEST(CppGeneratedCode, InteropMoveMessage) {
+   EXPECT_EQ(model.int_value_with_default(), 123);
+ }
+ 
+-TEST(CppGeneratedCode, CanCreateCProxyWithoutCasting) {
+-  upb_Arena* arena = upb_Arena_New();
+-  hpb_unittest_TestModel* msg = hpb_unittest_TestModel_new(arena);
+-
+-  hpb_unittest::protos::TestModel::CProxy const_handle =
+-      hpb::interop::upb::MakeCHandle<TestModel>(msg, arena);
+-  EXPECT_EQ(const_handle.value(), 0);
+-  upb_Arena_Free(arena);
+-}
+-
+-TEST(CppGeneratedCode, CanCreateProxyWithoutCasting) {
+-  upb_Arena* arena = upb_Arena_New();
+-  hpb_unittest_TestModel* msg = hpb_unittest_TestModel_new(arena);
+-
+-  hpb_unittest::protos::TestModel::Proxy handle =
+-      hpb::interop::upb::MakeHandle<TestModel>(msg, arena);
+-  EXPECT_EQ(handle.value(), 0);
+-  upb_Arena_Free(arena);
+-}
+-
+ }  // namespace
+ }  // namespace hpb::testing
+diff --git a/hpb/internal/internal.h b/hpb/internal/internal.h
+index f4be198ed..cff03ab03 100644
+--- a/hpb/internal/internal.h
++++ b/hpb/internal/internal.h
+@@ -58,9 +58,6 @@ struct PrivateAccess {
+   }
+ };
+ 
+-template <typename T>
+-struct AssociatedUpbTypes;
+-
+ }  // namespace hpb::internal
+ 
+ #endif  // GOOGLE_PROTOBUF_HPB_INTERNAL_INTERNAL_H__
+diff --git a/hpb_generator/generator.cc b/hpb_generator/generator.cc
+index 15f463c14..d0f2e7da1 100644
+--- a/hpb_generator/generator.cc
++++ b/hpb_generator/generator.cc
+@@ -23,7 +23,6 @@
+ #include "hpb_generator/gen_utils.h"
+ #include "hpb_generator/names.h"
+ #include "google/protobuf/descriptor.h"
+-#include "upb_generator/c/names.h"
+ 
+ namespace google {
+ namespace protobuf {
+@@ -147,31 +146,6 @@ void WriteHeader(const google::protobuf::FileDescriptor* file, Context& ctx) {
+     ctx.Emit("\n");
+   });
+ 
+-  ctx.Emit("namespace hpb::internal {\n");
+-  const std::vector<const google::protobuf::Descriptor*> messages_to_emit_helpers =
+-      SortedMessages(file);
+-  for (auto desc : messages_to_emit_helpers) {
+-    if (desc->map_key() != nullptr) {
+-      continue;
+-    }
+-    std::string outer_namespace =
+-        absl::StrCat(NamespaceFromPackageName(file->package()), "::");
+-    if (file->package().empty()) {
+-      outer_namespace = "";
+-    }
+-    ctx.Emit({{"class_name", ClassName(desc)},
+-              {"outer_namespace", outer_namespace},
+-              {"c_api_msg_type",
+-               upb::generator::CApiMessageType(desc->full_name())}},
+-             R"cc(
+-               template <>
+-               struct AssociatedUpbTypes<$outer_namespace$$class_name$> {
+-                 using CMessageType = $c_api_msg_type$;
+-               };
+-             )cc");
+-  }
+-
+-  ctx.Emit("}  // namespace hpb::internal\n");
+   ctx.Emit(
+       "#include \"hpb/internal/os_macros_restore.inc\"\n");
+   ctx.Emit("\n#include \"upb/port/undef.inc\"\n\n");

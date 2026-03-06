@@ -1,0 +1,165 @@
+diff --git a/rust/BUILD b/rust/BUILD
+index 8b76e7b25..29dd89641 100644
+--- a/rust/BUILD
++++ b/rust/BUILD
+@@ -262,6 +262,7 @@ config_setting(
+     flag_values = {
+         ":rust_proto_library_kernel": "upb",
+     },
++    visibility = ["//:__subpackages__"],
+ )
+ 
+ pkg_files(
+diff --git a/rust/defs.bzl b/rust/defs.bzl
+index b787d108f..9d2dcd50e 100644
+--- a/rust/defs.bzl
++++ b/rust/defs.bzl
+@@ -52,14 +52,14 @@ def rust_proto_library(name, deps, **args):
+     rust_upb_proto_library(
+         name = name + "_upb_rust_proto",
+         deps = deps,
+-        visibility = ["//visibility:private"],
++        visibility = ["//rust/test:__subpackages__"],
+         **args
+     )
+ 
+     rust_cc_proto_library(
+         name = name + "_cpp_rust_proto",
+         deps = deps,
+-        visibility = ["//visibility:private"],
++        visibility = ["//rust/test:__subpackages__"],
+         **args
+     )
+ 
+diff --git a/rust/release_crates/protobuf_well_known_types/BUILD.bazel b/rust/release_crates/protobuf_well_known_types/BUILD.bazel
+index 10a21cd05..cd25e788f 100644
+--- a/rust/release_crates/protobuf_well_known_types/BUILD.bazel
++++ b/rust/release_crates/protobuf_well_known_types/BUILD.bazel
+@@ -54,7 +54,7 @@ genrule(
+         "google/protobuf/type.u.pb.rs",
+         "google/protobuf/wrappers.u.pb.rs",
+     ],
+-    cmd = "echo $(SRCS) | sed 's?^src/??' | xargs $(location //:protoc) -I src --rust_out=$(@D) --rust_opt=experimental-codegen=enabled,kernel=upb",
++    cmd = "echo $(SRCS) | sed 's?src/??g' | xargs $(location //:protoc) -I src --rust_out=$(@D) --rust_opt=experimental-codegen=enabled,kernel=upb",
+     tools = ["//:protoc"],
+ )
+ 
+diff --git a/rust/upb.rs b/rust/upb.rs
+index 037f93f34..21a322bd9 100644
+--- a/rust/upb.rs
++++ b/rust/upb.rs
+@@ -1350,3 +1350,14 @@ pub unsafe fn message_set_map_field<
+         parent.ptr.set_map_at_index(index, inner.as_raw());
+     }
+ }
++
++pub mod __unstable {
++    // Stores a serialized FileDescriptorProto, along with references to its dependencies.
++    pub struct DescriptorInfo {
++        // The serialized FileDescriptorProto.
++        pub descriptor: &'static [u8],
++        // A reference to the DescriptorInfo associated with each .proto file that the current one
++        // imports.
++        pub deps: &'static [&'static DescriptorInfo],
++    }
++}
+diff --git a/src/google/protobuf/BUILD.bazel b/src/google/protobuf/BUILD.bazel
+index 5c0dec92d..84c140d2a 100644
+--- a/src/google/protobuf/BUILD.bazel
++++ b/src/google/protobuf/BUILD.bazel
+@@ -317,6 +317,7 @@ proto_library(
+     visibility = [
+         "//:__pkg__",
+         "//pkg:__pkg__",
++        "//rust/test:__pkg__",
+     ],
+ )
+ 
+diff --git a/src/google/protobuf/compiler/rust/generator.cc b/src/google/protobuf/compiler/rust/generator.cc
+index 1ad871a03..60d0477ef 100644
+--- a/src/google/protobuf/compiler/rust/generator.cc
++++ b/src/google/protobuf/compiler/rust/generator.cc
+@@ -18,6 +18,7 @@
+ #include "absl/memory/memory.h"
+ #include "absl/status/status.h"
+ #include "absl/status/statusor.h"
++#include "absl/strings/escaping.h"
+ #include "absl/strings/match.h"
+ #include "absl/strings/str_cat.h"
+ #include "absl/strings/str_replace.h"
+@@ -136,6 +137,43 @@ void EmitEntryPointRsFile(GeneratorContext* generator_context,
+               pub use internal_do_not_use_$mod_name$::*;
+             )rs");
+   }
++
++  auto v = ctx.printer().WithVars({
++      {"pbu", "::protobuf::__internal::runtime::__unstable"},
++  });
++  if (ctx.is_upb() && !ctx.opts().strip_nonfunctional_codegen) {
++    ctx.Emit(R"rs(
++      pub mod __unstable {
++    )rs");
++    for (const FileDescriptor* file : files) {
++      FileDescriptorProto descriptor_proto;
++      file->CopyTo(&descriptor_proto);
++      ctx.Emit({{"name", DescriptorInfoName(*file)},
++                {"serialized_descriptor",
++                 absl::CHexEscape(descriptor_proto.SerializeAsString())},
++                {"deps",
++                 [&] {
++                   for (int i = 0; i < file->dependency_count(); ++i) {
++                     const FileDescriptor& dep = *file->dependency(i);
++                     std::string mod = IsInCurrentlyGeneratingCrate(ctx, dep)
++                                           ? "super"
++                                           : GetCrateName(ctx, dep);
++                     ctx.Emit(
++                         {{"mod", mod}, {"dep_name", DescriptorInfoName(dep)}},
++                         "&$mod$::__unstable::$dep_name$,\n");
++                   }
++                 }}},
++               R"rs(
++          pub static $name$: $pbu$::DescriptorInfo = $pbu$::DescriptorInfo {
++            descriptor: b"$serialized_descriptor$",
++            deps: &[
++              $deps$
++            ],
++          };
++      )rs");
++    }
++    ctx.Emit("}\n");
++  }
+ }
+ 
+ }  // namespace
+diff --git a/src/google/protobuf/compiler/rust/naming.cc b/src/google/protobuf/compiler/rust/naming.cc
+index bcb93cb00..7a6a8bf2d 100644
+--- a/src/google/protobuf/compiler/rust/naming.cc
++++ b/src/google/protobuf/compiler/rust/naming.cc
+@@ -439,6 +439,13 @@ absl::string_view MultiCasePrefixStripper::StripPrefix(
+   return name;
+ }
+ 
++std::string DescriptorInfoName(const FileDescriptor& file) {
++  std::string name =
++      absl::StrReplaceAll(StripProto(file.name()), {{"/", "_"}, {"-", "_"}});
++  absl::AsciiStrToUpper(&name);
++  return absl::StrCat(name, "_DESCRIPTOR_INFO");
++}
++
+ }  // namespace rust
+ }  // namespace compiler
+ }  // namespace protobuf
+diff --git a/src/google/protobuf/compiler/rust/naming.h b/src/google/protobuf/compiler/rust/naming.h
+index eaae5fa00..e440e4f99 100644
+--- a/src/google/protobuf/compiler/rust/naming.h
++++ b/src/google/protobuf/compiler/rust/naming.h
+@@ -148,6 +148,9 @@ class MultiCasePrefixStripper final {
+ std::string EnumValueRsName(const MultiCasePrefixStripper& stripper,
+                             absl::string_view value_name);
+ 
++// Returns the name of the generated DescriptorInfo object for the given file.
++std::string DescriptorInfoName(const FileDescriptor& file);
++
+ // Describes the names and conversions for a supported map key type.
+ struct MapKeyType {
+   // Identifier used in thunk name.

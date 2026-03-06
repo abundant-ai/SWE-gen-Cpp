@@ -1,0 +1,206 @@
+diff --git a/modules/imgcodecs/src/bitstrm.cpp b/modules/imgcodecs/src/bitstrm.cpp
+index bb92d8a73b..12d9c1bcae 100644
+--- a/modules/imgcodecs/src/bitstrm.cpp
++++ b/modules/imgcodecs/src/bitstrm.cpp
+@@ -59,7 +59,17 @@ void  RBaseStream::readBlock()
+         throw RBS_THROW_EOS;
+     }
+ 
++#ifdef _WIN32
++    // See https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/fseek-fseeki64?view=msvc-170
++    // See https://en.wikipedia.org/wiki/64-bit_computing#64-bit_data_models
++    // - Windows uses LLP64 data model, sizeof long int = 32.
++    // - Linux   uses LP64  data model, sizeof long int = 64.
++    // So for Windows, we have to use _fseeki64() instead of fseek().
++    _fseeki64( m_file, m_block_pos, SEEK_SET );
++#else
+     fseek( m_file, m_block_pos, SEEK_SET );
++#endif
++
+     size_t readed = fread( m_start, 1, m_block_size, m_file );
+     m_end = m_start + readed;
+ 
+@@ -120,7 +130,7 @@ void  RBaseStream::release()
+ }
+ 
+ 
+-void  RBaseStream::setPos( int pos )
++void  RBaseStream::setPos( int64_t pos )
+ {
+     CV_Assert(isOpened() && pos >= 0);
+ 
+@@ -132,7 +142,7 @@ void  RBaseStream::setPos( int pos )
+     }
+ 
+     int offset = pos % m_block_size;
+-    int old_block_pos = m_block_pos;
++    int64_t old_block_pos = m_block_pos;
+     m_block_pos = pos - offset;
+     m_current = m_start + offset;
+     if (old_block_pos != m_block_pos)
+@@ -140,16 +150,16 @@ void  RBaseStream::setPos( int pos )
+ }
+ 
+ 
+-int  RBaseStream::getPos()
++int64_t RBaseStream::getPos()
+ {
+     CV_Assert(isOpened());
+-    int pos = validateToInt((m_current - m_start) + m_block_pos);
++    int64_t pos = validateToInt64((m_current - m_start) + m_block_pos);
+     CV_Assert(pos >= m_block_pos); // overflow check
+     CV_Assert(pos >= 0); // overflow check
+     return pos;
+ }
+ 
+-void  RBaseStream::skip( int bytes )
++void  RBaseStream::skip( int64_t bytes )
+ {
+     CV_Assert(bytes >= 0);
+     uchar* old = m_current;
+diff --git a/modules/imgcodecs/src/bitstrm.hpp b/modules/imgcodecs/src/bitstrm.hpp
+index 68982175f0..fbe918665a 100644
+--- a/modules/imgcodecs/src/bitstrm.hpp
++++ b/modules/imgcodecs/src/bitstrm.hpp
+@@ -45,9 +45,9 @@ public:
+     virtual bool  open( const Mat& buf );
+     virtual void  close();
+     bool          isOpened();
+-    void          setPos( int pos );
+-    int           getPos();
+-    void          skip( int bytes );
++    void          setPos( int64_t pos );
++    int64_t       getPos();
++    void          skip( int64_t bytes );
+ 
+ protected:
+ 
+@@ -57,7 +57,7 @@ protected:
+     uchar*  m_current;
+     FILE*   m_file;
+     int     m_block_size;
+-    int     m_block_pos;
++    int64_t m_block_pos;
+     bool    m_is_opened;
+ 
+     virtual void  readBlock();
+diff --git a/modules/imgcodecs/src/grfmt_bmp.cpp b/modules/imgcodecs/src/grfmt_bmp.cpp
+index faff17811e..f0802211d9 100644
+--- a/modules/imgcodecs/src/grfmt_bmp.cpp
++++ b/modules/imgcodecs/src/grfmt_bmp.cpp
+@@ -237,9 +237,6 @@ bool  BmpDecoder::readData( Mat& img )
+     int  nch = color ? 3 : 1;
+     int  y, width3 = m_width*nch;
+ 
+-    // FIXIT: use safe pointer arithmetic (avoid 'int'), use size_t, intptr_t, etc
+-    CV_Assert(((uint64)m_height * m_width * nch < (CV_BIG_UINT(1) << 30)) && "BMP reader implementation doesn't support large images >= 1Gb");
+-
+     if( m_offset < 0 || !m_strm.isOpened())
+         return false;
+ 
+diff --git a/modules/imgcodecs/src/grfmt_bmp.hpp b/modules/imgcodecs/src/grfmt_bmp.hpp
+index a9f5fe6040..82e8fa6c78 100644
+--- a/modules/imgcodecs/src/grfmt_bmp.hpp
++++ b/modules/imgcodecs/src/grfmt_bmp.hpp
+@@ -87,7 +87,7 @@ protected:
+     PaletteEntry    m_palette[256];
+     Origin          m_origin;
+     int             m_bpp;
+-    int             m_offset;
++    int64_t         m_offset;
+     BmpCompression  m_rle_code;
+     uint            m_rgba_mask[4];
+     int             m_rgba_bit_offset[4];
+diff --git a/modules/imgcodecs/src/grfmt_pam.hpp b/modules/imgcodecs/src/grfmt_pam.hpp
+index f9b2614b28..3b5c1aa2cd 100644
+--- a/modules/imgcodecs/src/grfmt_pam.hpp
++++ b/modules/imgcodecs/src/grfmt_pam.hpp
+@@ -78,8 +78,8 @@ public:
+ protected:
+ 
+     RLByteStream    m_strm;
+-    int m_maxval, m_channels, m_sampledepth, m_offset,
+-        selected_fmt;
++    int64_t m_offset;
++    int m_maxval, m_channels, m_sampledepth, selected_fmt;
+     bool bit_mode;
+ };
+ 
+diff --git a/modules/imgcodecs/src/grfmt_pxm.hpp b/modules/imgcodecs/src/grfmt_pxm.hpp
+index 6404e96ef1..ebf63eb8f1 100644
+--- a/modules/imgcodecs/src/grfmt_pxm.hpp
++++ b/modules/imgcodecs/src/grfmt_pxm.hpp
+@@ -79,7 +79,7 @@ protected:
+     RLByteStream    m_strm;
+     PaletteEntry    m_palette[256];
+     int             m_bpp;
+-    int             m_offset;
++    int64_t         m_offset;
+     bool            m_binary;
+     int             m_maxval;
+ };
+diff --git a/modules/imgcodecs/src/grfmt_sunras.cpp b/modules/imgcodecs/src/grfmt_sunras.cpp
+index f2878d1760..0dd31b3b1a 100644
+--- a/modules/imgcodecs/src/grfmt_sunras.cpp
++++ b/modules/imgcodecs/src/grfmt_sunras.cpp
+@@ -94,7 +94,7 @@ bool  SunRasterDecoder::readHeader()
+                     m_type = IsColorPalette( m_palette, m_bpp ) ? CV_8UC3 : CV_8UC1;
+                     m_offset = m_strm.getPos();
+ 
+-                    CV_Assert(m_offset == 32 + m_maplength);
++                    CV_Assert(m_offset == static_cast<int64_t>(32 + m_maplength));
+                     result = true;
+                 }
+             }
+@@ -107,7 +107,7 @@ bool  SunRasterDecoder::readHeader()
+ 
+                 m_offset = m_strm.getPos();
+ 
+-                CV_Assert(m_offset == 32 + m_maplength);
++                CV_Assert(m_offset == static_cast<int64_t>(32 + m_maplength));
+                 result = true;
+             }
+         }
+diff --git a/modules/imgcodecs/src/grfmt_sunras.hpp b/modules/imgcodecs/src/grfmt_sunras.hpp
+index fc6284ad40..6a85e36aab 100644
+--- a/modules/imgcodecs/src/grfmt_sunras.hpp
++++ b/modules/imgcodecs/src/grfmt_sunras.hpp
+@@ -84,7 +84,7 @@ protected:
+     RMByteStream    m_strm;
+     PaletteEntry    m_palette[256];
+     int             m_bpp;
+-    int             m_offset;
++    int64_t         m_offset;
+     SunRasType      m_encoding;
+     SunRasMapType   m_maptype;
+     int             m_maplength;
+diff --git a/modules/imgcodecs/src/utils.cpp b/modules/imgcodecs/src/utils.cpp
+index 41fd9f5041..1e14e86610 100644
+--- a/modules/imgcodecs/src/utils.cpp
++++ b/modules/imgcodecs/src/utils.cpp
+@@ -51,6 +51,13 @@ int validateToInt(size_t sz)
+     return valueInt;
+ }
+ 
++int64_t validateToInt64(size_t sz)
++{
++    int64_t valueInt = static_cast<int64_t>(sz);
++    CV_Assert((size_t)valueInt == sz);
++    return valueInt;
++}
++
+ #define  SCALE  14
+ #define  cR  (int)(0.299*(1 << SCALE) + 0.5)
+ #define  cG  (int)(0.587*(1 << SCALE) + 0.5)
+diff --git a/modules/imgcodecs/src/utils.hpp b/modules/imgcodecs/src/utils.hpp
+index 95deebde31..b5a00c47b3 100644
+--- a/modules/imgcodecs/src/utils.hpp
++++ b/modules/imgcodecs/src/utils.hpp
+@@ -45,6 +45,7 @@
+ namespace cv {
+ 
+ int validateToInt(size_t step);
++int64_t validateToInt64(size_t step);
+ 
+ template <typename _Tp> static inline
+ size_t safeCastToSizeT(const _Tp v_origin, const char* msg)

@@ -1,0 +1,159 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index 1cf387123c..6af2155080 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -514,6 +514,12 @@ CV__DNN_INLINE_NS_BEGIN
+         static Ptr<Reshape2Layer> create(const LayerParams& params);
+     };
+ 
++    class CV_EXPORTS IsNaNLayer : public Layer
++    {
++    public:
++        static Ptr<IsNaNLayer> create(const LayerParams& params);
++    };
++
+     class CV_EXPORTS FlattenLayer : public Layer
+     {
+     public:
+diff --git a/modules/dnn/src/init.cpp b/modules/dnn/src/init.cpp
+index 56e8a9b85b..0079c5cdc2 100644
+--- a/modules/dnn/src/init.cpp
++++ b/modules/dnn/src/init.cpp
+@@ -109,6 +109,7 @@ void initializeLayerFactory()
+     CV_DNN_REGISTER_LAYER_CLASS(Tile2,          Tile2Layer);
+     CV_DNN_REGISTER_LAYER_CLASS(Transpose,      TransposeLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Unsqueeze,      UnsqueezeLayer);
++    CV_DNN_REGISTER_LAYER_CLASS(IsNaN,          IsNaNLayer);
+ 
+     CV_DNN_REGISTER_LAYER_CLASS(Convolution,    ConvolutionLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Deconvolution,  DeconvolutionLayer);
+diff --git a/modules/dnn/src/layers/is_nan_layer.cpp b/modules/dnn/src/layers/is_nan_layer.cpp
+new file mode 100644
+index 0000000000..8361c0d454
+--- /dev/null
++++ b/modules/dnn/src/layers/is_nan_layer.cpp
+@@ -0,0 +1,91 @@
++// This file is part of OpenCV project.
++// It is subject to the license terms in the LICENSE file found in the top-level directory
++// of this distribution and at http://opencv.org/license.html.
++// Copyright (C) 2025, BigVision LLC, all rights reserved.
++// Third party copyrights are property of their respective owners.
++
++#include "../precomp.hpp"
++#include "layers_common.hpp"
++#include "opencv2/core/fast_math.hpp"  // for cvIsNaN
++
++namespace cv {
++namespace dnn {
++
++/*
++    IsNaN layer, as defined in ONNX specification:
++    https://onnx.ai/onnx/operators/onnx__IsNaN.html
++
++    Opset's 9 to 20 are covered.
++*/
++
++template <typename T, typename WT = T>
++static inline void computeIsNaNMask(const T* src, uchar* dst, const size_t count)
++{
++    parallel_for_(Range(0, (int)count), [&](const Range& r){
++        for (int i = r.start; i < r.end; ++i)
++        {
++            WT v = (WT)src[i];
++            dst[i] = static_cast<uchar>(cvIsNaN(v));
++        }
++    });
++}
++
++class IsNaNLayerImpl CV_FINAL : public IsNaNLayer
++{
++public:
++    IsNaNLayerImpl(const LayerParams& params)
++    {
++        setParamsFrom(params);
++    }
++
++    bool supportBackend(int backendId) CV_OVERRIDE
++    {
++        return backendId == DNN_BACKEND_OPENCV;
++    }
++
++    bool getMemoryShapes(const std::vector<MatShape>& inputs, int,
++                         std::vector<MatShape>& outputs,
++                         std::vector<MatShape>&) const CV_OVERRIDE
++    {
++        CV_Assert(inputs.size() == 1);
++        outputs.assign(1, inputs[0]);
++        return false;
++    }
++
++    void getTypes(const std::vector<MatType>&, const int requiredOutputs,
++                  const int requiredInternals, std::vector<MatType>& outputs,
++                  std::vector<MatType>& internals) const CV_OVERRIDE
++    {
++        outputs.assign(requiredOutputs, CV_Bool);
++        internals.assign(requiredInternals, MatType(-1));
++    }
++
++    void forward(InputArrayOfArrays in, OutputArrayOfArrays out, OutputArrayOfArrays) CV_OVERRIDE
++    {
++        std::vector<Mat> inputs, outputs; in.getMatVector(inputs); out.getMatVector(outputs);
++        CV_Assert(inputs.size() == 1 && outputs.size() == 1);
++
++        const Mat& X = inputs[0];
++        Mat& Y = outputs[0];
++
++        const int defaultOutType = CV_BoolC1;
++        const int outType = (Y.empty() || Y.type() < 0) ? defaultOutType : Y.type();
++        Y.create(X.dims, X.size.p, outType);
++
++        const int depth = CV_MAT_DEPTH(X.type());
++        const size_t total = X.total();
++        uchar* dst = Y.ptr<uchar>();
++
++        switch (depth) {
++            case CV_32F: computeIsNaNMask<float>(X.ptr<float>(), dst, total);    break;
++            case CV_64F: computeIsNaNMask<double>(X.ptr<double>(), dst, total);   break;
++            case CV_16F: computeIsNaNMask<hfloat, float>(X.ptr<hfloat>(), dst, total); break;
++            case CV_16BF: computeIsNaNMask<bfloat, float>(X.ptr<bfloat>(), dst, total); break;
++            default: CV_Error_(Error::StsError, ("IsNaN: Unsupported type depth=%d", depth));
++        }
++    }
++};
++
++Ptr<IsNaNLayer> IsNaNLayer::create(const LayerParams& p) { return makePtr<IsNaNLayerImpl>(p); }
++
++}} // namespace cv::dnn
+diff --git a/modules/dnn/src/onnx/onnx_importer2.cpp b/modules/dnn/src/onnx/onnx_importer2.cpp
+index 97345015f1..d045ab8357 100644
+--- a/modules/dnn/src/onnx/onnx_importer2.cpp
++++ b/modules/dnn/src/onnx/onnx_importer2.cpp
+@@ -210,6 +210,7 @@ protected:
+     void parseReduce               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseRelu                 (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseTrilu                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
++    void parseIsNaN                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseResize               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseSize               (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseReshape              (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+@@ -1610,6 +1611,12 @@ void ONNXImporter2::parseTrilu(LayerParams& layerParams, const opencv_onnx::Node
+ 
+ }
+ 
++void ONNXImporter2::parseIsNaN(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
++{
++    layerParams.type = "IsNaN";
++    addLayer(layerParams, node_proto);
++}
++
+ void ONNXImporter2::parseUpsample(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+ {
+     int n_inputs = node_proto.input_size();
+@@ -2440,6 +2447,7 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI(int opset_version)
+     dispatch["Resize"] = &ONNXImporter2::parseResize;
+     dispatch["Size"] = &ONNXImporter2::parseSize;
+     dispatch["Trilu"] = &ONNXImporter2::parseTrilu;
++    dispatch["IsNaN"] = &ONNXImporter2::parseIsNaN;
+     dispatch["Upsample"] = &ONNXImporter2::parseUpsample;
+     dispatch["SoftMax"] = dispatch["Softmax"] = dispatch["LogSoftmax"] = &ONNXImporter2::parseSoftMax;
+     dispatch["DetectionOutput"] = &ONNXImporter2::parseDetectionOutput;

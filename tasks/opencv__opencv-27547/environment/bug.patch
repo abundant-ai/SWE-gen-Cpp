@@ -1,0 +1,339 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index 9e9cd5f8e2..10916122b3 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -1382,12 +1382,6 @@ CV__DNN_INLINE_NS_BEGIN
+         static Ptr<TriluLayer> create(const LayerParams& params);
+     };
+ 
+-    class CV_EXPORTS TopK2Layer : public Layer
+-    {
+-    public:
+-        static Ptr<TopK2Layer> create(const LayerParams &params);
+-    };
+-
+ //! @}
+ //! @}
+ CV__DNN_INLINE_NS_END
+diff --git a/modules/dnn/src/init.cpp b/modules/dnn/src/init.cpp
+index 58c41e4e59..fae419d52a 100644
+--- a/modules/dnn/src/init.cpp
++++ b/modules/dnn/src/init.cpp
+@@ -222,7 +222,6 @@ void initializeLayerFactory()
+     CV_DNN_REGISTER_LAYER_CLASS(ScatterND,      ScatterNDLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Tile,           TileLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(TopK,           TopKLayer);
+-    CV_DNN_REGISTER_LAYER_CLASS(TopK2,          TopK2Layer);
+ 
+     CV_DNN_REGISTER_LAYER_CLASS(Quantize,         QuantizeLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Dequantize,       DequantizeLayer);
+diff --git a/modules/dnn/src/layers/topk2_layer.cpp b/modules/dnn/src/layers/topk2_layer.cpp
+deleted file mode 100644
+index 217f8315ca..0000000000
+--- a/modules/dnn/src/layers/topk2_layer.cpp
++++ /dev/null
+@@ -1,218 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-
+-#include "../precomp.hpp"
+-#include <opencv2/dnn/shape_utils.hpp>
+-
+-namespace cv { namespace dnn {
+-
+-/*
+-    TopK layer, as defined in ONNX specification:
+-    https://onnx.ai/onnx/operators/onnx__TopK.html
+-
+-    Opset’s 1, 10 and 11 are covered.
+-*/
+-
+-namespace {
+-
+-template<typename T, typename WT = T>
+-class ComparatorGreater {
+-public:
+-    using value_type = std::pair<T, WT>;
+-    bool operator()(const value_type& a, const value_type& b) const {
+-        return (a.second > b.second || (a.second == b.second && a.first < b.first));
+-    }
+-};
+-
+-template<typename T, typename WT = T>
+-class ComparatorLess {
+-public:
+-    using value_type = std::pair<T, WT>;
+-    bool operator()(const value_type& a, const value_type& b) const {
+-        return (a.second < b.second || (a.second == b.second && a.first < b.first));
+-    }
+-};
+-}
+-
+-class TopK2LayerImpl CV_FINAL : public TopK2Layer
+-{
+-public:
+-    int axis;
+-    bool largest;
+-    bool sorted;
+-    int K;
+-    bool dynamicK;
+-
+-    TopK2LayerImpl(const LayerParams& params)
+-    {
+-        setParamsFrom(params);
+-        axis    = params.get<int>("axis", -1);
+-        largest = params.get<int>("largest", 1) == 1;
+-        sorted  = params.get<int>("sorted", 1) == 1;
+-        CV_CheckTrue(sorted, "TopK2: sorted == false is not supported");
+-        if (params.has("k")) {
+-            K = params.get<int>("k");
+-            CV_CheckGT(K, 0, "TopK2: K needs to be a positive integer");
+-            dynamicK = false;
+-        } else {
+-            dynamicK = true;
+-            K = 0;
+-        }
+-    }
+-
+-    bool supportBackend(int backendId) CV_OVERRIDE
+-    {
+-        return backendId == DNN_BACKEND_OPENCV;
+-    }
+-
+-    virtual bool dynamicOutputShapes() const CV_OVERRIDE
+-    {
+-        return dynamicK;
+-    }
+-
+-    bool getMemoryShapes(const std::vector<MatShape>& inputs,
+-                         const int requiredOutputs,
+-                         std::vector<MatShape>& outputs,
+-                         std::vector<MatShape>& internals) const CV_OVERRIDE
+-    {
+-        CV_Assert(!inputs.empty());
+-        CV_Assert(K > 0);
+-        const MatShape& inShape = inputs[0];
+-        int inputDims = static_cast<int>(inShape.size());
+-        int a = normalize_axis(axis, inputDims);
+-        CV_Assert(a >= 0 && a < inputDims);
+-        CV_CheckLT(K, inShape[a] + 1, "TopK2: K is out of range");
+-
+-        MatShape outShape = inShape;
+-        outShape[a] = K;
+-        outputs.assign(2, outShape);
+-        internals.clear();
+-        return false;
+-    }
+-
+-    void getTypes(const std::vector<MatType>& inputs,
+-                  const int requiredOutputs,
+-                  const int requiredInternals,
+-                  std::vector<MatType>& outputs,
+-                  std::vector<MatType>& internals) const CV_OVERRIDE
+-    {
+-        outputs.resize(2);
+-        outputs[0] = inputs.front();
+-        outputs[1] = CV_64S;
+-    }
+-
+-private:
+-    template<typename T, typename WT = T>
+-    void FindTopK(const Mat &input, Mat &output_vals, Mat &output_idxs, int normalized_axis, int kVal)
+-    {
+-        const auto inShape = shape(input);
+-        size_t outer = std::accumulate(inShape.begin(), inShape.begin() + normalized_axis, 1, std::multiplies<int>());
+-        size_t inner = std::accumulate(inShape.begin() + normalized_axis + 1, inShape.end(), 1, std::multiplies<int>());
+-        int dimAxis = inShape[normalized_axis];
+-
+-        auto worker = [&](const Range &r) {
+-            const T* inPtr = input.ptr<T>();
+-            T* valPtr = output_vals.ptr<T>();
+-            int64_t* idxPtr = output_idxs.ptr<int64_t>();
+-
+-            std::vector<std::pair<uint32_t, WT>> sortbuf(dimAxis);
+-            for (size_t b = r.start; b < r.end; ++b) {
+-                for (size_t j = 0; j < inner; ++j) {
+-                    size_t offset = b * dimAxis * inner + j;
+-                    for (uint32_t u = 0; u < (uint32_t)dimAxis; ++u) {
+-                        sortbuf[u].first  = u;
+-                        sortbuf[u].second = WT(inPtr[offset + u * inner]);
+-                    }
+-                    if (largest){
+-                        ComparatorGreater<uint32_t,WT> cmp;
+-                        std::partial_sort(sortbuf.begin(), sortbuf.begin() + kVal, sortbuf.end(), cmp);
+-                    }
+-                    else{
+-                        ComparatorLess<uint32_t,WT> cmp;
+-                        std::partial_sort(sortbuf.begin(), sortbuf.begin() + kVal, sortbuf.end(), cmp);
+-                    }
+-                    for (int i = 0; i < kVal; ++i) {
+-                        auto &p = sortbuf[i];
+-                        valPtr[b * kVal * inner + i * inner + j] = T(p.second);
+-                        idxPtr[b * kVal * inner + i * inner + j] = p.first;
+-                    }
+-                }
+-            }
+-        };
+-        parallel_for_(Range(0, static_cast<int>(outer)), worker);
+-    }
+-
+-public:
+-    void forward(InputArrayOfArrays inputs_arr,
+-                 OutputArrayOfArrays outputs_arr,
+-                 OutputArrayOfArrays internals_arr) CV_OVERRIDE
+-    {
+-        CV_TRACE_FUNCTION();
+-        std::vector<Mat> inputs, outputs;
+-        inputs_arr.getMatVector(inputs);
+-        outputs_arr.getMatVector(outputs);
+-
+-        const auto &input = inputs.front();
+-        Mat output_value, output_index;
+-
+-        // Normalize axis to handle negative values
+-        int normalized_axis = normalize_axis(axis, input.dims);
+-
+-        int kVal = K;
+-        if (dynamicK) {
+-            CV_Assert(inputs.size() == 2);
+-            CV_Assert(inputs[1].type() == CV_64S);
+-            CV_Assert(inputs[1].total() == 1);
+-            int64_t kTemp = inputs[1].at<int64_t>(0);
+-            CV_CheckGT(kTemp, 0, "TopK2: dynamic K must be > 0");
+-            CV_CheckLT(kTemp, input.size[normalized_axis] + 1, "TopK2: dynamic K is out of range");
+-            kVal = static_cast<int>(kTemp);
+-        }
+-
+-        MatShape outShape = shape(input);
+-        outShape[normalized_axis] = kVal;
+-
+-        auto kind = outputs_arr.kind();
+-        if (kind == _InputArray::STD_VECTOR_MAT) {
+-            std::vector<Mat>& outs = outputs_arr.getMatVecRef();
+-            CV_Assert(outs.size() == 2);
+-            outs[0].fit(outShape, input.type());
+-            outs[1].fit(outShape, CV_64S);
+-            output_value = outs[0];
+-            output_index = outs[1];
+-        } else if (kind == _InputArray::STD_VECTOR_UMAT) {
+-            std::vector<UMat>& uouts = outputs_arr.getUMatVecRef();
+-            CV_Assert(uouts.size() == 2);
+-            uouts[0].fit(outShape, input.type());
+-            uouts[1].fit(outShape, CV_64S);
+-            output_value = uouts[0].getMat(ACCESS_WRITE);
+-            output_index = uouts[1].getMat(ACCESS_WRITE);
+-        } else {
+-            CV_Error(cv::Error::StsBadArg, cv::format("Unsupported output array kind: %d", kind));
+-        }
+-
+-        switch (input.depth()) {
+-            case CV_8U:   FindTopK<uint8_t          >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_8S:   FindTopK<int8_t           >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_16U:  FindTopK<uint16_t         >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_16S:  FindTopK<int16_t          >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_16F:  FindTopK<hfloat, float    >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_16BF: FindTopK<bfloat, float    >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_32U:  FindTopK<uint32_t         >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_32S:  FindTopK<int32_t          >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_32F:  FindTopK<float            >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_64U:  FindTopK<uint64_t         >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_64S:  FindTopK<int64_t          >(input, output_value, output_index, normalized_axis, kVal); break;
+-            case CV_64F:  FindTopK<double           >(input, output_value, output_index, normalized_axis, kVal); break;
+-            default: CV_Error(Error::BadDepth, "Unsupported input data type");
+-        }
+-    }
+-};
+-
+-Ptr<TopK2Layer> TopK2Layer::create(const LayerParams& params)
+-{
+-    return makePtr<TopK2LayerImpl>(params);
+-}
+-
+-}} // namespace cv::dnn
+diff --git a/modules/dnn/src/onnx/onnx_importer2.cpp b/modules/dnn/src/onnx/onnx_importer2.cpp
+index 63cdb0de2d..45609a991b 100644
+--- a/modules/dnn/src/onnx/onnx_importer2.cpp
++++ b/modules/dnn/src/onnx/onnx_importer2.cpp
+@@ -224,7 +224,6 @@ protected:
+     void parseTranspose            (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseUnsqueeze            (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseUpsample             (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+-    void parseTopK2                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+ 
+     // Domain: com.microsoft
+     // URL: https://github.com/microsoft/onnxruntime/blob/master/docs/ContribOperators.md
+@@ -1767,23 +1766,6 @@ void ONNXImporter2::parseEinsum(LayerParams& layerParams, const opencv_onnx::Nod
+     addLayer(layerParams, node_proto);
+ }
+ 
+-void ONNXImporter2::parseTopK2(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+-{
+-    layerParams.type = "TopK2";
+-    if (node_proto.input_size() >= 2 && net.isConstArg(node_inputs[1]))
+-    {
+-        Mat kMat = net.argTensor(node_inputs[1]);
+-        CV_Assert(kMat.type() == CV_32S || kMat.type() == CV_64S);
+-        int k = kMat.type() == CV_32S ? getScalarFromMat<int>(kMat):(int)getScalarFromMat<int64_t>(kMat);
+-        layerParams.set("k", k);
+-        addLayer(layerParams, node_proto, 1);
+-    }
+-    else //Dynamic K
+-    {
+-        addLayer(layerParams, node_proto);
+-    }
+-}
+-
+ void ONNXImporter2::parseDequantizeLinear(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+ {
+     addLayer(layerParams, node_proto);
+@@ -2446,7 +2428,6 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI(int opset_version)
+     dispatch["Where"] = &ONNXImporter2::parseElementWise;
+     dispatch["Range"] = &ONNXImporter2::parseRange;
+     dispatch["Einsum"] = &ONNXImporter2::parseEinsum;
+-    dispatch["TopK"] = &ONNXImporter2::parseTopK2;
+ 
+     std::vector<std::string> simpleLayers {
+         "Acos", "Acosh", "Asin", "Asinh", "Atan", "Atanh", "Ceil", "Celu", "Cos",
+diff --git a/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp b/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp
+index 7e26a56f4e..874b1d9cd0 100644
+--- a/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp
++++ b/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp
+@@ -2026,11 +2026,11 @@ CASE(test_tile)
+ CASE(test_tile_precomputed)
+     // no filter
+ CASE(test_top_k)
+-    SKIP;
++    // no filter
+ CASE(test_top_k_negative_axis)
+-    SKIP;
++    // no filter
+ CASE(test_top_k_smallest)
+-    SKIP;
++    // no filter
+ CASE(test_training_dropout)
+     // no filter
+ CASE(test_training_dropout_default)
+diff --git a/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp b/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp
+index 3235da210d..76878fa3c8 100644
+--- a/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp
++++ b/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp
+@@ -1,4 +1 @@
+ "test_if",
+-"test_top_k", // Issue:: K being input is not compatible with the current engine
+-"test_top_k_negative_axis",  // ---- same as above ---
+-"test_top_k_smallest",  // ---- same as above ---
+diff --git a/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp b/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
+index 0d391aab6c..3c67ec0cb7 100644
+--- a/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
++++ b/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
+@@ -394,6 +394,9 @@
+ "test_tfidfvectorizer_tf_uniandbigrams_skip5", // Issue:: Parser: Can't create layer "onnx_node_output_0!Y" of type "TfIdfVectorizer" in function 'getLayerInstance'
+ "test_tile", // Issue:: Parser: ONNX/Tile: repeats being non-constant is not supported. in function 'parseTile' (layer parameters are dynamic)
+ "test_tile_precomputed", //  // ---- same as above ---
++"test_top_k", // Issue:: K being input is not compatible with the current engine
++"test_top_k_negative_axis",  // ---- same as above ---
++"test_top_k_smallest",  // ---- same as above ---
+ "test_training_dropout", // Issue::cvtest::norm::wrong data type
+ "test_training_dropout_default",  // ---- same as above ---
+ "test_training_dropout_default_mask",  // ---- same as above ---

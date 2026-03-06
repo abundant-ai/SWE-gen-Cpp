@@ -1,0 +1,320 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index 95b6ea2e69..8548842848 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -532,12 +532,6 @@ CV__DNN_INLINE_NS_BEGIN
+         static Ptr<FlattenLayer> create(const LayerParams &params);
+     };
+ 
+-    class CV_EXPORTS BitShiftLayer : public Layer
+-    {
+-    public:
+-        static Ptr<BitShiftLayer> create(const LayerParams& params);
+-    };
+-
+     class CV_EXPORTS SqueezeLayer : public Layer
+     {
+     public:
+diff --git a/modules/dnn/src/init.cpp b/modules/dnn/src/init.cpp
+index 7861ed4a24..f053f324c8 100644
+--- a/modules/dnn/src/init.cpp
++++ b/modules/dnn/src/init.cpp
+@@ -112,7 +112,6 @@ void initializeLayerFactory()
+     CV_DNN_REGISTER_LAYER_CLASS(IsNaN,          IsNaNLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(IsInf,          IsInfLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Det,            DetLayer);
+-    CV_DNN_REGISTER_LAYER_CLASS(BitShift,       BitShiftLayer);
+ 
+     CV_DNN_REGISTER_LAYER_CLASS(Convolution,    ConvolutionLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Deconvolution,  DeconvolutionLayer);
+diff --git a/modules/dnn/src/layers/bitshift_layer.cpp b/modules/dnn/src/layers/bitshift_layer.cpp
+deleted file mode 100644
+index abce06627e..0000000000
+--- a/modules/dnn/src/layers/bitshift_layer.cpp
++++ /dev/null
+@@ -1,137 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-
+-// Copyright (C) 2025, BigVision LLC, all rights reserved.
+-// Third party copyrights are property of their respective owners.
+-
+-#include "../precomp.hpp"
+-#include "layers_common.hpp"
+-
+-// ONNX reference: BitShift operator
+-// Spec: https://onnx.ai/onnx/operators/onnx__BitShift.html
+-// Supported opsets: ai.onnx opset 11 and newer
+-// NOTE: Broadcasting is NOT fully supported. Only two cases are handled:
+-// 1) array (input[0]) shifted by array (input[1]) of the SAME SHAPE
+-// 2) array (input[0]) shifted by a SCALAR (0-D) shift amount
+-
+-namespace cv {
+-namespace dnn {
+-
+-template<typename T, typename U>
+-static inline T doShift(T inputVal, U shiftVal, int direction, int bitWidth)
+-{
+-    return (uint64_t)shiftVal >= (uint64_t)bitWidth
+-           ? T(0)
+-           : T(direction ? (inputVal >> shiftVal) : (inputVal << shiftVal));
+-}
+-
+-template<typename T, int CvTypeConst, int BitWidth>
+-void runBitShift(const Mat& input, const Mat& shift, Mat& output, int direction)
+-{
+-    output.create(input.dims, input.size.p, input.type());
+-    const size_t numElements = input.total();
+-
+-    const T* inputPtr = input.ptr<T>();
+-    T* outputPtr = output.ptr<T>();
+-
+-    if (shift.total() == 1)
+-    {
+-        T shiftScalar = 0;
+-        tensorToScalar(shift, CvTypeConst, &shiftScalar);
+-        parallel_for_(Range(0, (int)numElements), [&](const Range& r){
+-            for (int i = r.start; i < r.end; ++i)
+-                outputPtr[i] = doShift<T,T>(inputPtr[i], shiftScalar, direction, BitWidth);
+-        });
+-    }
+-    else
+-    {
+-        CV_Assert(shift.size == input.size);
+-        CV_Assert(shift.type() == CvTypeConst);
+-        const T* shiftPtr = shift.ptr<T>();
+-        parallel_for_(Range(0, (int)numElements), [&](const Range& r){
+-            for (int i = r.start; i < r.end; ++i)
+-                outputPtr[i] = doShift<T,T>(inputPtr[i], shiftPtr[i], direction, BitWidth);
+-        });
+-    }
+-}
+-
+-class BitShiftLayerImpl CV_FINAL : public BitShiftLayer
+-{
+-    int direction_; // 0=LEFT, 1=RIGHT
+-
+-public:
+-    BitShiftLayerImpl(const LayerParams& params)
+-    {
+-        setParamsFrom(params);
+-        direction_ = params.get<int>("direction", 0);
+-    }
+-
+-    bool supportBackend(int backendId) CV_OVERRIDE
+-    {
+-        return backendId == DNN_BACKEND_OPENCV;
+-    }
+-
+-    bool getMemoryShapes(const std::vector<MatShape>& inputs, const int requiredOutputs,
+-                         std::vector<MatShape>& outputs, std::vector<MatShape>& internals) const CV_OVERRIDE
+-    {
+-        CV_Assert(inputs.size() >= 2);
+-        bool isScalarShift = inputs[1].empty() || total(inputs[1]) == 1;
+-        CV_Assert(isScalarShift || inputs[1] == inputs[0]);
+-        outputs.assign(1, inputs[0]);
+-        return false;
+-    }
+-
+-    void getTypes(const std::vector<MatType>& in, const int reqOut, const int reqInt,
+-                  std::vector<MatType>& out, std::vector<MatType>& internals) const CV_OVERRIDE
+-    {
+-        CV_Assert(in.size() >= 2);
+-        int t = in[0];
+-        CV_Assert(t == CV_8U || t == CV_16U || t == CV_32U || t == CV_64U);
+-        CV_Assert(in[1] == in[0]);
+-        out.assign(reqOut, MatType(t));
+-        internals.assign(reqInt, MatType(t));
+-    }
+-
+-    void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr,
+-                 OutputArrayOfArrays) CV_OVERRIDE
+-    {
+-        std::vector<Mat> inputs, outputs;
+-        inputs_arr.getMatVector(inputs);
+-        outputs_arr.getMatVector(outputs);
+-
+-        CV_Assert(inputs.size() >= 2);
+-        const Mat& input = inputs[0];
+-        const Mat& shift = inputs[1];
+-        Mat& output = outputs[0];
+-
+-        const int depth = input.depth();
+-        if (depth == CV_8U)
+-        {
+-            runBitShift<uint8_t, CV_8U, 8>(input, shift, output, direction_);
+-        }
+-        else if (depth == CV_16U)
+-        {
+-            runBitShift<uint16_t, CV_16U, 16>(input, shift, output, direction_);
+-        }
+-        else if (depth == CV_32U)
+-        {
+-            runBitShift<uint32_t, CV_32U, 32>(input, shift, output, direction_);
+-        }
+-        else if (depth == CV_64U)
+-        {
+-            runBitShift<uint64_t, CV_64U, 64>(input, shift, output, direction_);
+-        }
+-        else
+-        {
+-            CV_Error(Error::StsNotImplemented, "BitShift: unsupported depth");
+-        }
+-    }
+-};
+-
+-Ptr<BitShiftLayer> BitShiftLayer::create(const LayerParams& params)
+-{
+-    return Ptr<BitShiftLayer>(new BitShiftLayerImpl(params));
+-}
+-
+-}}
+diff --git a/modules/dnn/src/onnx/onnx_graph_simplifier.cpp b/modules/dnn/src/onnx/onnx_graph_simplifier.cpp
+index 0a16f736c7..90bc732089 100644
+--- a/modules/dnn/src/onnx/onnx_graph_simplifier.cpp
++++ b/modules/dnn/src/onnx/onnx_graph_simplifier.cpp
+@@ -1861,27 +1861,6 @@ Mat getMatFromTensor(const opencv_onnx::TensorProto& tensor_proto, bool uint8ToI
+                 Mat(sizes, CV_8U, rawdata).copyTo(blob);
+         }
+     }
+-    else if (datatype == opencv_onnx::TensorProto_DataType_UINT16)
+-    {
+-        if (!tensor_proto.int32_data().empty())
+-            Mat(sizes, CV_32SC1, (void*)tensor_proto.int32_data().data()).convertTo(blob, CV_16UC1);
+-        else
+-            Mat(sizes, CV_16UC1, rawdata).copyTo(blob);
+-    }
+-    else if (datatype == opencv_onnx::TensorProto_DataType_UINT32)
+-    {
+-        if (!tensor_proto.int32_data().empty())
+-            Mat(sizes, CV_32SC1, (void*)tensor_proto.int32_data().data()).convertTo(blob, CV_32UC1);
+-        else
+-            Mat(sizes, CV_32UC1, rawdata).copyTo(blob);
+-    }
+-    else if (datatype == opencv_onnx::TensorProto_DataType_UINT64)
+-    {
+-        if (!tensor_proto.int64_data().empty())
+-            Mat(sizes, CV_64SC1, (void*)tensor_proto.int64_data().data()).convertTo(blob, CV_64UC1);
+-        else
+-            Mat(sizes, CV_64UC1, rawdata).copyTo(blob);
+-    }
+     else if (datatype == opencv_onnx::TensorProto_DataType_BOOL)
+     {
+         Mat(sizes, CV_Bool, rawdata).copyTo(blob);
+diff --git a/modules/dnn/src/onnx/onnx_importer2.cpp b/modules/dnn/src/onnx/onnx_importer2.cpp
+index 92424a6e96..a53cab38b6 100644
+--- a/modules/dnn/src/onnx/onnx_importer2.cpp
++++ b/modules/dnn/src/onnx/onnx_importer2.cpp
+@@ -229,7 +229,6 @@ protected:
+     void parseUnsqueeze            (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseUpsample             (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+     void parseTopK2                (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+-    void parseBitShift             (LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto);
+ 
+     // Domain: com.microsoft
+     // URL: https://github.com/microsoft/onnxruntime/blob/master/docs/ContribOperators.md
+@@ -1606,26 +1605,6 @@ void ONNXImporter2::parseSize(LayerParams& layerParams, const opencv_onnx::NodeP
+     addLayer(layerParams, node_proto);
+ }
+ 
+-void ONNXImporter2::parseBitShift(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+-{
+-    // ONNX spec: direction is required string attr: "LEFT" or "RIGHT"
+-    // https://onnx.ai/onnx/operators/onnx__BitShift.html
+-    layerParams.type = "BitShift";
+-    String dir = layerParams.get<String>("direction", "");
+-
+-    CV_Assert(dir == "LEFT" || dir == "RIGHT");
+-    CV_Assert(!dir.empty());
+-
+-    if (!dir.empty())
+-    {
+-        if (dir == "LEFT" || dir == "left")
+-            layerParams.set("direction", 0);
+-        else if (dir == "RIGHT" || dir == "right")
+-            layerParams.set("direction", 1);
+-    }
+-    addLayer(layerParams, node_proto);
+-}
+-
+ void ONNXImporter2::parseTrilu(LayerParams& layerParams, const opencv_onnx::NodeProto& node_proto)
+ {
+     int ninputs = node_proto.input_size();
+@@ -2486,7 +2465,6 @@ void ONNXImporter2::buildDispatchMap_ONNX_AI(int opset_version)
+     dispatch["IsInf"] = &ONNXImporter2::parseIsInf;
+     dispatch["Det"] = &ONNXImporter2::parseDet;
+     dispatch["Upsample"] = &ONNXImporter2::parseUpsample;
+-    dispatch["BitShift"] = &ONNXImporter2::parseBitShift;
+     dispatch["SoftMax"] = dispatch["Softmax"] = dispatch["LogSoftmax"] = &ONNXImporter2::parseSoftMax;
+     dispatch["DetectionOutput"] = &ONNXImporter2::parseDetectionOutput;
+     dispatch["CumSum"] = &ONNXImporter2::parseCumSum;
+diff --git a/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp b/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp
+index 9fe52963a4..8291217aa8 100644
+--- a/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp
++++ b/modules/dnn/test/test_onnx_conformance_layer_filter__openvino.inl.hpp
+@@ -263,21 +263,21 @@ CASE(test_bernoulli_seed)
+ CASE(test_bernoulli_seed_expanded)
+     // no filter
+ CASE(test_bitshift_left_uint16)
+-    SKIP;
++    // no filter
+ CASE(test_bitshift_left_uint32)
+-    SKIP;
++    // no filter
+ CASE(test_bitshift_left_uint64)
+-    SKIP;
++    // no filter
+ CASE(test_bitshift_left_uint8)
+-    SKIP;
++    // no filter
+ CASE(test_bitshift_right_uint16)
+-    SKIP;
++    // no filter
+ CASE(test_bitshift_right_uint32)
+-    SKIP;
++    // no filter
+ CASE(test_bitshift_right_uint64)
+-    SKIP;
++    // no filter
+ CASE(test_bitshift_right_uint8)
+-    SKIP;
++    // no filter
+ CASE(test_cast_BFLOAT16_to_FLOAT)
+     // no filter
+ CASE(test_cast_DOUBLE_to_FLOAT)
+diff --git a/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp b/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp
+index 0f18302fe5..07b4ee72d0 100644
+--- a/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp
++++ b/modules/dnn/test/test_onnx_conformance_layer_filter_opencv_classic_denylist.inl.hpp
+@@ -105,11 +105,3 @@
+ "test_mod_uint16",
+ "test_mod_uint32",
+ "test_mod_uint64",
+-"test_bitshift_left_uint16",
+-"test_bitshift_left_uint32",
+-"test_bitshift_left_uint64",
+-"test_bitshift_left_uint8",
+-"test_bitshift_right_uint16",
+-"test_bitshift_right_uint32",
+-"test_bitshift_right_uint64",
+-"test_bitshift_right_uint8",
+diff --git a/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp b/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
+index 89112eff78..59baab918b 100644
+--- a/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
++++ b/modules/dnn/test/test_onnx_conformance_layer_parser_denylist.inl.hpp
+@@ -15,6 +15,14 @@
+ "test_bernoulli_expanded",  // ---- same as above ---
+ "test_bernoulli_seed", // ---- same as above ---
+ "test_bernoulli_seed_expanded",  // ---- same as above ---
++"test_bitshift_left_uint16", // Issue::Unsuppoted data type
++"test_bitshift_left_uint32", // Issue::Unsuppoted data type
++"test_bitshift_left_uint64", // Issue::Unsuppoted data type
++"test_bitshift_left_uint8", // Issues::Layer::Can't create layer "onnx_node_output_0!z" of type "BitShift" in function 'getLayerInstance'
++"test_bitshift_right_uint16", // Issue::Unsuppoted data type
++"test_bitshift_right_uint32", // Issue::Unsuppoted data type
++"test_bitshift_right_uint64", // Issue::Unsuppoted data type
++"test_bitshift_right_uint8", // Issues::Layer::Can't create layer "onnx_node_output_0!z" of type "BitShift" in function 'getLayerInstance'
+ "test_cast_BFLOAT16_to_FLOAT",  // Issue::Unsuppoted data type
+ "test_cast_DOUBLE_to_FLOAT16", // Issue::Unsuppoted data type
+ "test_cast_FLOAT16_to_DOUBLE", // Issue::Unsuppoted data type

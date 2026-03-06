@@ -1,0 +1,67 @@
+diff --git a/doc/zmq_poller.txt b/doc/zmq_poller.txt
+index e9e49452..cf475d5f 100644
+--- a/doc/zmq_poller.txt
++++ b/doc/zmq_poller.txt
+@@ -104,11 +104,7 @@ The *zmq_poller_event_t* structure is defined as follows:
+ typedef struct
+ {
+     void *socket;
+-#if defined _WIN32
+-    SOCKET fd;
+-#else
+-    int fd;
+-#endif
++    zmq_fd_t fd;
+     void *user_data;
+     short events;
+ } zmq_poller_event_t;
+@@ -142,6 +138,9 @@ _zmq_poller_size_.
+ _zmq_poller_wait_all_ returns the number of valid elements. The valid elements
+ are placed in positions '0' to 'n_events - 1' in the 'events' array. All
+ members of a valid element are set to valid values by _zmq_poller_wait_all_.
++For socket events 'socket' is non-null and 'fd' is an operating system
++specific value for an invalid socket (-1 or INVALID_SOCKET). For fd events
++'socket' is NULL and 'fd' is a valid file descriptor.
+ The client does therefore not need to initialize the contents of the events
+ array before a call to _zmq_poller_wait_all_. It is unspecified whether the
+ the remaining elements of 'events' are written to by _zmq_poller_wait_all_.
+diff --git a/src/socket_poller.cpp b/src/socket_poller.cpp
+index 261aceec..eecbf16b 100644
+--- a/src/socket_poller.cpp
++++ b/src/socket_poller.cpp
+@@ -403,7 +403,7 @@ void zmq::socket_poller_t::zero_trail_events (
+ {
+     for (int i = found_; i < n_events_; ++i) {
+         events_[i].socket = NULL;
+-        events_[i].fd = 0;
++        events_[i].fd = zmq::retired_fd;
+         events_[i].user_data = NULL;
+         events_[i].events = 0;
+     }
+@@ -435,7 +435,7 @@ int zmq::socket_poller_t::check_events (zmq::socket_poller_t::event_t *events_,
+ 
+             if (it->events & events) {
+                 events_[found].socket = it->socket;
+-                events_[found].fd = 0;
++                events_[found].fd = zmq::retired_fd;
+                 events_[found].user_data = it->user_data;
+                 events_[found].events = it->events & events;
+                 ++found;
+diff --git a/src/zmq.cpp b/src/zmq.cpp
+index 1c1a525b..834f668f 100644
+--- a/src/zmq.cpp
++++ b/src/zmq.cpp
+@@ -1299,9 +1299,10 @@ int zmq_poller_wait (void *poller_, zmq_poller_event_t *event_, long timeout_)
+     const int rc = zmq_poller_wait_all (poller_, event_, 1, timeout_);
+ 
+     if (rc < 0 && event_) {
+-        // TODO this is not portable... zmq_poller_event_t contains pointers,
+-        // for which nullptr does not need to be represented by all-zeroes
+-        memset (event_, 0, sizeof (zmq_poller_event_t));
++        event_->socket = NULL;
++        event_->fd = zmq::retired_fd;
++        event_->user_data = NULL;
++        event_->events = 0;
+     }
+     // wait_all returns number of events, but we return 0 for any success
+     return rc >= 0 ? 0 : rc;

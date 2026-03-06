@@ -1,0 +1,192 @@
+diff --git a/src/mailbox_safe.cpp b/src/mailbox_safe.cpp
+index f5eeedb0..2376cf90 100644
+--- a/src/mailbox_safe.cpp
++++ b/src/mailbox_safe.cpp
+@@ -104,7 +104,8 @@ int zmq::mailbox_safe_t::recv (command_t *cmd_, int timeout_)
+     if (timeout_ == 0) {
+         _sync->unlock ();
+         _sync->lock ();
+-    } else {
++    } 
++    else {
+         //  Wait for signal from the command sender.
+         int rc = _cond_var.wait (_sync, timeout_);
+         if (rc == -1) {
+diff --git a/src/socks_connecter.cpp b/src/socks_connecter.cpp
+index 9e068e8e..d5aec659 100644
+--- a/src/socks_connecter.cpp
++++ b/src/socks_connecter.cpp
+@@ -224,19 +224,14 @@ int zmq::socks_connecter_t::connect_to_proxy ()
+     //  Automatic fallback to ipv4 is disabled here since this was the existing
+     //  behaviour, however I don't see a real reason for this. Maybe this can
+     //  be changed to true (and then the parameter can be removed entirely).
+-    _s = tcp_open_socket (_addr->address.c_str (), options, false, false,
++    _s = tcp_open_socket (_addr->address.c_str (), options, false,
+                           _addr->resolved.tcp_addr);
+     if (_s == retired_fd) {
+-        //  TODO we should emit some event in this case!
+-
+         LIBZMQ_DELETE (_addr->resolved.tcp_addr);
+         return -1;
+     }
+     zmq_assert (_addr->resolved.tcp_addr != NULL);
+ 
+-    // Set the socket to non-blocking mode so that we get async connect().
+-    unblock_socket (_s);
+-
+     const tcp_address_t *const tcp_addr = _addr->resolved.tcp_addr;
+ 
+     int rc;
+diff --git a/src/tcp.cpp b/src/tcp.cpp
+index 1592f51f..a8dd4873 100644
+--- a/src/tcp.cpp
++++ b/src/tcp.cpp
+@@ -385,12 +385,11 @@ void zmq::tcp_tune_loopback_fast_path (const fd_t socket_)
+ 
+ zmq::fd_t zmq::tcp_open_socket (const char *address_,
+                                 const zmq::options_t &options_,
+-                                bool local_,
+                                 bool fallback_to_ipv4_,
+                                 zmq::tcp_address_t *out_tcp_addr_)
+ {
+     //  Convert the textual address into address structure.
+-    int rc = out_tcp_addr_->resolve (address_, local_, options_.ipv6);
++    int rc = out_tcp_addr_->resolve (address_, true, options_.ipv6);
+     if (rc != 0)
+         return retired_fd;
+ 
+@@ -401,7 +400,7 @@ zmq::fd_t zmq::tcp_open_socket (const char *address_,
+     if (s == retired_fd && fallback_to_ipv4_
+         && out_tcp_addr_->family () == AF_INET6 && errno == EAFNOSUPPORT
+         && options_.ipv6) {
+-        rc = out_tcp_addr_->resolve (address_, local_, false);
++        rc = out_tcp_addr_->resolve (address_, false, false);
+         if (rc != 0) {
+             return retired_fd;
+         }
+@@ -429,6 +428,9 @@ zmq::fd_t zmq::tcp_open_socket (const char *address_,
+     if (!options_.bound_device.empty ())
+         bind_to_device (s, options_.bound_device);
+ 
++    // Set the socket to non-blocking mode so that we get async connect().
++    unblock_socket (s);
++
+     //  Set the socket buffer limits for the underlying socket.
+     if (options_.sndbuf >= 0)
+         set_tcp_send_buffer (s, options_.sndbuf);
+diff --git a/src/tcp.hpp b/src/tcp.hpp
+index fbb61af3..946dd42a 100644
+--- a/src/tcp.hpp
++++ b/src/tcp.hpp
+@@ -79,7 +79,6 @@ void tcp_tune_loopback_fast_path (const fd_t socket_);
+ //  errno is set to an error code describing the cause of the error.
+ fd_t tcp_open_socket (const char *address_,
+                       const options_t &options_,
+-                      bool local_,
+                       bool fallback_to_ipv4_,
+                       tcp_address_t *out_tcp_addr_);
+ }
+diff --git a/src/tcp_connecter.cpp b/src/tcp_connecter.cpp
+index 863f223f..b1d01cad 100644
+--- a/src/tcp_connecter.cpp
++++ b/src/tcp_connecter.cpp
+@@ -174,19 +174,14 @@ int zmq::tcp_connecter_t::open ()
+ 
+     _addr->resolved.tcp_addr = new (std::nothrow) tcp_address_t ();
+     alloc_assert (_addr->resolved.tcp_addr);
+-    _s = tcp_open_socket (_addr->address.c_str (), options, false, true,
++    _s = tcp_open_socket (_addr->address.c_str (), options, true,
+                           _addr->resolved.tcp_addr);
+     if (_s == retired_fd) {
+-        //  TODO we should emit some event in this case!
+-
+         LIBZMQ_DELETE (_addr->resolved.tcp_addr);
+         return -1;
+     }
+     zmq_assert (_addr->resolved.tcp_addr != NULL);
+ 
+-    // Set the socket to non-blocking mode so that we get async connect().
+-    unblock_socket (_s);
+-
+     const tcp_address_t *const tcp_addr = _addr->resolved.tcp_addr;
+ 
+     int rc;
+diff --git a/src/tcp_listener.cpp b/src/tcp_listener.cpp
+index fc6edf56..0f4b261b 100644
+--- a/src/tcp_listener.cpp
++++ b/src/tcp_listener.cpp
+@@ -103,7 +103,7 @@ zmq::tcp_listener_t::get_socket_name (zmq::fd_t fd_,
+ 
+ int zmq::tcp_listener_t::create_socket (const char *addr_)
+ {
+-    _s = tcp_open_socket (addr_, options, true, true, &_address);
++    _s = tcp_open_socket (addr_, options, true, &_address);
+     if (_s == retired_fd) {
+         return -1;
+     }
+diff --git a/tests/test_pair_tcp.cpp b/tests/test_pair_tcp.cpp
+index 2b16ffb3..61e52f6d 100644
+--- a/tests/test_pair_tcp.cpp
++++ b/tests/test_pair_tcp.cpp
+@@ -80,36 +80,6 @@ void test_pair_tcp_regular ()
+     test_pair_tcp ();
+ }
+ 
+-void test_pair_tcp_connect_by_name ()
+-{
+-    // all other tcp test cases bind to a loopback wildcard address, then
+-    // retrieve the bound endpoint, which is numerical, and use that to
+-    // connect. this test cases specifically uses "localhost" to connect
+-    // to ensure that names are correctly resolved
+-    void *sb = test_context_socket (ZMQ_PAIR);
+-
+-    char bound_endpoint[MAX_SOCKET_STRING];
+-    bind_loopback_ipv4 (sb, bound_endpoint, sizeof bound_endpoint);
+-
+-    // extract the bound port number
+-    const char *pos = strrchr (bound_endpoint, ':');
+-    TEST_ASSERT_NOT_NULL (pos);
+-    const char connect_endpoint_prefix[] = "tcp://localhost";
+-    char connect_endpoint[MAX_SOCKET_STRING];
+-    strcpy (connect_endpoint, connect_endpoint_prefix);
+-    strcat (connect_endpoint, pos);
+-
+-    void *sc = test_context_socket (ZMQ_PAIR);
+-
+-    TEST_ASSERT_SUCCESS_ERRNO (zmq_connect (sc, connect_endpoint));
+-
+-    bounce (sb, sc);
+-
+-    test_context_socket_close (sc);
+-    test_context_socket_close (sb);
+-}
+-
+-
+ #ifdef ZMQ_BUILD_DRAFT
+ void test_pair_tcp_fastpath ()
+ {
+@@ -123,7 +93,6 @@ int main ()
+ 
+     UNITY_BEGIN ();
+     RUN_TEST (test_pair_tcp_regular);
+-    RUN_TEST (test_pair_tcp_connect_by_name);
+ #ifdef ZMQ_BUILD_DRAFT
+     RUN_TEST (test_pair_tcp_fastpath);
+ #endif
+diff --git a/tests/testutil_unity.hpp b/tests/testutil_unity.hpp
+index f6eda652..aad1c7c6 100644
+--- a/tests/testutil_unity.hpp
++++ b/tests/testutil_unity.hpp
+@@ -347,7 +347,6 @@ void bind_loopback_tipc (void *socket_, char *my_endpoint_, size_t len_)
+     test_bind (socket_, "tipc://<*>", my_endpoint_, len_);
+ }
+ 
+-#if !defined(ZMQ_HAVE_WINDOWS) && !defined(ZMQ_HAVE_GNU)
+ // utility function to create a random IPC endpoint, similar to what a ipc://*
+ // wildcard binding does, but in a way it can be reused for multiple binds
+ void make_random_ipc_endpoint (char *out_endpoint_)
+@@ -367,4 +366,3 @@ void make_random_ipc_endpoint (char *out_endpoint_)
+     strcpy (out_endpoint_, "ipc://");
+     strcat (out_endpoint_, random_file);
+ }
+-#endif

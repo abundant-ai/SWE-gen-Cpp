@@ -1,0 +1,155 @@
+diff --git a/csharp/src/Google.Protobuf/JsonParser.cs b/csharp/src/Google.Protobuf/JsonParser.cs
+index 9bdfed6ca..eae0f927f 100644
+--- a/csharp/src/Google.Protobuf/JsonParser.cs
++++ b/csharp/src/Google.Protobuf/JsonParser.cs
+@@ -124,71 +124,87 @@ namespace Google.Protobuf
+         /// of tokens provided by the tokenizer. This token stream is assumed to be valid JSON, with the
+         /// tokenizer performing that validation - but not every token stream is valid "protobuf JSON".
+         /// </summary>
++        /// <remarks>
++        /// This method maintains and checks the recursion depth, so *must* be called for any nested parsing.
++        /// </remarks>
+         private void Merge(IMessage message, JsonTokenizer tokenizer)
+         {
+-            if (tokenizer.ObjectDepth > settings.RecursionLimit)
++            if (tokenizer.RecursionDepth > settings.RecursionLimit)
+             {
+                 throw InvalidProtocolBufferException.JsonRecursionLimitExceeded();
+             }
+-            if (message.Descriptor.IsWellKnownType)
+-            {
+-                if (WellKnownTypeHandlers.TryGetValue(message.Descriptor.FullName, out Action<JsonParser, IMessage, JsonTokenizer> handler))
+-                {
+-                    handler(this, message, tokenizer);
+-                    return;
+-                }
+-                // Well-known types with no special handling continue in the normal way.
+-            }
+-            var token = tokenizer.Next();
+-            if (token.Type != JsonToken.TokenType.StartObject)
+-            {
+-                throw new InvalidProtocolBufferException("Expected an object");
+-            }
+-            var descriptor = message.Descriptor;
+-            var jsonFieldMap = descriptor.Fields.ByJsonName();
+-            // All the oneof fields we've already accounted for - we can only see each of them once.
+-            // The set is created lazily to avoid the overhead of creating a set for every message
+-            // we parsed, when oneofs are relatively rare.
+-            HashSet<OneofDescriptor> seenOneofs = null;
+-            while (true)
++            tokenizer.RecursionDepth++;
++
++            // try/finally used in order to decrement the recursion depth regardless of outcome.
++            // If an exception is thrown, the recursion depth is irrelevant anyway - but as the method
++            // has multiple return statements, this is the simplest way of ensuring the recursion depth
++            // is always decremented. An alternative would be to use a local function.
++            try
+             {
+-                token = tokenizer.Next();
+-                if (token.Type == JsonToken.TokenType.EndObject)
++                if (message.Descriptor.IsWellKnownType)
+                 {
+-                    return;
++                    if (WellKnownTypeHandlers.TryGetValue(message.Descriptor.FullName, out Action<JsonParser, IMessage, JsonTokenizer> handler))
++                    {
++                        handler(this, message, tokenizer);
++                        return;
++                    }
++                    // Well-known types with no special handling continue in the normal way.
+                 }
+-                if (token.Type != JsonToken.TokenType.Name)
++                var token = tokenizer.Next();
++                if (token.Type != JsonToken.TokenType.StartObject)
+                 {
+-                    throw new InvalidOperationException("Unexpected token type " + token.Type);
++                    throw new InvalidProtocolBufferException("Expected an object");
+                 }
+-                string name = token.StringValue;
+-                if (jsonFieldMap.TryGetValue(name, out FieldDescriptor field))
++                var descriptor = message.Descriptor;
++                var jsonFieldMap = descriptor.Fields.ByJsonName();
++                // All the oneof fields we've already accounted for - we can only see each of them once.
++                // The set is created lazily to avoid the overhead of creating a set for every message
++                // we parsed, when oneofs are relatively rare.
++                HashSet<OneofDescriptor> seenOneofs = null;
++                while (true)
+                 {
+-                    if (field.ContainingOneof != null)
++                    token = tokenizer.Next();
++                    if (token.Type == JsonToken.TokenType.EndObject)
+                     {
+-                        if (seenOneofs == null)
+-                        {
+-                            seenOneofs = new HashSet<OneofDescriptor>();
+-                        }
+-                        if (!seenOneofs.Add(field.ContainingOneof))
+-                        {
+-                            throw new InvalidProtocolBufferException($"Multiple values specified for oneof {field.ContainingOneof.Name}");
+-                        }
++                        return;
+                     }
+-                    MergeField(message, field, tokenizer);
+-                }
+-                else
+-                {
+-                    if (settings.IgnoreUnknownFields)
++                    if (token.Type != JsonToken.TokenType.Name)
++                    {
++                        throw new InvalidOperationException("Unexpected token type " + token.Type);
++                    }
++                    string name = token.StringValue;
++                    if (jsonFieldMap.TryGetValue(name, out FieldDescriptor field))
+                     {
+-                        tokenizer.SkipValue();
++                        if (field.ContainingOneof != null)
++                        {
++                            if (seenOneofs == null)
++                            {
++                                seenOneofs = new HashSet<OneofDescriptor>();
++                            }
++                            if (!seenOneofs.Add(field.ContainingOneof))
++                            {
++                                throw new InvalidProtocolBufferException($"Multiple values specified for oneof {field.ContainingOneof.Name}");
++                            }
++                        }
++                        MergeField(message, field, tokenizer);
+                     }
+                     else
+                     {
+-                        throw new InvalidProtocolBufferException("Unknown field: " + name);
++                        if (settings.IgnoreUnknownFields)
++                        {
++                            tokenizer.SkipValue();
++                        }
++                        else
++                        {
++                            throw new InvalidProtocolBufferException("Unknown field: " + name);
++                        }
+                     }
+                 }
+             }
++            finally
++            {
++                tokenizer.RecursionDepth--;
++            }
+         }
+ 
+         private void MergeField(IMessage message, FieldDescriptor field, JsonTokenizer tokenizer)
+diff --git a/csharp/src/Google.Protobuf/JsonTokenizer.cs b/csharp/src/Google.Protobuf/JsonTokenizer.cs
+index d12d427d4..5611beaf4 100644
+--- a/csharp/src/Google.Protobuf/JsonTokenizer.cs
++++ b/csharp/src/Google.Protobuf/JsonTokenizer.cs
+@@ -51,6 +51,13 @@ namespace Google.Protobuf
+             return new JsonReplayTokenizer(tokens, continuation);
+         }
+ 
++        /// <summary>
++        /// The depth of recursion within JsonParser. This is not directly computable within the tokenizer itself,
++        /// as arrays contribute to the recursion depth for ListValue parsing, but not for "normal" message types.
++        /// This is maintained (and checked) by <see cref="JsonParser.Merge(IMessage, JsonTokenizer)"/>.
++        /// </summary>
++        internal int RecursionDepth { get; set; }
++
+         /// <summary>
+         /// Returns the depth of the stack, purely in objects (not collections).
+         /// Informally, this is the number of remaining unclosed '{' characters we have.
