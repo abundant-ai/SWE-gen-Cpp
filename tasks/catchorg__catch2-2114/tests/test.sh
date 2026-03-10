@@ -25,51 +25,36 @@ cp "/tests/SelfTest/Baselines/xml.sw.approved.txt" "tests/SelfTest/Baselines/xml
 mkdir -p "tests/SelfTest/UsageTests"
 cp "/tests/SelfTest/UsageTests/MatchersRanges.tests.cpp" "tests/SelfTest/UsageTests/MatchersRanges.tests.cpp"
 
-# Verify that the fix is applied - check that quantifiers matchers are present
-# BUGGY state: catch_matchers_quantifiers.hpp does NOT exist
-# FIXED state: catch_matchers_quantifiers.hpp exists
+# The PR adds new range quantifier matchers (AnyMatch, AllMatch, NoneMatch).
+# We need to rebuild with the updated test file and verify the matchers work correctly.
 
-if [ ! -f "src/catch2/matchers/catch_matchers_quantifiers.hpp" ]; then
-    echo "FAIL: Missing catch_matchers_quantifiers.hpp - fix not applied"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-# Verify that CMakeLists.txt includes the quantifiers header
-if ! grep -q 'catch_matchers_quantifiers.hpp' src/CMakeLists.txt; then
-    echo "FAIL: CMakeLists.txt missing catch_matchers_quantifiers.hpp - fix not applied"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-# Verify that the all matchers header includes quantifiers
-if ! grep -q 'catch_matchers_quantifiers.hpp' src/catch2/matchers/catch_matchers_all.hpp; then
-    echo "FAIL: catch_matchers_all.hpp missing include - fix not applied"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-# Reconfigure CMake to pick up the changes
+# Reconfigure CMake to pick up the new test file
 if ! cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
     -DCATCH_BUILD_TESTING=ON \
-    -DCATCH_BUILD_EXTRA_TESTS=ON \
-    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
+    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator -Wno-error=unused-but-set-variable" \
     -G Ninja 2>&1; then
     echo "FAIL: CMake reconfiguration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Rebuild to verify that code compiles with the quantifiers matchers
+# Rebuild to include the updated test file
 if ! cmake --build build 2>&1; then
-    echo "FAIL: Build failed - likely due to missing quantifiers matchers"
+    echo "FAIL: Build with updated test file failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-echo "SUCCESS: Fix properly applied - quantifiers matchers are present and code compiles"
+# Run the specific test for range matchers
+if ! ./build/tests/SelfTest "[matchers]" "[quantifiers]" 2>&1; then
+    echo "FAIL: Range quantifier matchers test failed"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+echo "SUCCESS: Range quantifier matchers work correctly"
 test_status=0
 
 if [ $test_status -eq 0 ]; then

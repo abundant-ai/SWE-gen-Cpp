@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CMake (required for building spdlog)
+# Install CMake build tool
 RUN apt-get update && apt-get install -y \
     cmake \
     && rm -rf /var/lib/apt/lists/*
@@ -17,20 +17,31 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Clone repo at HEAD commit (with fix applied)
+# Note: Using 750b520f (the follow-up fix) instead of 4eb80dd8 (the PR HEAD) because
+# 4eb80dd8 has a const-correctness bug that was fixed immediately in 750b520f
 RUN git clone https://github.com/gabime/spdlog.git src && \
     cd src && \
-    (git fetch --depth 1 origin 4eb80dd8d273d4785c780cf10e1bad9433ab8a35 || git fetch --depth 1 origin "+refs/pull/795/head:refs/remotes/origin/pr/795") && \
+    git fetch --depth 1 origin 750b520f415458762fa302c246f1f3fd013ccfbe && \
     git checkout --detach FETCH_HEAD && \
     git submodule update --init --recursive
 
 WORKDIR /app/src
 
-# Reset any tracked files before applying bug.patch
-RUN git reset --hard
-
 # Apply bug.patch to revert to buggy state (BASE)
+# Note: The HEAD commit has compilation errors, so we apply bug.patch first before building
+# First normalize line endings to unix format
+RUN apt-get update && apt-get install -y dos2unix && rm -rf /var/lib/apt/lists/*
+RUN find . -type f \( -name "*.txt" -o -name "*.cmake" -o -name ".gitignore" -o -name ".gitattributes" \) -exec dos2unix {} \;
+
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 --no-backup-if-mismatch --reject-file=- < /tmp/bug.patch || [ $? -eq 1 ] && rm /tmp/bug.patch
+
+# Rebuild after applying bug.patch (C++ is a compiled language)
+RUN rm -rf build && \
+    mkdir -p build && \
+    cd build && \
+    cmake .. -DSPDLOG_BUILD_TESTS=ON -DSPDLOG_BUILD_EXAMPLES=OFF -DSPDLOG_BUILD_BENCH=OFF && \
+    make -j$(nproc)
 
 RUN rm -rf /app/src/.git
 

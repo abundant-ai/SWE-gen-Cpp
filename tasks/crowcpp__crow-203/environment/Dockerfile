@@ -1,8 +1,5 @@
 FROM ubuntu:24.04
 
-# Set DEBIAN_FRONTEND to avoid interactive prompts during package installation
-ENV DEBIAN_FRONTEND=noninteractive
-
 # Base system packages (common to all languages)
 RUN apt-get update && apt-get install -y \
     git \
@@ -12,11 +9,11 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install C++ development tools and dependencies
+# Install C++ compiler (GCC), CMake, and dependencies for Crow
 RUN apt-get update && apt-get install -y \
     cmake \
+    ninja-build \
     g++ \
-    clang \
     libasio-dev \
     libssl-dev \
     zlib1g-dev \
@@ -37,27 +34,43 @@ RUN git clone https://github.com/CrowCpp/Crow.git src && \
 
 WORKDIR /app/src
 
-# Fix MINSIGSTKSZ issue in old Catch version for modern glibc
-RUN sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static const std::size_t sigStackSize = 32768;/' tests/catch.hpp || true
+# Fix catch.hpp compatibility with modern glibc (old catch version doesn't support dynamic MINSIGSTKSZ)
+# This must be done before any build attempts
+RUN sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static const std::size_t sigStackSize = 32768;/' tests/catch.hpp && \
+    sed -i 's/char FatalConditionHandler::altStackMem\[sigStackSize\] = {};/char FatalConditionHandler::altStackMem[32768] = {};/' tests/catch.hpp
 
-# Build the project with CMake to prepare dependencies (including Catch2)
-RUN mkdir -p build && cd build && \
-    cmake .. -DCROW_BUILD_TESTS=ON && \
-    cmake --build . --target unittest
+# Configure and build Crow with CMake (enable tests, disable examples)
+RUN cmake -Bbuild -H. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCROW_BUILD_TESTS=ON \
+    -DCROW_BUILD_EXAMPLES=OFF \
+    -DCROW_ENABLE_SSL=ON \
+    -DCROW_ENABLE_COMPRESSION=ON \
+    -G Ninja
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
+# Build the test target
+RUN cmake --build build --target unittest
+
+# Reset tracked files so bug.patch applies cleanly (also resets catch.hpp patch)
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Fix MINSIGSTKSZ issue again after bug.patch (in case unittest.cpp changes affected catch.hpp)
-RUN sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static const std::size_t sigStackSize = 32768;/' tests/catch.hpp || true
+# Fix catch.hpp again after git reset (same fix as before)
+RUN sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static const std::size_t sigStackSize = 32768;/' tests/catch.hpp && \
+    sed -i 's/char FatalConditionHandler::altStackMem\[sigStackSize\] = {};/char FatalConditionHandler::altStackMem[32768] = {};/' tests/catch.hpp
 
-# Rebuild after applying bug.patch
-RUN cd build && \
-    cmake --build . --target unittest
+# Reconfigure and rebuild after applying bug.patch
+RUN rm -rf build && cmake -Bbuild -H. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCROW_BUILD_TESTS=ON \
+    -DCROW_BUILD_EXAMPLES=OFF \
+    -DCROW_ENABLE_SSL=ON \
+    -DCROW_ENABLE_COMPRESSION=ON \
+    -G Ninja && \
+    cmake --build build --target unittest
 
 RUN rm -rf /app/src/.git
 

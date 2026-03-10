@@ -1,0 +1,157 @@
+diff --git a/modules/video/include/opencv2/video/tracking.hpp b/modules/video/include/opencv2/video/tracking.hpp
+index e757b0fa91..e8566faa3a 100644
+--- a/modules/video/include/opencv2/video/tracking.hpp
++++ b/modules/video/include/opencv2/video/tracking.hpp
+@@ -265,6 +265,19 @@ enum
+     MOTION_HOMOGRAPHY  = 3
+ };
+ 
++/** @brief Computes the Enhanced Correlation Coefficient value between two images @cite EP08 .
++
++@param templateImage single-channel template image; CV_8U or CV_32F array.
++@param inputImage single-channel input image to be warped to provide an image similar to
++ templateImage, same type as templateImage.
++@param inputMask An optional mask to indicate valid values of inputImage.
++
++@sa
++findTransformECC
++ */
++
++CV_EXPORTS_W double computeECC(InputArray templateImage, InputArray inputImage, InputArray inputMask = noArray());
++
+ /** @example samples/cpp/image_alignment.cpp
+ An example using the image alignment ECC algorithm
+ */
+@@ -273,7 +286,7 @@ An example using the image alignment ECC algorithm
+ 
+ @param templateImage single-channel template image; CV_8U or CV_32F array.
+ @param inputImage single-channel input image which should be warped with the final warpMatrix in
+-order to provide an image similar to templateImage, same type as temlateImage.
++order to provide an image similar to templateImage, same type as templateImage.
+ @param warpMatrix floating-point \f$2\times 3\f$ or \f$3\times 3\f$ mapping matrix (warp).
+ @param motionType parameter, specifying the type of motion:
+  -   **MOTION_TRANSLATION** sets a translational motion model; warpMatrix is \f$2\times 3\f$ with
+@@ -290,6 +303,7 @@ criteria.epsilon defines the threshold of the increment in the correlation coeff
+ iterations (a negative criteria.epsilon makes criteria.maxcount the only termination criterion).
+ Default values are shown in the declaration above.
+ @param inputMask An optional mask to indicate valid values of inputImage.
++@param gaussFiltSize An optional value indicating size of gaussian blur filter; (DEFAULT: 5)
+ 
+ The function estimates the optimum transformation (warpMatrix) with respect to ECC criterion
+ (@cite EP08), that is
+@@ -317,12 +331,19 @@ sample image_alignment.cpp that demonstrates the use of the function. Note that
+ an exception if algorithm does not converges.
+ 
+ @sa
+-estimateAffine2D, estimateAffinePartial2D, findHomography
++computeECC, estimateAffine2D, estimateAffinePartial2D, findHomography
+  */
+ CV_EXPORTS_W double findTransformECC( InputArray templateImage, InputArray inputImage,
+-                                      InputOutputArray warpMatrix, int motionType = MOTION_AFFINE,
+-                                      TermCriteria criteria = TermCriteria(TermCriteria::COUNT+TermCriteria::EPS, 50, 0.001),
+-                                      InputArray inputMask = noArray());
++                                      InputOutputArray warpMatrix, int motionType,
++                                      TermCriteria criteria,
++                                      InputArray inputMask, int gaussFiltSize);
++
++/** @overload */
++CV_EXPORTS
++double findTransformECC(InputArray templateImage, InputArray inputImage,
++    InputOutputArray warpMatrix, int motionType = MOTION_AFFINE,
++    TermCriteria criteria = TermCriteria(TermCriteria::COUNT+TermCriteria::EPS, 50, 0.001),
++    InputArray inputMask = noArray());
+ 
+ /** @example samples/cpp/kalman.cpp
+ An example using the standard Kalman filter
+diff --git a/modules/video/src/ecc.cpp b/modules/video/src/ecc.cpp
+index aabb317b65..cd189566c7 100644
+--- a/modules/video/src/ecc.cpp
++++ b/modules/video/src/ecc.cpp
+@@ -309,16 +309,48 @@ static void update_warping_matrix_ECC (Mat& map_matrix, const Mat& update, const
+ }
+ 
+ 
++/** Function that computes enhanced corelation coefficient from Georgios et.al. 2008
++*   See https://github.com/opencv/opencv/issues/12432
++*/
++double cv::computeECC(InputArray templateImage, InputArray inputImage, InputArray inputMask)
++{
++    CV_Assert(!templateImage.empty());
++    CV_Assert(!inputImage.empty());
++
++    if( ! (templateImage.type()==inputImage.type()))
++        CV_Error( Error::StsUnmatchedFormats, "Both input images must have the same data type" );
++
++    Scalar meanTemplate, sdTemplate;
++
++    int active_pixels = inputMask.empty() ? templateImage.size().area() : countNonZero(inputMask);
++
++    meanStdDev(templateImage, meanTemplate, sdTemplate, inputMask);
++    Mat templateImage_zeromean = Mat::zeros(templateImage.size(), templateImage.type());
++    subtract(templateImage, meanTemplate, templateImage_zeromean, inputMask);
++    double templateImagenorm = std::sqrt(active_pixels*sdTemplate.val[0]*sdTemplate.val[0]);
++
++    Scalar meanInput, sdInput;
++
++    Mat inputImage_zeromean = Mat::zeros(inputImage.size(), inputImage.type());
++    meanStdDev(inputImage, meanInput, sdInput, inputMask);
++    subtract(inputImage, meanInput, inputImage_zeromean, inputMask);
++    double inputImagenorm = std::sqrt(active_pixels*sdInput.val[0]*sdInput.val[0]);
++
++    return templateImage_zeromean.dot(inputImage_zeromean)/(templateImagenorm*inputImagenorm);
++}
++
++
+ double cv::findTransformECC(InputArray templateImage,
+                             InputArray inputImage,
+                             InputOutputArray warpMatrix,
+                             int motionType,
+                             TermCriteria criteria,
+-                            InputArray inputMask)
++                            InputArray inputMask,
++                            int gaussFiltSize)
+ {
+ 
+ 
+-    Mat src = templateImage.getMat();//template iamge
++    Mat src = templateImage.getMat();//template image
+     Mat dst = inputImage.getMat(); //input image (to be warped)
+     Mat map = warpMatrix.getMat(); //warp (transformation)
+ 
+@@ -416,11 +448,11 @@ double cv::findTransformECC(InputArray templateImage,
+ 
+     //gaussian filtering is optional
+     src.convertTo(templateFloat, templateFloat.type());
+-    GaussianBlur(templateFloat, templateFloat, Size(5, 5), 0, 0);
++    GaussianBlur(templateFloat, templateFloat, Size(gaussFiltSize, gaussFiltSize), 0, 0);
+ 
+     Mat preMaskFloat;
+     preMask.convertTo(preMaskFloat, CV_32F);
+-    GaussianBlur(preMaskFloat, preMaskFloat, Size(5, 5), 0, 0);
++    GaussianBlur(preMaskFloat, preMaskFloat, Size(gaussFiltSize, gaussFiltSize), 0, 0);
+     // Change threshold.
+     preMaskFloat *= (0.5/0.95);
+     // Rounding conversion.
+@@ -428,7 +460,7 @@ double cv::findTransformECC(InputArray templateImage,
+     preMask.convertTo(preMaskFloat, preMaskFloat.type());
+ 
+     dst.convertTo(imageFloat, imageFloat.type());
+-    GaussianBlur(imageFloat, imageFloat, Size(5, 5), 0, 0);
++    GaussianBlur(imageFloat, imageFloat, Size(gaussFiltSize, gaussFiltSize), 0, 0);
+ 
+     // needed matrices for gradients and warped gradients
+     Mat gradientX = Mat::zeros(hd, wd, CV_32FC1);
+@@ -557,5 +589,13 @@ double cv::findTransformECC(InputArray templateImage,
+     return rho;
+ }
+ 
++double cv::findTransformECC(InputArray templateImage, InputArray inputImage,
++    InputOutputArray warpMatrix, int motionType,
++    TermCriteria criteria,
++    InputArray inputMask)
++{
++    // Use default value of 5 for gaussFiltSize to maintain backward compatibility.
++    return findTransformECC(templateImage, inputImage, warpMatrix, motionType, criteria, inputMask, 5);
++}
+ 
+ /* End of file. */

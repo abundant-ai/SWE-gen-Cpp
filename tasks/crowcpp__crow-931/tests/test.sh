@@ -6,18 +6,15 @@ cd /app/src
 mkdir -p "tests"
 cp "/tests/unittest.cpp" "tests/unittest.cpp"
 
-# Rebuild only the unittest target with the updated test file (single-threaded to save memory)
-cmake --build build --config Release --target unittest -- -j1
-build_status=$?
-
-# If build fails, tests fail
-if [ $build_status -ne 0 ]; then
+# Rebuild with the updated test file
+if ! cmake --build build --target unittest 2>&1; then
+  echo "Build failed"
   echo 0 > /logs/verifier/reward.txt
-  exit $build_status
+  exit 1
 fi
 
-# Run the unittest executable (Catch2 framework)
-./build/tests/unittest
+# Run the multipart tests (this PR is about multipart/form-data boundary handling)
+./build/tests/unittest "multipart" 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

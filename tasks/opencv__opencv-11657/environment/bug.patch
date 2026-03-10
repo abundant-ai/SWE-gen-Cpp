@@ -1,0 +1,117 @@
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index 43a65eb3ff..710d6e5a88 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -361,20 +361,10 @@ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+ {
+     CV_Assert(!isInitialized());
+ 
+-    static std::map<std::string, InferenceEngine::InferenceEnginePluginPtr> sharedPlugins;
+-    std::string deviceName = InferenceEngine::getDeviceName(targetDevice);
+-    auto pluginIt = sharedPlugins.find(deviceName);
+-    if (pluginIt != sharedPlugins.end())
+-    {
+-        enginePtr = pluginIt->second;
+-    }
+-    else
+-    {
+-        enginePtr = InferenceEngine::PluginDispatcher({""}).getSuitablePlugin(targetDevice);
+-        sharedPlugins[deviceName] = enginePtr;
+-    }
+-    plugin = InferenceEngine::InferencePlugin(enginePtr);
++    InferenceEngine::StatusCode status;
++    InferenceEngine::ResponseDesc resp;
+ 
++    plugin = InferenceEngine::PluginDispatcher({""}).getSuitablePlugin(targetDevice);
+     if (targetDevice == InferenceEngine::TargetDevice::eCPU)
+     {
+ #ifdef _WIN32
+@@ -384,17 +374,18 @@ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+         InferenceEngine::IExtensionPtr extension =
+             InferenceEngine::make_so_pointer<InferenceEngine::IExtension>("libcpu_extension.so");
+ #endif  // _WIN32
+-        plugin.AddExtension(extension);
++        status = plugin->AddExtension(extension, &resp);
++        if (status != InferenceEngine::StatusCode::OK)
++            CV_Error(Error::StsAssert, resp.msg);
+     }
+-    netExec = plugin.LoadNetwork(net, {});
+-    infRequest = netExec.CreateInferRequest();
+-    infRequest.SetInput(inpBlobs);
+-    infRequest.SetOutput(outBlobs);
++    status = plugin->LoadNetwork(net, &resp);
++    if (status != InferenceEngine::StatusCode::OK)
++        CV_Error(Error::StsAssert, resp.msg);
+ }
+ 
+ bool InfEngineBackendNet::isInitialized()
+ {
+-    return (bool)enginePtr;
++    return (bool)plugin;
+ }
+ 
+ void InfEngineBackendNet::addBlobs(const std::vector<Ptr<BackendWrapper> >& ptrs)
+@@ -408,7 +399,10 @@ void InfEngineBackendNet::addBlobs(const std::vector<Ptr<BackendWrapper> >& ptrs
+ 
+ void InfEngineBackendNet::forward()
+ {
+-    infRequest.Infer();
++    InferenceEngine::ResponseDesc resp;
++    InferenceEngine::StatusCode status = plugin->Infer(inpBlobs, outBlobs, &resp);
++    if (status != InferenceEngine::StatusCode::OK)
++        CV_Error(Error::StsAssert, resp.msg);
+ }
+ 
+ Mat infEngineBlobToMat(const InferenceEngine::Blob::Ptr& blob)
+diff --git a/modules/dnn/src/op_inf_engine.hpp b/modules/dnn/src/op_inf_engine.hpp
+index 075c1be849..a61678cab2 100644
+--- a/modules/dnn/src/op_inf_engine.hpp
++++ b/modules/dnn/src/op_inf_engine.hpp
+@@ -89,10 +89,7 @@ private:
+     InferenceEngine::BlobMap allBlobs;
+     InferenceEngine::TargetDevice targetDevice;
+     InferenceEngine::Precision precision;
+-    InferenceEngine::InferenceEnginePluginPtr enginePtr;
+-    InferenceEngine::InferencePlugin plugin;
+-    InferenceEngine::ExecutableNetwork netExec;
+-    InferenceEngine::InferRequest infRequest;
++    InferenceEngine::InferenceEnginePluginPtr plugin;
+ 
+     void initPlugin(InferenceEngine::ICNNNetwork& net);
+ };
+diff --git a/modules/dnn/test/test_layers.cpp b/modules/dnn/test/test_layers.cpp
+index 593864822c..5cbfba5517 100644
+--- a/modules/dnn/test/test_layers.cpp
++++ b/modules/dnn/test/test_layers.cpp
+@@ -887,31 +887,6 @@ TEST(Test_DLDT, fused_output)
+     ASSERT_NO_THROW(net.forward());
+     LayerFactory::unregisterLayer("Unsupported");
+ }
+-
+-TEST(Test_DLDT, multiple_networks)
+-{
+-    Net nets[2];
+-    for (int i = 0; i < 2; ++i)
+-    {
+-        nets[i].setInputsNames(std::vector<String>(1, format("input_%d", i)));
+-
+-        LayerParams lp;
+-        lp.set("kernel_size", 1);
+-        lp.set("num_output", 1);
+-        lp.set("bias_term", false);
+-        lp.type = "Convolution";
+-        lp.name = format("testConv_%d", i);
+-        lp.blobs.push_back(Mat({1, 1, 1, 1}, CV_32F, Scalar(1 + i)));
+-        nets[i].addLayerToPrev(lp.name, lp.type, lp);
+-        nets[i].setPreferableBackend(DNN_BACKEND_INFERENCE_ENGINE);
+-        nets[i].setInput(Mat({1, 1, 1, 1}, CV_32FC1, Scalar(1)));
+-    }
+-    Mat out_1 = nets[0].forward();
+-    Mat out_2 = nets[1].forward();
+-    // After the second model is initialized we try to receive an output from the first network again.
+-    out_1 = nets[0].forward();
+-    normAssert(2 * out_1, out_2);
+-}
+ #endif  // HAVE_INF_ENGINE
+ 
+ // Test a custom layer.

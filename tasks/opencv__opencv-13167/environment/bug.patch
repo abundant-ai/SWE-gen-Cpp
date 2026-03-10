@@ -1,0 +1,194 @@
+diff --git a/doc/py_tutorials/py_imgproc/py_transforms/py_fourier_transform/py_fourier_transform.markdown b/doc/py_tutorials/py_imgproc/py_transforms/py_fourier_transform/py_fourier_transform.markdown
+index 44b08d53ab..3993790889 100644
+--- a/doc/py_tutorials/py_imgproc/py_transforms/py_fourier_transform/py_fourier_transform.markdown
++++ b/doc/py_tutorials/py_imgproc/py_transforms/py_fourier_transform/py_fourier_transform.markdown
+@@ -79,11 +79,11 @@ using **np.ifft2()** function. The result, again, will be a complex number. You
+ absolute value.
+ @code{.py}
+ rows, cols = img.shape
+-crow,ccol = rows//2 , cols//2
+-fshift[crow-30:crow+31, ccol-30:ccol+31] = 0
++crow,ccol = rows/2 , cols/2
++fshift[crow-30:crow+30, ccol-30:ccol+30] = 0
+ f_ishift = np.fft.ifftshift(fshift)
+ img_back = np.fft.ifft2(f_ishift)
+-img_back = np.real(img_back)
++img_back = np.abs(img_back)
+ 
+ plt.subplot(131),plt.imshow(img, cmap = 'gray')
+ plt.title('Input Image'), plt.xticks([]), plt.yticks([])
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 11c65ce9b4..078d13e73b 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1996,9 +1996,6 @@ struct Net::Impl
+                 }
+             }
+ 
+-            if (preferableBackend != DNN_BACKEND_OPENCV)
+-                continue;  // Go to the next layer.
+-
+             // the optimization #2. if there is no layer that takes max pooling layer's computed
+             // max indices (and only some semantical segmentation networks might need this;
+             // many others only take the maximum values), then we switch the max pooling
+diff --git a/modules/dnn/src/layers/batch_norm_layer.cpp b/modules/dnn/src/layers/batch_norm_layer.cpp
+index 01ea493fda..f0fa5f21a5 100644
+--- a/modules/dnn/src/layers/batch_norm_layer.cpp
++++ b/modules/dnn/src/layers/batch_norm_layer.cpp
+@@ -10,7 +10,6 @@ Implementation of Batch Normalization layer.
+ */
+ 
+ #include "../precomp.hpp"
+-#include "layers_common.hpp"
+ #include "../op_halide.hpp"
+ #include "../op_inf_engine.hpp"
+ #include <opencv2/dnn/shape_utils.hpp>
+@@ -285,10 +284,10 @@ public:
+                 v_float32x4 x1 = v_load(srcptr + i + 4);
+                 v_float32x4 x2 = v_load(srcptr + i + 8);
+                 v_float32x4 x3 = v_load(srcptr + i + 12);
+-                x0 = v_muladd(x0, wV, bV);
+-                x1 = v_muladd(x1, wV, bV);
+-                x2 = v_muladd(x2, wV, bV);
+-                x3 = v_muladd(x3, wV, bV);
++                x0 = v_muladd(x0, w, b);
++                x1 = v_muladd(x1, w, b);
++                x2 = v_muladd(x2, w, b);
++                x3 = v_muladd(x3, w, b);
+                 v_store(dstptr + i, x0);
+                 v_store(dstptr + i + 4, x1);
+                 v_store(dstptr + i + 8, x2);
+diff --git a/modules/dnn/src/layers/elementwise_layers.cpp b/modules/dnn/src/layers/elementwise_layers.cpp
+index 9a028101b3..00aa4efc21 100644
+--- a/modules/dnn/src/layers/elementwise_layers.cpp
++++ b/modules/dnn/src/layers/elementwise_layers.cpp
+@@ -45,6 +45,7 @@
+ #include "../op_halide.hpp"
+ #include "../op_inf_engine.hpp"
+ #include "../op_vkcom.hpp"
++#include "opencv2/imgproc.hpp"
+ #include <opencv2/dnn/shape_utils.hpp>
+ #include <iostream>
+ 
+diff --git a/modules/imgproc/src/morph.cpp b/modules/imgproc/src/morph.cpp
+index 52dc239bc6..cf105a99f4 100644
+--- a/modules/imgproc/src/morph.cpp
++++ b/modules/imgproc/src/morph.cpp
+@@ -45,7 +45,6 @@
+ #include "opencl_kernels_imgproc.hpp"
+ #include <iostream>
+ #include "hal_replacement.hpp"
+-#include <opencv2/core/utils/configuration.private.hpp>
+ 
+ /****************************************************************************************\
+                      Basic Morphological Operations: Erosion & Dilation
+@@ -1406,6 +1405,7 @@ void morph(int op, int src_type, int dst_type,
+ 
+ #define ROUNDUP(sz, n)      ((sz) + (n) - 1 - (((sz) + (n) - 1) % (n)))
+ 
++#ifndef __APPLE__
+ static bool ocl_morph3x3_8UC1( InputArray _src, OutputArray _dst, InputArray _kernel, Point anchor,
+                                int op, int actual_op = -1, InputArray _extraMat = noArray())
+ {
+@@ -1632,6 +1632,7 @@ static bool ocl_morphSmall( InputArray _src, OutputArray _dst, InputArray _kerne
+ 
+     return kernel.run(2, globalsize, NULL, false);
+ }
++#endif
+ 
+ static bool ocl_morphOp(InputArray _src, OutputArray _dst, InputArray _kernel,
+                         Point anchor, int iterations, int op, int borderType,
+@@ -1651,33 +1652,24 @@ static bool ocl_morphOp(InputArray _src, OutputArray _dst, InputArray _kernel,
+ 
+     if (kernel.empty())
+     {
+-        ksize = Size(1+iterations*2,1+iterations*2);
+-        kernel = getStructuringElement(MORPH_RECT, ksize);
++        kernel = getStructuringElement(MORPH_RECT, Size(1+iterations*2,1+iterations*2));
+         anchor = Point(iterations, iterations);
+         iterations = 1;
+-        CV_DbgAssert(ksize == kernel.size());
+     }
+     else if( iterations > 1 && countNonZero(kernel) == kernel.rows*kernel.cols )
+     {
+-        ksize = Size(ksize.width + (iterations-1)*(ksize.width-1),
+-                     ksize.height + (iterations-1)*(ksize.height-1));
+         anchor = Point(anchor.x*iterations, anchor.y*iterations);
+-        kernel = getStructuringElement(MORPH_RECT, ksize, anchor);
++        kernel = getStructuringElement(MORPH_RECT,
++                                       Size(ksize.width + (iterations-1)*(ksize.width-1),
++                                            ksize.height + (iterations-1)*(ksize.height-1)),
++                                       anchor);
+         iterations = 1;
+-        CV_DbgAssert(ksize == kernel.size());
+     }
+ 
+-    static bool param_use_morph_special_kernels = utils::getConfigurationParameterBool("OPENCV_OPENCL_IMGPROC_MORPH_SPECIAL_KERNEL",
+ #ifndef __APPLE__
+-        true
+-#else
+-        false
+-#endif
+-        );
+-
+     int esz = CV_ELEM_SIZE(type);
+     // try to use OpenCL kernel adopted for small morph kernel
+-    if (param_use_morph_special_kernels && dev.isIntel() &&
++    if (dev.isIntel() &&
+         ((ksize.width < 5 && ksize.height < 5 && esz <= 4) ||
+          (ksize.width == 5 && ksize.height == 5 && cn == 1)) &&
+          (iterations == 1)
+@@ -1689,6 +1681,7 @@ static bool ocl_morphOp(InputArray _src, OutputArray _dst, InputArray _kernel,
+         if (ocl_morphSmall(_src, _dst, kernel, anchor, borderType, op, actual_op, _extraMat))
+             return true;
+     }
++#endif
+ 
+     if (iterations == 0 || kernel.rows*kernel.cols == 1)
+     {
+diff --git a/modules/imgproc/test/ocl/test_filters.cpp b/modules/imgproc/test/ocl/test_filters.cpp
+index 351dd0253d..ef52d0a0fe 100644
+--- a/modules/imgproc/test/ocl/test_filters.cpp
++++ b/modules/imgproc/test/ocl/test_filters.cpp
+@@ -442,7 +442,7 @@ OCL_TEST_P(Erode, Mat)
+     for (int j = 0; j < test_loop_times; j++)
+     {
+         random_roi();
+-        Mat kernel = ksize==0 ? Mat() : randomMat(kernelSize, CV_8UC1, 0, 2);
++        Mat kernel = ksize==0 ? Mat() : randomMat(kernelSize, CV_8UC1, 0, 3);
+ 
+         OCL_OFF(cv::erode(src_roi, dst_roi, kernel, Point(-1, -1), iterations) );
+         OCL_ON(cv::erode(usrc_roi, udst_roi, kernel, Point(-1, -1), iterations) );
+@@ -464,7 +464,7 @@ OCL_TEST_P(Dilate, Mat)
+     for (int j = 0; j < test_loop_times; j++)
+     {
+         random_roi();
+-        Mat kernel = ksize==0 ? Mat() : randomMat(kernelSize, CV_8UC1, 0, 2);
++        Mat kernel = ksize==0 ? Mat() : randomMat(kernelSize, CV_8UC1, 0, 3);
+ 
+         OCL_OFF(cv::dilate(src_roi, dst_roi, kernel, Point(-1, -1), iterations) );
+         OCL_ON(cv::dilate(usrc_roi, udst_roi, kernel, Point(-1, -1), iterations) );
+@@ -728,19 +728,19 @@ OCL_INSTANTIATE_TEST_CASE_P(Filter, GaussianBlur_multicols, Combine(
+ 
+ OCL_INSTANTIATE_TEST_CASE_P(Filter, Erode, Combine(
+                             Values(CV_8UC1, CV_8UC3, CV_8UC4, CV_32FC1, CV_32FC3, CV_32FC4, CV_64FC1, CV_64FC4),
+-                            Values(0, 5, 7, 9), // kernel size, 0 means kernel = Mat()
++                            Values(0, 3, 5, 7), // kernel size, 0 means kernel = Mat()
+                             Values(Size(0, 0)), //not used
+                             Values((BorderType)BORDER_CONSTANT),
+-                            Values(1.0, 2.0, 3.0, 4.0),
++                            Values(1.0, 2.0, 3.0),
+                             Bool(),
+                             Values(1))); // not used
+ 
+ OCL_INSTANTIATE_TEST_CASE_P(Filter, Dilate, Combine(
+                             Values(CV_8UC1, CV_8UC3, CV_8UC4, CV_32FC1, CV_32FC3, CV_32FC4, CV_64FC1, CV_64FC4),
+-                            Values(0, 3, 5, 7, 9), // kernel size, 0 means kernel = Mat()
++                            Values(0, 3, 5, 7), // kernel size, 0 means kernel = Mat()
+                             Values(Size(0, 0)), // not used
+                             Values((BorderType)BORDER_CONSTANT),
+-                            Values(1.0, 2.0, 3.0, 4.0),
++                            Values(1.0, 2.0, 3.0),
+                             Bool(),
+                             Values(1))); // not used
+ 

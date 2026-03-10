@@ -1,0 +1,137 @@
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index f910185b83..fc5548cd8d 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1637,6 +1637,27 @@ struct Net::Impl
+                  preferableTarget == DNN_TARGET_MYRIAD ||
+                  preferableTarget == DNN_TARGET_FPGA) && !fused)
+             {
++#if INF_ENGINE_VER_MAJOR_GT(INF_ENGINE_RELEASE_2018R5)
++                bool hasWeights = false;
++                for (const std::string& name : {"weights", "biases"})
++                {
++                    auto it = ieNode->layer.getParameters().find(name);
++                    if (it != ieNode->layer.getParameters().end())
++                    {
++                        InferenceEngine::Blob::CPtr bp = it->second.as<InferenceEngine::Blob::CPtr>();
++                        it->second = (InferenceEngine::Blob::CPtr)convertFp16(std::const_pointer_cast<InferenceEngine::Blob>(bp));
++                        hasWeights = true;
++                    }
++                }
++                if (!hasWeights)
++                {
++                    InferenceEngine::Blob::Ptr blob = InferenceEngine::make_shared_blob<int16_t>(
++                                                          InferenceEngine::Precision::FP16,
++                                                          InferenceEngine::Layout::C, {1});
++                    blob->allocate();
++                    ieNode->layer.getParameters()["weights"] = (InferenceEngine::Blob::CPtr)blob;
++                }
++#else
+                 auto& blobs = ieNode->layer.getConstantData();
+                 if (blobs.empty())
+                 {
+@@ -1653,6 +1674,7 @@ struct Net::Impl
+                     for (auto& it : blobs)
+                         it.second = convertFp16(std::const_pointer_cast<InferenceEngine::Blob>(it.second));
+                 }
++#endif
+             }
+ 
+             if (!fused)
+@@ -1724,7 +1746,7 @@ struct Net::Impl
+ 
+             if (!ieNode->net->isInitialized())
+             {
+-#if INF_ENGINE_VER_MAJOR_GT(INF_ENGINE_RELEASE_2018R3)
++#if INF_ENGINE_VER_MAJOR_EQ(INF_ENGINE_RELEASE_2018R4)
+                 // For networks which is built in runtime we need to specify a
+                 // version of it's hyperparameters.
+                 std::string versionTrigger = "<net name=\"TestInput\" version=\"3\" batch=\"1\">"
+diff --git a/modules/dnn/src/layers/normalize_bbox_layer.cpp b/modules/dnn/src/layers/normalize_bbox_layer.cpp
+index 4766f1704e..8e21f116e4 100644
+--- a/modules/dnn/src/layers/normalize_bbox_layer.cpp
++++ b/modules/dnn/src/layers/normalize_bbox_layer.cpp
+@@ -276,23 +276,29 @@ public:
+ 
+             InferenceEngine::Builder::Layer l = ieLayer;
+             const int numChannels = input->dims[2];  // NOTE: input->dims are reversed (whcn)
++            InferenceEngine::Blob::Ptr weights;
+             if (blobs.empty())
+             {
+-                auto weights = InferenceEngine::make_shared_blob<float>(InferenceEngine::Precision::FP32,
+-                                                                        InferenceEngine::Layout::C,
+-                                                                        {(size_t)numChannels});
+-                weights->allocate();
++                auto onesBlob = InferenceEngine::make_shared_blob<float>(InferenceEngine::Precision::FP32,
++                                                                         InferenceEngine::Layout::C,
++                                                                         {(size_t)numChannels});
++                onesBlob->allocate();
+                 std::vector<float> ones(numChannels, 1);
+-                weights->set(ones);
+-                l.addConstantData("weights", weights);
++                onesBlob->set(ones);
++                weights = onesBlob;
+                 l.getParameters()["channel_shared"] = false;
+             }
+             else
+             {
+                 CV_Assert(numChannels == blobs[0].total());
+-                l.addConstantData("weights", wrapToInfEngineBlob(blobs[0], {(size_t)numChannels}, InferenceEngine::Layout::C));
++                weights = wrapToInfEngineBlob(blobs[0], {(size_t)numChannels}, InferenceEngine::Layout::C);
+                 l.getParameters()["channel_shared"] = blobs[0].total() == 1;
+             }
++#if INF_ENGINE_VER_MAJOR_GT(INF_ENGINE_RELEASE_2018R5)
++            l.getParameters()["weights"] = (InferenceEngine::Blob::CPtr)weights;
++#else
++            l.addConstantData("weights", weights);
++#endif
+             l.getParameters()["across_spatial"] = acrossSpatial;
+             return Ptr<BackendNode>(new InfEngineBackendNode(l));
+         }
+diff --git a/modules/dnn/src/layers/resize_layer.cpp b/modules/dnn/src/layers/resize_layer.cpp
+index 03d806ad2c..d5ab1acd6e 100644
+--- a/modules/dnn/src/layers/resize_layer.cpp
++++ b/modules/dnn/src/layers/resize_layer.cpp
+@@ -173,7 +173,7 @@ public:
+             ieLayer.getParameters()["antialias"] = false;
+             if (scaleWidth != scaleHeight)
+                 CV_Error(Error::StsNotImplemented, "resample with sw != sh");
+-            ieLayer.getParameters()["factor"] = 1.0 / scaleWidth;
++            ieLayer.getParameters()["factor"] = 1.0f / scaleWidth;
+         }
+         else if (interpolation == "bilinear")
+         {
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index 0349d44710..a452064337 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -766,7 +766,7 @@ void InfEngineBackendLayer::forward(InputArrayOfArrays inputs, OutputArrayOfArra
+     CV_Error(Error::StsInternal, "Choose Inference Engine as a preferable backend.");
+ }
+ 
+-InferenceEngine::TBlob<int16_t>::Ptr convertFp16(const InferenceEngine::Blob::Ptr& blob)
++InferenceEngine::Blob::Ptr convertFp16(const InferenceEngine::Blob::Ptr& blob)
+ {
+     auto halfs = InferenceEngine::make_shared_blob<int16_t>(InferenceEngine::Precision::FP16, blob->layout(), blob->dims());
+     halfs->allocate();
+diff --git a/modules/dnn/src/op_inf_engine.hpp b/modules/dnn/src/op_inf_engine.hpp
+index 89e3e339cf..e912725296 100644
+--- a/modules/dnn/src/op_inf_engine.hpp
++++ b/modules/dnn/src/op_inf_engine.hpp
+@@ -36,6 +36,7 @@
+ #define INF_ENGINE_VER_MAJOR_GT(ver) (((INF_ENGINE_RELEASE) / 10000) > ((ver) / 10000))
+ #define INF_ENGINE_VER_MAJOR_GE(ver) (((INF_ENGINE_RELEASE) / 10000) >= ((ver) / 10000))
+ #define INF_ENGINE_VER_MAJOR_LT(ver) (((INF_ENGINE_RELEASE) / 10000) < ((ver) / 10000))
++#define INF_ENGINE_VER_MAJOR_EQ(ver) (((INF_ENGINE_RELEASE) / 10000) == ((ver) / 10000))
+ 
+ #if INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2018R5)
+ #include <ie_builders.hpp>
+@@ -252,7 +253,7 @@ Mat infEngineBlobToMat(const InferenceEngine::Blob::Ptr& blob);
+ 
+ // Convert Inference Engine blob with FP32 precision to FP16 precision.
+ // Allocates memory for a new blob.
+-InferenceEngine::TBlob<int16_t>::Ptr convertFp16(const InferenceEngine::Blob::Ptr& blob);
++InferenceEngine::Blob::Ptr convertFp16(const InferenceEngine::Blob::Ptr& blob);
+ 
+ // This is a fake class to run networks from Model Optimizer. Objects of that
+ // class simulate responses of layers are imported by OpenCV and supported by

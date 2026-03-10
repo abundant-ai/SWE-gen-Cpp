@@ -1,0 +1,206 @@
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index cdb62b6830..58ad936378 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1160,12 +1160,6 @@ struct Net::Impl
+                 continue;
+ 
+             currLayer->unsetAttached();
+-
+-            Ptr<PoolingLayer> poolingLayer = currLayer.dynamicCast<PoolingLayer>();
+-            if( !poolingLayer.empty() )
+-            {
+-                poolingLayer->computeMaxIdx = true;
+-            }
+         }
+ 
+         layersTimings.clear();
+@@ -2082,30 +2076,11 @@ struct Net::Impl
+                     }
+                 }
+             }
+-            // the optimization #2. if there is no layer that takes max pooling layer's computed
+-            // max indices (and only some semantical segmentation networks might need this;
+-            // many others only take the maximum values), then we switch the max pooling
+-            // layer to the faster operating mode.
+-            Ptr<PoolingLayer> poolingLayer = ld.layerInstance.dynamicCast<PoolingLayer>();
+-            if( !poolingLayer.empty() && !ld.consumers.empty() )
+-            {
+-                size_t i = 0, nconsumers = ld.consumers.size();
+-                for( ; i < nconsumers; i++ )
+-                    if( ld.consumers[i].oid > 0 )
+-                        break;
+-                // if there is no layer that takes the second output pin of the pooling layer
+-                // on input then we don't need to compute the indices
+-                if( i >= nconsumers )
+-                {
+-                    poolingLayer->computeMaxIdx = false;
+-                    printf_(("\tsimplified pooling layer %s\n", poolingLayer->name.c_str()));
+-                }
+-            }
+ 
+             if (preferableBackend != DNN_BACKEND_OPENCV)
+                 continue;  // Go to the next layer.
+ 
+-            // the optimization #3. if there is concat layer that concatenates channels
++            // the optimization #2. if there is concat layer that concatenates channels
+             // from the inputs together (i.e. axis == 1) then we make the inputs of
+             // the concat layer to write to the concatenation output buffer
+             // (and so we eliminate the concatenation layer, because the channels
+diff --git a/modules/dnn/src/layers/elementwise_layers.cpp b/modules/dnn/src/layers/elementwise_layers.cpp
+index a18cce6fa9..86ac26f3cc 100644
+--- a/modules/dnn/src/layers/elementwise_layers.cpp
++++ b/modules/dnn/src/layers/elementwise_layers.cpp
+@@ -256,8 +256,11 @@ struct ReLUFunctor
+ 
+     bool supportBackend(int backendId, int)
+     {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE;
++#ifdef HAVE_INF_ENGINE
++        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
++            return slope >= 0 || !INF_ENGINE_VER_MAJOR_EQ(INF_ENGINE_RELEASE_2019R1);
++#endif
++        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+     }
+ 
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+@@ -741,8 +744,11 @@ struct AbsValFunctor
+ 
+     bool supportBackend(int backendId, int)
+     {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE;
++#ifdef HAVE_INF_ENGINE
++        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
++            return !INF_ENGINE_VER_MAJOR_EQ(INF_ENGINE_RELEASE_2019R1);
++#endif
++        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+     }
+ 
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+diff --git a/modules/dnn/src/layers/flatten_layer.cpp b/modules/dnn/src/layers/flatten_layer.cpp
+index 3a704dca81..aa264a749b 100644
+--- a/modules/dnn/src/layers/flatten_layer.cpp
++++ b/modules/dnn/src/layers/flatten_layer.cpp
+@@ -159,8 +159,8 @@ public:
+         InferenceEngine::Builder::Layer ieLayer(name);
+         ieLayer.setName(name);
+         ieLayer.setType("Flatten");
+-        ieLayer.getParameters()["axis"] = _startAxis;
+-        ieLayer.getParameters()["end_axis"] = _endAxis;
++        ieLayer.getParameters()["axis"] = (size_t)_startAxis;
++        ieLayer.getParameters()["end_axis"] = _endAxis;  // Do not cast to size_t because it might be negative.
+         ieLayer.setInputPorts(std::vector<InferenceEngine::Port>(1));
+         ieLayer.setOutputPorts(std::vector<InferenceEngine::Port>(1));
+         return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+diff --git a/modules/dnn/src/layers/padding_layer.cpp b/modules/dnn/src/layers/padding_layer.cpp
+index 30f04e029a..89a05e6a4d 100644
+--- a/modules/dnn/src/layers/padding_layer.cpp
++++ b/modules/dnn/src/layers/padding_layer.cpp
+@@ -12,6 +12,7 @@ Implementation of padding layer, which adds paddings to input blob.
+ #include "../precomp.hpp"
+ #include "layers_common.hpp"
+ #include "../op_halide.hpp"
++#include "../op_inf_engine.hpp"
+ #include <vector>
+ 
+ namespace cv
+@@ -68,28 +69,36 @@ public:
+ 
+         // Compute dstRanges.
+         const MatSize& inpShape = inputs[0].size;
+-        dstRanges.resize(paddings.size());
+ 
+-        int offset = 0;
+         if (inputDims != -1 && inputs[0].dims != inputDims)
+         {
+-            dstRanges.insert(dstRanges.begin(), Range::all());
+-            offset = 1;
++            paddings.insert(paddings.begin(), std::make_pair(0, 0));
+         }
+ 
++        dstRanges.resize(paddings.size());
+         for (int i = 0; i < paddings.size(); ++i)
+         {
+-            dstRanges[offset + i].start = paddings[i].first;
+-            dstRanges[offset + i].end = paddings[i].first + inpShape[offset + i];
++            dstRanges[i].start = paddings[i].first;
++            dstRanges[i].end = paddings[i].first + inpShape[i];
+         }
+ 
+         // Add the rest of dimensions.
+         for (int i = dstRanges.size(); i < inputs[0].dims; ++i)
++        {
+             dstRanges.push_back(Range::all());
++            paddings.push_back(std::make_pair(0, 0));
++        }
++        inputDims = -1;  // Next time paddings are filled for all the dimensions.
+     }
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
++#ifdef HAVE_INF_ENGINE
++        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
++            return INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2019R1) &&
++                   (preferableTarget != DNN_TARGET_MYRIAD ||
++                    (dstRanges.size() == 4 && paddings[0].first == 0 && paddings[0].second == 0));
++#endif
+         return backendId == DNN_BACKEND_OPENCV ||
+                (backendId == DNN_BACKEND_HALIDE && haveHalide() && dstRanges.size() == 4);
+     }
+@@ -109,7 +118,7 @@ public:
+             {
+                 std::vector<float> paddingValue_fp32(1, paddingValue);
+                 std::vector<int16_t> paddingValue_fp16(1);
+-                convertFp16(paddingValue_fp32, paddingValue_fp16);
++                cv::convertFp16(paddingValue_fp32, paddingValue_fp16);
+                 outputs[0].setTo(paddingValue_fp16[0]);
+             }
+             else
+@@ -173,6 +182,32 @@ public:
+         return Ptr<BackendNode>();
+     }
+ 
++    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
++    {
++#ifdef HAVE_INF_ENGINE
++        InferenceEngine::Builder::Layer ieLayer(name);
++        ieLayer.setName(name);
++        ieLayer.setType("Pad");
++
++        std::vector<int> begins(paddings.size(), 0), ends(paddings.size(), 0);
++        for (int i = 0; i < paddings.size(); ++i)
++        {
++            begins[i] = paddings[i].first;
++            ends[i] = paddings[i].second;
++        }
++        ieLayer.getParameters()["pads_begin"] = begins;
++        ieLayer.getParameters()["pads_end"] = ends;
++        ieLayer.getParameters()["pad_mode"] = paddingType;
++        if (paddingType == "constant")
++            ieLayer.getParameters()["pad_value"] = paddingValue;
++
++        ieLayer.setInputPorts(std::vector<InferenceEngine::Port>(1));
++        ieLayer.setOutputPorts(std::vector<InferenceEngine::Port>(1));
++        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
++#endif
++        return Ptr<BackendNode>();
++    }
++
+ private:
+     std::vector<std::pair<int, int> > paddings;  // Pairs pad before, pad after.
+     std::vector<Range> dstRanges;
+diff --git a/modules/dnn/src/layers/pooling_layer.cpp b/modules/dnn/src/layers/pooling_layer.cpp
+index 92d171a538..28945c7440 100644
+--- a/modules/dnn/src/layers/pooling_layer.cpp
++++ b/modules/dnn/src/layers/pooling_layer.cpp
+@@ -140,7 +140,7 @@ public:
+ #ifdef HAVE_OPENCL
+         poolOp.release();
+ #endif
+-        computeMaxIdx = type == MAX;
++        computeMaxIdx = type == MAX && outputs.size() == 2;
+     }
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE

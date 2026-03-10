@@ -1,0 +1,550 @@
+diff --git a/modules/dnn/include/opencv2/dnn/dnn.hpp b/modules/dnn/include/opencv2/dnn/dnn.hpp
+index 6f80597c70..07099dcb73 100644
+--- a/modules/dnn/include/opencv2/dnn/dnn.hpp
++++ b/modules/dnn/include/opencv2/dnn/dnn.hpp
+@@ -44,11 +44,14 @@
+ 
+ #include <vector>
+ #include <opencv2/core.hpp>
++#ifdef CV_CXX11
++#include <future>
++#endif
+ 
+ #if !defined CV_DOXYGEN && !defined CV_STATIC_ANALYSIS && !defined CV_DNN_DONT_ADD_EXPERIMENTAL_NS
+-#define CV__DNN_EXPERIMENTAL_NS_BEGIN namespace experimental_dnn_34_v11 {
++#define CV__DNN_EXPERIMENTAL_NS_BEGIN namespace experimental_dnn_34_v12 {
+ #define CV__DNN_EXPERIMENTAL_NS_END }
+-namespace cv { namespace dnn { namespace experimental_dnn_34_v11 { } using namespace experimental_dnn_34_v11; }}
++namespace cv { namespace dnn { namespace experimental_dnn_34_v12 { } using namespace experimental_dnn_34_v12; }}
+ #else
+ #define CV__DNN_EXPERIMENTAL_NS_BEGIN
+ #define CV__DNN_EXPERIMENTAL_NS_END
+@@ -64,6 +67,18 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+ 
+     typedef std::vector<int> MatShape;
+ 
++#if defined(CV_CXX11) || defined(CV_DOXYGEN)
++    typedef std::future<Mat> AsyncMat;
++#else
++    // Just a workaround for bindings.
++    struct AsyncMat
++    {
++        Mat get() { return Mat(); }
++        void wait() const {}
++        size_t wait_for(size_t milliseconds) const { CV_UNUSED(milliseconds); return -1; }
++    };
++#endif
++
+     /**
+      * @brief Enum of computation backends supported by layers.
+      * @see Net::setPreferableBackend
+@@ -75,7 +90,7 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+         //! DNN_BACKEND_OPENCV otherwise.
+         DNN_BACKEND_DEFAULT,
+         DNN_BACKEND_HALIDE,
+-        DNN_BACKEND_INFERENCE_ENGINE,
++        DNN_BACKEND_INFERENCE_ENGINE,  //!< Intel's Inference Engine computational backend.
+         DNN_BACKEND_OPENCV
+     };
+ 
+@@ -89,8 +104,7 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+         DNN_TARGET_OPENCL,
+         DNN_TARGET_OPENCL_FP16,
+         DNN_TARGET_MYRIAD,
+-        //! FPGA device with CPU fallbacks using Inference Engine's Heterogeneous plugin.
+-        DNN_TARGET_FPGA
++        DNN_TARGET_FPGA  //!< FPGA device with CPU fallbacks using Inference Engine's Heterogeneous plugin.
+     };
+ 
+     CV_EXPORTS std::vector< std::pair<Backend, Target> > getAvailableBackends();
+@@ -462,6 +476,15 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+          */
+         CV_WRAP Mat forward(const String& outputName = String());
+ 
++        /** @brief Runs forward pass to compute output of layer with name @p outputName.
++         *  @param outputName name for layer which output is needed to get
++         *  @details By default runs forward pass for the whole network.
++         *
++         *  This is an asynchronous version of forward(const String&).
++         *  dnn::DNN_BACKEND_INFERENCE_ENGINE backend is required.
++         */
++        CV_WRAP AsyncMat forwardAsync(const String& outputName = String());
++
+         /** @brief Runs forward pass to compute output of layer with name @p outputName.
+          *  @param outputBlobs contains all output blobs for specified layer.
+          *  @param outputName name for layer which output is needed to get
+diff --git a/modules/dnn/misc/python/pyopencv_dnn.hpp b/modules/dnn/misc/python/pyopencv_dnn.hpp
+index 53cba74435..8e6d80302d 100644
+--- a/modules/dnn/misc/python/pyopencv_dnn.hpp
++++ b/modules/dnn/misc/python/pyopencv_dnn.hpp
+@@ -2,7 +2,13 @@
+ typedef dnn::DictValue LayerId;
+ typedef std::vector<dnn::MatShape> vector_MatShape;
+ typedef std::vector<std::vector<dnn::MatShape> > vector_vector_MatShape;
+-
++#ifdef CV_CXX11
++typedef std::chrono::milliseconds chrono_milliseconds;
++typedef std::future_status AsyncMatStatus;
++#else
++typedef size_t chrono_milliseconds;
++typedef size_t AsyncMatStatus;
++#endif
+ 
+ template<>
+ bool pyopencv_to(PyObject *o, dnn::DictValue &dv, const char *name)
+@@ -40,6 +46,46 @@ bool pyopencv_to(PyObject *o, std::vector<Mat> &blobs, const char *name) //requi
+   return pyopencvVecConverter<Mat>::to(o, blobs, ArgInfo(name, false));
+ }
+ 
++#ifdef CV_CXX11
++
++template<>
++PyObject* pyopencv_from(const std::future<Mat>& f_)
++{
++    std::future<Mat>& f = const_cast<std::future<Mat>&>(f_);
++    Ptr<cv::dnn::AsyncMat> p(new std::future<Mat>(std::move(f)));
++    return pyopencv_from(p);
++}
++
++template<>
++PyObject* pyopencv_from(const std::future_status& status)
++{
++    return pyopencv_from((int)status);
++}
++
++template<>
++bool pyopencv_to(PyObject* src, std::chrono::milliseconds& dst, const char* name)
++{
++    size_t millis = 0;
++    if (pyopencv_to(src, millis, name))
++    {
++        dst = std::chrono::milliseconds(millis);
++        return true;
++    }
++    else
++        return false;
++}
++
++#else
++
++template<>
++PyObject* pyopencv_from(const cv::dnn::AsyncMat&)
++{
++    CV_Error(Error::StsNotImplemented, "C++11 is required.");
++    return 0;
++}
++
++#endif  // CV_CXX11
++
+ template<typename T>
+ PyObject* pyopencv_from(const dnn::DictValue &dv)
+ {
+diff --git a/modules/dnn/misc/python/shadow_async_mat.hpp b/modules/dnn/misc/python/shadow_async_mat.hpp
+new file mode 100644
+index 0000000000..8807b8624b
+--- /dev/null
++++ b/modules/dnn/misc/python/shadow_async_mat.hpp
+@@ -0,0 +1,22 @@
++#error This is a shadow header file, which is not intended for processing by any compiler. \
++       Only bindings parser should handle this file.
++
++namespace cv { namespace dnn {
++
++class CV_EXPORTS_W AsyncMat
++{
++public:
++    //! Wait for Mat object readiness and return it.
++    CV_WRAP Mat get();
++
++    //! Wait for Mat object readiness.
++    CV_WRAP void wait() const;
++
++    /** @brief Wait for Mat object readiness specific amount of time.
++     *  @param timeout Timeout in milliseconds
++     *  @returns [std::future_status](https://en.cppreference.com/w/cpp/thread/future_status)
++     */
++    CV_WRAP AsyncMatStatus wait_for(std::chrono::milliseconds timeout) const;
++};
++
++}}
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 36eee10eeb..2cc3f9a640 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1030,6 +1030,7 @@ struct Net::Impl
+         lastLayerId = 0;
+         netWasAllocated = false;
+         fusion = true;
++        isAsync = false;
+         preferableBackend = DNN_BACKEND_DEFAULT;
+         preferableTarget = DNN_TARGET_CPU;
+         skipInfEngineInit = false;
+@@ -1051,6 +1052,7 @@ struct Net::Impl
+ 
+     bool netWasAllocated;
+     bool fusion;
++    bool isAsync;
+     std::vector<int64> layersTimings;
+     Mat output_blob;
+ 
+@@ -2258,6 +2260,9 @@ struct Net::Impl
+             std::map<int, Ptr<BackendNode> >::iterator it = ld.backendNodes.find(preferableBackend);
+             if (preferableBackend == DNN_BACKEND_OPENCV || it == ld.backendNodes.end() || it->second.empty())
+             {
++                if (isAsync)
++                    CV_Error(Error::StsNotImplemented, "Default implementation fallbacks in asynchronous mode");
++
+                 if (preferableBackend == DNN_BACKEND_OPENCV && IS_DNN_OPENCL_TARGET(preferableTarget))
+                 {
+                     std::vector<UMat> umat_inputBlobs = OpenCLBackendWrapper::getUMatVector(ld.inputBlobsWrappers);
+@@ -2413,7 +2418,7 @@ struct Net::Impl
+                 }
+                 else if (preferableBackend == DNN_BACKEND_INFERENCE_ENGINE)
+                 {
+-                    forwardInfEngine(node);
++                    forwardInfEngine(ld.outputBlobsWrappers, node, isAsync);
+                 }
+                 else
+                 {
+@@ -2459,15 +2464,6 @@ struct Net::Impl
+         forwardLayer(ld);
+     }
+ 
+-    void forwardAll()
+-    {
+-        CV_TRACE_FUNCTION();
+-
+-        MapIdToLayerData::reverse_iterator last_layer = layers.rbegin();
+-        CV_Assert(last_layer != layers.rend());
+-        forwardToLayer(last_layer->second, true);
+-    }
+-
+     void getLayerShapesRecursively(int id, LayersShapesMap& inOutShapes)
+     {
+         std::vector<LayerPin>& inputLayerIds = layers[id].inputBlobsId;
+@@ -2558,6 +2554,42 @@ struct Net::Impl
+     {
+         return getBlob(getPinByAlias(outputName));
+     }
++
++#ifdef CV_CXX11
++    std::future<Mat> getBlobAsync(const LayerPin& pin)
++    {
++        CV_TRACE_FUNCTION();
++#ifdef HAVE_INF_ENGINE
++        if (!pin.valid())
++            CV_Error(Error::StsObjectNotFound, "Requested blob not found");
++
++        LayerData &ld = layers[pin.lid];
++        if ((size_t)pin.oid >= ld.outputBlobs.size())
++        {
++            CV_Error(Error::StsOutOfRange, format("Layer \"%s\" produce only %d outputs, "
++                                           "the #%d was requested", ld.name.c_str(),
++                                           ld.outputBlobs.size(), pin.oid));
++        }
++        if (preferableTarget != DNN_TARGET_CPU)
++        {
++            CV_Assert(!ld.outputBlobsWrappers.empty() && !ld.outputBlobsWrappers[pin.oid].empty());
++            // Transfer data to CPU if it's require.
++            ld.outputBlobsWrappers[pin.oid]->copyToHost();
++        }
++        CV_Assert(preferableBackend == DNN_BACKEND_INFERENCE_ENGINE);
++
++        Ptr<InfEngineBackendWrapper> wrapper = ld.outputBlobsWrappers[pin.oid].dynamicCast<InfEngineBackendWrapper>();
++        return std::move(wrapper->futureMat);
++#else
++        CV_Error(Error::StsNotImplemented, "DNN_BACKEND_INFERENCE_ENGINE backend is required");
++#endif
++    }
++
++    std::future<Mat> getBlobAsync(String outputName)
++    {
++        return getBlobAsync(getPinByAlias(outputName));
++    }
++#endif  // CV_CXX11
+ };
+ 
+ Net::Net() : impl(new Net::Impl)
+@@ -2681,6 +2713,31 @@ Mat Net::forward(const String& outputName)
+     return impl->getBlob(layerName);
+ }
+ 
++AsyncMat Net::forwardAsync(const String& outputName)
++{
++    CV_TRACE_FUNCTION();
++#ifdef CV_CXX11
++    if (impl->preferableBackend != DNN_BACKEND_INFERENCE_ENGINE)
++        CV_Error(Error::StsNotImplemented, "Asynchronous forward for backend which is different from DNN_BACKEND_INFERENCE_ENGINE");
++
++    String layerName = outputName;
++
++    if (layerName.empty())
++        layerName = getLayerNames().back();
++
++    std::vector<LayerPin> pins(1, impl->getPinByAlias(layerName));
++    impl->setUpNet(pins);
++
++    impl->isAsync = true;
++    impl->forwardToLayer(impl->getLayerData(layerName));
++    impl->isAsync = false;
++
++    return impl->getBlobAsync(layerName);
++#else
++    CV_Error(Error::StsNotImplemented, "Asynchronous forward without C++11");
++#endif  // CV_CXX11
++}
++
+ void Net::forward(OutputArrayOfArrays outputBlobs, const String& outputName)
+ {
+     CV_TRACE_FUNCTION();
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index e5c817056b..e5b025f945 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -168,7 +168,6 @@ void InfEngineBackendNet::init(int targetId)
+         const std::string& name = it.first;
+         auto blobIt = allBlobs.find(name);
+         CV_Assert(blobIt != allBlobs.end());
+-        inpBlobs[name] = blobIt->second;
+         it.second->setPrecision(blobIt->second->precision());
+     }
+     for (const auto& it : cnn.getOutputsInfo())
+@@ -176,7 +175,6 @@ void InfEngineBackendNet::init(int targetId)
+         const std::string& name = it.first;
+         auto blobIt = allBlobs.find(name);
+         CV_Assert(blobIt != allBlobs.end());
+-        outBlobs[name] = blobIt->second;
+         it.second->setPrecision(blobIt->second->precision());  // Should be always FP32
+     }
+ 
+@@ -288,6 +286,24 @@ InferenceEngine::Blob::Ptr wrapToInfEngineBlob(const Mat& m, InferenceEngine::La
+     return wrapToInfEngineBlob(m, reversedShape, layout);
+ }
+ 
++InferenceEngine::Blob::Ptr cloneBlob(const InferenceEngine::Blob::Ptr& blob)
++{
++    InferenceEngine::Precision precision = blob->precision();
++    InferenceEngine::Blob::Ptr copy;
++    if (precision == InferenceEngine::Precision::FP32)
++    {
++        copy = InferenceEngine::make_shared_blob<float>(precision, blob->layout(), blob->dims());
++    }
++    else if (precision == InferenceEngine::Precision::U8)
++    {
++        copy = InferenceEngine::make_shared_blob<uint8_t>(precision, blob->layout(), blob->dims());
++    }
++    else
++        CV_Error(Error::StsNotImplemented, "Unsupported blob precision");
++    copy->allocate();
++    return copy;
++}
++
+ InferenceEngine::DataPtr infEngineDataNode(const Ptr<BackendWrapper>& ptr)
+ {
+     CV_Assert(!ptr.empty());
+@@ -800,9 +816,6 @@ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+         plugin = InferenceEngine::InferencePlugin(enginePtr);
+ 
+         netExec = plugin.LoadNetwork(net, {});
+-        infRequest = netExec.CreateInferRequest();
+-        infRequest.SetInput(inpBlobs);
+-        infRequest.SetOutput(outBlobs);
+     }
+     catch (const std::exception& ex)
+     {
+@@ -828,9 +841,116 @@ void InfEngineBackendNet::addBlobs(const std::vector<Ptr<BackendWrapper> >& ptrs
+     }
+ }
+ 
+-void InfEngineBackendNet::forward()
++void InfEngineBackendNet::InfEngineReqWrapper::makePromises(const std::vector<Ptr<BackendWrapper> >& outsWrappers)
++{
++    auto outs = infEngineWrappers(outsWrappers);
++    outProms.clear();
++    outProms.resize(outs.size());
++    outsNames.resize(outs.size());
++    for (int i = 0; i < outs.size(); ++i)
++    {
++        outs[i]->futureMat = outProms[i].get_future();
++        outsNames[i] = outs[i]->dataPtr->name;
++    }
++}
++
++void InfEngineBackendNet::forward(const std::vector<Ptr<BackendWrapper> >& outBlobsWrappers,
++                                  bool isAsync)
+ {
+-    infRequest.Infer();
++    // Look for finished requests.
++    Ptr<InfEngineReqWrapper> reqWrapper;
++    for (auto& wrapper : infRequests)
++    {
++        if (wrapper->isReady)
++        {
++            reqWrapper = wrapper;
++            break;
++        }
++    }
++    if (reqWrapper.empty())
++    {
++        reqWrapper = Ptr<InfEngineReqWrapper>(new InfEngineReqWrapper());
++        try
++        {
++            reqWrapper->req = netExec.CreateInferRequest();
++        }
++        catch (const std::exception& ex)
++        {
++            CV_Error(Error::StsAssert, format("Failed to initialize Inference Engine backend: %s", ex.what()));
++        }
++        infRequests.push_back(reqWrapper);
++
++        InferenceEngine::BlobMap inpBlobs, outBlobs;
++        for (const auto& it : cnn.getInputsInfo())
++        {
++            const std::string& name = it.first;
++            auto blobIt = allBlobs.find(name);
++            CV_Assert(blobIt != allBlobs.end());
++            inpBlobs[name] = isAsync ? cloneBlob(blobIt->second) : blobIt->second;
++        }
++        for (const auto& it : cnn.getOutputsInfo())
++        {
++            const std::string& name = it.first;
++            auto blobIt = allBlobs.find(name);
++            CV_Assert(blobIt != allBlobs.end());
++            outBlobs[name] = isAsync ? cloneBlob(blobIt->second) : blobIt->second;
++        }
++        reqWrapper->req.SetInput(inpBlobs);
++        reqWrapper->req.SetOutput(outBlobs);
++
++        InferenceEngine::IInferRequest::Ptr infRequestPtr = reqWrapper->req;
++        infRequestPtr->SetUserData(reqWrapper.get(), 0);
++
++        infRequestPtr->SetCompletionCallback({
++            [](InferenceEngine::IInferRequest::Ptr request, InferenceEngine::StatusCode status)
++            {
++                InfEngineReqWrapper* wrapper;
++                request->GetUserData((void**)&wrapper, 0);
++                CV_Assert(wrapper);
++
++                for (int i = 0; i < wrapper->outProms.size(); ++i)
++                {
++                    const std::string& name = wrapper->outsNames[i];
++                    Mat m = infEngineBlobToMat(wrapper->req.GetBlob(name));
++
++                    if (status == InferenceEngine::StatusCode::OK)
++                        wrapper->outProms[i].set_value(m.clone());
++                    else
++                    {
++                        try {
++                            std::runtime_error e("Async request failed");
++                            wrapper->outProms[i].set_exception(std::make_exception_ptr(e));
++                        } catch(...) {
++                            CV_LOG_ERROR(NULL, "DNN: Exception occured during async inference exception propagation");
++                        }
++                    }
++                }
++                wrapper->isReady = true;
++            }
++        });
++    }
++    if (isAsync)
++    {
++        // Copy actual data to infer request's input blobs.
++        for (const auto& it : cnn.getInputsInfo())
++        {
++            const std::string& name = it.first;
++            auto blobIt = allBlobs.find(name);
++            Mat srcMat = infEngineBlobToMat(blobIt->second);
++            Mat dstMat = infEngineBlobToMat(reqWrapper->req.GetBlob(name));
++            srcMat.copyTo(dstMat);
++        }
++
++        // Set promises to output blobs wrappers.
++        reqWrapper->makePromises(outBlobsWrappers);
++
++        reqWrapper->isReady = false;
++        reqWrapper->req.StartAsync();
++    }
++    else
++    {
++        reqWrapper->req.Infer();
++    }
+ }
+ 
+ Mat infEngineBlobToMat(const InferenceEngine::Blob::Ptr& blob)
+@@ -920,14 +1040,15 @@ bool haveInfEngine()
+ #endif  // HAVE_INF_ENGINE
+ }
+ 
+-void forwardInfEngine(Ptr<BackendNode>& node)
++void forwardInfEngine(const std::vector<Ptr<BackendWrapper> >& outBlobsWrappers,
++                      Ptr<BackendNode>& node, bool isAsync)
+ {
+     CV_Assert(haveInfEngine());
+ #ifdef HAVE_INF_ENGINE
+     CV_Assert(!node.empty());
+     Ptr<InfEngineBackendNode> ieNode = node.dynamicCast<InfEngineBackendNode>();
+     CV_Assert(!ieNode.empty());
+-    ieNode->net->forward();
++    ieNode->net->forward(outBlobsWrappers, isAsync);
+ #endif  // HAVE_INF_ENGINE
+ }
+ 
+diff --git a/modules/dnn/src/op_inf_engine.hpp b/modules/dnn/src/op_inf_engine.hpp
+index 2219f926a7..009e121af7 100644
+--- a/modules/dnn/src/op_inf_engine.hpp
++++ b/modules/dnn/src/op_inf_engine.hpp
+@@ -185,7 +185,8 @@ public:
+ 
+     void init(int targetId);
+ 
+-    void forward();
++    void forward(const std::vector<Ptr<BackendWrapper> >& outBlobsWrappers,
++                 bool isAsync);
+ 
+     void initPlugin(InferenceEngine::ICNNNetwork& net);
+ 
+@@ -197,12 +198,23 @@ private:
+     InferenceEngine::InferenceEnginePluginPtr enginePtr;
+     InferenceEngine::InferencePlugin plugin;
+     InferenceEngine::ExecutableNetwork netExec;
+-    InferenceEngine::InferRequest infRequest;
+     InferenceEngine::BlobMap allBlobs;
+-    InferenceEngine::BlobMap inpBlobs;
+-    InferenceEngine::BlobMap outBlobs;
+     InferenceEngine::TargetDevice targetDevice;
+ 
++    struct InfEngineReqWrapper
++    {
++        InfEngineReqWrapper() : isReady(true) {}
++
++        void makePromises(const std::vector<Ptr<BackendWrapper> >& outs);
++
++        InferenceEngine::InferRequest req;
++        std::vector<std::promise<Mat> > outProms;
++        std::vector<std::string> outsNames;
++        bool isReady;
++    };
++
++    std::vector<Ptr<InfEngineReqWrapper> > infRequests;
++
+     InferenceEngine::CNNNetwork cnn;
+     bool hasNetOwner;
+ 
+@@ -252,6 +264,7 @@ public:
+ 
+     InferenceEngine::DataPtr dataPtr;
+     InferenceEngine::Blob::Ptr blob;
++    std::future<Mat> futureMat;
+ };
+ 
+ InferenceEngine::Blob::Ptr wrapToInfEngineBlob(const Mat& m, InferenceEngine::Layout layout = InferenceEngine::Layout::ANY);
+@@ -302,7 +315,8 @@ CV__DNN_EXPERIMENTAL_NS_END
+ 
+ bool haveInfEngine();
+ 
+-void forwardInfEngine(Ptr<BackendNode>& node);
++void forwardInfEngine(const std::vector<Ptr<BackendWrapper> >& outBlobsWrappers,
++                      Ptr<BackendNode>& node, bool isAsync);
+ 
+ }}  // namespace dnn, namespace cv
+ 

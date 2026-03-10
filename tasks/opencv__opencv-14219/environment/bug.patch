@@ -1,0 +1,804 @@
+diff --git a/modules/core/src/lda.cpp b/modules/core/src/lda.cpp
+index 53e7ee3aa8..cd03e9b1e8 100644
+--- a/modules/core/src/lda.cpp
++++ b/modules/core/src/lda.cpp
+@@ -903,19 +903,19 @@ public:
+     // given in src. This function is a port of the EigenvalueSolver in JAMA,
+     // which has been released to public domain by The MathWorks and the
+     // National Institute of Standards and Technology (NIST).
+-    EigenvalueDecomposition() :
++    EigenvalueDecomposition(InputArray src, bool fallbackSymmetric = true) :
+         n(0),
+         d(NULL), e(NULL), ort(NULL),
+         V(NULL), H(NULL)
+     {
+-        // nothing
++        compute(src, fallbackSymmetric);
+     }
+ 
+     // This function computes the Eigenvalue Decomposition for a general matrix
+     // given in src. This function is a port of the EigenvalueSolver in JAMA,
+     // which has been released to public domain by The MathWorks and the
+     // National Institute of Standards and Technology (NIST).
+-    void compute(InputArray src, bool fallbackSymmetric = true)
++    void compute(InputArray src, bool fallbackSymmetric)
+     {
+         CV_INSTRUMENT_REGION();
+ 
+@@ -970,8 +970,7 @@ void eigenNonSymmetric(InputArray _src, OutputArray _evals, OutputArray _evects)
+     else
+         src64f = src;
+ 
+-    EigenvalueDecomposition eigensystem;
+-    eigensystem.compute(src64f, false);
++    EigenvalueDecomposition eigensystem(src64f, false);
+ 
+     // EigenvalueDecomposition returns transposed and non-sorted eigenvalues
+     std::vector<double> eigenvalues64f;
+@@ -1147,8 +1146,7 @@ void LDA::lda(InputArrayOfArrays _src, InputArray _lbls) {
+     // M = inv(Sw)*Sb
+     Mat M;
+     gemm(Swi, Sb, 1.0, Mat(), 0.0, M);
+-    EigenvalueDecomposition es;
+-    es.compute(M);
++    EigenvalueDecomposition es(M);
+     _eigenvalues = es.eigenvalues();
+     _eigenvectors = es.eigenvectors();
+     // reshape eigenvalues, so they are stored by column
+diff --git a/modules/core/src/system.cpp b/modules/core/src/system.cpp
+index 1cc2dcdca1..408a673659 100644
+--- a/modules/core/src/system.cpp
++++ b/modules/core/src/system.cpp
+@@ -94,7 +94,7 @@ void* allocSingletonBuffer(size_t size) { return fastMalloc(size); }
+ #include <cstdlib>        // std::abort
+ #endif
+ 
+-#if defined __ANDROID__ || defined __linux__ || defined __FreeBSD__ || defined __OpenBSD__ || defined __HAIKU__ || defined __Fuchsia__
++#if defined __ANDROID__ || defined __linux__ || defined __FreeBSD__ || defined __HAIKU__ || defined __Fuchsia__
+ #  include <unistd.h>
+ #  include <fcntl.h>
+ #  include <elf.h>
+diff --git a/modules/dnn/CMakeLists.txt b/modules/dnn/CMakeLists.txt
+index 7682257729..d97829f81a 100644
+--- a/modules/dnn/CMakeLists.txt
++++ b/modules/dnn/CMakeLists.txt
+@@ -94,7 +94,7 @@ set(perf_path "${CMAKE_CURRENT_LIST_DIR}/perf")
+ file(GLOB_RECURSE perf_srcs "${perf_path}/*.cpp")
+ file(GLOB_RECURSE perf_hdrs "${perf_path}/*.hpp" "${perf_path}/*.h")
+ ocv_add_perf_tests(${INF_ENGINE_TARGET}
+-    FILES test_common "${CMAKE_CURRENT_LIST_DIR}/test/test_common.hpp" "${CMAKE_CURRENT_LIST_DIR}/test/test_common.impl.hpp"
++    FILES test_common "${CMAKE_CURRENT_LIST_DIR}/test/test_common.cpp"
+     FILES Src ${perf_srcs}
+     FILES Include ${perf_hdrs}
+ )
+diff --git a/modules/dnn/perf/perf_common.cpp b/modules/dnn/perf/perf_common.cpp
+deleted file mode 100644
+index 13db0fe446..0000000000
+--- a/modules/dnn/perf/perf_common.cpp
++++ /dev/null
+@@ -1,6 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-
+-#include "perf_precomp.hpp"
+-#include "../test/test_common.impl.hpp"  // shared with accuracy tests
+diff --git a/modules/dnn/test/test_common.cpp b/modules/dnn/test/test_common.cpp
+index a2ea6ead53..023faf5dd2 100644
+--- a/modules/dnn/test/test_common.cpp
++++ b/modules/dnn/test/test_common.cpp
+@@ -2,5 +2,292 @@
+ // It is subject to the license terms in the LICENSE file found in the top-level directory
+ // of this distribution and at http://opencv.org/license.html.
+ 
+-#include "test_precomp.hpp"
+-#include "test_common.impl.hpp"  // shared with perf tests
++// Used in perf tests too, disabled: #include "test_precomp.hpp"
++#include "opencv2/ts.hpp"
++#include "opencv2/ts/ts_perf.hpp"
++#include "opencv2/core/utility.hpp"
++#include "opencv2/core/ocl.hpp"
++
++#include "opencv2/dnn.hpp"
++#include "test_common.hpp"
++
++#include <opencv2/core/utils/configuration.private.hpp>
++#include <opencv2/core/utils/logger.hpp>
++
++namespace cv { namespace dnn {
++CV__DNN_INLINE_NS_BEGIN
++
++void PrintTo(const cv::dnn::Backend& v, std::ostream* os)
++{
++    switch (v) {
++    case DNN_BACKEND_DEFAULT: *os << "DEFAULT"; return;
++    case DNN_BACKEND_HALIDE: *os << "HALIDE"; return;
++    case DNN_BACKEND_INFERENCE_ENGINE: *os << "DLIE"; return;
++    case DNN_BACKEND_OPENCV: *os << "OCV"; return;
++    case DNN_BACKEND_VKCOM: *os << "VKCOM"; return;
++    } // don't use "default:" to emit compiler warnings
++    *os << "DNN_BACKEND_UNKNOWN(" << (int)v << ")";
++}
++
++void PrintTo(const cv::dnn::Target& v, std::ostream* os)
++{
++    switch (v) {
++    case DNN_TARGET_CPU: *os << "CPU"; return;
++    case DNN_TARGET_OPENCL: *os << "OCL"; return;
++    case DNN_TARGET_OPENCL_FP16: *os << "OCL_FP16"; return;
++    case DNN_TARGET_MYRIAD: *os << "MYRIAD"; return;
++    case DNN_TARGET_VULKAN: *os << "VULKAN"; return;
++    case DNN_TARGET_FPGA: *os << "FPGA"; return;
++    } // don't use "default:" to emit compiler warnings
++    *os << "DNN_TARGET_UNKNOWN(" << (int)v << ")";
++}
++
++void PrintTo(const tuple<cv::dnn::Backend, cv::dnn::Target> v, std::ostream* os)
++{
++    PrintTo(get<0>(v), os);
++    *os << "/";
++    PrintTo(get<1>(v), os);
++}
++
++CV__DNN_INLINE_NS_END
++}} // namespace
++
++
++
++namespace opencv_test {
++
++void normAssert(
++        cv::InputArray ref, cv::InputArray test, const char *comment /*= ""*/,
++        double l1 /*= 0.00001*/, double lInf /*= 0.0001*/)
++{
++    double normL1 = cvtest::norm(ref, test, cv::NORM_L1) / ref.getMat().total();
++    EXPECT_LE(normL1, l1) << comment;
++
++    double normInf = cvtest::norm(ref, test, cv::NORM_INF);
++    EXPECT_LE(normInf, lInf) << comment;
++}
++
++std::vector<cv::Rect2d> matToBoxes(const cv::Mat& m)
++{
++    EXPECT_EQ(m.type(), CV_32FC1);
++    EXPECT_EQ(m.dims, 2);
++    EXPECT_EQ(m.cols, 4);
++
++    std::vector<cv::Rect2d> boxes(m.rows);
++    for (int i = 0; i < m.rows; ++i)
++    {
++        CV_Assert(m.row(i).isContinuous());
++        const float* data = m.ptr<float>(i);
++        double l = data[0], t = data[1], r = data[2], b = data[3];
++        boxes[i] = cv::Rect2d(l, t, r - l, b - t);
++    }
++    return boxes;
++}
++
++void normAssertDetections(
++        const std::vector<int>& refClassIds,
++        const std::vector<float>& refScores,
++        const std::vector<cv::Rect2d>& refBoxes,
++        const std::vector<int>& testClassIds,
++        const std::vector<float>& testScores,
++        const std::vector<cv::Rect2d>& testBoxes,
++        const char *comment /*= ""*/, double confThreshold /*= 0.0*/,
++        double scores_diff /*= 1e-5*/, double boxes_iou_diff /*= 1e-4*/)
++{
++    std::vector<bool> matchedRefBoxes(refBoxes.size(), false);
++    for (int i = 0; i < testBoxes.size(); ++i)
++    {
++        double testScore = testScores[i];
++        if (testScore < confThreshold)
++            continue;
++
++        int testClassId = testClassIds[i];
++        const cv::Rect2d& testBox = testBoxes[i];
++        bool matched = false;
++        for (int j = 0; j < refBoxes.size() && !matched; ++j)
++        {
++            if (!matchedRefBoxes[j] && testClassId == refClassIds[j] &&
++                std::abs(testScore - refScores[j]) < scores_diff)
++            {
++                double interArea = (testBox & refBoxes[j]).area();
++                double iou = interArea / (testBox.area() + refBoxes[j].area() - interArea);
++                if (std::abs(iou - 1.0) < boxes_iou_diff)
++                {
++                    matched = true;
++                    matchedRefBoxes[j] = true;
++                }
++            }
++        }
++        if (!matched)
++            std::cout << cv::format("Unmatched prediction: class %d score %f box ",
++                                    testClassId, testScore) << testBox << std::endl;
++        EXPECT_TRUE(matched) << comment;
++    }
++
++    // Check unmatched reference detections.
++    for (int i = 0; i < refBoxes.size(); ++i)
++    {
++        if (!matchedRefBoxes[i] && refScores[i] > confThreshold)
++        {
++            std::cout << cv::format("Unmatched reference: class %d score %f box ",
++                                    refClassIds[i], refScores[i]) << refBoxes[i] << std::endl;
++            EXPECT_LE(refScores[i], confThreshold) << comment;
++        }
++    }
++}
++
++// For SSD-based object detection networks which produce output of shape 1x1xNx7
++// where N is a number of detections and an every detection is represented by
++// a vector [batchId, classId, confidence, left, top, right, bottom].
++void normAssertDetections(
++        cv::Mat ref, cv::Mat out, const char *comment /*= ""*/,
++        double confThreshold /*= 0.0*/, double scores_diff /*= 1e-5*/,
++        double boxes_iou_diff /*= 1e-4*/)
++{
++    CV_Assert(ref.total() % 7 == 0);
++    CV_Assert(out.total() % 7 == 0);
++    ref = ref.reshape(1, ref.total() / 7);
++    out = out.reshape(1, out.total() / 7);
++
++    cv::Mat refClassIds, testClassIds;
++    ref.col(1).convertTo(refClassIds, CV_32SC1);
++    out.col(1).convertTo(testClassIds, CV_32SC1);
++    std::vector<float> refScores(ref.col(2)), testScores(out.col(2));
++    std::vector<cv::Rect2d> refBoxes = matToBoxes(ref.colRange(3, 7));
++    std::vector<cv::Rect2d> testBoxes = matToBoxes(out.colRange(3, 7));
++    normAssertDetections(refClassIds, refScores, refBoxes, testClassIds, testScores,
++                         testBoxes, comment, confThreshold, scores_diff, boxes_iou_diff);
++}
++
++bool readFileInMemory(const std::string& filename, std::string& content)
++{
++    std::ios::openmode mode = std::ios::in | std::ios::binary;
++    std::ifstream ifs(filename.c_str(), mode);
++    if (!ifs.is_open())
++        return false;
++
++    content.clear();
++
++    ifs.seekg(0, std::ios::end);
++    content.reserve(ifs.tellg());
++    ifs.seekg(0, std::ios::beg);
++
++    content.assign((std::istreambuf_iterator<char>(ifs)),
++                   std::istreambuf_iterator<char>());
++
++    return true;
++}
++
++
++testing::internal::ParamGenerator< tuple<Backend, Target> > dnnBackendsAndTargets(
++        bool withInferenceEngine /*= true*/,
++        bool withHalide /*= false*/,
++        bool withCpuOCV /*= true*/,
++        bool withVkCom /*= true*/
++)
++{
++#ifdef HAVE_INF_ENGINE
++    bool withVPU = validateVPUType();
++#endif
++
++    std::vector< tuple<Backend, Target> > targets;
++    std::vector< Target > available;
++    if (withHalide)
++    {
++        available = getAvailableTargets(DNN_BACKEND_HALIDE);
++        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
++            targets.push_back(make_tuple(DNN_BACKEND_HALIDE, *i));
++    }
++#ifdef HAVE_INF_ENGINE
++    if (withInferenceEngine)
++    {
++        available = getAvailableTargets(DNN_BACKEND_INFERENCE_ENGINE);
++        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
++        {
++            if (*i == DNN_TARGET_MYRIAD && !withVPU)
++                continue;
++            targets.push_back(make_tuple(DNN_BACKEND_INFERENCE_ENGINE, *i));
++        }
++    }
++#else
++    CV_UNUSED(withInferenceEngine);
++#endif
++    if (withVkCom)
++    {
++        available = getAvailableTargets(DNN_BACKEND_VKCOM);
++        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
++            targets.push_back(make_tuple(DNN_BACKEND_VKCOM, *i));
++    }
++    {
++        available = getAvailableTargets(DNN_BACKEND_OPENCV);
++        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
++        {
++            if (!withCpuOCV && *i == DNN_TARGET_CPU)
++                continue;
++            targets.push_back(make_tuple(DNN_BACKEND_OPENCV, *i));
++        }
++    }
++    if (targets.empty())  // validate at least CPU mode
++        targets.push_back(make_tuple(DNN_BACKEND_OPENCV, DNN_TARGET_CPU));
++    return testing::ValuesIn(targets);
++}
++
++
++#ifdef HAVE_INF_ENGINE
++static std::string getTestInferenceEngineVPUType()
++{
++    static std::string param_vpu_type = utils::getConfigurationParameterString("OPENCV_TEST_DNN_IE_VPU_TYPE", "");
++    return param_vpu_type;
++}
++
++static bool validateVPUType_()
++{
++    std::string test_vpu_type = getTestInferenceEngineVPUType();
++    if (test_vpu_type == "DISABLED" || test_vpu_type == "disabled")
++    {
++        return false;
++    }
++
++    std::vector<Target> available = getAvailableTargets(DNN_BACKEND_INFERENCE_ENGINE);
++    bool have_vpu_target = false;
++    for (std::vector<Target>::const_iterator i = available.begin(); i != available.end(); ++i)
++    {
++        if (*i == DNN_TARGET_MYRIAD)
++        {
++            have_vpu_target = true;
++            break;
++        }
++    }
++
++    if (test_vpu_type.empty())
++    {
++        if (have_vpu_target)
++        {
++            CV_LOG_INFO(NULL, "OpenCV-DNN-Test: VPU type for testing is not specified via 'OPENCV_TEST_DNN_IE_VPU_TYPE' parameter.")
++        }
++    }
++    else
++    {
++        if (!have_vpu_target)
++        {
++            CV_LOG_FATAL(NULL, "OpenCV-DNN-Test: 'OPENCV_TEST_DNN_IE_VPU_TYPE' parameter requires VPU of type = '" << test_vpu_type << "', but VPU is not detected. STOP.");
++            exit(1);
++        }
++        std::string dnn_vpu_type = getInferenceEngineVPUType();
++        if (dnn_vpu_type != test_vpu_type)
++        {
++            CV_LOG_FATAL(NULL, "OpenCV-DNN-Test: 'testing' and 'detected' VPU types mismatch: '" << test_vpu_type << "' vs '" << dnn_vpu_type << "'. STOP.");
++            exit(1);
++        }
++    }
++    return true;
++}
++
++bool validateVPUType()
++{
++    static bool result = validateVPUType_();
++    return result;
++}
++#endif // HAVE_INF_ENGINE
++
++} // namespace
+diff --git a/modules/dnn/test/test_common.impl.hpp b/modules/dnn/test/test_common.impl.hpp
+deleted file mode 100644
+index 6914af2bcb..0000000000
+--- a/modules/dnn/test/test_common.impl.hpp
++++ /dev/null
+@@ -1,294 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-
+-// Used in accuracy and perf tests as a content of .cpp file
+-// Note: don't use "precomp.hpp" here
+-#include "opencv2/ts.hpp"
+-#include "opencv2/ts/ts_perf.hpp"
+-#include "opencv2/core/utility.hpp"
+-#include "opencv2/core/ocl.hpp"
+-
+-#include "opencv2/dnn.hpp"
+-#include "test_common.hpp"
+-
+-#include <opencv2/core/utils/configuration.private.hpp>
+-#include <opencv2/core/utils/logger.hpp>
+-
+-namespace cv { namespace dnn {
+-CV__DNN_INLINE_NS_BEGIN
+-
+-void PrintTo(const cv::dnn::Backend& v, std::ostream* os)
+-{
+-    switch (v) {
+-    case DNN_BACKEND_DEFAULT: *os << "DEFAULT"; return;
+-    case DNN_BACKEND_HALIDE: *os << "HALIDE"; return;
+-    case DNN_BACKEND_INFERENCE_ENGINE: *os << "DLIE"; return;
+-    case DNN_BACKEND_VKCOM: *os << "VKCOM"; return;
+-    case DNN_BACKEND_OPENCV: *os << "OCV"; return;
+-    } // don't use "default:" to emit compiler warnings
+-    *os << "DNN_BACKEND_UNKNOWN(" << (int)v << ")";
+-}
+-
+-void PrintTo(const cv::dnn::Target& v, std::ostream* os)
+-{
+-    switch (v) {
+-    case DNN_TARGET_CPU: *os << "CPU"; return;
+-    case DNN_TARGET_OPENCL: *os << "OCL"; return;
+-    case DNN_TARGET_OPENCL_FP16: *os << "OCL_FP16"; return;
+-    case DNN_TARGET_MYRIAD: *os << "MYRIAD"; return;
+-    case DNN_TARGET_VULKAN: *os << "VULKAN"; return;
+-    case DNN_TARGET_FPGA: *os << "FPGA"; return;
+-    } // don't use "default:" to emit compiler warnings
+-    *os << "DNN_TARGET_UNKNOWN(" << (int)v << ")";
+-}
+-
+-void PrintTo(const tuple<cv::dnn::Backend, cv::dnn::Target> v, std::ostream* os)
+-{
+-    PrintTo(get<0>(v), os);
+-    *os << "/";
+-    PrintTo(get<1>(v), os);
+-}
+-
+-CV__DNN_INLINE_NS_END
+-}} // namespace
+-
+-
+-
+-namespace opencv_test {
+-
+-void normAssert(
+-        cv::InputArray ref, cv::InputArray test, const char *comment /*= ""*/,
+-        double l1 /*= 0.00001*/, double lInf /*= 0.0001*/)
+-{
+-    double normL1 = cvtest::norm(ref, test, cv::NORM_L1) / ref.getMat().total();
+-    EXPECT_LE(normL1, l1) << comment;
+-
+-    double normInf = cvtest::norm(ref, test, cv::NORM_INF);
+-    EXPECT_LE(normInf, lInf) << comment;
+-}
+-
+-std::vector<cv::Rect2d> matToBoxes(const cv::Mat& m)
+-{
+-    EXPECT_EQ(m.type(), CV_32FC1);
+-    EXPECT_EQ(m.dims, 2);
+-    EXPECT_EQ(m.cols, 4);
+-
+-    std::vector<cv::Rect2d> boxes(m.rows);
+-    for (int i = 0; i < m.rows; ++i)
+-    {
+-        CV_Assert(m.row(i).isContinuous());
+-        const float* data = m.ptr<float>(i);
+-        double l = data[0], t = data[1], r = data[2], b = data[3];
+-        boxes[i] = cv::Rect2d(l, t, r - l, b - t);
+-    }
+-    return boxes;
+-}
+-
+-void normAssertDetections(
+-        const std::vector<int>& refClassIds,
+-        const std::vector<float>& refScores,
+-        const std::vector<cv::Rect2d>& refBoxes,
+-        const std::vector<int>& testClassIds,
+-        const std::vector<float>& testScores,
+-        const std::vector<cv::Rect2d>& testBoxes,
+-        const char *comment /*= ""*/, double confThreshold /*= 0.0*/,
+-        double scores_diff /*= 1e-5*/, double boxes_iou_diff /*= 1e-4*/)
+-{
+-    std::vector<bool> matchedRefBoxes(refBoxes.size(), false);
+-    for (int i = 0; i < testBoxes.size(); ++i)
+-    {
+-        double testScore = testScores[i];
+-        if (testScore < confThreshold)
+-            continue;
+-
+-        int testClassId = testClassIds[i];
+-        const cv::Rect2d& testBox = testBoxes[i];
+-        bool matched = false;
+-        for (int j = 0; j < refBoxes.size() && !matched; ++j)
+-        {
+-            if (!matchedRefBoxes[j] && testClassId == refClassIds[j] &&
+-                std::abs(testScore - refScores[j]) < scores_diff)
+-            {
+-                double interArea = (testBox & refBoxes[j]).area();
+-                double iou = interArea / (testBox.area() + refBoxes[j].area() - interArea);
+-                if (std::abs(iou - 1.0) < boxes_iou_diff)
+-                {
+-                    matched = true;
+-                    matchedRefBoxes[j] = true;
+-                }
+-            }
+-        }
+-        if (!matched)
+-            std::cout << cv::format("Unmatched prediction: class %d score %f box ",
+-                                    testClassId, testScore) << testBox << std::endl;
+-        EXPECT_TRUE(matched) << comment;
+-    }
+-
+-    // Check unmatched reference detections.
+-    for (int i = 0; i < refBoxes.size(); ++i)
+-    {
+-        if (!matchedRefBoxes[i] && refScores[i] > confThreshold)
+-        {
+-            std::cout << cv::format("Unmatched reference: class %d score %f box ",
+-                                    refClassIds[i], refScores[i]) << refBoxes[i] << std::endl;
+-            EXPECT_LE(refScores[i], confThreshold) << comment;
+-        }
+-    }
+-}
+-
+-// For SSD-based object detection networks which produce output of shape 1x1xNx7
+-// where N is a number of detections and an every detection is represented by
+-// a vector [batchId, classId, confidence, left, top, right, bottom].
+-void normAssertDetections(
+-        cv::Mat ref, cv::Mat out, const char *comment /*= ""*/,
+-        double confThreshold /*= 0.0*/, double scores_diff /*= 1e-5*/,
+-        double boxes_iou_diff /*= 1e-4*/)
+-{
+-    CV_Assert(ref.total() % 7 == 0);
+-    CV_Assert(out.total() % 7 == 0);
+-    ref = ref.reshape(1, ref.total() / 7);
+-    out = out.reshape(1, out.total() / 7);
+-
+-    cv::Mat refClassIds, testClassIds;
+-    ref.col(1).convertTo(refClassIds, CV_32SC1);
+-    out.col(1).convertTo(testClassIds, CV_32SC1);
+-    std::vector<float> refScores(ref.col(2)), testScores(out.col(2));
+-    std::vector<cv::Rect2d> refBoxes = matToBoxes(ref.colRange(3, 7));
+-    std::vector<cv::Rect2d> testBoxes = matToBoxes(out.colRange(3, 7));
+-    normAssertDetections(refClassIds, refScores, refBoxes, testClassIds, testScores,
+-                         testBoxes, comment, confThreshold, scores_diff, boxes_iou_diff);
+-}
+-
+-bool readFileInMemory(const std::string& filename, std::string& content)
+-{
+-    std::ios::openmode mode = std::ios::in | std::ios::binary;
+-    std::ifstream ifs(filename.c_str(), mode);
+-    if (!ifs.is_open())
+-        return false;
+-
+-    content.clear();
+-
+-    ifs.seekg(0, std::ios::end);
+-    content.reserve(ifs.tellg());
+-    ifs.seekg(0, std::ios::beg);
+-
+-    content.assign((std::istreambuf_iterator<char>(ifs)),
+-                   std::istreambuf_iterator<char>());
+-
+-    return true;
+-}
+-
+-
+-testing::internal::ParamGenerator< tuple<Backend, Target> > dnnBackendsAndTargets(
+-        bool withInferenceEngine /*= true*/,
+-        bool withHalide /*= false*/,
+-        bool withCpuOCV /*= true*/,
+-        bool withVkCom /*= true*/
+-)
+-{
+-#ifdef HAVE_INF_ENGINE
+-    bool withVPU = validateVPUType();
+-#endif
+-
+-    std::vector< tuple<Backend, Target> > targets;
+-    std::vector< Target > available;
+-    if (withHalide)
+-    {
+-        available = getAvailableTargets(DNN_BACKEND_HALIDE);
+-        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
+-            targets.push_back(make_tuple(DNN_BACKEND_HALIDE, *i));
+-    }
+-#ifdef HAVE_INF_ENGINE
+-    if (withInferenceEngine)
+-    {
+-        available = getAvailableTargets(DNN_BACKEND_INFERENCE_ENGINE);
+-        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
+-        {
+-            if (*i == DNN_TARGET_MYRIAD && !withVPU)
+-                continue;
+-            targets.push_back(make_tuple(DNN_BACKEND_INFERENCE_ENGINE, *i));
+-        }
+-    }
+-#else
+-    CV_UNUSED(withInferenceEngine);
+-#endif
+-    if (withVkCom)
+-    {
+-        available = getAvailableTargets(DNN_BACKEND_VKCOM);
+-        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
+-            targets.push_back(make_tuple(DNN_BACKEND_VKCOM, *i));
+-    }
+-    {
+-        available = getAvailableTargets(DNN_BACKEND_OPENCV);
+-        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
+-        {
+-            if (!withCpuOCV && *i == DNN_TARGET_CPU)
+-                continue;
+-            targets.push_back(make_tuple(DNN_BACKEND_OPENCV, *i));
+-        }
+-    }
+-    if (targets.empty())  // validate at least CPU mode
+-        targets.push_back(make_tuple(DNN_BACKEND_OPENCV, DNN_TARGET_CPU));
+-    return testing::ValuesIn(targets);
+-}
+-
+-
+-#ifdef HAVE_INF_ENGINE
+-static std::string getTestInferenceEngineVPUType()
+-{
+-    static std::string param_vpu_type = utils::getConfigurationParameterString("OPENCV_TEST_DNN_IE_VPU_TYPE", "");
+-    return param_vpu_type;
+-}
+-
+-static bool validateVPUType_()
+-{
+-    std::string test_vpu_type = getTestInferenceEngineVPUType();
+-    if (test_vpu_type == "DISABLED" || test_vpu_type == "disabled")
+-    {
+-        return false;
+-    }
+-
+-    std::vector<Target> available = getAvailableTargets(DNN_BACKEND_INFERENCE_ENGINE);
+-    bool have_vpu_target = false;
+-    for (std::vector<Target>::const_iterator i = available.begin(); i != available.end(); ++i)
+-    {
+-        if (*i == DNN_TARGET_MYRIAD)
+-        {
+-            have_vpu_target = true;
+-            break;
+-        }
+-    }
+-
+-    if (test_vpu_type.empty())
+-    {
+-        if (have_vpu_target)
+-        {
+-            CV_LOG_INFO(NULL, "OpenCV-DNN-Test: VPU type for testing is not specified via 'OPENCV_TEST_DNN_IE_VPU_TYPE' parameter.")
+-        }
+-    }
+-    else
+-    {
+-        if (!have_vpu_target)
+-        {
+-            CV_LOG_FATAL(NULL, "OpenCV-DNN-Test: 'OPENCV_TEST_DNN_IE_VPU_TYPE' parameter requires VPU of type = '" << test_vpu_type << "', but VPU is not detected. STOP.");
+-            exit(1);
+-        }
+-        std::string dnn_vpu_type = getInferenceEngineVPUType();
+-        if (dnn_vpu_type != test_vpu_type)
+-        {
+-            CV_LOG_FATAL(NULL, "OpenCV-DNN-Test: 'testing' and 'detected' VPU types mismatch: '" << test_vpu_type << "' vs '" << dnn_vpu_type << "'. STOP.");
+-            exit(1);
+-        }
+-    }
+-    return true;
+-}
+-
+-bool validateVPUType()
+-{
+-    static bool result = validateVPUType_();
+-    return result;
+-}
+-#endif // HAVE_INF_ENGINE
+-
+-} // namespace
+diff --git a/modules/dnn/test/test_ie_models.cpp b/modules/dnn/test/test_ie_models.cpp
+index 77259d8b23..9f3542dfc5 100644
+--- a/modules/dnn/test/test_ie_models.cpp
++++ b/modules/dnn/test/test_ie_models.cpp
+@@ -177,17 +177,34 @@ TEST_P(DNNTestOpenVINO, models)
+ {
+     Target target = (dnn::Target)(int)get<0>(GetParam());
+     std::string modelName = get<1>(GetParam());
+-    std::string precision = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? "FP16" : "FP32";
+ 
+ #ifdef INF_ENGINE_RELEASE
+-#if INF_ENGINE_RELEASE <= 2018050000
+-    std::string prefix = utils::fs::join("intel_models",
+-                         utils::fs::join(modelName,
+-                         utils::fs::join(precision, modelName)));
++#if INF_ENGINE_RELEASE <= 2018030000
++    if (target == DNN_TARGET_MYRIAD && (modelName == "landmarks-regression-retail-0001" ||
++                                        modelName == "semantic-segmentation-adas-0001" ||
++                                        modelName == "face-reidentification-retail-0001"))
++        throw SkipTestException("");
++#elif INF_ENGINE_RELEASE == 2018040000
++    if (modelName == "single-image-super-resolution-0034" ||
++        (target == DNN_TARGET_MYRIAD && (modelName == "license-plate-recognition-barrier-0001" ||
++                                         modelName == "landmarks-regression-retail-0009" ||
++                                          modelName == "semantic-segmentation-adas-0001")))
++        throw SkipTestException("");
++#elif INF_ENGINE_RELEASE == 2018050000
++    if (modelName == "single-image-super-resolution-0063" ||
++        modelName == "single-image-super-resolution-1011" ||
++        modelName == "single-image-super-resolution-1021" ||
++        (target == DNN_TARGET_OPENCL_FP16 && modelName == "face-reidentification-retail-0095") ||
++        (target == DNN_TARGET_MYRIAD && (modelName == "license-plate-recognition-barrier-0001" ||
++                                         modelName == "semantic-segmentation-adas-0001")))
++        throw SkipTestException("");
+ #endif
+ #endif
+ 
+-    initDLDTDataPath();
++    std::string precision = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? "FP16" : "FP32";
++    std::string prefix = utils::fs::join("intel_models",
++                         utils::fs::join(modelName,
++                         utils::fs::join(precision, modelName)));
+     std::string xmlPath = findDataFile(prefix + ".xml");
+     std::string binPath = findDataFile(prefix + ".bin");
+ 
+@@ -204,21 +221,49 @@ TEST_P(DNNTestOpenVINO, models)
+     {
+         auto dstIt = cvOutputsMap.find(srcIt.first);
+         CV_Assert(dstIt != cvOutputsMap.end());
++        double normInfIE = cvtest::norm(srcIt.second, cv::NORM_INF);
+         double normInf = cvtest::norm(srcIt.second, dstIt->second, cv::NORM_INF);
+-        EXPECT_EQ(normInf, 0);
++        double eps = 0;
++        if (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD)
++        {
++            double fp16_eps = 1.0/1024;
++            eps = fp16_eps * 1/*ULP*/ * std::max(normInfIE, 1.0);
++        }
++        EXPECT_LE(normInf, eps) << "IE: " << normInfIE;
++    }
++}
++
++static testing::internal::ParamGenerator<String> intelModels()
++{
++    initDLDTDataPath();
++    std::vector<String> modelsNames;
++
++    std::string path;
++    try
++    {
++        path = findDataDirectory("intel_models", false);
++    }
++    catch (...)
++    {
++        std::cerr << "ERROR: Can't find OpenVINO models. Check INTEL_CVSDK_DIR environment variable (run setup.sh)" << std::endl;
++        return ValuesIn(modelsNames);  // empty list
+     }
++
++    cv::utils::fs::glob_relative(path, "", modelsNames, false, true);
++
++    modelsNames.erase(
++        std::remove_if(modelsNames.begin(), modelsNames.end(),
++                       [&](const String& dir){ return !utils::fs::isDirectory(utils::fs::join(path, dir)); }),
++        modelsNames.end()
++    );
++    CV_Assert(!modelsNames.empty());
++
++    return ValuesIn(modelsNames);
+ }
+ 
+ INSTANTIATE_TEST_CASE_P(/**/,
+     DNNTestOpenVINO,
+-    Combine(testing::ValuesIn(getAvailableTargets(DNN_BACKEND_INFERENCE_ENGINE)),
+-            testing::Values(
+-              "age-gender-recognition-retail-0013",
+-              "face-person-detection-retail-0002",
+-              "head-pose-estimation-adas-0001",
+-              "person-detection-retail-0002",
+-              "vehicle-detection-adas-0002"
+-            ))
++    Combine(testing::ValuesIn(getAvailableTargets(DNN_BACKEND_INFERENCE_ENGINE)), intelModels())
+ );
+ 
+ }}
+diff --git a/modules/imgcodecs/src/bitstrm.cpp b/modules/imgcodecs/src/bitstrm.cpp
+index 97df645a6d..2f5b44dfeb 100644
+--- a/modules/imgcodecs/src/bitstrm.cpp
++++ b/modules/imgcodecs/src/bitstrm.cpp
+@@ -175,11 +175,8 @@ void  RBaseStream::setPos( int pos )
+     }
+ 
+     int offset = pos % m_block_size;
+-    int old_block_pos = m_block_pos;
+     m_block_pos = pos - offset;
+     m_current = m_start + offset;
+-    if (old_block_pos != m_block_pos)
+-        readBlock();
+ }
+ 
+ 

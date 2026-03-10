@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eo pipefail
 
 cd /app/src
 
@@ -8,7 +9,7 @@ cp "/tests/CMakeLists.txt" "tests/CMakeLists.txt"
 mkdir -p "tests/SelfTest/UsageTests"
 cp "/tests/SelfTest/UsageTests/Benchmark.tests.cpp" "tests/SelfTest/UsageTests/Benchmark.tests.cpp"
 
-# Reconfigure CMake to pick up the updated test files
+# Reconfigure CMake with testing enabled
 if ! cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
@@ -20,34 +21,16 @@ if ! cmake -Bbuild -H. \
     exit 1
 fi
 
-# Rebuild to pick up changes
+# Rebuild to incorporate the updated test files
 if ! cmake --build build 2>&1; then
     echo "FAIL: Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Run the specific test that validates --skip-benchmarks functionality
-# This test should pass with the fix (test case exists and --skip-benchmarks works)
-# but fail without the fix (test case or flag doesn't exist)
-if ! ./build/tests/SelfTest "Skip benchmark macros" --reporter console --skip-benchmarks 2>&1 | tee /tmp/test_output.txt; then
-    echo "FAIL: Test execution failed"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-# Verify the test passed with expected output
-if ! grep -q "All tests passed (2 assertions in 1 test case)" /tmp/test_output.txt; then
-    echo "FAIL: Test did not pass with expected output"
-    cat /tmp/test_output.txt
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-# Verify that benchmark output was skipped (shouldn't see "benchmark name" in output)
-if grep -q "benchmark name" /tmp/test_output.txt; then
-    echo "FAIL: Benchmarks were not skipped"
-    cat /tmp/test_output.txt
+# Run the benchmark tests
+if ! ctest --test-dir build -R "Benchmark" --output-on-failure 2>&1; then
+    echo "FAIL: Benchmark tests failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi

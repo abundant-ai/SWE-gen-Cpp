@@ -1,0 +1,423 @@
+diff --git a/src/google/protobuf/repeated_field.h b/src/google/protobuf/repeated_field.h
+index 6735fa09e..6531f504b 100644
+--- a/src/google/protobuf/repeated_field.h
++++ b/src/google/protobuf/repeated_field.h
+@@ -71,8 +71,6 @@ class RepeatedFieldProxy;
+ 
+ namespace internal {
+ 
+-template <typename ElementType>
+-class RepeatedFieldProxyBase;
+ class EpsCopyInputStream;
+ class TcParser;
+ class WireFormat;
+@@ -516,8 +514,6 @@ class ABSL_ATTRIBUTE_WARN_UNUSED PROTOBUF_DECLSPEC_EMPTY_BASES
+   friend class internal::v2::TableDrivenParse;
+ 
+   friend class RepeatedFieldProxy<Element>;
+-  template <typename ElementType>
+-  friend class internal::RepeatedFieldProxyBase;
+ 
+   // For access to private arena constructor.
+   friend class UnknownFieldSet;
+@@ -550,7 +546,9 @@ class ABSL_ATTRIBUTE_WARN_UNUSED PROTOBUF_DECLSPEC_EMPTY_BASES
+     ReserveWithArena(arena, size() + grow_by);
+   }
+ 
+-  void AddWithArena(Arena* arena, Element value);
++  void* AddUninitializedWithArena(Arena* arena);
++
++  pointer AddWithArena(Arena* arena, Element value);
+   pointer AddWithArena(Arena* arena) ABSL_ATTRIBUTE_LIFETIME_BOUND;
+   template <typename Iter>
+   void AddWithArena(Arena* arena, Iter begin, Iter end);
+@@ -965,6 +963,19 @@ inline void RepeatedField<Element>::Set(int index, const Element& value) {
+   *Mutable(index) = value;
+ }
+ 
++template <typename Element>
++inline void* RepeatedField<Element>::AddUninitializedWithArena(Arena* arena) {
++  ABSL_DCHECK_EQ(arena, GetArena());
++
++  bool is_soo = this->is_soo();
++  const int old_size = size();
++  if (ABSL_PREDICT_FALSE(old_size == Capacity(is_soo))) {
++    Grow(arena, is_soo, old_size, old_size + 1);
++    is_soo = false;
++  }
++  return unsafe_elements(is_soo) + ExchangeCurrentSize(old_size + 1);
++}
++
+ template <typename Element>
+ inline void RepeatedField<Element>::Add(Element value) {
+   AddWithArena(GetArena(), std::move(value));
+@@ -977,7 +988,8 @@ inline void RepeatedField<Element>::InternalAddWithArena(
+ }
+ 
+ template <typename Element>
+-inline void RepeatedField<Element>::AddWithArena(Arena* arena, Element value) {
++inline typename RepeatedField<Element>::pointer
++RepeatedField<Element>::AddWithArena(Arena* arena, Element value) {
+   ABSL_DCHECK_EQ(arena, GetArena());
+ 
+   bool is_soo = this->is_soo();
+@@ -992,7 +1004,7 @@ inline void RepeatedField<Element>::AddWithArena(Arena* arena, Element value) {
+   }
+   int new_size = old_size + 1;
+   void* p = elem + ExchangeCurrentSize(new_size);
+-  ::new (p) Element(std::move(value));
++  auto* result = ::new (p) Element(std::move(value));
+ 
+   // The below helps the compiler optimize dense loops.
+   // Note: we can't call functions in PROTOBUF_ASSUME so use local variables.
+@@ -1004,6 +1016,8 @@ inline void RepeatedField<Element>::AddWithArena(Arena* arena, Element value) {
+   PROTOBUF_ASSUME(elem == final_elements);
+   [[maybe_unused]] const int final_capacity = Capacity(is_soo);
+   PROTOBUF_ASSUME(capacity == final_capacity);
++
++  return result;
+ }
+ 
+ template <typename Element>
+@@ -1020,16 +1034,7 @@ inline Element* RepeatedField<Element>::InternalAddWithArena(
+ template <typename Element>
+ inline Element* RepeatedField<Element>::AddWithArena(Arena* arena)
+     ABSL_ATTRIBUTE_LIFETIME_BOUND {
+-  ABSL_DCHECK_EQ(arena, GetArena());
+-
+-  bool is_soo = this->is_soo();
+-  const int old_size = size();
+-  if (ABSL_PREDICT_FALSE(old_size == Capacity())) {
+-    Grow(arena, is_soo, old_size, old_size + 1);
+-    is_soo = false;
+-  }
+-  void* p = unsafe_elements(is_soo) + ExchangeCurrentSize(old_size + 1);
+-  return ::new (p) Element;
++  return ::new (AddUninitializedWithArena(arena)) Element;
+ }
+ 
+ template <typename Element>
+diff --git a/src/google/protobuf/repeated_field_proxy.h b/src/google/protobuf/repeated_field_proxy.h
+index 3ce2d6b6b..bf5fef0f8 100644
+--- a/src/google/protobuf/repeated_field_proxy.h
++++ b/src/google/protobuf/repeated_field_proxy.h
+@@ -25,12 +25,15 @@ class RepeatedFieldProxy;
+ 
+ namespace internal {
+ 
+-template <typename ElementType>
+-class RepeatedFieldProxyInjectionBase;
+-
+ template <typename T, typename... Args>
+ RepeatedFieldProxy<T> ConstructRepeatedFieldProxy(Args&&... args);
+ 
++// Casts up to a `RepeatedFieldProxy<ElementType>` from a subclass of
++// `RepeatedFieldProxy<ElementType>`. This is used to implement the CRTP
++// pattern for `*With<MethodName>` classes.
++template <template <typename...> class C, typename ElementType>
++RepeatedFieldProxy<ElementType> ToProxyType(const C<ElementType>* proxy);
++
+ // A type trait to determine if a repeated field element of type `ElementType`
+ // is a string type.
+ template <typename ElementType>
+@@ -223,63 +226,106 @@ class RepeatedFieldProxyBase {
+   ConstQualifiedRepeatedFieldType& field() const { return *field_; }
+ 
+  private:
+-  friend RepeatedFieldProxyInjectionBase<ElementType>;
+-
+   ConstQualifiedRepeatedFieldType* field_;
+ };
+ 
+-template <typename ElementType>
+-class RepeatedFieldProxyInjectionBase {
+- protected:
+-  using Traits = RepeatedFieldTraits<ElementType>;
+-  using RepeatedFieldType = typename Traits::type;
+-
+-  RepeatedFieldType& field() const;
+-};
++// The following classes are used to specialize methods of `RepeatedFieldProxy`
++// based on the element type. Most methods do not need specialization, since
++// they look similar for all element types, maybe only differing in whether
++// `const_reference` resolves to a `const T&` or some value type like
++// `absl::string_view`.
++//
++// For methods that do have a different signature based on the element type, we
++// make a `*With<MethodName>` class that defines only that method, specialized
++// on the element type using whatever conditions make sense for the method. We
++// then inherit from this type in `RepeatedFieldProxy`.
+ 
++// Defines `set()` for primitive element types, which only take by value.
+ template <typename ElementType, typename Enable = void>
+-class RepeatedFieldProxyWithSet
+-    : public RepeatedFieldProxyInjectionBase<ElementType> {
++class RepeatedFieldProxyWithSet {
+  public:
+   // Sets the element at the given index to the given value.
+   //
+   // Performs bounds checking in accordance with `bounds_check_mode_*`.
+   void set(size_t index, ElementType value) const {
+-    this->field()[index] = value;
++    ToProxyType(this).field()[index] = value;
+   }
+ };
+ 
++// Defines `set()` for message element types, which take by const reference or
++// rvalue.
+ template <typename ElementType>
+ class RepeatedFieldProxyWithSet<
+-    ElementType, std::enable_if_t<RepeatedElementTypeIsMessage<ElementType>>>
+-    : public RepeatedFieldProxyInjectionBase<ElementType> {
++    ElementType, std::enable_if_t<RepeatedElementTypeIsMessage<ElementType>>> {
+  public:
+   // Sets the element at the given index to the given value by move-assignment.
+   //
+   // Performs bounds checking in accordance with `bounds_check_mode_*`.
+   void set(size_t index, ElementType&& value) const {
+-    this->field()[index] = std::move(value);
++    ToProxyType(this).field()[index] = std::move(value);
+   }
+ 
+   // Sets the element at the given index to the given value by copy-assignment.
+   //
+   // Performs bounds checking in accordance with `bounds_check_mode_*`.
+   void set(size_t index, const ElementType& value) const {
+-    this->field()[index] = value;
++    ToProxyType(this).field()[index] = value;
+   }
+ };
+ 
++// Defines `set()` for string element types, which dispatch to
++// `string_util::SetElement` and accept many string-like types.
+ template <typename ElementType>
+ class RepeatedFieldProxyWithSet<
+-    ElementType, std::enable_if_t<RepeatedElementTypeIsString<ElementType>>>
+-    : public RepeatedFieldProxyInjectionBase<ElementType> {
++    ElementType, std::enable_if_t<RepeatedElementTypeIsString<ElementType>>> {
+  public:
+   // Sets the element at the given index to the given value.
+   //
+   // Performs bounds checking in accordance with `bounds_check_mode_*`.
+   template <typename T>
+   void set(size_t index, T&& value) const {
+-    string_util::SetElement(this->field()[index], std::forward<T>(value));
++    string_util::SetElement(ToProxyType(this).field()[index],
++                            std::forward<T>(value));
++  }
++};
++
++// Defines `push_back()` for primitive element types, which only take by value.
++template <typename ElementType, typename Enable = void>
++class RepeatedFieldProxyWithPushBack {
++ public:
++  // Appends the given value to the end of the repeated field.
++  void push_back(ElementType value) const { ToProxyType(this).Add(value); }
++};
++
++// Defines `push_back()` for message element types, which take by const
++// reference or rvalue.
++template <typename ElementType>
++class RepeatedFieldProxyWithPushBack<
++    ElementType, std::enable_if_t<RepeatedElementTypeIsMessage<ElementType>>> {
++ public:
++  // Appends the given value to the end of the repeated field by move
++  // construction/assignment.
++  void push_back(ElementType&& value) const {
++    ToProxyType(this).Add(std::move(value));
++  }
++
++  // Appends the given value to the end of the repeated field by copy
++  // construction/assignment.
++  void push_back(const ElementType& value) const {
++    ToProxyType(this).Add(value);
++  }
++};
++
++// Defines `push_back()` for string element types, which dispatch to
++// `string_util::SetElement` and accept many string-like types.
++template <typename ElementType>
++class RepeatedFieldProxyWithPushBack<
++    ElementType, std::enable_if_t<RepeatedElementTypeIsString<ElementType>>> {
++ public:
++  // Appends the given value to the end of the repeated field.
++  template <typename T>
++  void push_back(T&& value) const {
++    string_util::SetElement(ToProxyType(this).Add(), std::forward<T>(value));
+   }
+ };
+ 
+@@ -299,7 +345,8 @@ class RepeatedFieldProxyWithSet<
+ template <typename ElementType>
+ class PROTOBUF_DECLSPEC_EMPTY_BASES RepeatedFieldProxy final
+     : public internal::RepeatedFieldProxyBase<ElementType>,
+-      public internal::RepeatedFieldProxyWithSet<ElementType> {
++      public internal::RepeatedFieldProxyWithSet<ElementType>,
++      public internal::RepeatedFieldProxyWithPushBack<ElementType> {
+   static_assert(!std::is_const_v<ElementType>);
+ 
+  protected:
+@@ -328,6 +375,9 @@ class PROTOBUF_DECLSPEC_EMPTY_BASES RepeatedFieldProxy final
+  private:
+   friend RepeatedFieldProxy<const ElementType>;
+ 
++  friend internal::RepeatedFieldProxyWithSet<ElementType, void>;
++  friend internal::RepeatedFieldProxyWithPushBack<ElementType, void>;
++
+   template <typename T, typename... Args>
+   friend RepeatedFieldProxy<T> internal::ConstructRepeatedFieldProxy(
+       Args&&... args);
+@@ -337,6 +387,17 @@ class PROTOBUF_DECLSPEC_EMPTY_BASES RepeatedFieldProxy final
+     ABSL_DCHECK_EQ(arena, field.GetArena());
+   }
+ 
++  // The following methods all forward to the backing repeated fields. This is
++  // done here for access to private members of the legacy containers, which
++  // only need to friend `RepeatedFieldProxy`.
++  auto& Add() const { return *field().AddWithArena(arena()); }
++  auto& Add(ElementType&& value) const {
++    return *field().AddWithArena(arena(), std::move(value));
++  }
++  auto& Add(const ElementType& value) const {
++    return *field().AddWithArena(arena(), value);
++  }
++
+   Arena* arena() const { return arena_; }
+ 
+   Arena* arena_;
+@@ -405,16 +466,9 @@ inline RepeatedFieldProxy<T> ConstructRepeatedFieldProxy(Args&&... args) {
+   return RepeatedFieldProxy<T>(std::forward<Args>(args)...);
+ }
+ 
+-template <typename ElementType>
+-typename RepeatedFieldTraits<ElementType>::type&
+-RepeatedFieldProxyInjectionBase<ElementType>::field() const {
+-  // Cast up to the derived class, then back down to RepeatedFieldProxyBase.
+-  // We can't static_cast directly to RepeatedFieldProxyBase because
+-  // RepeatedFieldProxy multiple-inherits from RepeatedFieldProxyBase and
+-  // RepeatedFieldProxyWithSet.
+-  return static_cast<const RepeatedFieldProxyBase<ElementType>*>(
+-             static_cast<const google::protobuf::RepeatedFieldProxy<ElementType>*>(this))
+-      ->field();
++template <template <typename...> class C, typename ElementType>
++RepeatedFieldProxy<ElementType> ToProxyType(const C<ElementType>* proxy) {
++  return *static_cast<const RepeatedFieldProxy<ElementType>*>(proxy);
+ }
+ 
+ }  // namespace internal
+diff --git a/src/google/protobuf/repeated_ptr_field.h b/src/google/protobuf/repeated_ptr_field.h
+index 31114d8a7..f1ace0810 100644
+--- a/src/google/protobuf/repeated_ptr_field.h
++++ b/src/google/protobuf/repeated_ptr_field.h
+@@ -70,9 +70,6 @@ class RepeatedFieldProxy;
+ 
+ namespace internal {
+ 
+-template <typename ElementType>
+-class RepeatedFieldProxyBase;
+-
+ class MergePartialFromCodedStreamHelper;
+ class SwapFieldHelper;
+ class MapFieldBase;
+@@ -258,12 +255,28 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
+   }
+ 
+   template <typename TypeHandler>
+-  void Add(Arena* arena, Value<TypeHandler>&& value) {
++  Value<TypeHandler>* Add(Arena* arena, Value<TypeHandler>&& value) {
+     if (ClearedCount() > 0) {
+-      *cast<TypeHandler>(element_at(ExchangeCurrentSize(current_size_ + 1))) =
+-          std::move(value);
++      auto* result =
++          cast<TypeHandler>(element_at(ExchangeCurrentSize(current_size_ + 1)));
++      *result = std::move(value);
++      return result;
+     } else {
+-      AddInternal(arena, TypeHandler::GetNewWithMoveFunc(std::move(value)));
++      return cast<TypeHandler>(AddInternal(
++          arena, TypeHandler::GetNewWithMoveFunc(std::move(value))));
++    }
++  }
++
++  template <typename TypeHandler>
++  Value<TypeHandler>* Add(Arena* arena, const Value<TypeHandler>& value) {
++    if (ClearedCount() > 0) {
++      auto* result =
++          cast<TypeHandler>(element_at(ExchangeCurrentSize(current_size_ + 1)));
++      *result = value;
++      return result;
++    } else {
++      return cast<TypeHandler>(
++          AddInternal(arena, TypeHandler::GetNewWithCopyFunc(value)));
+     }
+   }
+ 
+@@ -1033,6 +1046,12 @@ class GenericTypeHandler {
+       ptr = Arena::Create<Type>(arena, std::move(from));
+     };
+   }
++  static constexpr auto GetNewWithCopyFunc(
++      const Type& from ABSL_ATTRIBUTE_LIFETIME_BOUND) {
++    return [&from](Arena* arena, void*& ptr) {
++      ptr = Arena::Create<Type>(arena, from);
++    };
++  }
+   static constexpr auto GetNewFromPrototypeFunc(
+       const Type* prototype ABSL_ATTRIBUTE_LIFETIME_BOUND) {
+     ABSL_DCHECK(prototype != nullptr);
+@@ -1101,6 +1120,12 @@ class GenericTypeHandler<std::string> {
+       ptr = Arena::Create<Type>(arena, std::move(from));
+     };
+   }
++  static constexpr auto GetNewWithCopyFunc(
++      const Type& from ABSL_ATTRIBUTE_LIFETIME_BOUND) {
++    return [&from](Arena* arena, void*& ptr) {
++      ptr = Arena::Create<Type>(arena, from);
++    };
++  }
+   static constexpr auto GetNewFromPrototypeFunc(const Type* /*prototype*/) {
+     return GetNewFunc();
+   }
+@@ -1510,10 +1535,8 @@ class ABSL_ATTRIBUTE_WARN_UNUSED RepeatedPtrField final
+ 
+   friend class internal::TcParser;
+ 
+-  friend class RepeatedFieldProxy<Element>;
+-
+   template <typename ElementType>
+-  friend class internal::RepeatedFieldProxyBase;
++  friend class RepeatedFieldProxy;
+ 
+   template <typename T>
+   friend struct WeakRepeatedPtrField;
+@@ -1536,7 +1559,10 @@ class ABSL_ATTRIBUTE_WARN_UNUSED RepeatedPtrField final
+ 
+   pointer AddWithArena(Arena* arena) ABSL_ATTRIBUTE_LIFETIME_BOUND;
+ 
+-  void AddWithArena(Arena* arena, Element&& value);
++  pointer AddWithArena(Arena* arena, Element&& value);
++
++  // Private-only. Copies `value` into a newly allocated element.
++  pointer AddWithArena(Arena* arena, const Element& value);
+ 
+   template <typename Iter>
+   void AddWithArena(Arena* arena, Iter begin, Iter end);
+@@ -1727,9 +1753,15 @@ PROTOBUF_NDEBUG_INLINE void RepeatedPtrField<Element>::InternalAddWithArena(
+ }
+ 
+ template <typename Element>
+-PROTOBUF_NDEBUG_INLINE void RepeatedPtrField<Element>::AddWithArena(
+-    Arena* arena, Element&& value) {
+-  RepeatedPtrFieldBase::Add<TypeHandler>(arena, std::move(value));
++PROTOBUF_NDEBUG_INLINE typename RepeatedPtrField<Element>::pointer
++RepeatedPtrField<Element>::AddWithArena(Arena* arena, Element&& value) {
++  return RepeatedPtrFieldBase::Add<TypeHandler>(arena, std::move(value));
++}
++
++template <typename Element>
++PROTOBUF_NDEBUG_INLINE typename RepeatedPtrField<Element>::pointer
++RepeatedPtrField<Element>::AddWithArena(Arena* arena, const Element& value) {
++  return RepeatedPtrFieldBase::Add<TypeHandler>(arena, value);
+ }
+ 
+ template <typename Element>

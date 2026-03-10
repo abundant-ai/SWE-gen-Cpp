@@ -1,0 +1,381 @@
+diff --git a/modules/dnn/src/layers/permute_layer.cpp b/modules/dnn/src/layers/permute_layer.cpp
+index 65e4f049e3..a8fe9dd861 100644
+--- a/modules/dnn/src/layers/permute_layer.cpp
++++ b/modules/dnn/src/layers/permute_layer.cpp
+@@ -57,6 +57,23 @@ namespace dnn
+ class PermuteLayerImpl CV_FINAL : public PermuteLayer
+ {
+ public:
++    void checkCurrentOrder(int currentOrder)
++    {
++        if(currentOrder < 0 || currentOrder > 3)
++        {
++            CV_Error(
++                     Error::StsBadArg,
++                     "Orders of dimensions in Permute layer parameter"
++                     "must be in [0...3] interval");
++        }
++
++        if(std::find(_order.begin(), _order.end(), currentOrder) != _order.end())
++        {
++            CV_Error(Error::StsBadArg,
++                     "Permute layer parameter contains duplicated orders.");
++        }
++    }
++
+     void checkNeedForPermutation()
+     {
+         _needsPermute = false;
+@@ -79,22 +96,19 @@ public:
+         }
+ 
+         DictValue paramOrder = params.get("order");
++        if(paramOrder.size() > 4)
++        {
++            CV_Error(
++                     Error::StsBadArg,
++                     "Too many (> 4) orders of dimensions in Permute layer");
++        }
++
+         _numAxes = paramOrder.size();
+ 
+         for (size_t i = 0; i < _numAxes; i++)
+         {
+             int currentOrder = paramOrder.get<int>(i);
+-            if (currentOrder < 0 || currentOrder > _numAxes)
+-            {
+-                CV_Error(Error::StsBadArg,
+-                         format("Orders of dimensions in Permute layer parameter"
+-                                "must be in [0...%d]", _numAxes - 1));
+-            }
+-            if (std::find(_order.begin(), _order.end(), currentOrder) != _order.end())
+-            {
+-                CV_Error(Error::StsBadArg,
+-                         "Permute layer parameter contains duplicated orders.");
+-            }
++            checkCurrentOrder(currentOrder);
+             _order.push_back(currentOrder);
+         }
+ 
+diff --git a/modules/dnn/src/layers/reorg_layer.cpp b/modules/dnn/src/layers/reorg_layer.cpp
+index 6f0d55cd2f..c0defb36d2 100644
+--- a/modules/dnn/src/layers/reorg_layer.cpp
++++ b/modules/dnn/src/layers/reorg_layer.cpp
+@@ -85,54 +85,6 @@ public:
+         return false;
+     }
+ 
+-    virtual void finalize(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr) CV_OVERRIDE
+-    {
+-        std::vector<Mat> inputs, outputs;
+-        inputs_arr.getMatVector(inputs);
+-        outputs_arr.getMatVector(outputs);
+-
+-        Mat inp = inputs[0];
+-        Mat out = outputs[0];
+-        int batchSize = inp.size[0];
+-
+-        LayerParams permParams;
+-        if (batchSize == 1)
+-        {
+-            int order[] = {1, 3, 0, 2};
+-            permParams.set("order", DictValue::arrayInt(&order[0], 4));
+-
+-            permuteInpShape.resize(4);
+-            permuteInpShape[0] = inp.size[1] * inp.size[2] / (reorgStride * reorgStride);  // (channels*height)/(r*r)
+-            permuteInpShape[1] = reorgStride;
+-            permuteInpShape[2] = inp.size[3];  // width
+-            permuteInpShape[3] = reorgStride;
+-
+-            permuteOutShape.resize(4);
+-            for (int i = 0; i < 4; ++i)
+-                permuteOutShape[i] = permuteInpShape[order[i]];
+-        }
+-        else
+-        {
+-            int order[] = {0, 2, 4, 1, 3};
+-            permParams.set("order", DictValue::arrayInt(&order[0], 5));
+-
+-            permuteInpShape.resize(5);
+-            permuteInpShape[0] = batchSize;
+-            permuteInpShape[1] = inp.size[1] * inp.size[2] / (reorgStride * reorgStride);  // (channels*height)/(r*r)
+-            permuteInpShape[2] = reorgStride;
+-            permuteInpShape[3] = inp.size[3];  // width
+-            permuteInpShape[4] = reorgStride;
+-
+-            permuteOutShape.resize(5);
+-            for (int i = 0; i < 5; ++i)
+-                permuteOutShape[i] = permuteInpShape[order[i]];
+-        }
+-        permute = PermuteLayer::create(permParams);
+-        std::vector<Mat> permuteInputs(1, inp.reshape(1, permuteInpShape));
+-        std::vector<Mat> permuteOutputs(1, out.reshape(1, permuteOutShape));
+-        permute->finalize(permuteInputs, permuteOutputs);
+-    }
+-
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+         return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_INFERENCE_ENGINE;
+@@ -144,13 +96,39 @@ public:
+         std::vector<UMat> inputs;
+         std::vector<UMat> outputs;
+ 
++        bool use_half = (inps.depth() == CV_16S);
+         inps.getUMatVector(inputs);
+         outs.getUMatVector(outputs);
++        String buildopt= format("-DDtype=%s ", use_half ? "half" : "float");
++
++        for (size_t i = 0; i < inputs.size(); i++)
++        {
++            ocl::Kernel kernel("reorg", ocl::dnn::reorg_oclsrc, buildopt);
++            if (kernel.empty())
++                return false;
++
++            UMat& srcBlob = inputs[i];
++            UMat& dstBlob = outputs[0];
++
++            int batch_size = srcBlob.size[0];
++            int channels = srcBlob.size[1];
++            int height = srcBlob.size[2];
++            int width = srcBlob.size[3];
++
++            size_t nthreads = batch_size * channels * height * width;
++
++            kernel.set(0, (int)nthreads);
++            kernel.set(1, ocl::KernelArg::PtrReadOnly(srcBlob));
++            kernel.set(2, (int)channels);
++            kernel.set(3, (int)height);
++            kernel.set(4, (int)width);
++            kernel.set(5, (int)reorgStride);
++            kernel.set(6, ocl::KernelArg::PtrWriteOnly(dstBlob));
++
++            if (!kernel.run(1, &nthreads, NULL, false))
++                return false;
++        }
+ 
+-        inputs[0] = inputs[0].reshape(1, permuteInpShape.size(), &permuteInpShape[0]);
+-        outputs[0] = outputs[0].reshape(1, permuteOutShape.size(), &permuteOutShape[0]);
+-        permute->preferableTarget = preferableTarget;
+-        permute->forward(inputs, outputs, internals);
+         return true;
+     }
+ #endif
+@@ -174,9 +152,34 @@ public:
+         inputs_arr.getMatVector(inputs);
+         outputs_arr.getMatVector(outputs);
+ 
+-        inputs[0] = inputs[0].reshape(1, permuteInpShape);
+-        outputs[0] = outputs[0].reshape(1, permuteOutShape);
+-        permute->forward(inputs, outputs, internals_arr);
++        for (size_t i = 0; i < inputs.size(); i++)
++        {
++            Mat srcBlob = inputs[i];
++            MatShape inputShape = shape(srcBlob), outShape = shape(outputs[i]);
++            float *dstData = outputs[0].ptr<float>();
++            const float *srcData = srcBlob.ptr<float>();
++
++            int channels = inputShape[1], height = inputShape[2], width = inputShape[3];
++            int sample_size = channels*height*width;
++            int batch_size = inputShape[0];
++
++            int out_c = channels / (reorgStride*reorgStride);
++            for (int b = 0; b < batch_size; ++b) {
++                for (int k = 0; k < channels; ++k) {
++                    for (int j = 0; j < height; ++j) {
++                        for (int i = 0; i < width; ++i) {
++                            int out_index = i + width*(j + height*k);
++                            int c2 = k % out_c;
++                            int offset = k / out_c;
++                            int w2 = i*reorgStride + offset % reorgStride;
++                            int h2 = j*reorgStride + offset / reorgStride;
++                            int in_index = w2 + width*reorgStride*(h2 + height*reorgStride*c2);
++                            dstData[b*sample_size + out_index] = srcData[b*sample_size + in_index];
++                        }
++                    }
++                }
++            }
++        }
+     }
+ 
+     virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
+@@ -205,10 +208,6 @@ public:
+         }
+         return flops;
+     }
+-
+-private:
+-    Ptr<PermuteLayer> permute;
+-    std::vector<int> permuteInpShape, permuteOutShape;
+ };
+ 
+ Ptr<ReorgLayer> ReorgLayer::create(const LayerParams& params)
+diff --git a/modules/dnn/src/layers/shuffle_channel_layer.cpp b/modules/dnn/src/layers/shuffle_channel_layer.cpp
+index c4c04786b1..67fb489f84 100644
+--- a/modules/dnn/src/layers/shuffle_channel_layer.cpp
++++ b/modules/dnn/src/layers/shuffle_channel_layer.cpp
+@@ -62,40 +62,11 @@ public:
+         }
+     }
+ 
+-#ifdef HAVE_OPENCL
+-    bool forward_ocl(InputArrayOfArrays inps, OutputArrayOfArrays outs, OutputArrayOfArrays internals)
+-    {
+-        std::vector<UMat> inputs;
+-        std::vector<UMat> outputs;
+-
+-        inps.getUMatVector(inputs);
+-        outs.getUMatVector(outputs);
+-
+-        if (inputs[0].u != outputs[0].u)
+-        {
+-            if (!permute.empty())
+-            {
+-                inputs[0] = inputs[0].reshape(1, permuteInpShape.size(), &permuteInpShape[0]);
+-                outputs[0] = outputs[0].reshape(1, permuteOutShape.size(), &permuteOutShape[0]);
+-                permute->preferableTarget = preferableTarget;
+-                permute->forward(inputs, outputs, internals);
+-            }
+-            else
+-                inputs[0].copyTo(outputs[0]);
+-        }
+-        return true;
+-    }
+-#endif
+-
+     void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
+     {
+         CV_TRACE_FUNCTION();
+         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+ 
+-        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget) &&
+-                   OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
+-                   forward_ocl(inputs_arr, outputs_arr, internals_arr))
+-
+         if (inputs_arr.depth() == CV_16S)
+         {
+             forward_fallback(inputs_arr, outputs_arr, internals_arr);
+diff --git a/modules/dnn/src/opencl/reorg.cl b/modules/dnn/src/opencl/reorg.cl
+new file mode 100644
+index 0000000000..7802239ad7
+--- /dev/null
++++ b/modules/dnn/src/opencl/reorg.cl
+@@ -0,0 +1,70 @@
++/*M///////////////////////////////////////////////////////////////////////////////////////
++//
++//  IMPORTANT: READ BEFORE DOWNLOADING, COPYING, INSTALLING OR USING.
++//
++//  By downloading, copying, installing or using the software you agree to this license.
++//  If you do not agree to this license, do not download, install,
++//  copy or use the software.
++//
++//
++//                           License Agreement
++//                For Open Source Computer Vision Library
++//
++// Copyright (c) 2016-2017 Fabian David Tschopp, all rights reserved.
++// Third party copyrights are property of their respective owners.
++//
++// Redistribution and use in source and binary forms, with or without modification,
++// are permitted provided that the following conditions are met:
++//
++//   * Redistribution's of source code must retain the above copyright notice,
++//     this list of conditions and the following disclaimer.
++//
++//   * Redistribution's in binary form must reproduce the above copyright notice,
++//     this list of conditions and the following disclaimer in the documentation
++//     and/or other materials provided with the distribution.
++//
++//   * The name of the copyright holders may not be used to endorse or promote products
++//     derived from this software without specific prior written permission.
++//
++// This software is provided by the copyright holders and contributors "as is" and
++// any express or implied warranties, including, but not limited to, the implied
++// warranties of merchantability and fitness for a particular purpose are disclaimed.
++// In no event shall the Intel Corporation or contributors be liable for any direct,
++// indirect, incidental, special, exemplary, or consequential damages
++// (including, but not limited to, procurement of substitute goods or services;
++// loss of use, data, or profits; or business interruption) however caused
++// and on any theory of liability, whether in contract, strict liability,
++// or tort (including negligence or otherwise) arising in any way out of
++// the use of this software, even if advised of the possibility of such damage.
++//
++//M*/
++
++#if defined(cl_khr_fp16)
++#pragma OPENCL EXTENSION cl_khr_fp16 : enable
++#endif
++
++__kernel void reorg(const int count,
++                    __global const Dtype* src,
++                    const int channels,
++                    const int height,
++                    const int width,
++                    const int reorgStride,
++                    __global Dtype* dst)
++{
++    for (int index = get_global_id(0); index < count; index += get_global_size(0))
++    {
++        int sample_size = channels*height*width;
++        int b = index/sample_size;
++        int new_index = index%sample_size;
++        int k = new_index / (height * width);
++        int j = (new_index - (k * height * width)) / width;
++        int i = new_index % width;
++        int out_c = channels / (reorgStride*reorgStride);
++        int c2 = k % out_c;
++        int offset = k / out_c;
++        int w2 = i*reorgStride + offset % reorgStride;
++        int h2 = j*reorgStride + offset / reorgStride;
++        int in_index = w2 + width*reorgStride*(h2 + height*reorgStride*c2);
++        dst[index] = src[b*sample_size + in_index];
++    }
++}
+diff --git a/modules/dnn/test/test_layers.cpp b/modules/dnn/test/test_layers.cpp
+index be0e37e294..14c6f55f40 100644
+--- a/modules/dnn/test/test_layers.cpp
++++ b/modules/dnn/test/test_layers.cpp
+@@ -1288,15 +1288,13 @@ TEST(Layer_Test_PoolingIndices, Accuracy)
+     normAssert(indices, outputs[1].reshape(1, 5));
+ }
+ 
+-typedef testing::TestWithParam<tuple<Vec4i, int, tuple<Backend, Target> > > Layer_Test_ShuffleChannel;
++typedef testing::TestWithParam<tuple<Vec4i, int> > Layer_Test_ShuffleChannel;
+ TEST_P(Layer_Test_ShuffleChannel, Accuracy)
+ {
+     Vec4i inpShapeVec = get<0>(GetParam());
+     int group = get<1>(GetParam());
+     ASSERT_EQ(inpShapeVec[1] % group, 0);
+     const int groupSize = inpShapeVec[1] / group;
+-    int backendId = get<0>(get<2>(GetParam()));
+-    int targetId = get<1>(get<2>(GetParam()));
+ 
+     Net net;
+     LayerParams lp;
+@@ -1310,25 +1308,21 @@ TEST_P(Layer_Test_ShuffleChannel, Accuracy)
+     randu(inp, 0, 255);
+ 
+     net.setInput(inp);
+-    net.setPreferableBackend(backendId);
+-    net.setPreferableTarget(targetId);
+     Mat out = net.forward();
+ 
+-    double l1 = (targetId == DNN_TARGET_OPENCL_FP16) ? 5e-2 : 1e-5;
+-    double lInf = (targetId == DNN_TARGET_OPENCL_FP16) ? 7e-2 : 1e-4;
+     for (int n = 0; n < inpShapeVec[0]; ++n)
+     {
+         for (int c = 0; c < inpShapeVec[1]; ++c)
+         {
+             Mat outChannel = getPlane(out, n, c);
+             Mat inpChannel = getPlane(inp, n, groupSize * (c % group) + c / group);
+-            normAssert(outChannel, inpChannel, "", l1, lInf);
++            normAssert(outChannel, inpChannel);
+         }
+     }
+ }
+ INSTANTIATE_TEST_CASE_P(/**/, Layer_Test_ShuffleChannel, Combine(
+ /*input shape*/  Values(Vec4i(1, 6, 5, 7), Vec4i(3, 12, 1, 4)),
+-/*group*/        Values(1, 2, 3, 6), dnnBackendsAndTargets(/*with IE*/ false)
++/*group*/        Values(1, 2, 3, 6)
+ ));
+ 
+ // Check if relu is not fused to convolution if we requested it's output

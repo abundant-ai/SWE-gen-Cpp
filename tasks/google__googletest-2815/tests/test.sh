@@ -1,4 +1,8 @@
 #!/bin/bash
+set -e
+
+# Trap errors and write reward=0
+trap 'echo 0 > /logs/verifier/reward.txt' ERR
 
 cd /app/src
 
@@ -15,27 +19,28 @@ cp "/tests/googletest/test/googletest-param-test-test.cc" "googletest/test/googl
 mkdir -p "googletest/test"
 cp "/tests/googletest/test/googletest-port-test.cc" "googletest/test/googletest-port-test.cc"
 
-# Rebuild the specific test files after copying them from /tests
+# Rebuild in the existing build directory (faster than rebuilding from scratch)
 cd build
 
-# Remove the test executables to force rebuild with new flags
-rm -f googlemock/gmock-actions_test googlemock/gmock-matchers_test \
-      googletest/googletest-param-test-test googletest/googletest-port-test
+# Remove test executables to force rebuild
+rm -f googlemock/gmock-actions_test
+rm -f googlemock/gmock-matchers_test
+rm -f googletest/googletest-param-test-test
+rm -f googletest/googletest-port-test
 
-# Rebuild with -Wdeprecated -Werror to catch deprecated usage
-cmake -DCMAKE_CXX_FLAGS="-std=c++11 -Wdeprecated -Werror" .. && \
-make -j4 gmock-actions_test gmock-matchers_test googletest-param-test-test googletest-port-test
+# Reconfigure with -Wdeprecated and turn deprecated warnings into errors
+cmake -DCMAKE_CXX_FLAGS="-std=c++11 -Wdeprecated -Werror=deprecated" .. 2>&1
+
+# Build only the specific test targets
+make -j4 gmock-actions_test gmock-matchers_test googletest-param-test-test googletest-port-test 2>&1
 
 # Run the specific test executables
-./googlemock/gmock-actions_test && \
-./googlemock/gmock-matchers_test && \
-./googletest/googletest-param-test-test && \
-./googletest/googletest-port-test
-test_status=$?
+./googlemock/gmock-actions_test 2>&1
+./googlemock/gmock-matchers_test 2>&1
+./googletest/googletest-param-test-test 2>&1
+./googletest/googletest-port-test 2>&1
 
-if [ $test_status -eq 0 ]; then
-  echo 1 > /logs/verifier/reward.txt
-else
-  echo 0 > /logs/verifier/reward.txt
-fi
-exit "$test_status"
+# If we got here, all tests passed
+trap - ERR  # Clear the trap
+echo 1 > /logs/verifier/reward.txt
+exit 0

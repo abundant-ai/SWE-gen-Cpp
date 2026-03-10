@@ -1,0 +1,224 @@
+diff --git a/modules/dnn/src/layers/reshape_layer.cpp b/modules/dnn/src/layers/reshape_layer.cpp
+index fdd33751f3..c9e632dd29 100644
+--- a/modules/dnn/src/layers/reshape_layer.cpp
++++ b/modules/dnn/src/layers/reshape_layer.cpp
+@@ -186,20 +186,15 @@ public:
+                          std::vector<MatShape> &outputs,
+                          std::vector<MatShape> &internals) const CV_OVERRIDE
+     {
+-        if (inputs.size() == 1 || inputs.size() == requiredOutputs)
+-        {
+-            outputs.clear();
+-            for (size_t i = 0; i < inputs.size(); i++)
+-            {
+-                outputs.push_back(MatShape());
+-                computeShapeByReshapeMask(inputs[i], newShapeDesc, newShapeRange, outputs.back());
+-            }
+-        }
+-        else
++        outputs.clear();
++
++        for (size_t i = 0; i < inputs.size(); i++)
+         {
+-            CV_Assert(inputs.size() == 2, total(inputs[0]) == total(inputs[1]));
+-            outputs.assign(1, inputs[1]);
++            outputs.push_back(MatShape());
++            computeShapeByReshapeMask(inputs[i], newShapeDesc, newShapeRange, outputs.back());
+         }
++        internals = outputs;
++
+         return true;
+     }
+ 
+@@ -211,7 +206,7 @@ public:
+         inps.getUMatVector(inputs);
+         outs.getUMatVector(outputs);
+ 
+-        for (size_t i = 0; i < outputs.size(); i++)
++        for (size_t i = 0; i < inputs.size(); i++)
+         {
+             UMat srcBlob = inputs[i];
+             void *src_handle = inputs[i].handle(ACCESS_READ);
+@@ -245,7 +240,7 @@ public:
+         CV_TRACE_FUNCTION();
+         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+ 
+-        for (size_t i = 0; i < outputs.size(); i++)
++        for (size_t i = 0; i < inputs.size(); i++)
+         {
+             Mat srcBlob = *inputs[i];
+             if (outputs[i].data != srcBlob.data)
+@@ -253,7 +248,7 @@ public:
+         }
+     }
+ 
+-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >& inputs) CV_OVERRIDE
++    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
+     {
+ #ifdef HAVE_INF_ENGINE
+         InferenceEngine::LayerParams lp;
+@@ -261,15 +256,7 @@ public:
+         lp.type = "Reshape";
+         lp.precision = InferenceEngine::Precision::FP32;
+         std::shared_ptr<InferenceEngine::ReshapeLayer> ieLayer(new InferenceEngine::ReshapeLayer(lp));
+-        if (!newShapeDesc.empty())
+-            ieLayer->shape = newShapeDesc;
+-        else
+-        {
+-            CV_Assert(inputs.size() == 2);
+-            InferenceEngine::DataPtr shapeSrc = infEngineDataNode(inputs[1]);
+-            // NOTE: shapeSrc->dims are reversed
+-            ieLayer->shape = std::vector<int>(shapeSrc->dims.rbegin(), shapeSrc->dims.rend());
+-        }
++        ieLayer->shape = newShapeDesc;
+         return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+ #endif  // HAVE_INF_ENGINE
+         return Ptr<BackendNode>();
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index f354d6966e..7d94b9d54a 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -524,7 +524,8 @@ Mat infEngineBlobToMat(const InferenceEngine::Blob::Ptr& blob)
+ {
+     // NOTE: Inference Engine sizes are reversed.
+     std::vector<size_t> dims = blob->dims();
+-    std::vector<int> size(dims.rbegin(), dims.rend());
++    std::vector<int> size(dims.begin(), dims.end());
++    std::reverse(size.begin(), size.end());
+     return Mat(size, CV_32F, (void*)blob->buffer());
+ }
+ 
+@@ -539,7 +540,8 @@ bool InfEngineBackendLayer::getMemoryShapes(const std::vector<MatShape> &inputs,
+                                             std::vector<MatShape> &internals) const
+ {
+     std::vector<size_t> dims = output->dims;
+-    std::vector<int> shape(dims.rbegin(), dims.rend());
++    std::vector<int> shape(dims.begin(), dims.end());
++    std::reverse(shape.begin(), shape.end());
+     outputs.assign(1, shape);
+     return false;
+ }
+diff --git a/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp b/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp
+index 241b8af790..3d8a97f240 100644
+--- a/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp
++++ b/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp
+@@ -615,19 +615,6 @@ public:
+     }
+ };
+ 
+-class ReshapeAsShapeSubgraph : public Subgraph
+-{
+-public:
+-    ReshapeAsShapeSubgraph()
+-    {
+-        int input = addNodeToMatch("");
+-        int shapeSrc = addNodeToMatch("");
+-        int shape = addNodeToMatch("Shape", shapeSrc);
+-        addNodeToMatch("Reshape", input, shape);
+-        setFusedNode("Reshape", input, shapeSrc);
+-    }
+-};
+-
+ void simplifySubgraphs(tensorflow::GraphDef& net)
+ {
+     std::vector<Ptr<Subgraph> > subgraphs;
+@@ -643,7 +630,6 @@ void simplifySubgraphs(tensorflow::GraphDef& net)
+     subgraphs.push_back(Ptr<Subgraph>(new DeconvolutionSameKerasSubgraph()));
+     subgraphs.push_back(Ptr<Subgraph>(new ResizeBilinearSubgraph()));
+     subgraphs.push_back(Ptr<Subgraph>(new UpsamplingKerasSubgraph()));
+-    subgraphs.push_back(Ptr<Subgraph>(new ReshapeAsShapeSubgraph()));
+ 
+     int numNodes = net.node_size();
+     std::vector<int> matchedNodesIds;
+diff --git a/modules/dnn/src/tensorflow/tf_importer.cpp b/modules/dnn/src/tensorflow/tf_importer.cpp
+index 927e3afdb2..6aea1fdf3a 100644
+--- a/modules/dnn/src/tensorflow/tf_importer.cpp
++++ b/modules/dnn/src/tensorflow/tf_importer.cpp
+@@ -1023,50 +1023,37 @@ void TFImporter::populateNet(Net dstNet)
+         else if (type == "Reshape")
+         {
+             Pin inpId = parsePin(layer.input(0));
++            Mat newShape = getTensorContent(getConstBlob(layer, value_id, 1));
++
+             int inpLayout = getDataLayout(layer.input(0), data_layouts);
+-            // There are two possible implementations: reshape an input using
+-            // predefined sizes or use a second input blob as a source of new shape.
+-            if (value_id.find(layer.input(1)) != value_id.end())
++            if (newShape.total() != 4 && inpLayout == DATA_LAYOUT_NHWC)
+             {
+-                Mat newShape = getTensorContent(getConstBlob(layer, value_id, 1));
+-
+-                if (newShape.total() != 4 && inpLayout == DATA_LAYOUT_NHWC)
+-                {
+-                    LayerParams permLP;
+-                    int order[] = {0, 2, 3, 1};  // From OpenCV's NCHW to NHWC.
+-                    permLP.set("order", DictValue::arrayInt<int*>(order, 4));
+-
+-                    std::string permName = name + "/nchw";
+-                    CV_Assert(layer_id.find(permName) == layer_id.end());
+-                    int permId = dstNet.addLayer(permName, "Permute", permLP);
+-                    layer_id[permName] = permId;
+-                    connect(layer_id, dstNet, inpId, permId, 0);
+-                    inpId = Pin(permName);
+-                    inpLayout = DATA_LAYOUT_NCHW;
+-                }
+-                else if (newShape.total() == 4 && inpLayout == DATA_LAYOUT_NHWC)
+-                {
+-                    // NHWC->NCHW
+-                    std::swap(*newShape.ptr<int32_t>(0, 2), *newShape.ptr<int32_t>(0, 3));
+-                    std::swap(*newShape.ptr<int32_t>(0, 1), *newShape.ptr<int32_t>(0, 2));
+-                }
+-                layerParams.set("dim", DictValue::arrayInt<int*>(newShape.ptr<int>(), newShape.total()));
+-
+-                int id = dstNet.addLayer(name, "Reshape", layerParams);
+-                layer_id[name] = id;
++                LayerParams permLP;
++                int order[] = {0, 2, 3, 1};  // From OpenCV's NCHW to NHWC.
++                permLP.set("order", DictValue::arrayInt<int*>(order, 4));
+ 
+-                // one input only
+-                connect(layer_id, dstNet, inpId, id, 0);
+-                data_layouts[name] = newShape.total() == 2 ? DATA_LAYOUT_PLANAR : inpLayout;
++                std::string permName = name + "/nchw";
++                CV_Assert(layer_id.find(permName) == layer_id.end());
++                int permId = dstNet.addLayer(permName, "Permute", permLP);
++                layer_id[permName] = permId;
++                connect(layer_id, dstNet, inpId, permId, 0);
++                inpId = Pin(permName);
++                inpLayout = DATA_LAYOUT_NCHW;
+             }
+-            else
++            else if (newShape.total() == 4 && inpLayout == DATA_LAYOUT_NHWC)
+             {
+-                int id = dstNet.addLayer(name, "Reshape", layerParams);
+-                layer_id[name] = id;
+-                connect(layer_id, dstNet, inpId, id, 0);
+-                connect(layer_id, dstNet, parsePin(layer.input(1)), id, 1);
+-                data_layouts[name] = inpLayout;
++                // NHWC->NCHW
++                std::swap(*newShape.ptr<int32_t>(0, 2), *newShape.ptr<int32_t>(0, 3));
++                std::swap(*newShape.ptr<int32_t>(0, 1), *newShape.ptr<int32_t>(0, 2));
+             }
++            layerParams.set("dim", DictValue::arrayInt<int*>(newShape.ptr<int>(), newShape.total()));
++
++            int id = dstNet.addLayer(name, "Reshape", layerParams);
++            layer_id[name] = id;
++
++            // one input only
++            connect(layer_id, dstNet, inpId, id, 0);
++            data_layouts[name] = newShape.total() == 2 ? DATA_LAYOUT_PLANAR : inpLayout;
+         }
+         else if (type == "Flatten" || type == "Squeeze")
+         {
+diff --git a/modules/dnn/test/test_tf_importer.cpp b/modules/dnn/test/test_tf_importer.cpp
+index a5534e223c..a5a0c8b87f 100644
+--- a/modules/dnn/test/test_tf_importer.cpp
++++ b/modules/dnn/test/test_tf_importer.cpp
+@@ -218,7 +218,6 @@ TEST_P(Test_TensorFlow_layers, reshape)
+     runTensorFlowNet("shift_reshape_no_reorder");
+     runTensorFlowNet("reshape_no_reorder");
+     runTensorFlowNet("reshape_reduce");
+-    runTensorFlowNet("reshape_as_shape");
+ }
+ 
+ TEST_P(Test_TensorFlow_layers, flatten)

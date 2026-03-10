@@ -1,0 +1,280 @@
+diff --git a/modules/dnn/include/opencv2/dnn/dnn.hpp b/modules/dnn/include/opencv2/dnn/dnn.hpp
+index b2a68b15d5..cff78ba7f6 100644
+--- a/modules/dnn/include/opencv2/dnn/dnn.hpp
++++ b/modules/dnn/include/opencv2/dnn/dnn.hpp
+@@ -937,6 +937,13 @@ CV__DNN_INLINE_NS_BEGIN
+                              CV_OUT std::vector<int>& indices,
+                              const float eta = 1.f, const int top_k = 0);
+ 
++    /** @brief Release a Myriad device is binded by OpenCV.
++     *
++     * Single Myriad device cannot be shared across multiple processes which uses
++     * Inference Engine's Myriad plugin.
++     */
++    CV_EXPORTS_W void resetMyriadDevice();
++
+ //! @}
+ CV__DNN_INLINE_NS_END
+ }
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index 04de1ee07f..9c49a06596 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -443,13 +443,14 @@ void InfEngineBackendNet::init(int targetId)
+         initPlugin(*this);
+ }
+ 
++static std::map<InferenceEngine::TargetDevice, InferenceEngine::InferenceEnginePluginPtr> sharedPlugins;
++
+ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+ {
+     CV_Assert(!isInitialized());
+ 
+     try
+     {
+-        static std::map<InferenceEngine::TargetDevice, InferenceEngine::InferenceEnginePluginPtr> sharedPlugins;
+         auto pluginIt = sharedPlugins.find(targetDevice);
+         if (pluginIt != sharedPlugins.end())
+         {
+@@ -589,4 +590,14 @@ void forwardInfEngine(Ptr<BackendNode>& node)
+ #endif  // HAVE_INF_ENGINE
+ }
+ 
++CV__DNN_INLINE_NS_BEGIN
++
++void resetMyriadDevice()
++{
++#ifdef HAVE_INF_ENGINE
++    sharedPlugins.erase(InferenceEngine::TargetDevice::eMYRIAD);
++#endif  // HAVE_INF_ENGINE
++}
++
++CV__DNN_INLINE_NS_END
+ }}  // namespace dnn, namespace cv
+diff --git a/modules/ts/misc/run_android.py b/modules/ts/misc/run_android.py
+index 5823c34096..84f2907288 100644
+--- a/modules/ts/misc/run_android.py
++++ b/modules/ts/misc/run_android.py
+@@ -123,7 +123,7 @@ class AndroidTestSuite(TestSuite):
+     def checkPrerequisites(self):
+         self.adb.init(self.options.serial)
+ 
+-    def runTest(self, path, logfile, workingDir, args=[]):
++    def runTest(self, module, path, logfile, workingDir, args=[]):
+         args = args[:]
+         exe = os.path.abspath(path)
+ 
+diff --git a/modules/ts/misc/run_long.py b/modules/ts/misc/run_long.py
+index 49ccb7b8c9..8b3d1e71ca 100644
+--- a/modules/ts/misc/run_long.py
++++ b/modules/ts/misc/run_long.py
+@@ -7,6 +7,18 @@ from pprint import PrettyPrinter as PP
+ LONG_TESTS_DEBUG_VALGRIND = [
+     ('calib3d', 'Calib3d_InitUndistortRectifyMap.accuracy', 2017.22),
+     ('dnn', 'Reproducibility*', 1000),  # large DNN models
++    ('dnn', '*RCNN*', 1000),  # very large DNN models
++    ('dnn', '*RFCN*', 1000),  # very large DNN models
++    ('dnn', '*EAST*', 1000),  # very large DNN models
++    ('dnn', '*VGG16*', 1000),  # very large DNN models
++    ('dnn', '*ZFNet*', 1000),  # very large DNN models
++    ('dnn', '*ResNet101_DUC_HDC*', 1000),  # very large DNN models
++    ('dnn', '*LResNet100E_IR*', 1000),  # very large DNN models
++    ('dnn', '*read_yolo_voc_stream*', 1000),  # very large DNN models
++    ('dnn', '*eccv16*', 1000),  # very large DNN models
++    ('dnn', '*OpenPose*', 1000),  # very large DNN models
++    ('dnn', '*SSD/*', 1000),  # very large DNN models
++    ('face', 'CV_Face_FacemarkLBF.test_workflow', 10000.0), # >40min on i7
+     ('features2d', 'Features2d/DescriptorImage.no_crash/3', 1000),
+     ('features2d', 'Features2d/DescriptorImage.no_crash/4', 1000),
+     ('features2d', 'Features2d/DescriptorImage.no_crash/5', 1000),
+@@ -29,6 +41,8 @@ LONG_TESTS_DEBUG_VALGRIND = [
+     ('shape', 'Shape_SCD.regression', 3311.46),
+     ('tracking', 'AUKF.br_mean_squared_error', 10764.6),
+     ('tracking', 'UKF.br_mean_squared_error', 5228.27),
++    ('tracking', '*DistanceAndOverlap*/1', 1000.0), # dudek
++    ('tracking', '*DistanceAndOverlap*/2', 1000.0), # faceocc2
+     ('videoio', 'Videoio_Video.ffmpeg_writebig', 1000),
+     ('xfeatures2d', 'Features2d_RotationInvariance_Descriptor_BoostDesc_LBGM.regression', 1124.51),
+     ('xfeatures2d', 'Features2d_RotationInvariance_Descriptor_VGG120.regression', 2198.1),
+@@ -41,17 +55,21 @@ LONG_TESTS_DEBUG_VALGRIND = [
+     ('xfeatures2d', 'Features2d_ScaleInvariance_Descriptor_VGG64.regression', 1163.41),
+     ('xfeatures2d', 'Features2d_ScaleInvariance_Descriptor_VGG80.regression', 1179.06),
+     ('ximgproc', 'L0SmoothTest.SplatSurfaceAccuracy', 6382.26),
+-    ('ximgproc', 'L0SmoothTest_perf.perf/17', 2052.16),
+-    ('ximgproc', 'RollingGuidanceFilterTest_perf.perf/59', 2760.29),
++    ('ximgproc', 'perf*/1*:perf*/2*:perf*/3*:perf*/4*:perf*/5*:perf*/6*:perf*/7*:perf*/8*:perf*/9*', 1000.0),  # only first 10 parameters
+     ('ximgproc', 'TypicalSet1/RollingGuidanceFilterTest.MultiThreadReproducibility/5', 1086.33),
+     ('ximgproc', 'TypicalSet1/RollingGuidanceFilterTest.MultiThreadReproducibility/7', 1405.05),
+     ('ximgproc', 'TypicalSet1/RollingGuidanceFilterTest.SplatSurfaceAccuracy/5', 1253.07),
+     ('ximgproc', 'TypicalSet1/RollingGuidanceFilterTest.SplatSurfaceAccuracy/7', 1599.98),
++    ('ximgproc', '*MultiThreadReproducibility*/1:*MultiThreadReproducibility*/2:*MultiThreadReproducibility*/3:*MultiThreadReproducibility*/4:*MultiThreadReproducibility*/5:*MultiThreadReproducibility*/6:*MultiThreadReproducibility*/7:*MultiThreadReproducibility*/8:*MultiThreadReproducibility*/9:*MultiThreadReproducibility*/1*', 1000.0),
++    ('ximgproc', '*AdaptiveManifoldRefImplTest*/1:*AdaptiveManifoldRefImplTest*/2:*AdaptiveManifoldRefImplTest*/3', 1000.0),
++    ('ximgproc', '*JointBilateralFilterTest_NaiveRef*', 1000.0),
++    ('ximgproc', '*RollingGuidanceFilterTest_BilateralRef*/1*:*RollingGuidanceFilterTest_BilateralRef*/2*:*RollingGuidanceFilterTest_BilateralRef*/3*', 1000.0),
++    ('ximgproc', '*JointBilateralFilterTest_NaiveRef*', 1000.0),
+ ]
+ 
+ 
+ def longTestFilter(data, module=None):
+-    res = ['*', '-'] + [v for _, v, m in data if module is None or m == module]
++    res = ['*', '-'] + [v for m, v, _time in data if module is None or m == module]
+     return '--gtest_filter={}'.format(':'.join(res))
+ 
+ 
+diff --git a/modules/ts/misc/run_suite.py b/modules/ts/misc/run_suite.py
+index c7103a6263..2eaeae1c3f 100644
+--- a/modules/ts/misc/run_suite.py
++++ b/modules/ts/misc/run_suite.py
+@@ -77,7 +77,7 @@ class TestSuite(object):
+             return False
+         return os.access(fullpath, os.X_OK)
+ 
+-    def wrapCommand(self, cmd, env):
++    def wrapCommand(self, module, cmd, env):
+         if self.options.valgrind:
+             res = ['valgrind']
+             supp = self.options.valgrind_supp or []
+@@ -88,7 +88,7 @@ class TestSuite(object):
+                     print("WARNING: Valgrind suppression file is missing, SKIP: %s" % f)
+             res.extend(self.options.valgrind_opt)
+             has_gtest_filter = next((True for x in cmd if x.startswith('--gtest_filter=')), False)
+-            return res + cmd + ([longTestFilter(LONG_TESTS_DEBUG_VALGRIND)] if not has_gtest_filter else [])
++            return res + cmd + ([longTestFilter(LONG_TESTS_DEBUG_VALGRIND, module)] if not has_gtest_filter else [])
+         elif self.options.qemu:
+             import shlex
+             res = shlex.split(self.options.qemu)
+@@ -107,14 +107,14 @@ class TestSuite(object):
+             pass
+         return False
+ 
+-    def runTest(self, path, logfile, workingDir, args=[]):
++    def runTest(self, module, path, logfile, workingDir, args=[]):
+         args = args[:]
+         exe = os.path.abspath(path)
+-        if path == "java":
++        if module == "java":
+             cmd = [self.cache.ant_executable, "-Dopencv.build.type=%s" % self.cache.build_type, "buildAndTest"]
+             ret = execute(cmd, cwd=self.cache.java_test_dir)
+             return None, ret
+-        elif path in ['python2', 'python3']:
++        elif module in ['python2', 'python3']:
+             executable = os.getenv('OPENCV_PYTHON_BINARY', None)
+             if executable is None:
+                 executable = path
+@@ -140,7 +140,7 @@ class TestSuite(object):
+                 env['OPENCV_TRACE_SYNC_OPENCL'] = '1'
+             tempDir = TempEnvDir('OPENCV_TEMP_PATH', "__opencv_temp.")
+             tempDir.init()
+-            cmd = self.wrapCommand([exe] + args, env)
++            cmd = self.wrapCommand(module, [exe] + args, env)
+             log.warning("Run: %s" % " ".join(cmd))
+             ret = execute(cmd, cwd=workingDir, env=env)
+             try:
+@@ -184,7 +184,7 @@ class TestSuite(object):
+             if self.options.dry_run:
+                 logfile, r = None, 0
+             else:
+-                logfile, r = self.runTest(exe, logname, workingDir, args + more_args)
++                logfile, r = self.runTest(test, exe, logname, workingDir, args + more_args)
+             log.debug("Test returned: %s ==> %s", r, logfile)
+ 
+             if r != 0:
+diff --git a/samples/dnn/tf_text_graph_common.py b/samples/dnn/tf_text_graph_common.py
+index d4d202e682..564c572d58 100644
+--- a/samples/dnn/tf_text_graph_common.py
++++ b/samples/dnn/tf_text_graph_common.py
+@@ -302,3 +302,26 @@ def removeUnusedNodesAndAttrs(to_remove, graph_def):
+         for i in reversed(range(len(node.input))):
+             if node.input[i] in removedNodes:
+                 del node.input[i]
++
++
++def writeTextGraph(modelPath, outputPath, outNodes):
++    try:
++        import cv2 as cv
++
++        cv.dnn.writeTextGraph(modelPath, outputPath)
++    except:
++        import tensorflow as tf
++        from tensorflow.tools.graph_transforms import TransformGraph
++
++        with tf.gfile.FastGFile(modelPath, 'rb') as f:
++            graph_def = tf.GraphDef()
++            graph_def.ParseFromString(f.read())
++
++            graph_def = TransformGraph(graph_def, ['image_tensor'], outNodes, ['sort_by_execution_order'])
++
++            for node in graph_def.node:
++                if node.op == 'Const':
++                    if 'value' in node.attr:
++                        del node.attr['value']
++
++        tf.train.write_graph(graph_def, "", outputPath, as_text=True)
+diff --git a/samples/dnn/tf_text_graph_faster_rcnn.py b/samples/dnn/tf_text_graph_faster_rcnn.py
+index 368edaa6fa..a6db8dcd4a 100644
+--- a/samples/dnn/tf_text_graph_faster_rcnn.py
++++ b/samples/dnn/tf_text_graph_faster_rcnn.py
+@@ -1,6 +1,5 @@
+ import argparse
+ import numpy as np
+-import cv2 as cv
+ from tf_text_graph_common import *
+ 
+ 
+@@ -42,7 +41,7 @@ def createFasterRCNNGraph(modelPath, configPath, outputPath):
+     print('Features stride:   %f' % features_stride)
+ 
+     # Read the graph.
+-    cv.dnn.writeTextGraph(modelPath, outputPath)
++    writeTextGraph(modelPath, outputPath, ['num_detections', 'detection_scores', 'detection_boxes', 'detection_classes'])
+     graph_def = parseTextGraph(outputPath)
+ 
+     removeIdentity(graph_def)
+diff --git a/samples/dnn/tf_text_graph_mask_rcnn.py b/samples/dnn/tf_text_graph_mask_rcnn.py
+index b80a0fc4df..b92d4623b8 100644
+--- a/samples/dnn/tf_text_graph_mask_rcnn.py
++++ b/samples/dnn/tf_text_graph_mask_rcnn.py
+@@ -1,6 +1,5 @@
+ import argparse
+ import numpy as np
+-import cv2 as cv
+ from tf_text_graph_common import *
+ 
+ parser = argparse.ArgumentParser(description='Run this script to get a text graph of '
+@@ -48,7 +47,7 @@ print('Height stride:     %f' % height_stride)
+ print('Features stride:   %f' % features_stride)
+ 
+ # Read the graph.
+-cv.dnn.writeTextGraph(args.input, args.output)
++writeTextGraph(args.input, args.output, ['num_detections', 'detection_scores', 'detection_boxes', 'detection_classes', 'detection_masks'])
+ graph_def = parseTextGraph(args.output)
+ 
+ removeIdentity(graph_def)
+diff --git a/samples/dnn/tf_text_graph_ssd.py b/samples/dnn/tf_text_graph_ssd.py
+index eb4b33042c..5017dba7a7 100644
+--- a/samples/dnn/tf_text_graph_ssd.py
++++ b/samples/dnn/tf_text_graph_ssd.py
+@@ -11,7 +11,6 @@
+ # See details and examples on the following wiki page: https://github.com/opencv/opencv/wiki/TensorFlow-Object-Detection-API
+ import argparse
+ from math import sqrt
+-import cv2 as cv
+ from tf_text_graph_common import *
+ 
+ def createSSDGraph(modelPath, configPath, outputPath):
+@@ -52,12 +51,12 @@ def createSSDGraph(modelPath, configPath, outputPath):
+     print('Input image size: %dx%d' % (image_width, image_height))
+ 
+     # Read the graph.
+-    cv.dnn.writeTextGraph(modelPath, outputPath)
+-    graph_def = parseTextGraph(outputPath)
+-
+     inpNames = ['image_tensor']
+     outNames = ['num_detections', 'detection_scores', 'detection_boxes', 'detection_classes']
+ 
++    writeTextGraph(modelPath, outputPath, outNames)
++    graph_def = parseTextGraph(outputPath)
++
+     def getUnconnectedNodes():
+         unconnected = []
+         for node in graph_def.node:

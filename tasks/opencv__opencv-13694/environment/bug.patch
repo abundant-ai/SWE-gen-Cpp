@@ -1,0 +1,847 @@
+diff --git a/modules/dnn/include/opencv2/dnn/dnn.hpp b/modules/dnn/include/opencv2/dnn/dnn.hpp
+index 07099dcb73..6f80597c70 100644
+--- a/modules/dnn/include/opencv2/dnn/dnn.hpp
++++ b/modules/dnn/include/opencv2/dnn/dnn.hpp
+@@ -44,14 +44,11 @@
+ 
+ #include <vector>
+ #include <opencv2/core.hpp>
+-#ifdef CV_CXX11
+-#include <future>
+-#endif
+ 
+ #if !defined CV_DOXYGEN && !defined CV_STATIC_ANALYSIS && !defined CV_DNN_DONT_ADD_EXPERIMENTAL_NS
+-#define CV__DNN_EXPERIMENTAL_NS_BEGIN namespace experimental_dnn_34_v12 {
++#define CV__DNN_EXPERIMENTAL_NS_BEGIN namespace experimental_dnn_34_v11 {
+ #define CV__DNN_EXPERIMENTAL_NS_END }
+-namespace cv { namespace dnn { namespace experimental_dnn_34_v12 { } using namespace experimental_dnn_34_v12; }}
++namespace cv { namespace dnn { namespace experimental_dnn_34_v11 { } using namespace experimental_dnn_34_v11; }}
+ #else
+ #define CV__DNN_EXPERIMENTAL_NS_BEGIN
+ #define CV__DNN_EXPERIMENTAL_NS_END
+@@ -67,18 +64,6 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+ 
+     typedef std::vector<int> MatShape;
+ 
+-#if defined(CV_CXX11) || defined(CV_DOXYGEN)
+-    typedef std::future<Mat> AsyncMat;
+-#else
+-    // Just a workaround for bindings.
+-    struct AsyncMat
+-    {
+-        Mat get() { return Mat(); }
+-        void wait() const {}
+-        size_t wait_for(size_t milliseconds) const { CV_UNUSED(milliseconds); return -1; }
+-    };
+-#endif
+-
+     /**
+      * @brief Enum of computation backends supported by layers.
+      * @see Net::setPreferableBackend
+@@ -90,7 +75,7 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+         //! DNN_BACKEND_OPENCV otherwise.
+         DNN_BACKEND_DEFAULT,
+         DNN_BACKEND_HALIDE,
+-        DNN_BACKEND_INFERENCE_ENGINE,  //!< Intel's Inference Engine computational backend.
++        DNN_BACKEND_INFERENCE_ENGINE,
+         DNN_BACKEND_OPENCV
+     };
+ 
+@@ -104,7 +89,8 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+         DNN_TARGET_OPENCL,
+         DNN_TARGET_OPENCL_FP16,
+         DNN_TARGET_MYRIAD,
+-        DNN_TARGET_FPGA  //!< FPGA device with CPU fallbacks using Inference Engine's Heterogeneous plugin.
++        //! FPGA device with CPU fallbacks using Inference Engine's Heterogeneous plugin.
++        DNN_TARGET_FPGA
+     };
+ 
+     CV_EXPORTS std::vector< std::pair<Backend, Target> > getAvailableBackends();
+@@ -476,15 +462,6 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+          */
+         CV_WRAP Mat forward(const String& outputName = String());
+ 
+-        /** @brief Runs forward pass to compute output of layer with name @p outputName.
+-         *  @param outputName name for layer which output is needed to get
+-         *  @details By default runs forward pass for the whole network.
+-         *
+-         *  This is an asynchronous version of forward(const String&).
+-         *  dnn::DNN_BACKEND_INFERENCE_ENGINE backend is required.
+-         */
+-        CV_WRAP AsyncMat forwardAsync(const String& outputName = String());
+-
+         /** @brief Runs forward pass to compute output of layer with name @p outputName.
+          *  @param outputBlobs contains all output blobs for specified layer.
+          *  @param outputName name for layer which output is needed to get
+diff --git a/modules/dnn/misc/python/pyopencv_dnn.hpp b/modules/dnn/misc/python/pyopencv_dnn.hpp
+index 8e6d80302d..53cba74435 100644
+--- a/modules/dnn/misc/python/pyopencv_dnn.hpp
++++ b/modules/dnn/misc/python/pyopencv_dnn.hpp
+@@ -2,13 +2,7 @@
+ typedef dnn::DictValue LayerId;
+ typedef std::vector<dnn::MatShape> vector_MatShape;
+ typedef std::vector<std::vector<dnn::MatShape> > vector_vector_MatShape;
+-#ifdef CV_CXX11
+-typedef std::chrono::milliseconds chrono_milliseconds;
+-typedef std::future_status AsyncMatStatus;
+-#else
+-typedef size_t chrono_milliseconds;
+-typedef size_t AsyncMatStatus;
+-#endif
++
+ 
+ template<>
+ bool pyopencv_to(PyObject *o, dnn::DictValue &dv, const char *name)
+@@ -46,46 +40,6 @@ bool pyopencv_to(PyObject *o, std::vector<Mat> &blobs, const char *name) //requi
+   return pyopencvVecConverter<Mat>::to(o, blobs, ArgInfo(name, false));
+ }
+ 
+-#ifdef CV_CXX11
+-
+-template<>
+-PyObject* pyopencv_from(const std::future<Mat>& f_)
+-{
+-    std::future<Mat>& f = const_cast<std::future<Mat>&>(f_);
+-    Ptr<cv::dnn::AsyncMat> p(new std::future<Mat>(std::move(f)));
+-    return pyopencv_from(p);
+-}
+-
+-template<>
+-PyObject* pyopencv_from(const std::future_status& status)
+-{
+-    return pyopencv_from((int)status);
+-}
+-
+-template<>
+-bool pyopencv_to(PyObject* src, std::chrono::milliseconds& dst, const char* name)
+-{
+-    size_t millis = 0;
+-    if (pyopencv_to(src, millis, name))
+-    {
+-        dst = std::chrono::milliseconds(millis);
+-        return true;
+-    }
+-    else
+-        return false;
+-}
+-
+-#else
+-
+-template<>
+-PyObject* pyopencv_from(const cv::dnn::AsyncMat&)
+-{
+-    CV_Error(Error::StsNotImplemented, "C++11 is required.");
+-    return 0;
+-}
+-
+-#endif  // CV_CXX11
+-
+ template<typename T>
+ PyObject* pyopencv_from(const dnn::DictValue &dv)
+ {
+diff --git a/modules/dnn/misc/python/shadow_async_mat.hpp b/modules/dnn/misc/python/shadow_async_mat.hpp
+deleted file mode 100644
+index 8807b8624b..0000000000
+--- a/modules/dnn/misc/python/shadow_async_mat.hpp
++++ /dev/null
+@@ -1,22 +0,0 @@
+-#error This is a shadow header file, which is not intended for processing by any compiler. \
+-       Only bindings parser should handle this file.
+-
+-namespace cv { namespace dnn {
+-
+-class CV_EXPORTS_W AsyncMat
+-{
+-public:
+-    //! Wait for Mat object readiness and return it.
+-    CV_WRAP Mat get();
+-
+-    //! Wait for Mat object readiness.
+-    CV_WRAP void wait() const;
+-
+-    /** @brief Wait for Mat object readiness specific amount of time.
+-     *  @param timeout Timeout in milliseconds
+-     *  @returns [std::future_status](https://en.cppreference.com/w/cpp/thread/future_status)
+-     */
+-    CV_WRAP AsyncMatStatus wait_for(std::chrono::milliseconds timeout) const;
+-};
+-
+-}}
+diff --git a/modules/dnn/misc/python/test/test_dnn.py b/modules/dnn/misc/python/test/test_dnn.py
+index 5cafbc531d..544ecbd20e 100644
+--- a/modules/dnn/misc/python/test/test_dnn.py
++++ b/modules/dnn/misc/python/test/test_dnn.py
+@@ -5,8 +5,8 @@ import numpy as np
+ 
+ from tests_common import NewOpenCVTests, unittest
+ 
+-def normAssert(test, a, b, msg=None, lInf=1e-5):
+-    test.assertLess(np.max(np.abs(a - b)), lInf, msg)
++def normAssert(test, a, b, lInf=1e-5):
++    test.assertLess(np.max(np.abs(a - b)), lInf)
+ 
+ def inter_area(box1, box2):
+     x_min, x_max = max(box1[0], box2[0]), min(box1[2], box2[2])
+@@ -53,6 +53,53 @@ def normAssertDetections(test, ref, out, confThreshold=0.0, scores_diff=1e-5, bo
+     if errMsg:
+         test.fail(errMsg)
+ 
++
++# Returns a simple one-layer network created from Caffe's format
++def getSimpleNet():
++    prototxt = """
++        name: "simpleNet"
++        input: "data"
++        layer {
++          type: "Identity"
++          name: "testLayer"
++          top: "testLayer"
++          bottom: "data"
++        }
++    """
++    return cv.dnn.readNetFromCaffe(bytearray(prototxt, 'utf8'))
++
++
++def testBackendAndTarget(backend, target):
++    net = getSimpleNet()
++    net.setPreferableBackend(backend)
++    net.setPreferableTarget(target)
++    inp = np.random.standard_normal([1, 2, 3, 4]).astype(np.float32)
++    try:
++        net.setInput(inp)
++        net.forward()
++    except BaseException as e:
++        return False
++    return True
++
++
++haveInfEngine = testBackendAndTarget(cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_CPU)
++dnnBackendsAndTargets = [
++    [cv.dnn.DNN_BACKEND_OPENCV, cv.dnn.DNN_TARGET_CPU],
++]
++
++if haveInfEngine:
++    dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_CPU])
++    if testBackendAndTarget(cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_MYRIAD):
++        dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_MYRIAD])
++
++if cv.ocl.haveOpenCL() and cv.ocl.useOpenCL():
++    dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_OPENCV, cv.dnn.DNN_TARGET_OPENCL])
++    dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_OPENCV, cv.dnn.DNN_TARGET_OPENCL_FP16])
++    if haveInfEngine and cv.ocl_Device.getDefault().isIntel():
++        dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_OPENCL])
++        dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_OPENCL_FP16])
++
++
+ def printParams(backend, target):
+     backendNames = {
+         cv.dnn.DNN_BACKEND_OPENCV: 'OCV',
+@@ -69,44 +116,8 @@ def printParams(backend, target):
+ 
+ class dnn_test(NewOpenCVTests):
+ 
+-    def __init__(self, *args, **kwargs):
+-        super(dnn_test, self).__init__(*args, **kwargs)
+-        self.dnnBackendsAndTargets = [
+-            [cv.dnn.DNN_BACKEND_OPENCV, cv.dnn.DNN_TARGET_CPU],
+-        ]
+-
+-        if self.checkIETarget(cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_CPU):
+-            self.dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_CPU])
+-        if self.checkIETarget(cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_MYRIAD):
+-            self.dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_MYRIAD])
+-
+-        if cv.ocl.haveOpenCL() and cv.ocl.useOpenCL():
+-            self.dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_OPENCV, cv.dnn.DNN_TARGET_OPENCL])
+-            self.dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_OPENCV, cv.dnn.DNN_TARGET_OPENCL_FP16])
+-            if cv.ocl_Device.getDefault().isIntel():
+-                if self.checkIETarget(cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_OPENCL):
+-                    self.dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_OPENCL])
+-                if self.checkIETarget(cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_OPENCL_FP16):
+-                    self.dnnBackendsAndTargets.append([cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_TARGET_OPENCL_FP16])
+-
+     def find_dnn_file(self, filename, required=True):
+-        return self.find_file(filename, [os.environ.get('OPENCV_DNN_TEST_DATA_PATH', os.getcwd()),
+-                                         os.environ['OPENCV_TEST_DATA_PATH']],
+-                              required=required)
+-
+-    def checkIETarget(self, backend, target):
+-        proto = self.find_dnn_file('dnn/layers/layer_convolution.prototxt', required=True)
+-        model = self.find_dnn_file('dnn/layers/layer_convolution.caffemodel', required=True)
+-        net = cv.dnn.readNet(proto, model)
+-        net.setPreferableBackend(backend)
+-        net.setPreferableTarget(target)
+-        inp = np.random.standard_normal([1, 2, 10, 11]).astype(np.float32)
+-        try:
+-            net.setInput(inp)
+-            net.forward()
+-        except BaseException as e:
+-            return False
+-        return True
++        return self.find_file(filename, [os.environ.get('OPENCV_DNN_TEST_DATA_PATH', os.getcwd())], required=required)
+ 
+     def test_blobFromImage(self):
+         np.random.seed(324)
+@@ -137,7 +148,7 @@ class dnn_test(NewOpenCVTests):
+ 
+     def test_face_detection(self):
+         testdata_required = bool(os.environ.get('OPENCV_DNN_TEST_REQUIRE_TESTDATA', False))
+-        proto = self.find_dnn_file('dnn/opencv_face_detector.prototxt', required=testdata_required)
++        proto = self.find_dnn_file('dnn/opencv_face_detector.prototxt2', required=testdata_required)
+         model = self.find_dnn_file('dnn/opencv_face_detector.caffemodel', required=testdata_required)
+         if proto is None or model is None:
+             raise unittest.SkipTest("Missing DNN test files (dnn/opencv_face_detector.{prototxt/caffemodel}). Verify OPENCV_DNN_TEST_DATA_PATH configuration parameter.")
+@@ -153,7 +164,7 @@ class dnn_test(NewOpenCVTests):
+                [0, 1, 0.95097077, 0.51901293, 0.45863652, 0.5777427,  0.5347801]]
+ 
+         print('\n')
+-        for backend, target in self.dnnBackendsAndTargets:
++        for backend, target in dnnBackendsAndTargets:
+             printParams(backend, target)
+ 
+             net = cv.dnn.readNet(proto, model)
+@@ -167,52 +178,5 @@ class dnn_test(NewOpenCVTests):
+ 
+             normAssertDetections(self, ref, out, 0.5, scoresDiff, iouDiff)
+ 
+-    def test_async(self):
+-        timeout = 5000  # in milliseconds
+-        testdata_required = bool(os.environ.get('OPENCV_DNN_TEST_REQUIRE_TESTDATA', False))
+-        proto = self.find_dnn_file('dnn/layers/layer_convolution.prototxt', required=testdata_required)
+-        model = self.find_dnn_file('dnn/layers/layer_convolution.caffemodel', required=testdata_required)
+-        if proto is None or model is None:
+-            raise unittest.SkipTest("Missing DNN test files (dnn/layers/layer_convolution.{prototxt/caffemodel}). Verify OPENCV_DNN_TEST_DATA_PATH configuration parameter.")
+-
+-        print('\n')
+-        for backend, target in self.dnnBackendsAndTargets:
+-            if backend != cv.dnn.DNN_BACKEND_INFERENCE_ENGINE:
+-                continue
+-
+-            printParams(backend, target)
+-
+-            netSync = cv.dnn.readNet(proto, model)
+-            netSync.setPreferableBackend(backend)
+-            netSync.setPreferableTarget(target)
+-
+-            netAsync = cv.dnn.readNet(proto, model)
+-            netAsync.setPreferableBackend(backend)
+-            netAsync.setPreferableTarget(target)
+-
+-            # Generate inputs
+-            numInputs = 10
+-            inputs = []
+-            for _ in range(numInputs):
+-                inputs.append(np.random.standard_normal([2, 6, 75, 113]).astype(np.float32))
+-
+-            # Run synchronously
+-            refs = []
+-            for i in range(numInputs):
+-                netSync.setInput(inputs[i])
+-                refs.append(netSync.forward())
+-
+-            # Run asynchronously. To make test more robust, process inputs in the reversed order.
+-            outs = []
+-            for i in reversed(range(numInputs)):
+-                netAsync.setInput(inputs[i])
+-                outs.insert(0, netAsync.forwardAsync())
+-
+-            for i in reversed(range(numInputs)):
+-                if outs[i].wait_for(timeout) == 1:
+-                    self.fail("Timeout")
+-                normAssert(self, refs[i], outs[i].get(), 'Index: %d' % i, 1e-10)
+-
+-
+ if __name__ == '__main__':
+     NewOpenCVTests.bootstrap()
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 2cc3f9a640..36eee10eeb 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1030,7 +1030,6 @@ struct Net::Impl
+         lastLayerId = 0;
+         netWasAllocated = false;
+         fusion = true;
+-        isAsync = false;
+         preferableBackend = DNN_BACKEND_DEFAULT;
+         preferableTarget = DNN_TARGET_CPU;
+         skipInfEngineInit = false;
+@@ -1052,7 +1051,6 @@ struct Net::Impl
+ 
+     bool netWasAllocated;
+     bool fusion;
+-    bool isAsync;
+     std::vector<int64> layersTimings;
+     Mat output_blob;
+ 
+@@ -2260,9 +2258,6 @@ struct Net::Impl
+             std::map<int, Ptr<BackendNode> >::iterator it = ld.backendNodes.find(preferableBackend);
+             if (preferableBackend == DNN_BACKEND_OPENCV || it == ld.backendNodes.end() || it->second.empty())
+             {
+-                if (isAsync)
+-                    CV_Error(Error::StsNotImplemented, "Default implementation fallbacks in asynchronous mode");
+-
+                 if (preferableBackend == DNN_BACKEND_OPENCV && IS_DNN_OPENCL_TARGET(preferableTarget))
+                 {
+                     std::vector<UMat> umat_inputBlobs = OpenCLBackendWrapper::getUMatVector(ld.inputBlobsWrappers);
+@@ -2418,7 +2413,7 @@ struct Net::Impl
+                 }
+                 else if (preferableBackend == DNN_BACKEND_INFERENCE_ENGINE)
+                 {
+-                    forwardInfEngine(ld.outputBlobsWrappers, node, isAsync);
++                    forwardInfEngine(node);
+                 }
+                 else
+                 {
+@@ -2464,6 +2459,15 @@ struct Net::Impl
+         forwardLayer(ld);
+     }
+ 
++    void forwardAll()
++    {
++        CV_TRACE_FUNCTION();
++
++        MapIdToLayerData::reverse_iterator last_layer = layers.rbegin();
++        CV_Assert(last_layer != layers.rend());
++        forwardToLayer(last_layer->second, true);
++    }
++
+     void getLayerShapesRecursively(int id, LayersShapesMap& inOutShapes)
+     {
+         std::vector<LayerPin>& inputLayerIds = layers[id].inputBlobsId;
+@@ -2554,42 +2558,6 @@ struct Net::Impl
+     {
+         return getBlob(getPinByAlias(outputName));
+     }
+-
+-#ifdef CV_CXX11
+-    std::future<Mat> getBlobAsync(const LayerPin& pin)
+-    {
+-        CV_TRACE_FUNCTION();
+-#ifdef HAVE_INF_ENGINE
+-        if (!pin.valid())
+-            CV_Error(Error::StsObjectNotFound, "Requested blob not found");
+-
+-        LayerData &ld = layers[pin.lid];
+-        if ((size_t)pin.oid >= ld.outputBlobs.size())
+-        {
+-            CV_Error(Error::StsOutOfRange, format("Layer \"%s\" produce only %d outputs, "
+-                                           "the #%d was requested", ld.name.c_str(),
+-                                           ld.outputBlobs.size(), pin.oid));
+-        }
+-        if (preferableTarget != DNN_TARGET_CPU)
+-        {
+-            CV_Assert(!ld.outputBlobsWrappers.empty() && !ld.outputBlobsWrappers[pin.oid].empty());
+-            // Transfer data to CPU if it's require.
+-            ld.outputBlobsWrappers[pin.oid]->copyToHost();
+-        }
+-        CV_Assert(preferableBackend == DNN_BACKEND_INFERENCE_ENGINE);
+-
+-        Ptr<InfEngineBackendWrapper> wrapper = ld.outputBlobsWrappers[pin.oid].dynamicCast<InfEngineBackendWrapper>();
+-        return std::move(wrapper->futureMat);
+-#else
+-        CV_Error(Error::StsNotImplemented, "DNN_BACKEND_INFERENCE_ENGINE backend is required");
+-#endif
+-    }
+-
+-    std::future<Mat> getBlobAsync(String outputName)
+-    {
+-        return getBlobAsync(getPinByAlias(outputName));
+-    }
+-#endif  // CV_CXX11
+ };
+ 
+ Net::Net() : impl(new Net::Impl)
+@@ -2713,31 +2681,6 @@ Mat Net::forward(const String& outputName)
+     return impl->getBlob(layerName);
+ }
+ 
+-AsyncMat Net::forwardAsync(const String& outputName)
+-{
+-    CV_TRACE_FUNCTION();
+-#ifdef CV_CXX11
+-    if (impl->preferableBackend != DNN_BACKEND_INFERENCE_ENGINE)
+-        CV_Error(Error::StsNotImplemented, "Asynchronous forward for backend which is different from DNN_BACKEND_INFERENCE_ENGINE");
+-
+-    String layerName = outputName;
+-
+-    if (layerName.empty())
+-        layerName = getLayerNames().back();
+-
+-    std::vector<LayerPin> pins(1, impl->getPinByAlias(layerName));
+-    impl->setUpNet(pins);
+-
+-    impl->isAsync = true;
+-    impl->forwardToLayer(impl->getLayerData(layerName));
+-    impl->isAsync = false;
+-
+-    return impl->getBlobAsync(layerName);
+-#else
+-    CV_Error(Error::StsNotImplemented, "Asynchronous forward without C++11");
+-#endif  // CV_CXX11
+-}
+-
+ void Net::forward(OutputArrayOfArrays outputBlobs, const String& outputName)
+ {
+     CV_TRACE_FUNCTION();
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index e5b025f945..e5c817056b 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -168,6 +168,7 @@ void InfEngineBackendNet::init(int targetId)
+         const std::string& name = it.first;
+         auto blobIt = allBlobs.find(name);
+         CV_Assert(blobIt != allBlobs.end());
++        inpBlobs[name] = blobIt->second;
+         it.second->setPrecision(blobIt->second->precision());
+     }
+     for (const auto& it : cnn.getOutputsInfo())
+@@ -175,6 +176,7 @@ void InfEngineBackendNet::init(int targetId)
+         const std::string& name = it.first;
+         auto blobIt = allBlobs.find(name);
+         CV_Assert(blobIt != allBlobs.end());
++        outBlobs[name] = blobIt->second;
+         it.second->setPrecision(blobIt->second->precision());  // Should be always FP32
+     }
+ 
+@@ -286,24 +288,6 @@ InferenceEngine::Blob::Ptr wrapToInfEngineBlob(const Mat& m, InferenceEngine::La
+     return wrapToInfEngineBlob(m, reversedShape, layout);
+ }
+ 
+-InferenceEngine::Blob::Ptr cloneBlob(const InferenceEngine::Blob::Ptr& blob)
+-{
+-    InferenceEngine::Precision precision = blob->precision();
+-    InferenceEngine::Blob::Ptr copy;
+-    if (precision == InferenceEngine::Precision::FP32)
+-    {
+-        copy = InferenceEngine::make_shared_blob<float>(precision, blob->layout(), blob->dims());
+-    }
+-    else if (precision == InferenceEngine::Precision::U8)
+-    {
+-        copy = InferenceEngine::make_shared_blob<uint8_t>(precision, blob->layout(), blob->dims());
+-    }
+-    else
+-        CV_Error(Error::StsNotImplemented, "Unsupported blob precision");
+-    copy->allocate();
+-    return copy;
+-}
+-
+ InferenceEngine::DataPtr infEngineDataNode(const Ptr<BackendWrapper>& ptr)
+ {
+     CV_Assert(!ptr.empty());
+@@ -816,6 +800,9 @@ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+         plugin = InferenceEngine::InferencePlugin(enginePtr);
+ 
+         netExec = plugin.LoadNetwork(net, {});
++        infRequest = netExec.CreateInferRequest();
++        infRequest.SetInput(inpBlobs);
++        infRequest.SetOutput(outBlobs);
+     }
+     catch (const std::exception& ex)
+     {
+@@ -841,116 +828,9 @@ void InfEngineBackendNet::addBlobs(const std::vector<Ptr<BackendWrapper> >& ptrs
+     }
+ }
+ 
+-void InfEngineBackendNet::InfEngineReqWrapper::makePromises(const std::vector<Ptr<BackendWrapper> >& outsWrappers)
+-{
+-    auto outs = infEngineWrappers(outsWrappers);
+-    outProms.clear();
+-    outProms.resize(outs.size());
+-    outsNames.resize(outs.size());
+-    for (int i = 0; i < outs.size(); ++i)
+-    {
+-        outs[i]->futureMat = outProms[i].get_future();
+-        outsNames[i] = outs[i]->dataPtr->name;
+-    }
+-}
+-
+-void InfEngineBackendNet::forward(const std::vector<Ptr<BackendWrapper> >& outBlobsWrappers,
+-                                  bool isAsync)
++void InfEngineBackendNet::forward()
+ {
+-    // Look for finished requests.
+-    Ptr<InfEngineReqWrapper> reqWrapper;
+-    for (auto& wrapper : infRequests)
+-    {
+-        if (wrapper->isReady)
+-        {
+-            reqWrapper = wrapper;
+-            break;
+-        }
+-    }
+-    if (reqWrapper.empty())
+-    {
+-        reqWrapper = Ptr<InfEngineReqWrapper>(new InfEngineReqWrapper());
+-        try
+-        {
+-            reqWrapper->req = netExec.CreateInferRequest();
+-        }
+-        catch (const std::exception& ex)
+-        {
+-            CV_Error(Error::StsAssert, format("Failed to initialize Inference Engine backend: %s", ex.what()));
+-        }
+-        infRequests.push_back(reqWrapper);
+-
+-        InferenceEngine::BlobMap inpBlobs, outBlobs;
+-        for (const auto& it : cnn.getInputsInfo())
+-        {
+-            const std::string& name = it.first;
+-            auto blobIt = allBlobs.find(name);
+-            CV_Assert(blobIt != allBlobs.end());
+-            inpBlobs[name] = isAsync ? cloneBlob(blobIt->second) : blobIt->second;
+-        }
+-        for (const auto& it : cnn.getOutputsInfo())
+-        {
+-            const std::string& name = it.first;
+-            auto blobIt = allBlobs.find(name);
+-            CV_Assert(blobIt != allBlobs.end());
+-            outBlobs[name] = isAsync ? cloneBlob(blobIt->second) : blobIt->second;
+-        }
+-        reqWrapper->req.SetInput(inpBlobs);
+-        reqWrapper->req.SetOutput(outBlobs);
+-
+-        InferenceEngine::IInferRequest::Ptr infRequestPtr = reqWrapper->req;
+-        infRequestPtr->SetUserData(reqWrapper.get(), 0);
+-
+-        infRequestPtr->SetCompletionCallback({
+-            [](InferenceEngine::IInferRequest::Ptr request, InferenceEngine::StatusCode status)
+-            {
+-                InfEngineReqWrapper* wrapper;
+-                request->GetUserData((void**)&wrapper, 0);
+-                CV_Assert(wrapper);
+-
+-                for (int i = 0; i < wrapper->outProms.size(); ++i)
+-                {
+-                    const std::string& name = wrapper->outsNames[i];
+-                    Mat m = infEngineBlobToMat(wrapper->req.GetBlob(name));
+-
+-                    if (status == InferenceEngine::StatusCode::OK)
+-                        wrapper->outProms[i].set_value(m.clone());
+-                    else
+-                    {
+-                        try {
+-                            std::runtime_error e("Async request failed");
+-                            wrapper->outProms[i].set_exception(std::make_exception_ptr(e));
+-                        } catch(...) {
+-                            CV_LOG_ERROR(NULL, "DNN: Exception occured during async inference exception propagation");
+-                        }
+-                    }
+-                }
+-                wrapper->isReady = true;
+-            }
+-        });
+-    }
+-    if (isAsync)
+-    {
+-        // Copy actual data to infer request's input blobs.
+-        for (const auto& it : cnn.getInputsInfo())
+-        {
+-            const std::string& name = it.first;
+-            auto blobIt = allBlobs.find(name);
+-            Mat srcMat = infEngineBlobToMat(blobIt->second);
+-            Mat dstMat = infEngineBlobToMat(reqWrapper->req.GetBlob(name));
+-            srcMat.copyTo(dstMat);
+-        }
+-
+-        // Set promises to output blobs wrappers.
+-        reqWrapper->makePromises(outBlobsWrappers);
+-
+-        reqWrapper->isReady = false;
+-        reqWrapper->req.StartAsync();
+-    }
+-    else
+-    {
+-        reqWrapper->req.Infer();
+-    }
++    infRequest.Infer();
+ }
+ 
+ Mat infEngineBlobToMat(const InferenceEngine::Blob::Ptr& blob)
+@@ -1040,15 +920,14 @@ bool haveInfEngine()
+ #endif  // HAVE_INF_ENGINE
+ }
+ 
+-void forwardInfEngine(const std::vector<Ptr<BackendWrapper> >& outBlobsWrappers,
+-                      Ptr<BackendNode>& node, bool isAsync)
++void forwardInfEngine(Ptr<BackendNode>& node)
+ {
+     CV_Assert(haveInfEngine());
+ #ifdef HAVE_INF_ENGINE
+     CV_Assert(!node.empty());
+     Ptr<InfEngineBackendNode> ieNode = node.dynamicCast<InfEngineBackendNode>();
+     CV_Assert(!ieNode.empty());
+-    ieNode->net->forward(outBlobsWrappers, isAsync);
++    ieNode->net->forward();
+ #endif  // HAVE_INF_ENGINE
+ }
+ 
+diff --git a/modules/dnn/src/op_inf_engine.hpp b/modules/dnn/src/op_inf_engine.hpp
+index 009e121af7..2219f926a7 100644
+--- a/modules/dnn/src/op_inf_engine.hpp
++++ b/modules/dnn/src/op_inf_engine.hpp
+@@ -185,8 +185,7 @@ public:
+ 
+     void init(int targetId);
+ 
+-    void forward(const std::vector<Ptr<BackendWrapper> >& outBlobsWrappers,
+-                 bool isAsync);
++    void forward();
+ 
+     void initPlugin(InferenceEngine::ICNNNetwork& net);
+ 
+@@ -198,23 +197,12 @@ private:
+     InferenceEngine::InferenceEnginePluginPtr enginePtr;
+     InferenceEngine::InferencePlugin plugin;
+     InferenceEngine::ExecutableNetwork netExec;
++    InferenceEngine::InferRequest infRequest;
+     InferenceEngine::BlobMap allBlobs;
++    InferenceEngine::BlobMap inpBlobs;
++    InferenceEngine::BlobMap outBlobs;
+     InferenceEngine::TargetDevice targetDevice;
+ 
+-    struct InfEngineReqWrapper
+-    {
+-        InfEngineReqWrapper() : isReady(true) {}
+-
+-        void makePromises(const std::vector<Ptr<BackendWrapper> >& outs);
+-
+-        InferenceEngine::InferRequest req;
+-        std::vector<std::promise<Mat> > outProms;
+-        std::vector<std::string> outsNames;
+-        bool isReady;
+-    };
+-
+-    std::vector<Ptr<InfEngineReqWrapper> > infRequests;
+-
+     InferenceEngine::CNNNetwork cnn;
+     bool hasNetOwner;
+ 
+@@ -264,7 +252,6 @@ public:
+ 
+     InferenceEngine::DataPtr dataPtr;
+     InferenceEngine::Blob::Ptr blob;
+-    std::future<Mat> futureMat;
+ };
+ 
+ InferenceEngine::Blob::Ptr wrapToInfEngineBlob(const Mat& m, InferenceEngine::Layout layout = InferenceEngine::Layout::ANY);
+@@ -315,8 +302,7 @@ CV__DNN_EXPERIMENTAL_NS_END
+ 
+ bool haveInfEngine();
+ 
+-void forwardInfEngine(const std::vector<Ptr<BackendWrapper> >& outBlobsWrappers,
+-                      Ptr<BackendNode>& node, bool isAsync);
++void forwardInfEngine(Ptr<BackendNode>& node);
+ 
+ }}  // namespace dnn, namespace cv
+ 
+diff --git a/modules/dnn/test/test_misc.cpp b/modules/dnn/test/test_misc.cpp
+index 56962432a3..458344cc4f 100644
+--- a/modules/dnn/test/test_misc.cpp
++++ b/modules/dnn/test/test_misc.cpp
+@@ -340,106 +340,4 @@ TEST(Net, forwardAndRetrieve)
+     normAssert(outBlobs[0][1], inp.rowRange(2, 4), "second part");
+ }
+ 
+-#ifdef HAVE_INF_ENGINE
+-// This test runs network in synchronous mode for different inputs and then
+-// runs the same model asynchronously for the same inputs.
+-typedef testing::TestWithParam<Target> Async;
+-TEST_P(Async, set_and_forward_single)
+-{
+-    static const int kTimeout = 5000;  // in milliseconds.
+-    const int target = GetParam();
+-
+-    const std::string suffix = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? "_fp16" : "";
+-    const std::string& model = findDataFile("dnn/layers/layer_convolution" + suffix + ".bin");
+-    const std::string& proto = findDataFile("dnn/layers/layer_convolution" + suffix + ".xml");
+-
+-    Net netSync = readNet(model, proto);
+-    netSync.setPreferableTarget(target);
+-
+-    Net netAsync = readNet(model, proto);
+-    netAsync.setPreferableTarget(target);
+-
+-    // Generate inputs.
+-    const int numInputs = 10;
+-    std::vector<Mat> inputs(numInputs);
+-    int blobSize[] = {2, 6, 75, 113};
+-    for (int i = 0; i < numInputs; ++i)
+-    {
+-        inputs[i].create(4, &blobSize[0], CV_32FC1);
+-        randu(inputs[i], 0.0f, 1.0f);
+-    }
+-
+-    // Run synchronously.
+-    std::vector<Mat> refs(numInputs);
+-    for (int i = 0; i < numInputs; ++i)
+-    {
+-        netSync.setInput(inputs[i]);
+-        refs[i] = netSync.forward().clone();
+-    }
+-
+-    // Run asynchronously. To make test more robust, process inputs in the reversed order.
+-    for (int i = numInputs - 1; i >= 0; --i)
+-    {
+-        netAsync.setInput(inputs[i]);
+-
+-        std::future<Mat> out = netAsync.forwardAsync();
+-        if (out.wait_for(std::chrono::milliseconds(kTimeout)) == std::future_status::timeout)
+-            CV_Error(Error::StsAssert, "Timeout");
+-        normAssert(refs[i], out.get(), format("Index: %d", i).c_str(), 0, 0);
+-    }
+-}
+-
+-TEST_P(Async, set_and_forward_all)
+-{
+-    static const int kTimeout = 5000;  // in milliseconds.
+-    const int target = GetParam();
+-
+-    const std::string suffix = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? "_fp16" : "";
+-    const std::string& model = findDataFile("dnn/layers/layer_convolution" + suffix + ".bin");
+-    const std::string& proto = findDataFile("dnn/layers/layer_convolution" + suffix + ".xml");
+-
+-
+-    Net netSync = readNet(model, proto);
+-    netSync.setPreferableTarget(target);
+-
+-    Net netAsync = readNet(model, proto);
+-    netAsync.setPreferableTarget(target);
+-
+-    // Generate inputs.
+-    const int numInputs = 10;
+-    std::vector<Mat> inputs(numInputs);
+-    int blobSize[] = {2, 6, 75, 113};
+-    for (int i = 0; i < numInputs; ++i)
+-    {
+-        inputs[i].create(4, &blobSize[0], CV_32FC1);
+-        randu(inputs[i], 0.0f, 1.0f);
+-    }
+-
+-    // Run synchronously.
+-    std::vector<Mat> refs(numInputs);
+-    for (int i = 0; i < numInputs; ++i)
+-    {
+-        netSync.setInput(inputs[i]);
+-        refs[i] = netSync.forward().clone();
+-    }
+-
+-    // Run asynchronously. To make test more robust, process inputs in the reversed order.
+-    std::vector<std::future<Mat> > outs(numInputs);
+-    for (int i = numInputs - 1; i >= 0; --i)
+-    {
+-        netAsync.setInput(inputs[i]);
+-        outs[i] = netAsync.forwardAsync();
+-    }
+-
+-    for (int i = numInputs - 1; i >= 0; --i)
+-    {
+-        if (outs[i].wait_for(std::chrono::milliseconds(kTimeout)) == std::future_status::timeout)
+-            CV_Error(Error::StsAssert, "Timeout");
+-        normAssert(refs[i], outs[i].get(), format("Index: %d", i).c_str(), 0, 0);
+-    }
+-}
+-
+-INSTANTIATE_TEST_CASE_P(/**/, Async, testing::ValuesIn(getAvailableTargets(DNN_BACKEND_INFERENCE_ENGINE)));
+-#endif  // HAVE_INF_ENGINE
+-
+ }} // namespace

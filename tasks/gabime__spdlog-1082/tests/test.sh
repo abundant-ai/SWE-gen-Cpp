@@ -2,26 +2,26 @@
 
 cd /app/src
 
-# Copy HEAD test files from /tests (overwrites BASE state)
+# Copy fixed test configuration
 mkdir -p "tests"
 cp "/tests/CMakeLists.txt" "tests/CMakeLists.txt"
 
-# Build with CMake to verify the tests/CMakeLists.txt file is valid
-rm -rf build
-cmake -S . -B build || {
+# Rebuild with updated CMakeLists.txt
+cd build
+cmake .. -DSPDLOG_BUILD_TESTS=ON 2>&1 || {
     echo "CMake configuration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-cmake --build build 2>&1 || {
+make -j$(nproc) 2>&1 || {
     echo "Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-# Run the tests using CTest
-cd build && ctest --output-on-failure
+# Run the unit tests (executable is in tests subdirectory)
+./tests/spdlog-utests 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

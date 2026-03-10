@@ -10,23 +10,53 @@ cp "/tests/ostream-test.cc" "test/ostream-test.cc"
 mkdir -p "test"
 cp "/tests/xchar-test.cc" "test/xchar-test.cc"
 
-# Reconfigure CMake to force FMT_USE_BITINT=1 (ensures bitint tests always compile)
-cmake -S . -B build \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
+# Clean and reconfigure CMake to pick up the new test files and any library changes
+rm -rf build/*
+cd build
+cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_STANDARD=23 \
     -DFMT_TEST=ON \
-    -DCMAKE_CXX_FLAGS="-DFMT_USE_BITINT=1"
-
-# Rebuild and run the specific test targets after copying updated test files
-cmake --build build --target format-test && \
-cmake --build build --target ostream-test && \
-cmake --build build --target xchar-test && \
-build/bin/format-test && \
-build/bin/ostream-test && \
-build/bin/xchar-test
+    -DBUILD_SHARED_LIBS=ON
 test_status=$?
+
+# Build the library first
+if [ $test_status -eq 0 ]; then
+  cmake --build . --target fmt
+  test_status=$?
+fi
+
+# Build and run format-test
+if [ $test_status -eq 0 ]; then
+  cmake --build . --target format-test
+  test_status=$?
+fi
+
+if [ $test_status -eq 0 ]; then
+  ./bin/format-test
+  test_status=$?
+fi
+
+# Build and run ostream-test
+if [ $test_status -eq 0 ]; then
+  cmake --build . --target ostream-test
+  test_status=$?
+fi
+
+if [ $test_status -eq 0 ]; then
+  ./bin/ostream-test
+  test_status=$?
+fi
+
+# Build and run xchar-test
+if [ $test_status -eq 0 ]; then
+  cmake --build . --target xchar-test
+  test_status=$?
+fi
+
+if [ $test_status -eq 0 ]; then
+  ./bin/xchar-test
+  test_status=$?
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

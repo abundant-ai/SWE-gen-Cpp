@@ -1,0 +1,257 @@
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 438cde2fd3..6a7c9d5a6a 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1993,17 +1993,11 @@ Net Net::readFromModelOptimizer(const String& xml, const String& bin)
+     backendNode->net = Ptr<InfEngineBackendNet>(new InfEngineBackendNet(ieNet));
+     for (auto& it : ieNet.getOutputsInfo())
+     {
+-        Ptr<Layer> cvLayer(new InfEngineBackendLayer(it.second));
+-        InferenceEngine::CNNLayerPtr ieLayer = ieNet.getLayerByName(it.first.c_str());
+-        CV_Assert(ieLayer);
+-
+         LayerParams lp;
+         int lid = cvNet.addLayer(it.first, "", lp);
+ 
+         LayerData& ld = cvNet.impl->layers[lid];
+-        cvLayer->name = it.first;
+-        cvLayer->type = ieLayer->type;
+-        ld.layerInstance = cvLayer;
++        ld.layerInstance = Ptr<Layer>(new InfEngineBackendLayer(it.second));
+         ld.backendNodes[DNN_BACKEND_INFERENCE_ENGINE] = backendNode;
+ 
+         for (int i = 0; i < inputsNames.size(); ++i)
+diff --git a/modules/dnn/test/test_layers.cpp b/modules/dnn/test/test_layers.cpp
+index 720447afb9..b773c25e65 100644
+--- a/modules/dnn/test/test_layers.cpp
++++ b/modules/dnn/test/test_layers.cpp
+@@ -925,10 +925,6 @@ TEST(Layer_Test_Convolution_DLDT, Accuracy)
+     Mat out = net.forward();
+ 
+     normAssert(outDefault, out);
+-
+-    std::vector<int> outLayers = net.getUnconnectedOutLayers();
+-    ASSERT_EQ(net.getLayer(outLayers[0])->name, "output_merge");
+-    ASSERT_EQ(net.getLayer(outLayers[0])->type, "Concat");
+ }
+ 
+ // 1. Create a .prototxt file with the following network:
+diff --git a/samples/dnn/object_detection.cpp b/samples/dnn/object_detection.cpp
+index 922bdcc9a0..084d41bb5f 100644
+--- a/samples/dnn/object_detection.cpp
++++ b/samples/dnn/object_detection.cpp
+@@ -22,7 +22,6 @@ const char* keys =
+     "{ height      | -1 | Preprocess input image by resizing to a specific height. }"
+     "{ rgb         |    | Indicate that model works with RGB input images instead BGR ones. }"
+     "{ thr         | .5 | Confidence threshold. }"
+-    "{ thr         | .4 | Non-maximum suppression threshold. }"
+     "{ backend     |  0 | Choose one of computation backends: "
+                          "0: automatically (by default), "
+                          "1: Halide language (http://halide-lang.org/), "
+@@ -38,7 +37,7 @@ const char* keys =
+ using namespace cv;
+ using namespace dnn;
+ 
+-float confThreshold, nmsThreshold;
++float confThreshold;
+ std::vector<std::string> classes;
+ 
+ void postprocess(Mat& frame, const std::vector<Mat>& out, Net& net);
+@@ -60,7 +59,6 @@ int main(int argc, char** argv)
+     }
+ 
+     confThreshold = parser.get<float>("thr");
+-    nmsThreshold = parser.get<float>("nms");
+     float scale = parser.get<float>("scale");
+     Scalar mean = parser.get<Scalar>("mean");
+     bool swapRB = parser.get<bool>("rgb");
+@@ -146,9 +144,6 @@ void postprocess(Mat& frame, const std::vector<Mat>& outs, Net& net)
+     static std::vector<int> outLayers = net.getUnconnectedOutLayers();
+     static std::string outLayerType = net.getLayer(outLayers[0])->type;
+ 
+-    std::vector<int> classIds;
+-    std::vector<float> confidences;
+-    std::vector<Rect> boxes;
+     if (net.getLayer(0)->outputNameToIndex("im_info") != -1)  // Faster-RCNN or R-FCN
+     {
+         // Network produces output blob with a shape 1x1xNx7 where N is a number of
+@@ -165,11 +160,8 @@ void postprocess(Mat& frame, const std::vector<Mat>& outs, Net& net)
+                 int top = (int)data[i + 4];
+                 int right = (int)data[i + 5];
+                 int bottom = (int)data[i + 6];
+-                int width = right - left + 1;
+-                int height = bottom - top + 1;
+-                classIds.push_back((int)(data[i + 1]) - 1);  // Skip 0th background class id.
+-                boxes.push_back(Rect(left, top, width, height));
+-                confidences.push_back(confidence);
++                int classId = (int)(data[i + 1]) - 1;  // Skip 0th background class id.
++                drawPred(classId, confidence, left, top, right, bottom, frame);
+             }
+         }
+     }
+@@ -189,16 +181,16 @@ void postprocess(Mat& frame, const std::vector<Mat>& outs, Net& net)
+                 int top = (int)(data[i + 4] * frame.rows);
+                 int right = (int)(data[i + 5] * frame.cols);
+                 int bottom = (int)(data[i + 6] * frame.rows);
+-                int width = right - left + 1;
+-                int height = bottom - top + 1;
+-                classIds.push_back((int)(data[i + 1]) - 1);  // Skip 0th background class id.
+-                boxes.push_back(Rect(left, top, width, height));
+-                confidences.push_back(confidence);
++                int classId = (int)(data[i + 1]) - 1;  // Skip 0th background class id.
++                drawPred(classId, confidence, left, top, right, bottom, frame);
+             }
+         }
+     }
+     else if (outLayerType == "Region")
+     {
++        std::vector<int> classIds;
++        std::vector<float> confidences;
++        std::vector<Rect> boxes;
+         for (size_t i = 0; i < outs.size(); ++i)
+         {
+             // Network produces output blob with a shape NxC where N is a number of
+@@ -226,19 +218,18 @@ void postprocess(Mat& frame, const std::vector<Mat>& outs, Net& net)
+                 }
+             }
+         }
++        std::vector<int> indices;
++        NMSBoxes(boxes, confidences, confThreshold, 0.4f, indices);
++        for (size_t i = 0; i < indices.size(); ++i)
++        {
++            int idx = indices[i];
++            Rect box = boxes[idx];
++            drawPred(classIds[idx], confidences[idx], box.x, box.y,
++                     box.x + box.width, box.y + box.height, frame);
++        }
+     }
+     else
+         CV_Error(Error::StsNotImplemented, "Unknown output layer type: " + outLayerType);
+-
+-    std::vector<int> indices;
+-    NMSBoxes(boxes, confidences, confThreshold, nmsThreshold, indices);
+-    for (size_t i = 0; i < indices.size(); ++i)
+-    {
+-        int idx = indices[i];
+-        Rect box = boxes[idx];
+-        drawPred(classIds[idx], confidences[idx], box.x, box.y,
+-                 box.x + box.width, box.y + box.height, frame);
+-    }
+ }
+ 
+ void drawPred(int classId, float conf, int left, int top, int right, int bottom, Mat& frame)
+diff --git a/samples/dnn/object_detection.py b/samples/dnn/object_detection.py
+index 386e02890d..b191cd4925 100644
+--- a/samples/dnn/object_detection.py
++++ b/samples/dnn/object_detection.py
+@@ -31,7 +31,6 @@ parser.add_argument('--height', type=int,
+ parser.add_argument('--rgb', action='store_true',
+                     help='Indicate that model works with RGB input images instead BGR ones.')
+ parser.add_argument('--thr', type=float, default=0.5, help='Confidence threshold')
+-parser.add_argument('--nms', type=float, default=0.4, help='Non-maximum suppression threshold')
+ parser.add_argument('--backend', choices=backends, default=cv.dnn.DNN_BACKEND_DEFAULT, type=int,
+                     help="Choose one of computation backends: "
+                          "%d: automatically (by default), "
+@@ -58,7 +57,6 @@ net.setPreferableBackend(args.backend)
+ net.setPreferableTarget(args.target)
+ 
+ confThreshold = args.thr
+-nmsThreshold = args.nms
+ 
+ def getOutputsNames(net):
+     layersNames = net.getLayerNames()
+@@ -88,43 +86,36 @@ def postprocess(frame, outs):
+     lastLayerId = net.getLayerId(layerNames[-1])
+     lastLayer = net.getLayer(lastLayerId)
+ 
+-    classIds = []
+-    confidences = []
+-    boxes = []
+     if net.getLayer(0).outputNameToIndex('im_info') != -1:  # Faster-RCNN or R-FCN
+         # Network produces output blob with a shape 1x1xNx7 where N is a number of
+         # detections and an every detection is a vector of values
+         # [batchId, classId, confidence, left, top, right, bottom]
+-        for out in outs:
+-            for detection in out[0, 0]:
+-                confidence = detection[2]
+-                if confidence > confThreshold:
+-                    left = int(detection[3])
+-                    top = int(detection[4])
+-                    right = int(detection[5])
+-                    bottom = int(detection[6])
+-                    width = right - left + 1
+-                    height = bottom - top + 1
+-                    classIds.append(int(detection[1]) - 1)  # Skip background label
+-                    confidences.append(float(confidence))
+-                    boxes.append([left, top, width, height])
++        assert(len(outs) == 1)
++        out = outs[0]
++        for detection in out[0, 0]:
++            confidence = detection[2]
++            if confidence > confThreshold:
++                left = int(detection[3])
++                top = int(detection[4])
++                right = int(detection[5])
++                bottom = int(detection[6])
++                classId = int(detection[1]) - 1  # Skip background label
++                drawPred(classId, confidence, left, top, right, bottom)
+     elif lastLayer.type == 'DetectionOutput':
+         # Network produces output blob with a shape 1x1xNx7 where N is a number of
+         # detections and an every detection is a vector of values
+         # [batchId, classId, confidence, left, top, right, bottom]
+-        for out in outs:
+-            for detection in out[0, 0]:
+-                confidence = detection[2]
+-                if confidence > confThreshold:
+-                    left = int(detection[3] * frameWidth)
+-                    top = int(detection[4] * frameHeight)
+-                    right = int(detection[5] * frameWidth)
+-                    bottom = int(detection[6] * frameHeight)
+-                    width = right - left + 1
+-                    height = bottom - top + 1
+-                    classIds.append(int(detection[1]) - 1)  # Skip background label
+-                    confidences.append(float(confidence))
+-                    boxes.append([left, top, width, height])
++        assert(len(outs) == 1)
++        out = outs[0]
++        for detection in out[0, 0]:
++            confidence = detection[2]
++            if confidence > confThreshold:
++                left = int(detection[3] * frameWidth)
++                top = int(detection[4] * frameHeight)
++                right = int(detection[5] * frameWidth)
++                bottom = int(detection[6] * frameHeight)
++                classId = int(detection[1]) - 1  # Skip background label
++                drawPred(classId, confidence, left, top, right, bottom)
+     elif lastLayer.type == 'Region':
+         # Network produces output blob with a shape NxC where N is a number of
+         # detected objects and C is a number of classes + 4 where the first 4
+@@ -147,19 +138,15 @@ def postprocess(frame, outs):
+                     classIds.append(classId)
+                     confidences.append(float(confidence))
+                     boxes.append([left, top, width, height])
+-    else:
+-        print('Unknown output layer type: ' + lastLayer.type)
+-        exit()
+-
+-    indices = cv.dnn.NMSBoxes(boxes, confidences, confThreshold, nmsThreshold)
+-    for i in indices:
+-        i = i[0]
+-        box = boxes[i]
+-        left = box[0]
+-        top = box[1]
+-        width = box[2]
+-        height = box[3]
+-        drawPred(classIds[i], confidences[i], left, top, left + width, top + height)
++        indices = cv.dnn.NMSBoxes(boxes, confidences, confThreshold, 0.4)
++        for i in indices:
++            i = i[0]
++            box = boxes[i]
++            left = box[0]
++            top = box[1]
++            width = box[2]
++            height = box[3]
++            drawPred(classIds[i], confidences[i], left, top, left + width, top + height)
+ 
+ # Process inputs
+ winName = 'Deep learning object detection in OpenCV'

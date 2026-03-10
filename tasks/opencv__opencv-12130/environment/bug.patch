@@ -1,0 +1,299 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index b5416142c9..9ba180c7d1 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -489,7 +489,7 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+         static Ptr<EltwiseLayer> create(const LayerParams &params);
+     };
+ 
+-    class CV_EXPORTS BatchNormLayer : public ActivationLayer
++    class CV_EXPORTS BatchNormLayer : public Layer
+     {
+     public:
+         bool hasWeights, hasBias;
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 66d86c5501..5920edc85e 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1471,8 +1471,6 @@ struct Net::Impl
+             {
+                 node = layer->initInfEngine(ld.inputBlobsWrappers);
+             }
+-            else if (node.empty())
+-                continue;
+ 
+             CV_Assert(!node.empty());
+             ld.backendNodes[preferableBackend] = node;
+@@ -1717,41 +1715,40 @@ struct Net::Impl
+                 if (preferableBackend != DNN_BACKEND_OPENCV)
+                     continue;  // Go to the next layer.
+ 
+-                while (nextData)
++                // For now, OpenCL target support fusion with activation of ReLU/ChannelsPReLU/Power/Tanh
++                if ( !IS_DNN_OPENCL_TARGET(preferableTarget) ||
++                     (IS_DNN_OPENCL_TARGET(preferableTarget) &&
++                         nextData &&
++                        ((nextData->type == "ReLU") ||
++                         (nextData->type == "ChannelsPReLU") ||
++                         (nextData->type == "ReLU6") ||
++                         (nextData->type == "TanH") ||
++                         (nextData->type == "Power"))) )
+                 {
+-                    // For now, OpenCL target support fusion with activation of ReLU/ChannelsPReLU/Power/Tanh
+-                    if (IS_DNN_OPENCL_TARGET(preferableTarget) &&
+-                        nextData->type != "ReLU" &&
+-                        nextData->type != "ChannelsPReLU" &&
+-                        nextData->type != "ReLU6" &&
+-                        nextData->type != "TanH" &&
+-                        nextData->type != "Power")
+-                        break;
+ 
+-                    Ptr<ActivationLayer> nextActivLayer = nextData->layerInstance.dynamicCast<ActivationLayer>();
+-                    if (nextActivLayer.empty())
+-                        break;
++                    Ptr<ActivationLayer> nextActivLayer;
++
++                    if( nextData )
++                        nextActivLayer = nextData->layerInstance.dynamicCast<ActivationLayer>();
+ 
+-                    if (currLayer->setActivation(nextActivLayer))
++                    if( !nextActivLayer.empty() && pinsToKeep.count(lpNext) == 0
++                            && currLayer->setActivation(nextActivLayer) )
+                     {
++                        LayerData *activData = nextData;
+                         printf_(("\tfused with %s\n", nextActivLayer->name.c_str()));
+-                        nextData->skip = true;
++                        activData->skip = true;
+                         ld.outputBlobs = layers[lpNext.lid].outputBlobs;
+                         ld.outputBlobsWrappers = layers[lpNext.lid].outputBlobsWrappers;
+-                        if (nextData->consumers.size() == 1)
+-                        {
+-                            int nextLayerId = nextData->consumers[0].lid;
+-                            nextData = &layers[nextLayerId];
+-                            lpNext = LayerPin(nextLayerId, 0);
+-                        }
+-                        else
++
++                        if ( IS_DNN_OPENCL_TARGET(preferableTarget) )
+                         {
+-                            nextData = 0;
+-                            break;
++                            if ( !activData->consumers.empty() )
++                            {
++                                nextData = &layers[activData->consumers[0].lid];
++                                lpNext = LayerPin(activData->consumers[0].lid, 0);
++                            }
+                         }
+                     }
+-                    else
+-                        break;
+                 }
+ 
+                 // fuse convolution layer followed by eltwise + relu
+diff --git a/modules/dnn/src/layers/batch_norm_layer.cpp b/modules/dnn/src/layers/batch_norm_layer.cpp
+index 1ced532fdc..3b472328c8 100644
+--- a/modules/dnn/src/layers/batch_norm_layer.cpp
++++ b/modules/dnn/src/layers/batch_norm_layer.cpp
+@@ -268,36 +268,6 @@ public:
+         }
+     }
+ 
+-    void forwardSlice(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const CV_OVERRIDE
+-    {
+-        for( int cn = cn0; cn < cn1; cn++, srcptr += planeSize, dstptr += planeSize )
+-        {
+-            int i = 0;
+-            float w = weights_.at<float>(cn);
+-            float b = bias_.at<float>(cn);
+-#if CV_SIMD128
+-            v_float32x4 wV = v_setall_f32(w), bV = v_setall_f32(b);
+-            for( ; i <= len - 16; i += 16 )
+-            {
+-                v_float32x4 x0 = v_load(srcptr + i);
+-                v_float32x4 x1 = v_load(srcptr + i + 4);
+-                v_float32x4 x2 = v_load(srcptr + i + 8);
+-                v_float32x4 x3 = v_load(srcptr + i + 12);
+-                x0 = v_muladd(x0, w, b);
+-                x1 = v_muladd(x1, w, b);
+-                x2 = v_muladd(x2, w, b);
+-                x3 = v_muladd(x3, w, b);
+-                v_store(dstptr + i, x0);
+-                v_store(dstptr + i + 4, x1);
+-                v_store(dstptr + i + 8, x2);
+-                v_store(dstptr + i + 12, x3);
+-            }
+-#endif
+-            for( ; i < len; i++ )
+-                dstptr[i] = w * srcptr[i] + b;
+-        }
+-    }
+-
+     virtual Ptr<BackendNode> tryAttach(const Ptr<BackendNode>& node) CV_OVERRIDE
+     {
+         switch (node->backendId)
+diff --git a/modules/dnn/src/layers/convolution_layer.cpp b/modules/dnn/src/layers/convolution_layer.cpp
+index 08760ab49a..d08dec548b 100644
+--- a/modules/dnn/src/layers/convolution_layer.cpp
++++ b/modules/dnn/src/layers/convolution_layer.cpp
+@@ -296,9 +296,6 @@ public:
+ 
+     bool setActivation(const Ptr<ActivationLayer>& layer) CV_OVERRIDE
+     {
+-        if (!activ.empty() && !layer.empty())
+-            return false;
+-
+         activ = layer;
+         if (activ.empty())
+             reluslope.clear();
+diff --git a/modules/dnn/src/layers/eltwise_layer.cpp b/modules/dnn/src/layers/eltwise_layer.cpp
+index 3a2c0ddb3f..442bfa7aff 100644
+--- a/modules/dnn/src/layers/eltwise_layer.cpp
++++ b/modules/dnn/src/layers/eltwise_layer.cpp
+@@ -452,13 +452,8 @@ public:
+ 
+     bool setActivation(const Ptr<ActivationLayer>& layer) CV_OVERRIDE
+     {
+-        if (activ.empty() || layer.empty())
+-        {
+-            activ = layer;
+-            return !activ.empty();
+-        }
+-        else
+-            return false;
++        activ = layer;
++        return !activ.empty();
+     }
+ 
+     Ptr<ActivationLayer> activ;
+diff --git a/modules/dnn/src/layers/fully_connected_layer.cpp b/modules/dnn/src/layers/fully_connected_layer.cpp
+index d17ca27383..dfaa58c7ed 100644
+--- a/modules/dnn/src/layers/fully_connected_layer.cpp
++++ b/modules/dnn/src/layers/fully_connected_layer.cpp
+@@ -135,13 +135,8 @@ public:
+ 
+     virtual bool setActivation(const Ptr<ActivationLayer>& layer) CV_OVERRIDE
+     {
+-        if (activ.empty() || layer.empty())
+-        {
+-            activ = layer;
+-            return !activ.empty();
+-        }
+-        else
+-            return false;
++        activ = layer;
++        return !activ.empty();
+     }
+ 
+     class FullyConnected : public ParallelLoopBody
+diff --git a/modules/dnn/src/layers/mvn_layer.cpp b/modules/dnn/src/layers/mvn_layer.cpp
+index 6a2c6f1dd9..9e4f0ac39c 100644
+--- a/modules/dnn/src/layers/mvn_layer.cpp
++++ b/modules/dnn/src/layers/mvn_layer.cpp
+@@ -42,7 +42,6 @@
+ 
+ #include "../precomp.hpp"
+ #include "layers_common.hpp"
+-#include "../op_inf_engine.hpp"
+ #include <opencv2/dnn/shape_utils.hpp>
+ 
+ #ifdef HAVE_OPENCL
+@@ -67,25 +66,27 @@ public:
+         fuse_batch_norm = false;
+         fuse_relu = false;
+         relu_slope = 0.f;
+-        zeroDev = false;
+     }
+ 
+     Mat scale, shift;
+     bool fuse_batch_norm;
+ 
+-    Ptr<ReLULayer> activ_relu;
+-    float relu_slope;
+-    bool fuse_relu;
+-    bool zeroDev;  // TODO: Doesn't considered in Intel's Inference Engine backend.
+-    bool setActivation(const Ptr<ActivationLayer>& layer) CV_OVERRIDE
++    virtual bool tryFuse(Ptr<Layer>& top) CV_OVERRIDE
+     {
+-        if (!layer.empty() && !fuse_relu && !fuse_batch_norm)
++        if (!fuse_batch_norm)
+         {
+-            layer->getScaleShift(scale, shift);
++            top->getScaleShift(scale, shift);
+             fuse_batch_norm = !scale.empty() || !shift.empty();
+             return fuse_batch_norm;
+         }
++        return false;
++    }
+ 
++    Ptr<ReLULayer> activ_relu;
++    float relu_slope;
++    bool fuse_relu;
++    bool setActivation(const Ptr<ActivationLayer>& layer) CV_OVERRIDE
++    {
+         if (!layer.empty() && preferableTarget == DNN_TARGET_OPENCL)
+         {
+             activ_relu = layer.dynamicCast<ReLULayer>();
+@@ -96,23 +97,6 @@ public:
+         return fuse_relu;
+     }
+ 
+-    void finalize(const std::vector<Mat*> &inputs, std::vector<Mat> &outputs) CV_OVERRIDE
+-    {
+-        int splitDim = (acrossChannels) ? 1 : 2;
+-        int i, newRows = 1;
+-        for( i = 0; i < splitDim; i++ )
+-            newRows *= inputs[0]->size[i];
+-        zeroDev = inputs[0]->total() == newRows;
+-    }
+-
+-    virtual bool supportBackend(int backendId) CV_OVERRIDE
+-    {
+-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-            return !zeroDev && (preferableTarget == DNN_TARGET_CPU || eps <= 1e-7f);
+-        else
+-            return backendId == DNN_BACKEND_OPENCV;
+-    }
+-
+ #ifdef HAVE_OPENCL
+     bool fast_forward_ocl(std::vector<UMat> &inputs, std::vector<UMat> &outputs)
+     {
+@@ -340,22 +324,6 @@ public:
+         }
+     }
+ 
+-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
+-    {
+-#ifdef HAVE_INF_ENGINE
+-        InferenceEngine::LayerParams lp;
+-        lp.name = name;
+-        lp.type = "MVN";
+-        lp.precision = InferenceEngine::Precision::FP32;
+-        std::shared_ptr<InferenceEngine::MVNLayer> ieLayer(new InferenceEngine::MVNLayer(lp));
+-        ieLayer->params["across_channels"] = acrossChannels ? "1" : "0";
+-        ieLayer->params["normalize_variance"] = normVariance ? "1" : "0";
+-        ieLayer->params["eps"] = format("%f", eps);
+-        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+-#endif  // HAVE_INF_ENGINE
+-        return Ptr<BackendNode>();
+-    }
+-
+     virtual int64 getFLOPS(const std::vector<MatShape> &inputs,
+                            const std::vector<MatShape> &outputs) const CV_OVERRIDE
+     {
+diff --git a/modules/dnn/test/test_tf_importer.cpp b/modules/dnn/test/test_tf_importer.cpp
+index a6711a1f01..0bcbe562a3 100644
+--- a/modules/dnn/test/test_tf_importer.cpp
++++ b/modules/dnn/test/test_tf_importer.cpp
+@@ -165,6 +165,12 @@ TEST_P(Test_TensorFlow_layers, batch_norm)
+     runTensorFlowNet("unfused_batch_norm");
+     runTensorFlowNet("fused_batch_norm_no_gamma");
+     runTensorFlowNet("unfused_batch_norm_no_gamma");
++}
++
++TEST_P(Test_TensorFlow_layers, mvn_batch_norm)
++{
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE)
++        throw SkipTestException("");
+     runTensorFlowNet("mvn_batch_norm");
+     runTensorFlowNet("mvn_batch_norm_1x1");
+ }

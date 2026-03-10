@@ -1,0 +1,596 @@
+diff --git a/modules/cudaimgproc/src/cuda/clahe.cu b/modules/cudaimgproc/src/cuda/clahe.cu
+index b66a7d8a66..455aa20d98 100644
+--- a/modules/cudaimgproc/src/cuda/clahe.cu
++++ b/modules/cudaimgproc/src/cuda/clahe.cu
+@@ -42,9 +42,15 @@
+ 
+ #if !defined CUDA_DISABLER
+ 
+-#include "opencv2/cudev.hpp"
++#include "opencv2/core/cuda/common.hpp"
++#include "opencv2/core/cuda/functional.hpp"
++#include "opencv2/core/cuda/emulation.hpp"
++#include "opencv2/core/cuda/scan.hpp"
++#include "opencv2/core/cuda/reduce.hpp"
++#include "opencv2/core/cuda/saturate_cast.hpp"
+ 
+-using namespace cv::cudev;
++using namespace cv::cuda;
++using namespace cv::cuda::device;
+ 
+ namespace clahe
+ {
+@@ -67,7 +73,7 @@ namespace clahe
+             for (int j = threadIdx.x; j < tileSize.x; j += blockDim.x)
+             {
+                 const int data = srcPtr[j];
+-                ::atomicAdd(&smem[data], 1);
++                Emulation::smem::atomicAdd(&smem[data], 1);
+             }
+         }
+ 
+@@ -90,7 +96,7 @@ namespace clahe
+ 
+             // find number of overall clipped samples
+ 
+-            blockReduce<256>(smem, clipped, tid, plus<int>());
++            reduce<256>(smem, clipped, tid, plus<int>());
+ 
+             // broadcast evaluated value
+ 
+@@ -122,10 +128,10 @@ namespace clahe
+ 
+         calcLutKernel<<<grid, block, 0, stream>>>(src, lut, tileSize, tilesX, clipLimit, lutScale);
+ 
+-        CV_CUDEV_SAFE_CALL( cudaGetLastError() );
++        cudaSafeCall( cudaGetLastError() );
+ 
+         if (stream == 0)
+-            CV_CUDEV_SAFE_CALL( cudaDeviceSynchronize() );
++            cudaSafeCall( cudaDeviceSynchronize() );
+     }
+ 
+     __global__ void transformKernel(const PtrStepSzb src, PtrStepb dst, const PtrStepb lut, const int2 tileSize, const int tilesX, const int tilesY)
+@@ -167,13 +173,13 @@ namespace clahe
+         const dim3 block(32, 8);
+         const dim3 grid(divUp(src.cols, block.x), divUp(src.rows, block.y));
+ 
+-        CV_CUDEV_SAFE_CALL( cudaFuncSetCacheConfig(transformKernel, cudaFuncCachePreferL1) );
++        cudaSafeCall( cudaFuncSetCacheConfig(transformKernel, cudaFuncCachePreferL1) );
+ 
+         transformKernel<<<grid, block, 0, stream>>>(src, dst, lut, tileSize, tilesX, tilesY);
+-        CV_CUDEV_SAFE_CALL( cudaGetLastError() );
++        cudaSafeCall( cudaGetLastError() );
+ 
+         if (stream == 0)
+-            CV_CUDEV_SAFE_CALL( cudaDeviceSynchronize() );
++            cudaSafeCall( cudaDeviceSynchronize() );
+     }
+ }
+ 
+diff --git a/modules/cudev/include/opencv2/cudev/block/scan.hpp b/modules/cudev/include/opencv2/cudev/block/scan.hpp
+index 705f875a6e..cd75a3e197 100644
+--- a/modules/cudev/include/opencv2/cudev/block/scan.hpp
++++ b/modules/cudev/include/opencv2/cudev/block/scan.hpp
+@@ -48,134 +48,12 @@
+ 
+ #include "../common.hpp"
+ #include "../warp/scan.hpp"
+-#include "../warp/warp.hpp"
+ 
+ namespace cv { namespace cudev {
+ 
+ //! @addtogroup cudev
+ //! @{
+ 
+-#if __CUDACC_VER_MAJOR__ >= 9
+-
+-// Usage Note
+-// - THREADS_NUM should be equal to the number of threads in this block.
+-// - smem must be able to contain at least n elements of type T, where n is equal to the number
+-//   of warps in this block. The number can be calculated by divUp(THREADS_NUM, WARP_SIZE).
+-//
+-// Dev Note
+-// - Starting from CUDA 9.0, support for Fermi is dropped. So CV_CUDEV_ARCH >= 300 is implied.
+-// - "For Pascal and earlier architectures (CV_CUDEV_ARCH < 700), all threads in mask must execute
+-//    the same warp intrinsic instruction in convergence, and the union of all values in mask must
+-//    be equal to the warp's active mask."
+-//   (https://docs.nvidia.com/cuda/archive/10.0/cuda-c-programming-guide#independent-thread-scheduling-7-x)
+-// - Above restriction does not apply starting from Volta (CV_CUDEV_ARCH >= 700). We just need to
+-//   take care so that "all non-exited threads named in mask must execute the same intrinsic with
+-//   the same mask."
+-//   (https://docs.nvidia.com/cuda/archive/10.0/cuda-c-programming-guide#warp-description)
+-
+-template <int THREADS_NUM, typename T>
+-__device__ T blockScanInclusive(T data, volatile T* smem, uint tid)
+-{
+-    const int residual = THREADS_NUM & (WARP_SIZE - 1);
+-
+-#if CV_CUDEV_ARCH < 700
+-    const uint residual_mask = (1U << residual) - 1;
+-#endif
+-
+-    if (THREADS_NUM > WARP_SIZE)
+-    {
+-        // bottom-level inclusive warp scan
+-    #if CV_CUDEV_ARCH >= 700
+-        T warpResult = warpScanInclusive(0xFFFFFFFFU, data);
+-    #else
+-        T warpResult;
+-
+-        if (0 == residual)
+-            warpResult = warpScanInclusive(0xFFFFFFFFU, data);
+-        else
+-        {
+-            const int n_warps = divUp(THREADS_NUM, WARP_SIZE);
+-            const int warp_num = Warp::warpId();
+-
+-            if (warp_num < n_warps - 1)
+-                warpResult = warpScanInclusive(0xFFFFFFFFU, data);
+-            else
+-            {
+-                // We are at the last threads of a block whose number of threads
+-                // is not a multiple of the warp size
+-                warpResult = warpScanInclusive(residual_mask, data);
+-            }
+-        }
+-    #endif
+-
+-        __syncthreads();
+-
+-        // save top elements of each warp for exclusive warp scan
+-        // sync to wait for warp scans to complete (because smem is being overwritten)
+-        if ((tid & (WARP_SIZE - 1)) == (WARP_SIZE - 1))
+-        {
+-            smem[tid >> LOG_WARP_SIZE] = warpResult;
+-        }
+-
+-        __syncthreads();
+-
+-        int quot = THREADS_NUM / WARP_SIZE;
+-
+-        if (tid < quot)
+-        {
+-            // grab top warp elements
+-            T val = smem[tid];
+-
+-            uint mask = (1LLU << quot) - 1;
+-
+-            if (0 == residual)
+-            {
+-                // calculate exclusive scan and write back to shared memory
+-                smem[tid] = warpScanExclusive(mask, val);
+-            }
+-            else
+-            {
+-                // calculate inclusive scan and write back to shared memory with offset 1
+-                smem[tid + 1] = warpScanInclusive(mask, val);
+-
+-                if (tid == 0)
+-                    smem[0] = 0;
+-            }
+-        }
+-
+-        __syncthreads();
+-
+-        // return updated warp scans
+-        return warpResult + smem[tid >> LOG_WARP_SIZE];
+-    }
+-    else
+-    {
+-    #if CV_CUDEV_ARCH >= 700
+-        return warpScanInclusive(0xFFFFFFFFU, data);
+-    #else
+-        if (THREADS_NUM == WARP_SIZE)
+-            return warpScanInclusive(0xFFFFFFFFU, data);
+-        else
+-            return warpScanInclusive(residual_mask, data);
+-    #endif
+-    }
+-}
+-
+-template <int THREADS_NUM, typename T>
+-__device__ __forceinline__ T blockScanExclusive(T data, volatile T* smem, uint tid)
+-{
+-    return blockScanInclusive<THREADS_NUM>(data, smem, tid) - data;
+-}
+-
+-#else // __CUDACC_VER_MAJOR__ >= 9
+-
+-// Usage Note
+-// - THREADS_NUM should be equal to the number of threads in this block.
+-// - (>= Kepler) smem must be able to contain at least n elements of type T, where n is equal to the number
+-//   of warps in this block. The number can be calculated by divUp(THREADS_NUM, WARP_SIZE).
+-// - (Fermi) smem must be able to contain at least n elements of type T, where n is equal to the number
+-//   of threads in this block (= THREADS_NUM).
+-
+ template <int THREADS_NUM, typename T>
+ __device__ T blockScanInclusive(T data, volatile T* smem, uint tid)
+ {
+@@ -195,31 +73,18 @@ __device__ T blockScanInclusive(T data, volatile T* smem, uint tid)
+ 
+         __syncthreads();
+ 
+-        int quot = THREADS_NUM / WARP_SIZE;
+-
+-        if (tid < quot)
++        if (tid < (THREADS_NUM / WARP_SIZE))
+         {
+             // grab top warp elements
+             T val = smem[tid];
+ 
+-            if (0 == (THREADS_NUM & (WARP_SIZE - 1)))
+-            {
+-                // calculate exclusive scan and write back to shared memory
+-                smem[tid] = warpScanExclusive(val, smem, tid);
+-            }
+-            else
+-            {
+-                // calculate inclusive scan and write back to shared memory with offset 1
+-                smem[tid + 1] = warpScanInclusive(val, smem, tid);
+-
+-                if (tid == 0)
+-                    smem[0] = 0;
+-            }
++            // calculate exclusive scan and write back to shared memory
++            smem[tid] = warpScanExclusive(val, smem, tid);
+         }
+ 
+         __syncthreads();
+ 
+-        // return updated warp scans
++        // return updated warp scans with exclusive scan results
+         return warpResult + smem[tid >> LOG_WARP_SIZE];
+     }
+     else
+@@ -234,8 +99,6 @@ __device__ __forceinline__ T blockScanExclusive(T data, volatile T* smem, uint t
+     return blockScanInclusive<THREADS_NUM>(data, smem, tid) - data;
+ }
+ 
+-#endif // __CUDACC_VER_MAJOR__ >= 9
+-
+ //! @}
+ 
+ }}
+diff --git a/modules/cudev/include/opencv2/cudev/grid/detail/integral.hpp b/modules/cudev/include/opencv2/cudev/grid/detail/integral.hpp
+index d1014b3ceb..7672aca71d 100644
+--- a/modules/cudev/include/opencv2/cudev/grid/detail/integral.hpp
++++ b/modules/cudev/include/opencv2/cudev/grid/detail/integral.hpp
+@@ -215,7 +215,7 @@ namespace integral_detail
+         #pragma unroll
+         for (int i = 1; i < 32; i *= 2)
+         {
+-            const int n = compatible_shfl_up(sum, i, 32);
++            const int n = shfl_up(sum, i, 32);
+ 
+             if (lane_id >= i)
+             {
+@@ -245,9 +245,9 @@ namespace integral_detail
+             int warp_sum = sums[lane_id];
+ 
+             #pragma unroll
+-            for (int i = 1; i < 32; i *= 2)
++            for (int i = 1; i <= 32; i *= 2)
+             {
+-                const int n = compatible_shfl_up(warp_sum, i, 32);
++                const int n = shfl_up(warp_sum, i, 32);
+ 
+                 if (lane_id >= i)
+                     warp_sum += n;
+@@ -453,7 +453,7 @@ namespace integral_detail
+ 
+             for (int i = 1; i <= 8; i *= 2)
+             {
+-                T n = compatible_shfl_up(partial_sum, i, 32);
++                T n = shfl_up(partial_sum, i, 32);
+ 
+                 if (lane_id >= i)
+                     partial_sum += n;
+diff --git a/modules/cudev/include/opencv2/cudev/warp/scan.hpp b/modules/cudev/include/opencv2/cudev/warp/scan.hpp
+index bab462973f..a5007f881a 100644
+--- a/modules/cudev/include/opencv2/cudev/warp/scan.hpp
++++ b/modules/cudev/include/opencv2/cudev/warp/scan.hpp
+@@ -55,36 +55,6 @@ namespace cv { namespace cudev {
+ //! @addtogroup cudev
+ //! @{
+ 
+-#if __CUDACC_VER_MAJOR__ >= 9
+-
+-// Starting from CUDA 9.0, support for Fermi is dropped.
+-// So CV_CUDEV_ARCH >= 300 is implied.
+-
+-template <typename T>
+-__device__ T warpScanInclusive(uint mask, T data)
+-{
+-    const uint laneId = Warp::laneId();
+-
+-    // scan on shufl functions
+-    #pragma unroll
+-    for (int i = 1; i <= (WARP_SIZE / 2); i *= 2)
+-    {
+-        const T val = shfl_up_sync(mask, data, i);
+-        if (laneId >= i)
+-              data += val;
+-    }
+-
+-    return data;
+-}
+-
+-template <typename T>
+-__device__ __forceinline__ T warpScanExclusive(uint mask, T data)
+-{
+-    return warpScanInclusive(mask, data) - data;
+-}
+-
+-#else // __CUDACC_VER_MAJOR__ >= 9
+-
+ template <typename T>
+ __device__ T warpScanInclusive(T data, volatile T* smem, uint tid)
+ {
+@@ -105,16 +75,19 @@ __device__ T warpScanInclusive(T data, volatile T* smem, uint tid)
+ 
+     return data;
+ #else
+-    const uint laneId = Warp::laneId();
++    uint pos = 2 * tid - (tid & (WARP_SIZE - 1));
++    smem[pos] = 0;
+ 
+-    smem[tid] = data;
++    pos += WARP_SIZE;
++    smem[pos] = data;
+ 
+-    #pragma unroll
+-    for (int i = 1; i <= (WARP_SIZE / 2); i *= 2)
+-        if (laneId >= i)
+-            smem[tid] += smem[tid - i];
++    smem[pos] += smem[pos - 1];
++    smem[pos] += smem[pos - 2];
++    smem[pos] += smem[pos - 4];
++    smem[pos] += smem[pos - 8];
++    smem[pos] += smem[pos - 16];
+ 
+-    return smem[tid];
++    return smem[pos];
+ #endif
+ }
+ 
+@@ -124,8 +97,6 @@ __device__ __forceinline__ T warpScanExclusive(T data, volatile T* smem, uint ti
+     return warpScanInclusive(data, smem, tid) - data;
+ }
+ 
+-#endif // __CUDACC_VER_MAJOR__ >= 9
+-
+ //! @}
+ 
+ }}
+diff --git a/modules/cudev/include/opencv2/cudev/warp/shuffle.hpp b/modules/cudev/include/opencv2/cudev/warp/shuffle.hpp
+index dd142c6719..e776dd65df 100644
+--- a/modules/cudev/include/opencv2/cudev/warp/shuffle.hpp
++++ b/modules/cudev/include/opencv2/cudev/warp/shuffle.hpp
+@@ -48,8 +48,6 @@
+ 
+ #include "../common.hpp"
+ #include "../util/vec_traits.hpp"
+-#include "../block/block.hpp"
+-#include "warp.hpp"
+ 
+ namespace cv { namespace cudev {
+ 
+@@ -61,7 +59,7 @@ namespace cv { namespace cudev {
+ #if __CUDACC_VER_MAJOR__ >= 9
+ #  define __shfl(x, y, z) __shfl_sync(0xFFFFFFFFU, x, y, z)
+ #  define __shfl_xor(x, y, z) __shfl_xor_sync(0xFFFFFFFFU, x, y, z)
+-//#  define __shfl_up(x, y, z) __shfl_up_sync(0xFFFFFFFFU, x, y, z)
++#  define __shfl_up(x, y, z) __shfl_up_sync(0xFFFFFFFFU, x, y, z)
+ #  define __shfl_down(x, y, z) __shfl_down_sync(0xFFFFFFFFU, x, y, z)
+ #endif
+ 
+@@ -157,53 +155,6 @@ CV_CUDEV_SHFL_VEC_INST(double)
+ 
+ // shfl_up
+ 
+-template <typename T>
+-__device__ __forceinline__ T compatible_shfl_up(T val, uint delta, int width = warpSize)
+-{
+-#if __CUDACC_VER_MAJOR__ < 9
+-
+-    return shfl_up(val, delta, width);
+-
+-#else // __CUDACC_VER_MAJOR__ < 9
+-
+-#if CV_CUDEV_ARCH >= 700
+-    return shfl_up_sync(0xFFFFFFFFU, val, delta, width);
+-#else
+-    const int block_size = Block::blockSize();
+-    const int residual = block_size & (warpSize - 1);
+-
+-    if (0 == residual)
+-        return shfl_up_sync(0xFFFFFFFFU, val, delta, width);
+-    else
+-    {
+-        const int n_warps = divUp(block_size, warpSize);
+-        const int warp_id = Warp::warpId();
+-
+-        if (warp_id < n_warps - 1)
+-            return shfl_up_sync(0xFFFFFFFFU, val, delta, width);
+-        else
+-        {
+-            // We are at the last threads of a block whose number of threads
+-            // is not a multiple of the warp size
+-            uint mask = (1LU << residual) - 1;
+-            return shfl_up_sync(mask, val, delta, width);
+-        }
+-    }
+-#endif
+-
+-#endif // __CUDACC_VER_MAJOR__ < 9
+-}
+-
+-#if __CUDACC_VER_MAJOR__ >= 9
+-
+-template <typename T>
+-__device__ __forceinline__ T shfl_up_sync(uint mask, T val, uint delta, int width = warpSize)
+-{
+-    return (T) __shfl_up_sync(mask, val, delta, width);
+-}
+-
+-#else
+-
+ __device__ __forceinline__ uchar shfl_up(uchar val, uint delta, int width = warpSize)
+ {
+     return (uchar) __shfl_up((int) val, delta, width);
+@@ -293,8 +244,6 @@ CV_CUDEV_SHFL_UP_VEC_INST(double)
+ 
+ #undef CV_CUDEV_SHFL_UP_VEC_INST
+ 
+-#endif
+-
+ // shfl_down
+ 
+ __device__ __forceinline__ uchar shfl_down(uchar val, uint delta, int width = warpSize)
+diff --git a/modules/cudev/test/test_scan.cu b/modules/cudev/test/test_scan.cu
+deleted file mode 100644
+index e5404d8890..0000000000
+--- a/modules/cudev/test/test_scan.cu
++++ /dev/null
+@@ -1,140 +0,0 @@
+-
+-#include "test_precomp.hpp"
+-
+-using namespace cv;
+-using namespace cv::cudev;
+-using namespace cvtest;
+-
+-// BlockScanInt
+-
+-template <int THREADS_NUM>
+-__global__ void int_kernel(int* data)
+-{
+-    uint tid = Block::threadLineId();
+-
+-#if CV_CUDEV_ARCH >= 300
+-    const int n_warps = (THREADS_NUM - 1) / WARP_SIZE + 1;
+-    __shared__ int smem[n_warps];
+-#else
+-    __shared__ int smem[THREADS_NUM];
+-#endif
+-
+-    data[tid] = blockScanInclusive<THREADS_NUM>(data[tid], smem, tid);
+-}
+-
+-#define BLOCK_SCAN_INT_TEST(block_size)                                 \
+-    TEST(BlockScanInt, BlockSize##block_size)                           \
+-    {                                                                   \
+-        Mat src = randomMat(Size(block_size, 1), CV_32SC1, 0, 1024);    \
+-                                                                        \
+-        GpuMat d_src;                                                   \
+-        d_src.upload(src);                                              \
+-                                                                        \
+-        for (int col = 1; col < block_size; col++)                      \
+-            src.at<int>(0, col) += src.at<int>(0, col - 1);             \
+-                                                                        \
+-        int_kernel<block_size><<<1, block_size>>>((int*)d_src.data);    \
+-                                                                        \
+-        CV_CUDEV_SAFE_CALL(cudaDeviceSynchronize());                    \
+-                                                                        \
+-        EXPECT_MAT_NEAR(d_src, src, 0);                                 \
+-    }
+-
+-BLOCK_SCAN_INT_TEST(29)
+-BLOCK_SCAN_INT_TEST(30)
+-BLOCK_SCAN_INT_TEST(32)
+-BLOCK_SCAN_INT_TEST(40)
+-BLOCK_SCAN_INT_TEST(41)
+-
+-BLOCK_SCAN_INT_TEST(59)
+-BLOCK_SCAN_INT_TEST(60)
+-BLOCK_SCAN_INT_TEST(64)
+-BLOCK_SCAN_INT_TEST(70)
+-BLOCK_SCAN_INT_TEST(71)
+-
+-BLOCK_SCAN_INT_TEST(109)
+-BLOCK_SCAN_INT_TEST(110)
+-BLOCK_SCAN_INT_TEST(128)
+-BLOCK_SCAN_INT_TEST(130)
+-BLOCK_SCAN_INT_TEST(131)
+-
+-BLOCK_SCAN_INT_TEST(189)
+-BLOCK_SCAN_INT_TEST(200)
+-BLOCK_SCAN_INT_TEST(256)
+-BLOCK_SCAN_INT_TEST(300)
+-BLOCK_SCAN_INT_TEST(311)
+-
+-BLOCK_SCAN_INT_TEST(489)
+-BLOCK_SCAN_INT_TEST(500)
+-BLOCK_SCAN_INT_TEST(512)
+-BLOCK_SCAN_INT_TEST(600)
+-BLOCK_SCAN_INT_TEST(611)
+-
+-BLOCK_SCAN_INT_TEST(1024)
+-
+-// BlockScanDouble
+-
+-template <int THREADS_NUM>
+-__global__ void double_kernel(double* data)
+-{
+-    uint tid = Block::threadLineId();
+-
+-#if CV_CUDEV_ARCH >= 300
+-    const int n_warps = (THREADS_NUM - 1) / WARP_SIZE + 1;
+-    __shared__ double smem[n_warps];
+-#else
+-    __shared__ double smem[THREADS_NUM];
+-#endif
+-
+-    data[tid] = blockScanInclusive<THREADS_NUM>(data[tid], smem, tid);
+-}
+-
+-#define BLOCK_SCAN_DOUBLE_TEST(block_size)                                  \
+-    TEST(BlockScanDouble, BlockSize##block_size)                            \
+-    {                                                                       \
+-        Mat src = randomMat(Size(block_size, 1), CV_64FC1, 0.0, 1.0);       \
+-                                                                            \
+-        GpuMat d_src;                                                       \
+-        d_src.upload(src);                                                  \
+-                                                                            \
+-        for (int col = 1; col < block_size; col++)                          \
+-            src.at<double>(0, col) += src.at<double>(0, col - 1);           \
+-                                                                            \
+-        double_kernel<block_size><<<1, block_size>>>((double*)d_src.data);  \
+-                                                                            \
+-        CV_CUDEV_SAFE_CALL(cudaDeviceSynchronize());                        \
+-                                                                            \
+-        EXPECT_MAT_NEAR(d_src, src, 1e-10);                                 \
+-    }
+-
+-BLOCK_SCAN_DOUBLE_TEST(29)
+-BLOCK_SCAN_DOUBLE_TEST(30)
+-BLOCK_SCAN_DOUBLE_TEST(32)
+-BLOCK_SCAN_DOUBLE_TEST(40)
+-BLOCK_SCAN_DOUBLE_TEST(41)
+-
+-BLOCK_SCAN_DOUBLE_TEST(59)
+-BLOCK_SCAN_DOUBLE_TEST(60)
+-BLOCK_SCAN_DOUBLE_TEST(64)
+-BLOCK_SCAN_DOUBLE_TEST(70)
+-BLOCK_SCAN_DOUBLE_TEST(71)
+-
+-BLOCK_SCAN_DOUBLE_TEST(109)
+-BLOCK_SCAN_DOUBLE_TEST(110)
+-BLOCK_SCAN_DOUBLE_TEST(128)
+-BLOCK_SCAN_DOUBLE_TEST(130)
+-BLOCK_SCAN_DOUBLE_TEST(131)
+-
+-BLOCK_SCAN_DOUBLE_TEST(189)
+-BLOCK_SCAN_DOUBLE_TEST(200)
+-BLOCK_SCAN_DOUBLE_TEST(256)
+-BLOCK_SCAN_DOUBLE_TEST(300)
+-BLOCK_SCAN_DOUBLE_TEST(311)
+-
+-BLOCK_SCAN_DOUBLE_TEST(489)
+-BLOCK_SCAN_DOUBLE_TEST(500)
+-BLOCK_SCAN_DOUBLE_TEST(512)
+-BLOCK_SCAN_DOUBLE_TEST(600)
+-BLOCK_SCAN_DOUBLE_TEST(611)
+-
+-BLOCK_SCAN_DOUBLE_TEST(1024)

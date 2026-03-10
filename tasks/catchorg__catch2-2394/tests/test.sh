@@ -43,12 +43,11 @@ cp "/tests/SelfTest/Baselines/xml.sw.multi.approved.txt" "tests/SelfTest/Baselin
 mkdir -p "tests/SelfTest/IntrospectiveTests"
 cp "/tests/SelfTest/IntrospectiveTests/TestCaseInfoHasher.tests.cpp" "tests/SelfTest/IntrospectiveTests/TestCaseInfoHasher.tests.cpp"
 
-# Reconfigure CMake to pick up the updated test files
+# Reconfigure CMake with testing enabled
 if ! cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
     -DCATCH_BUILD_TESTING=ON \
-    -DCATCH_BUILD_EXTRA_TESTS=ON \
     -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
     -G Ninja 2>&1; then
     echo "FAIL: CMake reconfiguration failed"
@@ -56,23 +55,21 @@ if ! cmake -Bbuild -H. \
     exit 1
 fi
 
-# Rebuild to pick up changes (including the TestCaseInfoHasher test)
+# Rebuild to incorporate the updated test files
 if ! cmake --build build 2>&1; then
     echo "FAIL: Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Run the specific test that validates TestCaseInfoHasher functionality
-# This test is in tests/SelfTest/IntrospectiveTests/TestCaseInfoHasher.tests.cpp
-if ! ./build/tests/SelfTest "TestCaseInfoHasher*" 2>&1 | tee /tmp/test_output.txt; then
-    echo "FAIL: TestCaseInfoHasher test failed"
-    cat /tmp/test_output.txt
+# Run the TestCaseInfoHasher tests
+if ! ctest --test-dir build -R "TestCaseInfoHasher" --output-on-failure 2>&1; then
+    echo "FAIL: TestCaseInfoHasher tests failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-echo "SUCCESS: TestCaseInfoHasher test passed"
+echo "SUCCESS: All tests passed"
 test_status=0
 
 if [ $test_status -eq 0 ]; then

@@ -1,0 +1,210 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index 7018201b73..55b85a0b56 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -361,23 +361,6 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+         static Ptr<PermuteLayer> create(const LayerParams& params);
+     };
+ 
+-    /**
+-     * Permute channels of 4-dimensional input blob.
+-     * @param group Number of groups to split input channels and pick in turns
+-     *              into output blob.
+-     *
+-     * \f[ groupSize = \frac{number\ of\ channels}{group} \f]
+-     * \f[ output(n, c, h, w) = input(n, groupSize \times (c \% group) + \lfloor \frac{c}{group} \rfloor, h, w) \f]
+-     * Read more at https://arxiv.org/pdf/1707.01083.pdf
+-     */
+-    class CV_EXPORTS ShuffleChannelLayer : public Layer
+-    {
+-    public:
+-        static Ptr<Layer> create(const LayerParams& params);
+-
+-        int group;
+-    };
+-
+     /**
+      * @brief Adds extra values for specific axes.
+      * @param paddings Vector of paddings in format
+diff --git a/modules/dnn/src/init.cpp b/modules/dnn/src/init.cpp
+index a4ea60eaf2..e5c3a279e5 100644
+--- a/modules/dnn/src/init.cpp
++++ b/modules/dnn/src/init.cpp
+@@ -115,7 +115,6 @@ void initializeLayerFactory()
+     CV_DNN_REGISTER_LAYER_CLASS(Crop,           CropLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Eltwise,        EltwiseLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Permute,        PermuteLayer);
+-    CV_DNN_REGISTER_LAYER_CLASS(ShuffleChannel, ShuffleChannelLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(PriorBox,       PriorBoxLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(PriorBoxClustered, PriorBoxLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Reorg,          ReorgLayer);
+diff --git a/modules/dnn/src/layers/crop_and_resize_layer.cpp b/modules/dnn/src/layers/crop_and_resize_layer.cpp
+index ad2280f30c..a9bca1f04b 100644
+--- a/modules/dnn/src/layers/crop_and_resize_layer.cpp
++++ b/modules/dnn/src/layers/crop_and_resize_layer.cpp
+@@ -1,9 +1,3 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-
+-// Copyright (C) 2018, Intel Corporation, all rights reserved.
+-// Third party copyrights are property of their respective owners.
+ #include "../precomp.hpp"
+ #include "layers_common.hpp"
+ 
+diff --git a/modules/dnn/src/layers/shuffle_channel_layer.cpp b/modules/dnn/src/layers/shuffle_channel_layer.cpp
+deleted file mode 100644
+index 6c69d773a4..0000000000
+--- a/modules/dnn/src/layers/shuffle_channel_layer.cpp
++++ /dev/null
+@@ -1,104 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-
+-// Copyright (C) 2018, Intel Corporation, all rights reserved.
+-// Third party copyrights are property of their respective owners.
+-#include "../precomp.hpp"
+-
+-namespace cv { namespace dnn {
+-
+-class ShuffleChannelLayerImpl CV_FINAL : public ShuffleChannelLayer
+-{
+-public:
+-    ShuffleChannelLayerImpl(const LayerParams& params)
+-    {
+-        group = params.get<int>("group", 1);
+-    }
+-
+-    bool getMemoryShapes(const std::vector<MatShape> &inputs,
+-                         const int requiredOutputs,
+-                         std::vector<MatShape> &outputs,
+-                         std::vector<MatShape> &internals) const CV_OVERRIDE
+-    {
+-        CV_Assert(inputs.size() == 1 && inputs[0].size() == 4);
+-        CV_Assert(inputs[0][1] % group == 0);
+-        Layer::getMemoryShapes(inputs, requiredOutputs, outputs, internals);
+-        return group == 1;
+-    }
+-
+-    virtual void finalize(const std::vector<Mat*>& inputs, std::vector<Mat> &outputs) CV_OVERRIDE
+-    {
+-        if (group != 1)
+-        {
+-            LayerParams lp;
+-            float order[] = {0, 2, 1, 3};
+-            lp.set("order", DictValue::arrayInt(&order[0], 4));
+-            permute = PermuteLayer::create(lp);
+-
+-            Mat inp = *inputs[0];
+-            Mat out = outputs[0];
+-
+-            permuteInpShape.resize(4);
+-            permuteInpShape[0] = inp.size[0];
+-            permuteInpShape[1] = group;
+-            permuteInpShape[2] = inp.size[1] / group;
+-            permuteInpShape[3] = inp.size[2]*inp.size[3];
+-
+-            permuteOutShape.resize(4);
+-            permuteOutShape[0] = permuteInpShape[0];
+-            permuteOutShape[1] = permuteInpShape[2];
+-            permuteOutShape[2] = permuteInpShape[1];
+-            permuteOutShape[3] = permuteInpShape[3];
+-
+-            inp = inp.reshape(1, permuteInpShape);
+-            out = out.reshape(1, permuteOutShape);
+-
+-            std::vector<Mat*> permuteInputs(1, &inp);
+-            std::vector<Mat> permuteOutputs(1, out);
+-            permute->finalize(permuteInputs, permuteOutputs);
+-        }
+-    }
+-
+-    void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
+-    {
+-        CV_TRACE_FUNCTION();
+-        CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+-
+-        Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
+-    }
+-
+-    void forward(std::vector<Mat*> &inputs, std::vector<Mat> &outputs, std::vector<Mat> &internals) CV_OVERRIDE
+-    {
+-        CV_TRACE_FUNCTION();
+-        CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+-
+-        Mat inp = *inputs[0];
+-        Mat out = outputs[0];
+-        if (inp.data != out.data)
+-        {
+-            if (!permute.empty())
+-            {
+-                inp = inp.reshape(1, permuteInpShape);
+-                out = out.reshape(1, permuteOutShape);
+-                std::vector<Mat*> permuteInputs(1, &inp);
+-                std::vector<Mat> permuteOutputs(1, out);
+-                permute->forward(permuteInputs, permuteOutputs, internals);
+-            }
+-            else
+-                inp.copyTo(out);
+-        }
+-    }
+-
+-private:
+-    Ptr<PermuteLayer> permute;
+-    std::vector<int> permuteInpShape, permuteOutShape;
+-};
+-
+-Ptr<Layer> ShuffleChannelLayer::create(const LayerParams& params)
+-{
+-    return Ptr<Layer>(new ShuffleChannelLayerImpl(params));
+-}
+-
+-}  // namespace dnn
+-}  // namespace cv
+diff --git a/modules/dnn/test/test_layers.cpp b/modules/dnn/test/test_layers.cpp
+index 7f4a6f3186..77d69ce117 100644
+--- a/modules/dnn/test/test_layers.cpp
++++ b/modules/dnn/test/test_layers.cpp
+@@ -1186,41 +1186,4 @@ TEST(Layer_Test_PoolingIndices, Accuracy)
+     normAssert(indices, outputs[1].reshape(1, 5));
+ }
+ 
+-typedef testing::TestWithParam<tuple<Vec4i, int> > Layer_Test_ShuffleChannel;
+-TEST_P(Layer_Test_ShuffleChannel, Accuracy)
+-{
+-    Vec4i inpShapeVec = get<0>(GetParam());
+-    int group = get<1>(GetParam());
+-    ASSERT_EQ(inpShapeVec[1] % group, 0);
+-    const int groupSize = inpShapeVec[1] / group;
+-
+-    Net net;
+-    LayerParams lp;
+-    lp.set("group", group);
+-    lp.type = "ShuffleChannel";
+-    lp.name = "testLayer";
+-    net.addLayerToPrev(lp.name, lp.type, lp);
+-
+-    const int inpShape[] = {inpShapeVec[0], inpShapeVec[1], inpShapeVec[2], inpShapeVec[3]};
+-    Mat inp(4, inpShape, CV_32F);
+-    randu(inp, 0, 255);
+-
+-    net.setInput(inp);
+-    Mat out = net.forward();
+-
+-    for (int n = 0; n < inpShapeVec[0]; ++n)
+-    {
+-        for (int c = 0; c < inpShapeVec[1]; ++c)
+-        {
+-            Mat outChannel = getPlane(out, n, c);
+-            Mat inpChannel = getPlane(inp, n, groupSize * (c % group) + c / group);
+-            normAssert(outChannel, inpChannel);
+-        }
+-    }
+-}
+-INSTANTIATE_TEST_CASE_P(/**/, Layer_Test_ShuffleChannel, Combine(
+-/*input shape*/  Values(Vec4i(1, 6, 5, 7), Vec4i(3, 12, 1, 4)),
+-/*group*/        Values(1, 2, 3, 6)
+-));
+-
+ }} // namespace

@@ -1,6 +1,6 @@
 #!/bin/bash
 
 set -euo pipefail
-cd /root/go/src/github.com/envoyproxy/protoc-gen-validate
+cd /app/src
 
 patch -p1 < /solution/fix.patch

@@ -9,14 +9,21 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Meson and Ninja (required for building spdlog with meson)
+# Install Python (required by Meson build system)
 RUN apt-get update && apt-get install -y \
-    meson \
-    ninja-build \
     python3 \
     python3-pip \
-    pkg-config \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# Install CMake and Meson build tools
+RUN apt-get update && apt-get install -y \
+    cmake \
+    ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Meson via pip
+RUN pip3 install --break-system-packages meson
 
 WORKDIR /app
 
@@ -29,11 +36,16 @@ RUN git clone https://github.com/gabime/spdlog.git src && \
 
 WORKDIR /app/src
 
+# Reset any changes from build steps before applying bug.patch
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 --no-backup-if-mismatch --reject-file=- < /tmp/bug.patch || [ $? -eq 1 ] && rm /tmp/bug.patch
+
+# Fix MINSIGSTKSZ compilation issue with Catch 2.8.0 on modern GCC
+RUN sed -i '9041s/.*/    static constexpr std::size_t sigStackSize = 32768;/' tests/catch.hpp && \
+    sed -i '9100s/.*/    char FatalConditionHandler::altStackMem[32768] = {};/' tests/catch.hpp
 
 RUN rm -rf /app/src/.git
 

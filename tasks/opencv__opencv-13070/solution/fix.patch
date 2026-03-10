@@ -1,0 +1,603 @@
+diff --git a/modules/gapi/CMakeLists.txt b/modules/gapi/CMakeLists.txt
+index d854a49635..74b73d1834 100644
+--- a/modules/gapi/CMakeLists.txt
++++ b/modules/gapi/CMakeLists.txt
+@@ -69,6 +69,7 @@ set(gapi_srcs
+     src/backends/fluid/gfluidbuffer.cpp
+     src/backends/fluid/gfluidbackend.cpp
+     src/backends/fluid/gfluidimgproc.cpp
++    src/backends/fluid/gfluidimgproc_func.cpp
+     src/backends/fluid/gfluidcore.cpp
+ 
+     # GPU Backend (currently built-in)
+diff --git a/modules/gapi/include/opencv2/gapi/own/saturate.hpp b/modules/gapi/include/opencv2/gapi/own/saturate.hpp
+index d08896b71d..207dcde25d 100644
+--- a/modules/gapi/include/opencv2/gapi/own/saturate.hpp
++++ b/modules/gapi/include/opencv2/gapi/own/saturate.hpp
+@@ -8,6 +8,8 @@
+ #ifndef OPENCV_GAPI_OWN_SATURATE_HPP
+ #define OPENCV_GAPI_OWN_SATURATE_HPP
+ 
++#include <cmath>
++
+ #include <limits>
+ #include <type_traits>
+ 
+diff --git a/modules/gapi/perf/common/gapi_imgproc_perf_tests_inl.hpp b/modules/gapi/perf/common/gapi_imgproc_perf_tests_inl.hpp
+index 671f54e962..0769002307 100644
+--- a/modules/gapi/perf/common/gapi_imgproc_perf_tests_inl.hpp
++++ b/modules/gapi/perf/common/gapi_imgproc_perf_tests_inl.hpp
+@@ -476,7 +476,7 @@ PERF_TEST_P_(SobelPerfTest, TestPerformance)
+ 
+     // G-API code //////////////////////////////////////////////////////////////
+     cv::GMat in;
+-    auto out = cv::gapi::Sobel(in, dtype, dx, dy, kernSize );
++    auto out = cv::gapi::Sobel(in, dtype, dx, dy, kernSize);
+     cv::GComputation c(in, out);
+ 
+     // Warm-up graph engine:
+@@ -484,7 +484,7 @@ PERF_TEST_P_(SobelPerfTest, TestPerformance)
+ 
+     TEST_CYCLE()
+     {
+-        c.apply(in_mat1, out_mat_gapi, std::move(compile_args));
++        c.apply(in_mat1, out_mat_gapi);
+     }
+ 
+     // Comparison //////////////////////////////////////////////////////////////
+@@ -494,7 +494,6 @@ PERF_TEST_P_(SobelPerfTest, TestPerformance)
+     }
+ 
+     SANITY_CHECK_NOTHING();
+-
+ }
+ 
+ //------------------------------------------------------------------------------
+diff --git a/modules/gapi/perf/cpu/gapi_imgproc_perf_tests_cpu.cpp b/modules/gapi/perf/cpu/gapi_imgproc_perf_tests_cpu.cpp
+index a4312de855..ea3d753f2f 100644
+--- a/modules/gapi/perf/cpu/gapi_imgproc_perf_tests_cpu.cpp
++++ b/modules/gapi/perf/cpu/gapi_imgproc_perf_tests_cpu.cpp
+@@ -31,8 +31,6 @@ INSTANTIATE_TEST_CASE_P(SepFilterPerfTestCPU_other, SepFilterPerfTest,
+         Values(-1, CV_32F),
+         Values(cv::compile_args(IMGPROC_CPU))));
+ 
+-
+-
+ INSTANTIATE_TEST_CASE_P(Filter2DPerfTestCPU, Filter2DPerfTest,
+     Combine(Values(AbsExact().to_compare_f()),
+         Values(CV_8UC1, CV_8UC3, CV_16UC1, CV_16SC1, CV_32FC1),
+@@ -109,10 +107,20 @@ INSTANTIATE_TEST_CASE_P(Dilate3x3PerfTestCPU, Dilate3x3PerfTest,
+ 
+ INSTANTIATE_TEST_CASE_P(SobelPerfTestCPU, SobelPerfTest,
+     Combine(Values(AbsExact().to_compare_f()),
+-        Values(CV_8UC1, CV_8UC3, CV_16UC1, CV_16SC1, CV_32FC1),
++        Values(CV_8UC1, CV_8UC3, CV_16UC1, CV_16SC1),
+         Values(3, 5),
+         Values(szVGA, sz720p, sz1080p),
+-        Values(-1, CV_32F),
++        Values(-1, CV_16S, CV_32F),
++        Values(0, 1),
++        Values(1, 2),
++        Values(cv::compile_args(IMGPROC_CPU))));
++
++INSTANTIATE_TEST_CASE_P(SobelPerfTestCPU32F, SobelPerfTest,
++    Combine(Values(AbsExact().to_compare_f()),
++        Values(CV_32FC1),
++        Values(3, 5),
++        Values(szVGA, sz720p, sz1080p),
++        Values(CV_32F),
+         Values(0, 1),
+         Values(1, 2),
+         Values(cv::compile_args(IMGPROC_CPU))));
+diff --git a/modules/gapi/perf/cpu/gapi_imgproc_perf_tests_fluid.cpp b/modules/gapi/perf/cpu/gapi_imgproc_perf_tests_fluid.cpp
+new file mode 100644
+index 0000000000..306e34fe89
+--- /dev/null
++++ b/modules/gapi/perf/cpu/gapi_imgproc_perf_tests_fluid.cpp
+@@ -0,0 +1,38 @@
++// This file is part of OpenCV project.
++// It is subject to the license terms in the LICENSE file found in the top-level directory
++// of this distribution and at http://opencv.org/license.html.
++//
++// Copyright (C) 2018 Intel Corporation
++
++
++#include "../perf_precomp.hpp"
++#include "../common/gapi_imgproc_perf_tests.hpp"
++#include "../../src/backends/fluid/gfluidimgproc.hpp"
++
++
++#define IMGPROC_FLUID cv::gapi::imgproc::fluid::kernels()
++
++namespace opencv_test
++{
++
++    INSTANTIATE_TEST_CASE_P(SobelPerfTestFluid, SobelPerfTest,
++        Combine(Values(AbsExact().to_compare_f()),
++            Values(CV_8UC1, CV_8UC3, CV_16UC1, CV_16SC1),  // add CV_32FC1 when ready
++            Values(3),                                     // add 5x5 once supported
++            Values(szVGA, sz720p, sz1080p),
++            Values(-1, CV_16S, CV_32F),
++            Values(0, 1),
++            Values(1, 2),
++            Values(cv::compile_args(IMGPROC_FLUID))));
++
++    INSTANTIATE_TEST_CASE_P(SobelPerfTestFluid32F, SobelPerfTest,
++        Combine(Values(AbsToleranceSobel(1e-3).to_compare_f()),
++            Values(CV_32FC1),
++            Values(3),                                     // add 5x5 once supported
++            Values(szVGA, sz720p, sz1080p),
++            Values(CV_32F),
++            Values(0, 1),
++            Values(1, 2),
++            Values(cv::compile_args(IMGPROC_FLUID))));
++
++}
+diff --git a/modules/gapi/src/backends/fluid/gfluidimgproc.cpp b/modules/gapi/src/backends/fluid/gfluidimgproc.cpp
+index c35d16b0c4..3c7a7d0111 100644
+--- a/modules/gapi/src/backends/fluid/gfluidimgproc.cpp
++++ b/modules/gapi/src/backends/fluid/gfluidimgproc.cpp
+@@ -25,6 +25,10 @@
+ #include "gfluidimgproc.hpp"
+ #include "gfluidutils.hpp"
+ 
++#include "gfluidimgproc_func.hpp"
++
++#include <opencv2/core/hal/intrin.hpp>
++
+ #include <cmath>
+ #include <cstdlib>
+ 
+@@ -733,11 +737,12 @@ GAPI_FLUID_KERNEL(GFluidGaussBlur, cv::gapi::imgproc::GGaussBlur, true)
+ template<typename DST, typename SRC>
+ static void run_sobel(Buffer& dst,
+                 const View  & src,
+-                      float   kx[],
+-                      float   ky[],
++                const float   kx[],
++                const float   ky[],
+                       int     ksize,
+-                      float   scale=1,
+-                      float   delta=0)
++                      float   scale,  // default: 1
++                      float   delta,  // default: 0
++                      float  *buf[])
+ {
+     static const int kmax = 11;
+     GAPI_Assert(ksize <= kmax);
+@@ -756,30 +761,14 @@ static void run_sobel(Buffer& dst,
+     int width = dst.length();
+     int chan  = dst.meta().chan;
+ 
+-    for (int w=0; w < width; w++)
+-    {
+-        // TODO: make this cycle innermost
+-        for (int c=0; c < chan; c++)
+-        {
+-            float sum=0;
++    GAPI_DbgAssert(ksize == 3);
++//  float buf[3][width * chan];
+ 
+-            for (int i=0; i < ksize; i++)
+-            {
+-                float sumi=0;
+-
+-                for (int j=0; j < ksize; j++)
+-                {
+-                    sumi += in[i][(w + j - border)*chan + c] * kx[j];
+-                }
++    int y  = dst.y();
++    int y0 = dst.priv().writeStart();
++//  int y1 = dst.priv().writeEnd();
+ 
+-                sum += sumi * ky[i];
+-            }
+-
+-            float result = sum*scale + delta;
+-
+-            out[w*chan + c] = saturate<DST>(result, rintf);
+-        }
+-    }
++    run_sobel_impl(out, in, width, chan, kx, ky, border, scale, delta, buf, y, y0);
+ }
+ 
+ GAPI_FLUID_KERNEL(GFluidSobel, cv::gapi::imgproc::GSobel, true)
+@@ -801,28 +790,37 @@ GAPI_FLUID_KERNEL(GFluidSobel, cv::gapi::imgproc::GSobel, true)
+         // TODO: support kernel height 3, 5, 7, 9, ...
+         GAPI_Assert(ksize == 3 || ksize == CV_SCHARR);
+ 
+-        if (ksize == CV_SCHARR)
+-            ksize = 3;
++        int ksz = (ksize == CV_SCHARR)? 3: ksize;
+ 
+         auto *kx = scratch.OutLine<float>();
+-        auto *ky = kx + ksize;
++        auto *ky = kx + ksz;
++
++        int width = dst.meta().size.width;
++        int chan  = dst.meta().chan;
++
++        float *buf[3];
++        buf[0] = ky + ksz;
++        buf[1] = buf[0] + width*chan;
++        buf[2] = buf[1] + width*chan;
+ 
+         auto scale = static_cast<float>(_scale);
+         auto delta = static_cast<float>(_delta);
+ 
+         //     DST     SRC     OP         __VA_ARGS__
+-        UNARY_(uchar , uchar , run_sobel, dst, src, kx, ky, ksize, scale, delta);
+-        UNARY_(ushort, ushort, run_sobel, dst, src, kx, ky, ksize, scale, delta);
+-        UNARY_( short,  short, run_sobel, dst, src, kx, ky, ksize, scale, delta);
+-        UNARY_( float, uchar , run_sobel, dst, src, kx, ky, ksize, scale, delta);
+-        UNARY_( float, ushort, run_sobel, dst, src, kx, ky, ksize, scale, delta);
+-        UNARY_( float,  short, run_sobel, dst, src, kx, ky, ksize, scale, delta);
+-        UNARY_( float,  float, run_sobel, dst, src, kx, ky, ksize, scale, delta);
++        UNARY_(uchar , uchar , run_sobel, dst, src, kx, ky, ksz, scale, delta, buf);
++        UNARY_(ushort, ushort, run_sobel, dst, src, kx, ky, ksz, scale, delta, buf);
++        UNARY_( short, uchar , run_sobel, dst, src, kx, ky, ksz, scale, delta, buf);
++        UNARY_( short, ushort, run_sobel, dst, src, kx, ky, ksz, scale, delta, buf);
++        UNARY_( short,  short, run_sobel, dst, src, kx, ky, ksz, scale, delta, buf);
++        UNARY_( float, uchar , run_sobel, dst, src, kx, ky, ksz, scale, delta, buf);
++        UNARY_( float, ushort, run_sobel, dst, src, kx, ky, ksz, scale, delta, buf);
++        UNARY_( float,  short, run_sobel, dst, src, kx, ky, ksz, scale, delta, buf);
++        UNARY_( float,  float, run_sobel, dst, src, kx, ky, ksz, scale, delta, buf);
+ 
+         CV_Error(cv::Error::StsBadArg, "unsupported combination of types");
+     }
+ 
+-    static void initScratch(const GMatDesc& /* in */,
++    static void initScratch(const GMatDesc&    in,
+                                   int       /* ddepth */,
+                                   int          dx,
+                                   int          dy,
+@@ -833,14 +831,24 @@ GAPI_FLUID_KERNEL(GFluidSobel, cv::gapi::imgproc::GSobel, true)
+                             const Scalar  & /* borderValue */,
+                                   Buffer  &    scratch)
+     {
+-        cv::gapi::own::Size bufsize(ksize + ksize, 1);
++        // TODO: support kernel height 3, 5, 7, 9, ...
++        GAPI_Assert(ksize == 3 || ksize == CV_SCHARR);
++        int ksz = (ksize == CV_SCHARR) ? 3 : ksize;
++
++        int width = in.size.width;
++        int chan  = in.chan;
++
++        int buflen = ksz + ksz            // kernels: kx, ky
++                   + ksz * width * chan;  // working buffers
++
++        cv::gapi::own::Size bufsize(buflen, 1);
+         GMatDesc bufdesc = {CV_32F, 1, bufsize};
+         Buffer buffer(bufdesc);
+         scratch = std::move(buffer);
+ 
+-        // FIXME: move to resetScratch stage ?
+         auto *kx = scratch.OutLine<float>();
+-        auto *ky = kx + ksize;
++        auto *ky = kx + ksz;
++
+         Mat kxmat(1, ksize, CV_32FC1, kx);
+         Mat kymat(ksize, 1, CV_32FC1, ky);
+         getDerivKernels(kxmat, kymat, dx, dy, ksize);
+@@ -860,7 +868,7 @@ GAPI_FLUID_KERNEL(GFluidSobel, cv::gapi::imgproc::GSobel, true)
+                                       int          borderType,
+                             const cv::Scalar  &    borderValue)
+     {
+-        return { borderType, borderValue};
++        return {borderType, borderValue};
+     }
+ };
+ 
+diff --git a/modules/gapi/src/backends/fluid/gfluidimgproc_func.cpp b/modules/gapi/src/backends/fluid/gfluidimgproc_func.cpp
+new file mode 100644
+index 0000000000..0fe3510937
+--- /dev/null
++++ b/modules/gapi/src/backends/fluid/gfluidimgproc_func.cpp
+@@ -0,0 +1,270 @@
++// This file is part of OpenCV project.
++// It is subject to the license terms in the LICENSE file found in the top-level directory
++// of this distribution and at http://opencv.org/license.html.
++//
++// Copyright (C) 2018 Intel Corporation
++
++#if !defined(GAPI_STANDALONE)
++
++#include "gfluidimgproc_func.hpp"
++
++#include "gfluidutils.hpp"
++
++#include <opencv2/core/hal/intrin.hpp>
++
++#include <cmath>
++#include <cstdlib>
++
++#ifdef __GNUC__
++#  pragma GCC diagnostic push
++#  pragma GCC diagnostic ignored "-Wstrict-overflow"
++#endif
++
++namespace cv {
++namespace gapi {
++namespace fluid {
++
++//---------------------
++//
++// Fluid kernels: Sobel
++//
++//---------------------
++
++// Sobel 3x3: vertical pass
++template<bool noscale, typename DST>
++void run_sobel3x3_vert(DST out[], int length, const float ky[],
++         float scale, float delta, const int r[], float *buf[])
++{
++    float ky0 = ky[0],
++          ky1 = ky[1],
++          ky2 = ky[2];
++
++    int r0 = r[0],
++        r1 = r[1],
++        r2 = r[2];
++
++#if CV_SIMD
++    // for floating-point output,
++    // manual vectoring may be not better than compiler's optimization
++#define EXPLICIT_SIMD_32F 0  // 1=vectorize 32f case explicitly, 0=don't
++#if     EXPLICIT_SIMD_32F
++    if (std::is_same<DST, float>::value && length >= v_int16::nlanes)
++    {
++        constexpr static int nlanes = v_float32::nlanes;
++
++        for (int l=0; l < length; )
++        {
++            for (; l <= length - nlanes; l += nlanes)
++            {
++                v_float32 sum = vx_load(&buf[r0][l]) * vx_setall_f32(ky0);
++                    sum = v_fma(vx_load(&buf[r1][l]),  vx_setall_f32(ky1), sum);
++                    sum = v_fma(vx_load(&buf[r2][l]),  vx_setall_f32(ky2), sum);
++
++                if (!noscale)
++                {
++                    sum = v_fma(sum, vx_setall_f32(scale), vx_setall_f32(delta));
++                }
++
++                v_store(reinterpret_cast<float*>(&out[l]), sum);
++            }
++
++            if (l < length)
++            {
++                // tail: recalculate last pixels
++                GAPI_DbgAssert(length >= nlanes);
++                l = length - nlanes;
++            }
++        }
++
++        return;
++    }
++#endif
++
++    if ((std::is_same<DST, short>::value || std::is_same<DST, ushort>::value)
++        && length >= v_int16::nlanes)
++    {
++        constexpr static int nlanes = v_int16::nlanes;
++
++        for (int l=0; l < length; )
++        {
++            for (; l <= length - nlanes; l += nlanes)
++            {
++                v_float32 sum0 = vx_load(&buf[r0][l])            * vx_setall_f32(ky0);
++                    sum0 = v_fma(vx_load(&buf[r1][l]),             vx_setall_f32(ky1), sum0);
++                    sum0 = v_fma(vx_load(&buf[r2][l]),             vx_setall_f32(ky2), sum0);
++
++                v_float32 sum1 = vx_load(&buf[r0][l + nlanes/2]) * vx_setall_f32(ky0);
++                    sum1 = v_fma(vx_load(&buf[r1][l + nlanes/2]),  vx_setall_f32(ky1), sum1);
++                    sum1 = v_fma(vx_load(&buf[r2][l + nlanes/2]),  vx_setall_f32(ky2), sum1);
++
++                if (!noscale)
++                {
++                    sum0 = v_fma(sum0, vx_setall_f32(scale), vx_setall_f32(delta));
++                    sum1 = v_fma(sum1, vx_setall_f32(scale), vx_setall_f32(delta));
++                }
++
++                v_int32 isum0 = v_round(sum0),
++                        isum1 = v_round(sum1);
++
++                if (std::is_same<DST, short>::value)
++                {
++                    // signed short
++                    v_int16 res = v_pack(isum0, isum1);
++                    v_store(reinterpret_cast<short*>(&out[l]), res);
++                } else
++                {
++                    // unsigned short
++                    v_uint16 res = v_pack_u(isum0, isum1);
++                    v_store(reinterpret_cast<ushort*>(&out[l]), res);
++                }
++            }
++
++            if (l < length)
++            {
++                // tail: recalculate last pixels
++                GAPI_DbgAssert(length >= nlanes);
++                l = length - nlanes;
++            }
++        }
++
++        return;
++    }
++
++    if (std::is_same<DST, uchar>::value && length >= v_uint8::nlanes)
++    {
++        constexpr static int nlanes = v_uint8::nlanes;
++
++        for (int l=0; l < length; )
++        {
++            for (; l <= length - nlanes; l += nlanes)
++            {
++                v_float32 sum0 = vx_load(&buf[r0][l])              * vx_setall_f32(ky0);
++                    sum0 = v_fma(vx_load(&buf[r1][l]),               vx_setall_f32(ky1), sum0);
++                    sum0 = v_fma(vx_load(&buf[r2][l]),               vx_setall_f32(ky2), sum0);
++
++                v_float32 sum1 = vx_load(&buf[r0][l +   nlanes/4]) * vx_setall_f32(ky0);
++                    sum1 = v_fma(vx_load(&buf[r1][l +   nlanes/4]),  vx_setall_f32(ky1), sum1);
++                    sum1 = v_fma(vx_load(&buf[r2][l +   nlanes/4]),  vx_setall_f32(ky2), sum1);
++
++                v_float32 sum2 = vx_load(&buf[r0][l + 2*nlanes/4]) * vx_setall_f32(ky0);
++                    sum2 = v_fma(vx_load(&buf[r1][l + 2*nlanes/4]),  vx_setall_f32(ky1), sum2);
++                    sum2 = v_fma(vx_load(&buf[r2][l + 2*nlanes/4]),  vx_setall_f32(ky2), sum2);
++
++                v_float32 sum3 = vx_load(&buf[r0][l + 3*nlanes/4]) * vx_setall_f32(ky0);
++                    sum3 = v_fma(vx_load(&buf[r1][l + 3*nlanes/4]),  vx_setall_f32(ky1), sum3);
++                    sum3 = v_fma(vx_load(&buf[r2][l + 3*nlanes/4]),  vx_setall_f32(ky2), sum3);
++
++                if (!noscale)
++                {
++                    sum0 = v_fma(sum0, vx_setall_f32(scale), vx_setall_f32(delta));
++                    sum1 = v_fma(sum1, vx_setall_f32(scale), vx_setall_f32(delta));
++                    sum2 = v_fma(sum2, vx_setall_f32(scale), vx_setall_f32(delta));
++                    sum3 = v_fma(sum3, vx_setall_f32(scale), vx_setall_f32(delta));
++                }
++
++                v_int32 isum0 = v_round(sum0),
++                        isum1 = v_round(sum1),
++                        isum2 = v_round(sum2),
++                        isum3 = v_round(sum3);
++
++                v_int16 ires0 = v_pack(isum0, isum1),
++                        ires1 = v_pack(isum2, isum3);
++
++                v_uint8 res = v_pack_u(ires0, ires1);
++                v_store(reinterpret_cast<uchar*>(&out[l]), res);
++            }
++
++            if (l < length)
++            {
++                // tail: recalculate last pixels
++                GAPI_DbgAssert(length >= nlanes);
++                l = length - nlanes;
++            }
++        }
++
++        return;
++    }
++#endif
++
++    // reference code
++    for (int l=0; l < length; l++)
++    {
++        float sum = buf[r0][l]*ky0 + buf[r1][l]*ky1 + buf[r2][l]*ky2;
++
++        if (!noscale)
++        {
++            sum = sum*scale + delta;
++        }
++
++        out[l] = saturate<DST>(sum, rintf);
++    }
++}
++
++template<typename DST, typename SRC>
++void run_sobel_impl(DST out[], const SRC *in[], int width, int chan,
++                    const float kx[], const float ky[], int border,
++                    float scale, float delta, float *buf[],
++                    int y, int y0)
++{
++    int r[3];
++    r[0] = (y - y0)     % 3;  // buf[r[0]]: previous
++    r[1] = (y - y0 + 1) % 3;  //            this
++    r[2] = (y - y0 + 2) % 3;  //            next row
++
++    int length = width * chan;
++
++    // horizontal pass
++
++    // full horizontal pass is needed only if very 1st row in ROI;
++    // for 2nd and further rows, it is enough to convolve only the
++    // "next" row - as we can reuse buffers from previous calls to
++    // this kernel (note that Fluid processes rows consequently)
++    int k0 = (y == y0)? 0: 2;
++
++    for (int k = k0; k < 3; k++)
++    {
++        //                             previous, this , next pixel
++        const SRC *s[3] = {in[k] - border*chan , in[k], in[k] + border*chan};
++
++        // rely on compiler vectoring
++        for (int l=0; l < length; l++)
++        {
++            buf[r[k]][l] = s[0][l]*kx[0] + s[1][l]*kx[1] + s[2][l]*kx[2];
++        }
++    }
++
++    // vertical pass
++    if (scale == 1 && delta == 0)
++    {
++        constexpr static bool noscale = true;  // omit scaling
++        run_sobel3x3_vert<noscale, DST>(out, length, ky, scale, delta, r, buf);
++    } else
++    {
++        constexpr static bool noscale = false;  // do scaling
++        run_sobel3x3_vert<noscale, DST>(out, length, ky, scale, delta, r, buf);
++    }
++}
++
++#define INSTANTIATE(DST, SRC)                                                 \
++template void run_sobel_impl(DST out[], const SRC *in[], int width, int chan, \
++                             const float kx[], const float ky[], int border,  \
++                             float scale, float delta, float *buf[],          \
++                             int y, int y0);
++
++INSTANTIATE(uchar , uchar )
++INSTANTIATE(ushort, ushort)
++INSTANTIATE( short, uchar )
++INSTANTIATE( short, ushort)
++INSTANTIATE( short,  short)
++INSTANTIATE( float, uchar )
++INSTANTIATE( float, ushort)
++INSTANTIATE( float,  short)
++INSTANTIATE( float,  float)
++
++#undef INSTANTIATE
++
++} // namespace fliud
++} // namespace gapi
++} // namespace cv
++
++#endif // !defined(GAPI_STANDALONE)
+diff --git a/modules/gapi/src/backends/fluid/gfluidimgproc_func.hpp b/modules/gapi/src/backends/fluid/gfluidimgproc_func.hpp
+new file mode 100644
+index 0000000000..f4d49c272e
+--- /dev/null
++++ b/modules/gapi/src/backends/fluid/gfluidimgproc_func.hpp
+@@ -0,0 +1,31 @@
++// This file is part of OpenCV project.
++// It is subject to the license terms in the LICENSE file found in the top-level directory
++// of this distribution and at http://opencv.org/license.html.
++//
++// Copyright (C) 2018 Intel Corporation
++
++#pragma once
++
++#if !defined(GAPI_STANDALONE)
++
++namespace cv {
++namespace gapi {
++namespace fluid {
++
++//---------------------
++//
++// Fluid kernels: Sobel
++//
++//---------------------
++
++template<typename DST, typename SRC>
++void run_sobel_impl(DST out[], const SRC *in[], int width, int chan,
++                    const float kx[], const float ky[], int border,
++                    float scale, float delta, float *buf[],
++                    int y, int y0);
++
++}  // namespace fluid
++}  // namespace gapi
++}  // namespace cv
++
++#endif // !defined(GAPI_STANDALONE)

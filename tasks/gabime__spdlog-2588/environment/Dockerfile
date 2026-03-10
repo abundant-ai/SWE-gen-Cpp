@@ -9,10 +9,9 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CMake (required for building spdlog)
+# Install CMake (required for building spdlog tests)
 RUN apt-get update && apt-get install -y \
     cmake \
-    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,6 +24,8 @@ RUN git clone https://github.com/gabime/spdlog.git src && \
     git submodule update --init --recursive
 
 WORKDIR /app/src
+
+RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch

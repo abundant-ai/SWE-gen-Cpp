@@ -1,0 +1,219 @@
+diff --git a/modules/core/test/test_io.cpp b/modules/core/test/test_io.cpp
+index b4e3d10db6..6b39c41b3b 100644
+--- a/modules/core/test/test_io.cpp
++++ b/modules/core/test/test_io.cpp
+@@ -522,23 +522,33 @@ protected:
+ 
+ TEST(Core_InputOutput, misc) { CV_MiscIOTest test; test.safe_run(); }
+ 
+-#if 0 // 4+ GB of data, 40+ GB of estimated result size, it is very slow
+-BIGDATA_TEST(Core_InputOutput, huge)
++/*class CV_BigMatrixIOTest : public cvtest::BaseTest
+ {
+-    RNG& rng = theRNG();
+-    int N = 1000, M = 1200000;
+-    std::cout << "Allocating..." << std::endl;
+-    Mat mat(M, N, CV_32F);
+-    std::cout << "Initializing..." << std::endl;
+-    rng.fill(mat, RNG::UNIFORM, 0, 1);
+-    std::cout << "Writing..." << std::endl;
++public:
++    CV_BigMatrixIOTest() {}
++    ~CV_BigMatrixIOTest() {}
++protected:
++    void run(int)
+     {
+-        FileStorage fs(cv::tempfile(".xml"), FileStorage::WRITE);
+-        fs << "mat" << mat;
+-        fs.release();
++        try
++        {
++            RNG& rng = theRNG();
++            int N = 1000, M = 1200000;
++            Mat mat(M, N, CV_32F);
++            rng.fill(mat, RNG::UNIFORM, 0, 1);
++            FileStorage fs(cv::tempfile(".xml"), FileStorage::WRITE);
++            fs << "mat" << mat;
++            fs.release();
++        }
++        catch(...)
++        {
++            ts->set_failed_test_info(cvtest::TS::FAIL_MISMATCH);
++        }
+     }
+-}
+-#endif
++};
++
++TEST(Core_InputOutput, huge) { CV_BigMatrixIOTest test; test.safe_run(); }
++*/
+ 
+ TEST(Core_globbing, accuracy)
+ {
+diff --git a/modules/core/test/test_mat.cpp b/modules/core/test/test_mat.cpp
+index 18906f8dcd..53b43ae8c2 100644
+--- a/modules/core/test/test_mat.cpp
++++ b/modules/core/test/test_mat.cpp
+@@ -1776,26 +1776,4 @@ TEST(Mat_, template_based_ptr)
+ 
+ #endif
+ 
+-
+-BIGDATA_TEST(Mat, push_back_regression_4158)  // memory usage: ~10.6 Gb
+-{
+-    Mat result;
+-
+-    Mat tail(100, 500000, CV_32FC2, Scalar(1, 2));
+-
+-    tail.copyTo(result);
+-    for (int i = 1; i < 15; i++)
+-    {
+-        result.push_back(tail);
+-        std::cout << "i = " << i << "  result = " << result.size() << "   used = " << (uint64)result.total()*result.elemSize()*(1.0 / (1 << 20)) << " Mb"
+-            << "   allocated=" << (uint64)(result.datalimit - result.datastart)*(1.0 / (1 << 20)) << " Mb" << std::endl;
+-    }
+-    for (int i = 0; i < 15; i++)
+-    {
+-        Rect roi(0, tail.rows * i, tail.cols, tail.rows);
+-        int nz = countNonZero(result(roi).reshape(1) == 2);
+-        EXPECT_EQ(tail.total(), (size_t)nz) << "i=" << i;
+-    }
+-}
+-
+ }} // namespace
+diff --git a/modules/imgproc/test/test_thresh.cpp b/modules/imgproc/test/test_thresh.cpp
+index e9bed8c72e..8064eed992 100644
+--- a/modules/imgproc/test/test_thresh.cpp
++++ b/modules/imgproc/test/test_thresh.cpp
+@@ -420,18 +420,34 @@ void CV_ThreshTest::prepare_to_validation( int /*test_case_idx*/ )
+ 
+ TEST(Imgproc_Threshold, accuracy) { CV_ThreshTest test; test.safe_run(); }
+ 
+-BIGDATA_TEST(Imgproc_Threshold, huge)
++#if defined(_M_X64) || defined(__x86_64__)
++TEST(Imgproc_Threshold, huge) /* since the test needs a lot of memory, enable it only on 64-bit Intel/AMD platforms, otherwise it may take a lot of time because of heavy swapping */
++#else
++TEST(DISABLED_Imgproc_Threshold, huge)
++#endif
+ {
+-    Mat m(65000, 40000, CV_8U);
+-    ASSERT_FALSE(m.isContinuous());
++    Mat m;
++    try
++    {
++        m.create(65000, 40000, CV_8U);
++    }
++    catch(...)
++    {
++    }
+ 
+-    uint64 i, n = (uint64)m.rows*m.cols;
+-    for( i = 0; i < n; i++ )
+-        m.data[i] = (uchar)(i & 255);
++    if( !m.empty() )
++    {
++        ASSERT_FALSE(m.isContinuous());
++
++        uint64 i, n = (uint64)m.rows*m.cols;
++        for( i = 0; i < n; i++ )
++            m.data[i] = (uchar)(i & 255);
+ 
+-    cv::threshold(m, m, 127, 255, cv::THRESH_BINARY);
+-    int nz = cv::countNonZero(m);  // FIXIT 'int' is not enough here (overflow is possible with other inputs)
+-    ASSERT_EQ((uint64)nz, n / 2);
++        cv::threshold(m, m, 127, 255, cv::THRESH_BINARY);
++        int nz = cv::countNonZero(m);
++        ASSERT_EQ(nz, (int)(n/2));
++    }
++    // just skip the test if there is no enough memory
+ }
+ 
+ }} // namespace
+diff --git a/modules/ts/include/opencv2/ts/ts_ext.hpp b/modules/ts/include/opencv2/ts/ts_ext.hpp
+index 37c399515a..11ee1c9f20 100644
+--- a/modules/ts/include/opencv2/ts/ts_ext.hpp
++++ b/modules/ts/include/opencv2/ts/ts_ext.hpp
+@@ -11,7 +11,6 @@
+ namespace cvtest {
+ void checkIppStatus();
+ extern bool skipUnstableTests;
+-extern bool runBigDataTests;
+ extern int testThreads;
+ }
+ 
+@@ -44,7 +43,7 @@ extern int testThreads;
+ 
+ 
+ #undef TEST
+-#define TEST_(test_case_name, test_name, BODY_IMPL) \
++#define TEST(test_case_name, test_name) \
+     class GTEST_TEST_CLASS_NAME_(test_case_name, test_name) : public ::testing::Test {\
+      public:\
+       GTEST_TEST_CLASS_NAME_(test_case_name, test_name)() {}\
+@@ -66,37 +65,9 @@ extern int testThreads;
+             ::testing::Test::TearDownTestCase, \
+             new ::testing::internal::TestFactoryImpl<\
+                 GTEST_TEST_CLASS_NAME_(test_case_name, test_name)>);\
+-    void GTEST_TEST_CLASS_NAME_(test_case_name, test_name)::TestBody() BODY_IMPL( #test_case_name "_" #test_name ) \
++    void GTEST_TEST_CLASS_NAME_(test_case_name, test_name)::TestBody() CV__TEST_BODY_IMPL( #test_case_name "_" #test_name ) \
+     void GTEST_TEST_CLASS_NAME_(test_case_name, test_name)::Body()
+ 
+-#define TEST(test_case_name, test_name) TEST_(test_case_name, test_name, CV__TEST_BODY_IMPL)
+-
+-#define CV__TEST_BIGDATA_BODY_IMPL(name) \
+-    { \
+-       if (!cvtest::runBigDataTests) \
+-       { \
+-           printf("[     SKIP ] BigData tests are disabled\n"); \
+-           return; \
+-       } \
+-       CV__TRACE_APP_FUNCTION_NAME(name); \
+-       try { \
+-          CV__TEST_INIT \
+-          Body(); \
+-          CV__TEST_CLEANUP \
+-       } \
+-       catch (cvtest::SkipTestException& e) \
+-       { \
+-          printf("[     SKIP ] %s\n", e.what()); \
+-       } \
+-    } \
+-
+-// Special type of tests which require / use or validate processing of huge amount of data (>= 2Gb)
+-#if defined(_M_X64) || defined(__x86_64__) || defined(__aarch64__)
+-#define BIGDATA_TEST(test_case_name, test_name) TEST_(BigData_ ## test_case_name, test_name, CV__TEST_BIGDATA_BODY_IMPL)
+-#else
+-#define BIGDATA_TEST(test_case_name, test_name) TEST_(BigData_ ## test_case_name, DISABLED_ ## test_name, CV__TEST_BIGDATA_BODY_IMPL)
+-#endif
+-
+ #undef TEST_F
+ #define TEST_F(test_fixture, test_name)\
+     class GTEST_TEST_CLASS_NAME_(test_fixture, test_name) : public test_fixture {\
+diff --git a/modules/ts/src/ts.cpp b/modules/ts/src/ts.cpp
+index ee823a54a9..7dd05fbf55 100644
+--- a/modules/ts/src/ts.cpp
++++ b/modules/ts/src/ts.cpp
+@@ -699,7 +699,6 @@ void checkIppStatus()
+ }
+ 
+ bool skipUnstableTests = false;
+-bool runBigDataTests = false;
+ int testThreads = 0;
+ 
+ void parseCustomOptions(int argc, char **argv)
+@@ -709,7 +708,6 @@ void parseCustomOptions(int argc, char **argv)
+         "{ test_seed          |809564   |seed for random numbers generator }"
+         "{ test_threads       |-1       |the number of worker threads, if parallel execution is enabled}"
+         "{ skip_unstable      |false    |skip unstable tests }"
+-        "{ test_bigdata       |false    |run BigData tests (>=2Gb) }"
+         "{ h   help           |false    |print help info                          }";
+ 
+     cv::CommandLineParser parser(argc, argv, command_line_keys);
+@@ -732,7 +730,6 @@ void parseCustomOptions(int argc, char **argv)
+     testThreads = parser.get<int>("test_threads");
+ 
+     skipUnstableTests = parser.get<bool>("skip_unstable");
+-    runBigDataTests = parser.get<bool>("test_bigdata");
+ }
+ 
+ 

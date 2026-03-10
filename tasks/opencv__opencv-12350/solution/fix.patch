@@ -1,0 +1,118 @@
+diff --git a/modules/dnn/src/layers/crop_layer.cpp b/modules/dnn/src/layers/crop_layer.cpp
+index 8b56f6f439..3572b88337 100644
+--- a/modules/dnn/src/layers/crop_layer.cpp
++++ b/modules/dnn/src/layers/crop_layer.cpp
+@@ -41,6 +41,7 @@
+ //M*/
+ 
+ #include "../precomp.hpp"
++#include "../op_inf_engine.hpp"
+ #include "layers_common.hpp"
+ 
+ namespace cv
+@@ -64,6 +65,12 @@ public:
+         }
+     }
+ 
++    virtual bool supportBackend(int backendId) CV_OVERRIDE
++    {
++        return backendId == DNN_BACKEND_OPENCV ||
++               backendId == DNN_BACKEND_INFERENCE_ENGINE && crop_ranges.size() == 4;
++    }
++
+     bool getMemoryShapes(const std::vector<MatShape> &inputs,
+                          const int requiredOutputs,
+                          std::vector<MatShape> &outputs,
+@@ -109,7 +116,11 @@ public:
+                 offset_final[i] = offset[i - start_axis];
+         }
+ 
+-        crop_ranges.resize(dims, Range::all());
++        crop_ranges.resize(dims);
++        for (int i = 0; i < start_axis; i++)
++        {
++            crop_ranges[i] = Range(0, inpBlob.size[i]);
++        }
+         for (int i = start_axis; i < dims; i++)
+         {
+             if (offset_final[i] < 0 || offset_final[i] + inpSzBlob.size[i] > inpBlob.size[i])
+@@ -138,6 +149,38 @@ public:
+         input(&crop_ranges[0]).copyTo(output);
+     }
+ 
++    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
++    {
++#ifdef HAVE_INF_ENGINE
++        InferenceEngine::LayerParams lp;
++        lp.name = name;
++        lp.type = "Crop";
++        lp.precision = InferenceEngine::Precision::FP32;
++        std::shared_ptr<InferenceEngine::CropLayer> ieLayer(new InferenceEngine::CropLayer(lp));
++
++        CV_Assert(crop_ranges.size() == 4);
++
++        ieLayer->axis.push_back(0);  // batch
++        ieLayer->offset.push_back(crop_ranges[0].start);
++        ieLayer->dim.push_back(crop_ranges[0].end - crop_ranges[0].start);
++
++        ieLayer->axis.push_back(1);  // channels
++        ieLayer->offset.push_back(crop_ranges[1].start);
++        ieLayer->dim.push_back(crop_ranges[1].end - crop_ranges[1].start);
++
++        ieLayer->axis.push_back(3);  // height
++        ieLayer->offset.push_back(crop_ranges[2].start);
++        ieLayer->dim.push_back(crop_ranges[2].end - crop_ranges[2].start);
++
++        ieLayer->axis.push_back(2);  // width
++        ieLayer->offset.push_back(crop_ranges[3].start);
++        ieLayer->dim.push_back(crop_ranges[3].end - crop_ranges[3].start);
++
++        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
++#endif  // HAVE_INF_ENGINE
++        return Ptr<BackendNode>();
++    }
++
+     std::vector<Range> crop_ranges;
+ };
+ 
+diff --git a/modules/dnn/src/layers/fully_connected_layer.cpp b/modules/dnn/src/layers/fully_connected_layer.cpp
+index d17ca27383..e40f8c6bdd 100644
+--- a/modules/dnn/src/layers/fully_connected_layer.cpp
++++ b/modules/dnn/src/layers/fully_connected_layer.cpp
+@@ -350,17 +350,33 @@ public:
+             inshape = shape(outerSize, innerSize);
+             outshape = shape(outerSize, numOutput);
+ 
+-            UMat srcMat, dstMat;
++            UMat srcMat, dstMat, srcMat_fp32, dstMat_fp32;
+             srcMat = inputs[i].reshape(1, inshape.size(), &inshape[0]);
+             dstMat = outputs[i].reshape(1, outshape.size(), &outshape[0]);
+ 
+-            cv::gemm(srcMat, weights, 1, noArray(), 0, dstMat, GEMM_2_T);
++            if (use_half)
++            {
++                convertFp16(srcMat, srcMat_fp32);
++                convertFp16(dstMat, dstMat_fp32);
++            }
++            else
++            {
++                srcMat_fp32 = srcMat;
++                dstMat_fp32 = dstMat;
++            }
++
++            cv::gemm(srcMat_fp32, weights, 1, noArray(), 0, dstMat_fp32, GEMM_2_T);
+ 
+             if (bias)
+             {
+                 UMat biasOnesMat = UMat::ones(outerSize, 1, umat_blobs[0].type());
+                 UMat& biases = umat_blobs[1];
+-                cv::gemm(biasOnesMat, biases, 1, dstMat, 1, dstMat, 0);
++                cv::gemm(biasOnesMat, biases, 1, dstMat_fp32, 1, dstMat_fp32, 0);
++            }
++            if (use_half)
++            {
++                convertFp16(srcMat_fp32, srcMat);
++                convertFp16(dstMat_fp32, dstMat);
+             }
+         }
+ 

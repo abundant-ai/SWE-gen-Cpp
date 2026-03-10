@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install C++ compiler and autotools build dependencies
+# Install C++ compiler and autotools
 RUN apt-get update && apt-get install -y \
     g++ \
     autoconf \
@@ -28,24 +28,21 @@ RUN git clone https://github.com/google/googletest.git src && \
 
 WORKDIR /app/src
 
-# Build Google Test first using autotools
-RUN cd googletest && \
-    autoreconf -fvi && \
-    ./configure && \
-    make -j4
-
-# Build Google Mock using autotools (this works in the fixed/HEAD state)
+# Build Google Mock using autotools
 RUN cd googlemock && \
     autoreconf -fvi && \
     ./configure && \
     make -j4
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
+
+# Note: We don't rebuild after applying bug.patch because the bug breaks the autotools build.
+# The test.sh will attempt to rebuild and should fail for NOP (buggy) and succeed for Oracle (fixed).
 
 RUN rm -rf /app/src/.git
 

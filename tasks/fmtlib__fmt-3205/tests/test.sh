@@ -18,26 +18,35 @@ cp "/tests/gtest/CMakeLists.txt" "test/gtest/CMakeLists.txt"
 mkdir -p "test/static-export-test"
 cp "/tests/static-export-test/CMakeLists.txt" "test/static-export-test/CMakeLists.txt"
 
-# Test: Reconfigure with updated CMakeLists.txt files
-# In buggy state: cxx14.cmake exists and prints "CXX_STANDARD:" and "Required features: cxx_variadic_templates"
-# In fixed state: cxx14.cmake doesn't exist, uses target_compile_features, no such messages
-cmake_output=$(cmake -S . -B build \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ \
+# Clean and reconfigure CMake to pick up the new CMakeLists.txt changes
+rm -rf build/*
+cd build
+cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_STANDARD=23 \
-    -DFMT_TEST=ON 2>&1)
+    -DFMT_TEST=ON \
+    -DBUILD_SHARED_LIBS=ON 2>&1 | tee cmake_output.log
+test_status=${PIPESTATUS[0]}
 
-# Check that buggy cxx14.cmake messages are NOT present (indicates fix is applied)
-if echo "$cmake_output" | grep -q "Required features: cxx_variadic_templates"; then
-    echo "FAIL: Found 'Required features: cxx_variadic_templates' - buggy cxx14.cmake is active"
+# Verify the new CMake approach is being used (should NOT use cxx14.cmake)
+if [ $test_status -eq 0 ]; then
+  if grep -q "include(cxx14)" ../CMakeLists.txt 2>/dev/null; then
+    echo "ERROR: Old cxx14.cmake approach still being used!" >&2
     test_status=1
-elif ! cmake --build build > /dev/null 2>&1; then
-    echo "FAIL: Build failed"
+  fi
+fi
+
+# Verify that cmake_minimum_required is 3.8 or higher
+if [ $test_status -eq 0 ]; then
+  if ! grep -q "cmake_minimum_required(VERSION 3.8" ../CMakeLists.txt 2>/dev/null; then
+    echo "ERROR: CMake minimum version should be 3.8!" >&2
     test_status=1
-else
-    echo "PASS: CMake configuration uses target_compile_features correctly"
-    test_status=0
+  fi
+fi
+
+# Build the fmt library to verify target_compile_features works
+if [ $test_status -eq 0 ]; then
+  cmake --build . --target fmt
+  test_status=$?
 fi
 
 if [ $test_status -eq 0 ]; then

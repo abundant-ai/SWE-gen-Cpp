@@ -8,12 +8,30 @@ cp "/tests/format-test.cc" "test/format-test.cc"
 mkdir -p "test"
 cp "/tests/mock-allocator.h" "test/mock-allocator.h"
 
-# For this PR, the bug involves basic_memory_buffer not being movable/assignable
-# with non-propagating allocators. The test verifies that the fixed allocator-aware
-# logic works correctly by running the test cases.
-# Rebuild and run the specific test target after copying updated test files
-cmake --build build --target format-test && build/bin/format-test
+# Remove test/format file to avoid header collision with std::format
+rm -f test/format
+
+# Reconfigure CMake to pick up the new test file
+cd build
+cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_STANDARD=14 \
+    -DFMT_TEST=ON \
+    -DBUILD_SHARED_LIBS=ON \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -DFMT_PEDANTIC=ON \
+    -DCMAKE_CXX_FLAGS="-I/usr/local/include/workaround"
+
+# Build the specific test target
+cmake --build . --target format-test
 test_status=$?
+
+if [ $test_status -eq 0 ]; then
+  # Run the specific test
+  ./bin/format-test
+  test_status=$?
+fi
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

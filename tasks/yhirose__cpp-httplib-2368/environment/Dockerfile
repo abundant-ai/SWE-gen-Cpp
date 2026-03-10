@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     patch \
     build-essential \
+    file \
     && rm -rf /var/lib/apt/lists/*
 
 # Install C++ compiler and required libraries for cpp-httplib
@@ -31,10 +32,7 @@ RUN git clone https://github.com/yhirose/cpp-httplib.git src && \
 
 WORKDIR /app/src
 
-# Generate certificates needed by tests
-RUN cd test && ./gen-certs.sh
-
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)

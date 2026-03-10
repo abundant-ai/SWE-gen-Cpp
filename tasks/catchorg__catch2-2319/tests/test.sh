@@ -41,55 +41,33 @@ cp "/tests/SelfTest/Baselines/xml.sw.multi.approved.txt" "tests/SelfTest/Baselin
 mkdir -p "tests/SelfTest/UsageTests"
 cp "/tests/SelfTest/UsageTests/MatchersRanges.tests.cpp" "tests/SelfTest/UsageTests/MatchersRanges.tests.cpp"
 
-# Reconfigure CMake to pick up the updated test files
+# Reconfigure CMake with testing enabled
 if ! cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
     -DCATCH_BUILD_TESTING=ON \
-    -DCATCH_BUILD_EXTRA_TESTS=ON \
-    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
+    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator -Wno-error=unused-but-set-variable" \
     -G Ninja 2>&1; then
     echo "FAIL: CMake reconfiguration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Rebuild to pick up changes (including the new matchers and updated test cases)
-# The fix adds AllTrue(), NoneTrue(), and AnyTrue() matchers
+# Rebuild to incorporate the updated test files
 if ! cmake --build build 2>&1; then
     echo "FAIL: Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Verify that the fix has been applied by checking for the new matcher functions
-# The fix adds AllTrueMatcher, NoneTrueMatcher, and AnyTrueMatcher classes
-if ! grep -q "class AllTrueMatcher" src/catch2/matchers/catch_matchers_quantifiers.hpp; then
-    echo "FAIL: AllTrueMatcher class not found in header file"
+# Run the MatchersRanges tests
+if ! ctest --test-dir build -R "MatchersRanges" --output-on-failure 2>&1; then
+    echo "FAIL: MatchersRanges tests failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-if ! grep -q "class NoneTrueMatcher" src/catch2/matchers/catch_matchers_quantifiers.hpp; then
-    echo "FAIL: NoneTrueMatcher class not found in header file"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-if ! grep -q "class AnyTrueMatcher" src/catch2/matchers/catch_matchers_quantifiers.hpp; then
-    echo "FAIL: AnyTrueMatcher class not found in header file"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-# Check that the new implementation file exists
-if [ ! -f src/catch2/matchers/catch_matchers_quantifiers.cpp ]; then
-    echo "FAIL: catch_matchers_quantifiers.cpp implementation file not found"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-echo "SUCCESS: Build succeeded and new matchers are present"
+echo "SUCCESS: All tests passed"
 test_status=0
 
 if [ $test_status -eq 0 ]; then

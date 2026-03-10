@@ -1,0 +1,428 @@
+diff --git a/modules/videoio/src/cap_avfoundation_mac.mm b/modules/videoio/src/cap_avfoundation_mac.mm
+index dfc7e64d86..f68316c815 100644
+--- a/modules/videoio/src/cap_avfoundation_mac.mm
++++ b/modules/videoio/src/cap_avfoundation_mac.mm
+@@ -45,7 +45,6 @@
+ #include "precomp.hpp"
+ #include "opencv2/imgproc.hpp"
+ #include <stdio.h>
+-#include <AvailabilityMacros.h>
+ #import <AVFoundation/AVFoundation.h>
+ 
+ #define CV_CAP_MODE_BGR CV_FOURCC_MACRO('B','G','R','3')
+@@ -185,14 +184,12 @@ private:
+ 
+ class CvVideoWriter_AVFoundation : public CvVideoWriter {
+     public:
+-        CvVideoWriter_AVFoundation(const std::string &filename, int fourcc, double fps, CvSize frame_size, int is_color);
++        CvVideoWriter_AVFoundation(const char* filename, int fourcc,
++                double fps, CvSize frame_size,
++                int is_color=1);
+         ~CvVideoWriter_AVFoundation();
+         bool writeFrame(const IplImage* image) CV_OVERRIDE;
+         int getCaptureDomain() const CV_OVERRIDE { return cv::CAP_AVFOUNDATION; }
+-        bool isOpened() const
+-        {
+-            return is_good;
+-        }
+     private:
+         IplImage* argbimage;
+ 
+@@ -207,7 +204,6 @@ class CvVideoWriter_AVFoundation : public CvVideoWriter {
+         CvSize movieSize;
+         int movieColor;
+         unsigned long mFrameNum;
+-        bool is_good;
+ };
+ 
+ /****************** Implementation of interface functions ********************/
+@@ -234,13 +230,8 @@ cv::Ptr<cv::IVideoCapture> cv::create_AVFoundation_capture_cam(int index)
+ cv::Ptr<cv::IVideoWriter> cv::create_AVFoundation_writer(const std::string& filename, int fourcc, double fps, const cv::Size &frameSize, bool isColor)
+ {
+     CvSize sz = { frameSize.width, frameSize.height };
+-    CvVideoWriter_AVFoundation* wrt = new CvVideoWriter_AVFoundation(filename, fourcc, fps, sz, isColor);
+-    if (wrt->isOpened())
+-    {
+-        return cv::makePtr<cv::LegacyWriter>(wrt);
+-    }
+-    delete wrt;
+-    return NULL;
++    CvVideoWriter_AVFoundation* wrt = new CvVideoWriter_AVFoundation(filename.c_str(), fourcc, fps, sz, isColor);
++    return cv::makePtr<cv::LegacyWriter>(wrt);
+ }
+ 
+ /********************** Implementation of Classes ****************************/
+@@ -1115,20 +1106,38 @@ bool CvCaptureFile::setProperty(int property_id, double value) {
+  *****************************************************************************/
+ 
+ 
+-CvVideoWriter_AVFoundation::CvVideoWriter_AVFoundation(const std::string &filename, int fourcc, double fps, CvSize frame_size, int is_color)
+-    : argbimage(nil), mMovieWriter(nil), mMovieWriterInput(nil), mMovieWriterAdaptor(nil), path(nil),
+-    codec(nil), fileType(nil), mMovieFPS(fps), movieSize(frame_size), movieColor(is_color), mFrameNum(0),
+-    is_good(true)
+-{
+-    if (mMovieFPS <= 0 || movieSize.width <= 0 || movieSize.height <= 0)
+-    {
+-        is_good = false;
+-        return;
+-    }
++CvVideoWriter_AVFoundation::CvVideoWriter_AVFoundation(const char* filename, int fourcc,
++        double fps, CvSize frame_size,
++        int is_color) {
++
+     NSAutoreleasePool* localpool = [[NSAutoreleasePool alloc] init];
+ 
++
++    mFrameNum = 0;
++    mMovieFPS = fps;
++    movieSize = frame_size;
++    movieColor = is_color;
+     argbimage = cvCreateImage(movieSize, IPL_DEPTH_8U, 4);
+-    path = [[[NSString stringWithUTF8String:filename.c_str()] stringByExpandingTildeInPath] retain];
++    path = [[[NSString stringWithCString:filename encoding:NSASCIIStringEncoding] stringByExpandingTildeInPath] retain];
++
++
++    /*
++         AVFileTypeQuickTimeMovie
++         UTI for the QuickTime movie file format.
++         The value of this UTI is com.apple.quicktime-movie. Files are identified with the .mov and .qt extensions.
++
++         AVFileTypeMPEG4
++         UTI for the MPEG-4 file format.
++         The value of this UTI is public.mpeg-4. Files are identified with the .mp4 extension.
++
++         AVFileTypeAppleM4V
++         UTI for the iTunes video file format.
++         The value of this UTI is com.apple.mpeg-4-video. Files are identified with the .m4v extension.
++
++         AVFileType3GPP
++         UTI for the 3GPP file format.
++         The value of this UTI is public.3gpp. Files are identified with the .3gp, .3gpp, and .sdv extensions.
++     */
+ 
+     NSString *fileExt =[[[path pathExtension] lowercaseString] copy];
+     if ([fileExt isEqualToString:@"mov"] || [fileExt isEqualToString:@"qt"]){
+@@ -1137,8 +1146,12 @@ CvVideoWriter_AVFoundation::CvVideoWriter_AVFoundation(const std::string &filena
+         fileType = [AVFileTypeMPEG4 copy];
+     }else if ([fileExt isEqualToString:@"m4v"]){
+         fileType = [AVFileTypeAppleM4V copy];
++#if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
++    }else if ([fileExt isEqualToString:@"3gp"] || [fileExt isEqualToString:@"3gpp"] || [fileExt isEqualToString:@"sdv"]  ){
++        fileType = [AVFileType3GPP copy];
++#endif
+     } else{
+-        is_good = false;
++        fileType = [AVFileTypeMPEG4 copy];  //default mp4
+     }
+     [fileExt release];
+ 
+@@ -1150,7 +1163,8 @@ CvVideoWriter_AVFoundation::CvVideoWriter_AVFoundation(const std::string &filena
+     cc[4] = 0;
+     int cc2 = CV_FOURCC(cc[0], cc[1], cc[2], cc[3]);
+     if (cc2!=fourcc) {
+-        is_good = false;
++        fprintf(stderr, "OpenCV: Didn't properly encode FourCC. Expected 0x%08X but got 0x%08X.\n", fourcc, cc2);
++        //exception;
+     }
+ 
+     // Two codec supported AVVideoCodecH264 AVVideoCodecJPEG
+@@ -1161,59 +1175,59 @@ CvVideoWriter_AVFoundation::CvVideoWriter_AVFoundation(const std::string &filena
+     }else if(fourcc == CV_FOURCC('H','2','6','4') || fourcc == CV_FOURCC('a','v','c','1')){
+             codec = [AVVideoCodecH264 copy];
+     }else{
+-        is_good = false;
++        codec = [AVVideoCodecH264 copy]; // default canonical H264.
++
+     }
+ 
+     //NSLog(@"Path: %@", path);
+ 
+-    if (is_good)
+-    {
+-        NSError *error = nil;
++    NSError *error = nil;
++
+ 
++    // Make sure the file does not already exist. Necessary to overwirte??
++    /*
++    NSFileManager *fileManager = [NSFileManager defaultManager];
++    if ([fileManager fileExistsAtPath:path]){
++        [fileManager removeItemAtPath:path error:&error];
++    }
++    */
+ 
+-        // Make sure the file does not already exist. Necessary to overwirte??
+-        /*
+-        NSFileManager *fileManager = [NSFileManager defaultManager];
+-        if ([fileManager fileExistsAtPath:path]){
+-            [fileManager removeItemAtPath:path error:&error];
+-        }
+-        */
++    // Wire the writer:
++    // Supported file types:
++    //      AVFileTypeQuickTimeMovie AVFileTypeMPEG4 AVFileTypeAppleM4V AVFileType3GPP
+ 
+-        // Wire the writer:
+-        // Supported file types:
+-        //      AVFileTypeQuickTimeMovie AVFileTypeMPEG4 AVFileTypeAppleM4V AVFileType3GPP
++    mMovieWriter = [[AVAssetWriter alloc] initWithURL:[NSURL fileURLWithPath:path]
++        fileType:fileType
++        error:&error];
++    //NSParameterAssert(mMovieWriter);
+ 
+-        mMovieWriter = [[AVAssetWriter alloc] initWithURL:[NSURL fileURLWithPath:path]
+-            fileType:fileType
+-            error:&error];
+-        //NSParameterAssert(mMovieWriter);
++    NSDictionary *videoSettings = [NSDictionary dictionaryWithObjectsAndKeys:
++        codec, AVVideoCodecKey,
++        [NSNumber numberWithInt:movieSize.width], AVVideoWidthKey,
++        [NSNumber numberWithInt:movieSize.height], AVVideoHeightKey,
++        nil];
+ 
+-        NSDictionary *videoSettings = [NSDictionary dictionaryWithObjectsAndKeys:
+-            codec, AVVideoCodecKey,
+-            [NSNumber numberWithInt:movieSize.width], AVVideoWidthKey,
+-            [NSNumber numberWithInt:movieSize.height], AVVideoHeightKey,
+-            nil];
++    mMovieWriterInput = [[AVAssetWriterInput
++        assetWriterInputWithMediaType:AVMediaTypeVideo
++        outputSettings:videoSettings] retain];
+ 
+-        mMovieWriterInput = [[AVAssetWriterInput
+-            assetWriterInputWithMediaType:AVMediaTypeVideo
+-            outputSettings:videoSettings] retain];
++    //NSParameterAssert(mMovieWriterInput);
++    //NSParameterAssert([mMovieWriter canAddInput:mMovieWriterInput]);
+ 
+-        //NSParameterAssert(mMovieWriterInput);
+-        //NSParameterAssert([mMovieWriter canAddInput:mMovieWriterInput]);
++    [mMovieWriter addInput:mMovieWriterInput];
+ 
+-        [mMovieWriter addInput:mMovieWriterInput];
++    mMovieWriterAdaptor = [[AVAssetWriterInputPixelBufferAdaptor alloc] initWithAssetWriterInput:mMovieWriterInput sourcePixelBufferAttributes:nil];
+ 
+-        mMovieWriterAdaptor = [[AVAssetWriterInputPixelBufferAdaptor alloc] initWithAssetWriterInput:mMovieWriterInput sourcePixelBufferAttributes:nil];
+ 
++    //Start a session:
++    [mMovieWriter startWriting];
++    [mMovieWriter startSessionAtSourceTime:kCMTimeZero];
+ 
+-        //Start a session:
+-        [mMovieWriter startWriting];
+-        [mMovieWriter startSessionAtSourceTime:kCMTimeZero];
+ 
+-        if(mMovieWriter.status == AVAssetWriterStatusFailed){
+-            NSLog(@"AVF: AVAssetWriter status: %@", [mMovieWriter.error localizedDescription]);
+-            is_good = false;
+-        }
++    if(mMovieWriter.status == AVAssetWriterStatusFailed){
++        NSLog(@"AVF: AVAssetWriter status: %@", [mMovieWriter.error localizedDescription]);
++        // TODO: error handling, cleanup. Throw execption?
++        // return;
+     }
+ 
+     [localpool drain];
+@@ -1223,22 +1237,15 @@ CvVideoWriter_AVFoundation::CvVideoWriter_AVFoundation(const std::string &filena
+ CvVideoWriter_AVFoundation::~CvVideoWriter_AVFoundation() {
+     NSAutoreleasePool* localpool = [[NSAutoreleasePool alloc] init];
+ 
+-    if (mMovieWriterInput && mMovieWriter && mMovieWriterAdaptor)
+-    {
+-        [mMovieWriterInput markAsFinished];
+-        [mMovieWriter finishWriting];
+-        [mMovieWriter release];
+-        [mMovieWriterInput release];
+-        [mMovieWriterAdaptor release];
+-    }
+-    if (path)
+-        [path release];
+-    if (codec)
+-        [codec release];
+-    if (fileType)
+-        [fileType release];
+-    if (argbimage)
+-        cvReleaseImage(&argbimage);
++    [mMovieWriterInput markAsFinished];
++    [mMovieWriter finishWriting];
++    [mMovieWriter release];
++    [mMovieWriterInput release];
++    [mMovieWriterAdaptor release];
++    [path release];
++    [codec release];
++    [fileType release];
++    cvReleaseImage(&argbimage);
+ 
+     [localpool drain];
+ 
+diff --git a/modules/videoio/src/cap_gstreamer.cpp b/modules/videoio/src/cap_gstreamer.cpp
+index 3c5383d543..4378171b3c 100644
+--- a/modules/videoio/src/cap_gstreamer.cpp
++++ b/modules/videoio/src/cap_gstreamer.cpp
+@@ -1142,7 +1142,7 @@ public:
+ 
+     int getCaptureDomain() const CV_OVERRIDE { return cv::CAP_GSTREAMER; }
+ 
+-    bool open(const std::string &filename, int fourcc,
++    bool open(const char* filename, int fourcc,
+                        double fps, const Size &frameSize, bool isColor );
+     void close();
+     bool writeFrame( const IplImage* image ) CV_OVERRIDE;
+@@ -1280,12 +1280,13 @@ const char* CvVideoWriter_GStreamer::filenameToMimetype(const char *filename)
+  * If the file extension did was not recognize, an avi container is used
+  *
+  */
+-bool CvVideoWriter_GStreamer::open( const std::string &filename, int fourcc,
++bool CvVideoWriter_GStreamer::open( const char * filename, int fourcc,
+                                     double fps, const cv::Size &frameSize, bool is_color )
+ {
+     // check arguments
+-    if (filename.empty() || frameSize.width <= 0 ||  frameSize.height <= 0 || fps <= 0)
+-        return false;
++    assert (filename);
++    assert (fps > 0);
++    assert (frameSize.width > 0  &&  frameSize.height > 0);
+ 
+     // init gstreamer
+     gst_initializer::init();
+@@ -1312,7 +1313,7 @@ bool CvVideoWriter_GStreamer::open( const std::string &filename, int fourcc,
+     // we first try to construct a pipeline from the given string.
+     // if that fails, we assume it is an ordinary filename
+ 
+-    encodebin = gst_parse_launch(filename.c_str(), &err);
++    encodebin = gst_parse_launch(filename, &err);
+     manualpipeline = (encodebin != NULL);
+ 
+     if(manualpipeline)
+@@ -1376,7 +1377,7 @@ bool CvVideoWriter_GStreamer::open( const std::string &filename, int fourcc,
+         }
+ 
+         //create container caps from file extension
+-        mime = filenameToMimetype(filename.c_str());
++        mime = filenameToMimetype(filename);
+         if (!mime) {
+             CV_WARN("Gstreamer Opencv backend does not support this file type.");
+             return false;
+@@ -1395,7 +1396,7 @@ bool CvVideoWriter_GStreamer::open( const std::string &filename, int fourcc,
+         g_object_set(G_OBJECT(encodebin), "profile", containerprofile, NULL);
+         source = gst_element_factory_make("appsrc", NULL);
+         file = gst_element_factory_make("filesink", NULL);
+-        g_object_set(G_OBJECT(file), "location", filename.c_str(), NULL);
++        g_object_set(G_OBJECT(file), "location", filename, NULL);
+     }
+ 
+     if (fourcc == CV_FOURCC('M','J','P','G') && frameSize.height == 1)
+@@ -1540,11 +1541,12 @@ bool CvVideoWriter_GStreamer::writeFrame( const IplImage * image )
+     return true;
+ }
+ 
+-Ptr<IVideoWriter> cv::create_GStreamer_writer(const std::string &filename, int fourcc, double fps, const cv::Size &frameSize, bool isColor)
++Ptr<IVideoWriter> cv::create_GStreamer_writer(const std::string& filename, int fourcc, double fps, const cv::Size &frameSize, bool isColor)
+ {
+     CvVideoWriter_GStreamer* wrt = new CvVideoWriter_GStreamer;
+-    if (wrt->open(filename, fourcc, fps, frameSize, isColor))
++    if (wrt->open(filename.c_str(), fourcc, fps, frameSize, isColor))
+         return makePtr<LegacyWriter>(wrt);
++
+     delete wrt;
+     return 0;
+ }
+diff --git a/modules/videoio/src/cap_mfx_writer.cpp b/modules/videoio/src/cap_mfx_writer.cpp
+index 449d24da84..3204d3711d 100644
+--- a/modules/videoio/src/cap_mfx_writer.cpp
++++ b/modules/videoio/src/cap_mfx_writer.cpp
+@@ -41,12 +41,6 @@ VideoWriter_IntelMFX::VideoWriter_IntelMFX(const String &filename, int _fourcc,
+         return;
+     }
+ 
+-    if (fps <= 0)
+-    {
+-        MSG(cerr << "MFX: Invalid FPS passed to encoder" << endl);
+-        return;
+-    }
+-
+     // Init device and session
+     deviceHandler = createDeviceHandler();
+     session = new MFXVideoSession();
+diff --git a/modules/videoio/test/test_dynamic.cpp b/modules/videoio/test/test_dynamic.cpp
+index dc787e80ab..603336a9cd 100644
+--- a/modules/videoio/test/test_dynamic.cpp
++++ b/modules/videoio/test/test_dynamic.cpp
+@@ -79,51 +79,5 @@ TEST(videoio_dynamic, basic_write)
+     remove(filename.c_str());
+ }
+ 
+-TEST(videoio_dynamic, write_invalid)
+-{
+-    vector<VideoCaptureAPIs> backends = videoio_registry::getWriterBackends();
+-    for (VideoCaptureAPIs be : backends)
+-    {
+-        SCOPED_TRACE(be);
+-        const string filename = cv::tempfile(".mkv");
+-        VideoWriter writer;
+-        bool res = true;
+-
+-        // Bad FourCC
+-        EXPECT_NO_THROW(res = writer.open(filename, be, VideoWriter::fourcc('A', 'B', 'C', 'D'), 1, Size(640, 480), true));
+-        EXPECT_FALSE(res);
+-        EXPECT_FALSE(writer.isOpened());
+-
+-        // Empty filename
+-        EXPECT_NO_THROW(res = writer.open(String(), be, VideoWriter::fourcc('H', '2', '6', '4'), 1, Size(640, 480), true));
+-        EXPECT_FALSE(res);
+-        EXPECT_FALSE(writer.isOpened());
+-        EXPECT_NO_THROW(res = writer.open(String(), be, VideoWriter::fourcc('M', 'J', 'P', 'G'), 1, Size(640, 480), true));
+-        EXPECT_FALSE(res);
+-        EXPECT_FALSE(writer.isOpened());
+-
+-        // zero FPS
+-        EXPECT_NO_THROW(res = writer.open(filename, be, VideoWriter::fourcc('H', '2', '6', '4'), 0, Size(640, 480), true));
+-        EXPECT_FALSE(res);
+-        EXPECT_FALSE(writer.isOpened());
+-
+-        // cleanup
+-        EXPECT_NO_THROW(writer.release());
+-        remove(filename.c_str());
+-    }
+-
+-    // Generic
+-    {
+-        VideoWriter writer;
+-        bool res = true;
+-        EXPECT_NO_THROW(res = writer.open(std::string(), VideoWriter::fourcc('H', '2', '6', '4'), 1, Size(640, 480)));
+-        EXPECT_FALSE(res);
+-        EXPECT_FALSE(writer.isOpened());
+-        EXPECT_NO_THROW(res = writer.open(std::string(), VideoWriter::fourcc('M', 'J', 'P', 'G'), 1, Size(640, 480)));
+-        EXPECT_FALSE(res);
+-        EXPECT_FALSE(writer.isOpened());
+-    }
+-}
+-
+ 
+ }} // opencv_test::<anonymous>::
+diff --git a/modules/videoio/test/test_mfx.cpp b/modules/videoio/test/test_mfx.cpp
+index 2f69ea75db..1c8f48e097 100644
+--- a/modules/videoio/test/test_mfx.cpp
++++ b/modules/videoio/test/test_mfx.cpp
+@@ -35,7 +35,7 @@ TEST(videoio_mfx, write_invalid)
+     ASSERT_NO_THROW(res = writer.open(String(), CAP_INTEL_MFX, VideoWriter::fourcc('H', '2', '6', '4'), 1, Size(640, 480), true));
+     EXPECT_FALSE(res);
+     EXPECT_FALSE(writer.isOpened());
+-    ASSERT_NO_THROW(res = writer.open(filename, CAP_INTEL_MFX, VideoWriter::fourcc('H', '2', '6', '4'), 0, Size(640, 480), true));
++    ASSERT_ANY_THROW(res = writer.open(filename, CAP_INTEL_MFX, VideoWriter::fourcc('H', '2', '6', '4'), 0, Size(640, 480), true));
+     EXPECT_FALSE(res);
+     EXPECT_FALSE(writer.isOpened());
+ 
+diff --git a/modules/videoio/test/test_video_io.cpp b/modules/videoio/test/test_video_io.cpp
+index faf7842cff..9634420510 100644
+--- a/modules/videoio/test/test_video_io.cpp
++++ b/modules/videoio/test/test_video_io.cpp
+@@ -381,6 +381,8 @@ static Ext_Fourcc_PSNR synthetic_params[] = {
+    makeParam("mp4", "MJPG", 30.f, CAP_AVFOUNDATION),
+    makeParam("m4v", "H264", 30.f, CAP_AVFOUNDATION),
+    makeParam("m4v", "MJPG", 30.f, CAP_AVFOUNDATION),
++   makeParam("3gp", "H264", 30.f, CAP_AVFOUNDATION),
++   makeParam("3gp", "MJPG", 30.f, CAP_AVFOUNDATION),
+ #endif
+ 
+     makeParam("avi", "XVID", 30.f, CAP_FFMPEG),

@@ -1,0 +1,67 @@
+diff --git a/modules/dnn/src/layers/prior_box_layer.cpp b/modules/dnn/src/layers/prior_box_layer.cpp
+index 1e41585672..0756f38f80 100644
+--- a/modules/dnn/src/layers/prior_box_layer.cpp
++++ b/modules/dnn/src/layers/prior_box_layer.cpp
+@@ -369,11 +369,15 @@ public:
+         // clip the prior's coordinate such that it is within [0, 1]
+         if (_clip)
+         {
+-            ocl::Kernel kernel("clip", ocl::dnn::prior_box_oclsrc, opts);
+-            size_t nthreads = _layerHeight * _layerWidth * _numPriors * 4;
+-            if (!kernel.args((int)nthreads, ocl::KernelArg::PtrReadWrite(outputs[0]))
+-                       .run(1, &nthreads, NULL, false))
+-                return false;
++            Mat mat = outputs[0].getMat(ACCESS_READ);
++            int aspect_count = (_maxSize > 0) ? 1 : 0;
++            int offset = nthreads * 4 * _offsetsX.size() * (1 + aspect_count + _aspectRatios.size());
++            float* outputPtr = mat.ptr<float>() + offset;
++            int _outChannelSize = _layerHeight * _layerWidth * _numPriors * 4;
++            for (size_t d = 0; d < _outChannelSize; ++d)
++            {
++                outputPtr[d] = std::min<float>(std::max<float>(outputPtr[d], 0.), 1.);
++            }
+         }
+ 
+         // set the variance.
+diff --git a/modules/dnn/src/opencl/prior_box.cl b/modules/dnn/src/opencl/prior_box.cl
+index d898a13ffd..6ffbf8df29 100644
+--- a/modules/dnn/src/opencl/prior_box.cl
++++ b/modules/dnn/src/opencl/prior_box.cl
+@@ -107,13 +107,3 @@ __kernel void set_variance(const int nthreads,
+         vstore4(var_vec, 0, dst + offset + index * 4);
+     }
+ }
+-
+-__kernel void clip(const int nthreads,
+-                   __global Dtype* dst)
+-{
+-    for (int index = get_global_id(0); index < nthreads; index += get_global_size(0))
+-    {
+-        Dtype4 vec = vload4(index, dst);
+-        vstore4(clamp(vec, 0, 1), index, dst);
+-    }
+-}
+diff --git a/modules/dnn/test/test_layers.cpp b/modules/dnn/test/test_layers.cpp
+index ca6645057b..bd567ce72e 100644
+--- a/modules/dnn/test/test_layers.cpp
++++ b/modules/dnn/test/test_layers.cpp
+@@ -763,7 +763,8 @@ TEST_P(Test_Caffe_layers, Average_pooling_kernel_area)
+ // Test PriorBoxLayer in case of no aspect ratios (just squared proposals).
+ TEST_P(Test_Caffe_layers, PriorBox_squares)
+ {
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE)
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE ||
++        (backend == DNN_BACKEND_OPENCV && (target == DNN_TARGET_OPENCL || target == DNN_TARGET_OPENCL_FP16)))
+         throw SkipTestException("");
+     LayerParams lp;
+     lp.name = "testPriorBox";
+@@ -790,8 +791,7 @@ TEST_P(Test_Caffe_layers, PriorBox_squares)
+                                        0.25, 0.0, 1.0, 1.0,
+                                        0.1f, 0.1f, 0.2f, 0.2f,
+                                        0.1f, 0.1f, 0.2f, 0.2f);
+-    double l1 = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 2e-5 : 1e-5;
+-    normAssert(out.reshape(1, 4), ref, "", l1);
++    normAssert(out.reshape(1, 4), ref);
+ }
+ 
+ typedef TestWithParam<tuple<int, int> > Layer_Test_DWconv_Prelu;

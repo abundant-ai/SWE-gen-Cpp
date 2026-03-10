@@ -31,12 +31,19 @@ WORKDIR /app/src
 # Use Clang as the C++ compiler
 ENV CC=clang
 ENV CXX=clang++
-ENV CXXFLAGS="-Wno-error=deprecated-literal-operator"
+ENV CXXFLAGS="-Wno-error=deprecated-literal-operator -Wno-error=unused-but-set-variable"
 
-# Configure and build Catch2 with CMake
+# Fix missing cstdint includes - add to all relevant source/header files
+RUN find src/catch2 -type f \( -name "*.cpp" -o -name "*.hpp" \) \
+    -exec grep -l "uint\(8\|16\|32\|64\)_t" {} \; | \
+    xargs -I {} sh -c 'grep -q "#include <cstdint>" {} || sed -i "7i #include <cstdint>" {}'
+
+# Configure and build Catch2 with CMake (enable tests)
 RUN cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
+    -DCATCH_DEVELOPMENT_BUILD=ON \
+    -DCATCH_BUILD_TESTING=ON \
+    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator -Wno-error=unused-but-set-variable" \
     -G Ninja
 
 # Fix MINSIGSTKSZ constexpr issue with newer glibc - hardcode a safe value
@@ -46,12 +53,17 @@ RUN find . \( -name "*.cpp" -o -name "*.hpp" \) -type f -exec grep -l "sigStackS
 # Build Catch2
 RUN cmake --build build
 
-# Reset tracked files so bug.patch applies cleanly
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
+
+# Fix missing cstdint includes again (undone by git reset and patch)
+RUN find src/catch2 -type f \( -name "*.cpp" -o -name "*.hpp" \) \
+    -exec grep -l "uint\(8\|16\|32\|64\)_t" {} \; | \
+    xargs -I {} sh -c 'grep -q "#include <cstdint>" {} || sed -i "7i #include <cstdint>" {}'
 
 # Fix MINSIGSTKSZ constexpr issue again (undone by git reset)
 RUN find . \( -name "*.cpp" -o -name "*.hpp" \) -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \

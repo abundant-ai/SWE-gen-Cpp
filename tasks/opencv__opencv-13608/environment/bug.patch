@@ -1,0 +1,125 @@
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 92975a7560..b83630a67f 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -2600,7 +2600,7 @@ Net Net::readFromModelOptimizer(const String& xml, const String& bin)
+     backendNode->net = Ptr<InfEngineBackendNet>(new InfEngineBackendNet(ieNet));
+     for (auto& it : ieNet.getOutputsInfo())
+     {
+-        Ptr<Layer> cvLayer(new InfEngineBackendLayer(ieNet));
++        Ptr<Layer> cvLayer(new InfEngineBackendLayer(it.second));
+         InferenceEngine::CNNLayerPtr ieLayer = ieNet.getLayerByName(it.first.c_str());
+         CV_Assert(ieLayer);
+ 
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index 6d46f304f5..658ffd0a2e 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -718,33 +718,19 @@ Mat infEngineBlobToMat(const InferenceEngine::Blob::Ptr& blob)
+     return Mat(size, CV_32F, (void*)blob->buffer());
+ }
+ 
++InfEngineBackendLayer::InfEngineBackendLayer(const InferenceEngine::DataPtr& output_)
++{
++    output = output_;
++}
++
+ bool InfEngineBackendLayer::getMemoryShapes(const std::vector<MatShape> &inputs,
+                                             const int requiredOutputs,
+                                             std::vector<MatShape> &outputs,
+                                             std::vector<MatShape> &internals) const
+ {
+-    InferenceEngine::ICNNNetwork::InputShapes inShapes = t_net.getInputShapes();
+-    InferenceEngine::ICNNNetwork::InputShapes::iterator itr;
+-    bool equal_flag = true;
+-    size_t i = 0;
+-    for (itr = inShapes.begin(); itr != inShapes.end(); ++itr)
+-    {
+-        InferenceEngine::SizeVector currentInShape(inputs[i].begin(), inputs[i].end());
+-        if (itr->second != currentInShape)
+-        {
+-            itr->second = currentInShape;
+-            equal_flag = false;
+-        }
+-        i++;
+-    }
+-
+-    if (!equal_flag)
+-    {
+-        InferenceEngine::CNNNetwork curr_t_net(t_net);
+-        curr_t_net.reshape(inShapes);
+-    }
+-    std::vector<size_t> dims = t_net.getOutputsInfo()[name]->getDims();
+-    outputs.push_back(MatShape(dims.begin(), dims.end()));
++    std::vector<size_t> dims = output->dims;
++    std::vector<int> shape(dims.rbegin(), dims.rend());
++    outputs.assign(1, shape);
+     return false;
+ }
+ 
+diff --git a/modules/dnn/src/op_inf_engine.hpp b/modules/dnn/src/op_inf_engine.hpp
+index 89e3e339cf..122de51659 100644
+--- a/modules/dnn/src/op_inf_engine.hpp
++++ b/modules/dnn/src/op_inf_engine.hpp
+@@ -260,7 +260,7 @@ InferenceEngine::TBlob<int16_t>::Ptr convertFp16(const InferenceEngine::Blob::Pt
+ class InfEngineBackendLayer : public Layer
+ {
+ public:
+-    InfEngineBackendLayer(const InferenceEngine::CNNNetwork &t_net_) : t_net(t_net_) {};
++    InfEngineBackendLayer(const InferenceEngine::DataPtr& output);
+ 
+     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
+                                  const int requiredOutputs,
+@@ -273,7 +273,7 @@ public:
+     virtual bool supportBackend(int backendId) CV_OVERRIDE;
+ 
+ private:
+-    InferenceEngine::CNNNetwork t_net;
++    InferenceEngine::DataPtr output;
+ };
+ 
+ #endif  // HAVE_INF_ENGINE
+diff --git a/modules/dnn/test/test_layers.cpp b/modules/dnn/test/test_layers.cpp
+index 0928631448..62e625f03c 100644
+--- a/modules/dnn/test/test_layers.cpp
++++ b/modules/dnn/test/test_layers.cpp
+@@ -1008,8 +1008,8 @@ INSTANTIATE_TEST_CASE_P(/**/, Layer_Test_Convolution_DLDT,
+ // net.save('/path/to/caffemodel')
+ //
+ // 3. Convert using ModelOptimizer.
+-typedef testing::TestWithParam<tuple<int, int, Target, std::vector<int> > > Test_DLDT_two_inputs_3dim;
+-TEST_P(Test_DLDT_two_inputs_3dim, as_IR)
++typedef testing::TestWithParam<tuple<int, int, Target> > Test_DLDT_two_inputs;
++TEST_P(Test_DLDT_two_inputs, as_IR)
+ {
+     int firstInpType = get<0>(GetParam());
+     int secondInpType = get<1>(GetParam());
+@@ -1021,9 +1021,9 @@ TEST_P(Test_DLDT_two_inputs_3dim, as_IR)
+ #endif
+ 
+     Net net = readNet(_tf("net_two_inputs.xml"), _tf("net_two_inputs.bin"));
+-    std::vector<int> inpSize = get<3>(GetParam());
+-    Mat firstInp(3, inpSize.data(), firstInpType);
+-    Mat secondInp(3, inpSize.data(), secondInpType);
++    int inpSize[] = {1, 2, 3};
++    Mat firstInp(3, &inpSize[0], firstInpType);
++    Mat secondInp(3, &inpSize[0], secondInpType);
+     randu(firstInp, 0, 255);
+     randu(secondInp, 0, 255);
+ 
+@@ -1046,15 +1046,6 @@ TEST_P(Test_DLDT_two_inputs_3dim, as_IR)
+     }
+ }
+ 
+-std::vector< std::vector<int> > list_sizes{ {1, 2, 3}, {3, 2, 1}, {5, 5, 5}, {13, 7, 11} };
+-
+-INSTANTIATE_TEST_CASE_P(/*nothing*/, Test_DLDT_two_inputs_3dim, Combine(
+-  Values(CV_8U, CV_32F), Values(CV_8U, CV_32F),
+-  testing::ValuesIn(getAvailableTargets(DNN_BACKEND_INFERENCE_ENGINE)),
+-  testing::ValuesIn(list_sizes)
+-));
+-
+-typedef testing::TestWithParam<tuple<int, int, Target> > Test_DLDT_two_inputs;
+ TEST_P(Test_DLDT_two_inputs, as_backend)
+ {
+     static const float kScale = 0.5f;

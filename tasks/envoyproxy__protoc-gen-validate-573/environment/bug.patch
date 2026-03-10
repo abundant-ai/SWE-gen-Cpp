@@ -1,0 +1,156 @@
+diff --git a/Makefile b/Makefile
+index aad3789..9585457 100644
+--- a/Makefile
++++ b/Makefile
+@@ -38,7 +38,7 @@ gazelle: ## runs gazelle against the codebase to generate Bazel BUILD files
+ 
+ .PHONY: lint
+ lint: bin/golint bin/shadow ## lints the package for common code smells
+-	test -z "$(shell gofmt -d -s ./*.go)" || (gofmt -d -s ./*.go && exit 1)
++	test -z "$(gofmt -d -s ./*.go)" || (gofmt -d -s ./*.go && exit 1)
+ 	# golint -set_exit_status
+ 	# check for variable shadowing
+ 	go vet -vettool=$(shell pwd)/bin/shadow ./...
+diff --git a/templates/cc/register.go b/templates/cc/register.go
+index 7792e77..615932c 100644
+--- a/templates/cc/register.go
++++ b/templates/cc/register.go
+@@ -318,8 +318,7 @@ func (fns CCFuncs) cType(t pgs.FieldType) string {
+ 		return fns.cTypeOfString(fns.Type(t.Field()).Element().String())
+ 	}
+ 
+-	// Use Value() to strip any potential pointer type.
+-	return fns.cTypeOfString(fns.Type(t.Field()).Value().String())
++	return fns.cTypeOfString(fns.Type(t.Field()).String())
+ }
+ 
+ func (fns CCFuncs) cTypeOfString(s string) string {
+diff --git a/templates/go/file.go b/templates/go/file.go
+index 8e382a3..fdb359a 100644
+--- a/templates/go/file.go
++++ b/templates/go/file.go
+@@ -41,7 +41,7 @@ var (
+ 	_ = sort.Sort
+ 
+ 	{{ range $pkg, $path := enumPackages (externalEnums .) }}
+-	_ = {{ $pkg }}.{{ enumName (index (externalEnums $) 0) }}(0)
++		_ = {{ $pkg }}.{{ (index (externalEnums $) 0).Parent.Name }}_{{ (index (externalEnums $) 0).Name }}(0)
+ 	{{ end }}
+ )
+ 
+diff --git a/templates/goshared/register.go b/templates/goshared/register.go
+index 8eacfcc..a6a039f 100644
+--- a/templates/goshared/register.go
++++ b/templates/goshared/register.go
+@@ -48,7 +48,6 @@ func Register(tpl *template.Template, params pgs.Parameters) {
+ 		"typ":           fns.Type,
+ 		"unwrap":        fns.unwrap,
+ 		"externalEnums": fns.externalEnums,
+-		"enumName":      fns.enumName,
+ 		"enumPackages":  fns.enumPackages,
+ 	})
+ 
+@@ -229,8 +228,7 @@ func (fns goSharedFuncs) inType(f pgs.Field, x interface{}) string {
+ 			return fns.Type(f).String()
+ 		}
+ 	default:
+-		// Use Value() to strip any potential pointer type.
+-		return fns.Type(f).Value().String()
++		return fns.Type(f).String()
+ 	}
+ }
+ 
+@@ -328,20 +326,6 @@ func (fns goSharedFuncs) externalEnums(file pgs.File) []pgs.Enum {
+ 	return out
+ }
+ 
+-func (fns goSharedFuncs) enumName(enum pgs.Enum) string {
+-	out := string(enum.Name())
+-	parent := enum.Parent()
+-	for {
+-		message, ok := parent.(pgs.Message)
+-		if ok {
+-			out = string(message.Name()) + "_" + out
+-			parent = message.Parent()
+-		} else {
+-			return out
+-		}
+-	}
+-}
+-
+ func (fns goSharedFuncs) enumPackages(enums []pgs.Enum) map[pgs.Name]pgs.FilePath {
+ 	out := make(map[pgs.Name]pgs.FilePath, len(enums))
+ 
+diff --git a/tests/harness/cases/enums.proto b/tests/harness/cases/enums.proto
+index ea46b08..010c6b1 100644
+--- a/tests/harness/cases/enums.proto
++++ b/tests/harness/cases/enums.proto
+@@ -39,7 +39,6 @@ message EnumNotIn      { TestEnum val = 1 [(validate.rules).enum = { not_in: [1]
+ message EnumAliasNotIn { TestEnumAlias val = 1 [(validate.rules).enum = { not_in: [1]}]; }
+ 
+ message EnumExternal { other_package.Embed.Enumerated val = 1 [(validate.rules).enum.defined_only = true]; }
+-message EnumExternal2 { other_package.Embed.DoubleEmbed.DoubleEnumerated val = 1 [(validate.rules).enum.defined_only = true]; }
+ 
+ message RepeatedEnumDefined { repeated TestEnum val = 1 [(validate.rules).repeated.items.enum.defined_only = true]; }
+ message RepeatedExternalEnumDefined { repeated other_package.Embed.Enumerated val = 1 [(validate.rules).repeated.items.enum.defined_only = true]; }
+diff --git a/tests/harness/cases/other_package/embed.proto b/tests/harness/cases/other_package/embed.proto
+index 22d1f14..59cefe0 100644
+--- a/tests/harness/cases/other_package/embed.proto
++++ b/tests/harness/cases/other_package/embed.proto
+@@ -7,10 +7,6 @@ import "validate/validate.proto";
+ 
+ // Validate message embedding across packages.
+ message Embed {
+-    message DoubleEmbed {
+-        enum DoubleEnumerated { VALUE = 0; }
+-    }
+-
+     int64 val = 1 [(validate.rules).int64.gt = 0];
+ 
+     enum Enumerated { VALUE = 0; }
+diff --git a/tests/harness/cases/strings.proto b/tests/harness/cases/strings.proto
+index 19fe29e..2efc937 100644
+--- a/tests/harness/cases/strings.proto
++++ b/tests/harness/cases/strings.proto
+@@ -37,9 +37,3 @@ message StringHttpHeaderName { string val = 1 [(validate.rules).string.well_know
+ message StringHttpHeaderValue     { string val = 1 [(validate.rules).string.well_known_regex = HTTP_HEADER_VALUE]; }
+ message StringValidHeader    { string val = 1 [(validate.rules).string = {well_known_regex: HTTP_HEADER_VALUE, strict: false}]; }
+ message StringUUIDIgnore     { string val = 1 [(validate.rules).string = {uuid: true, ignore_empty: true}]; }
+-
+-message StringInOneOf {
+-    oneof foo {
+-      string bar = 1 [(validate.rules).string = {in: "a" in: "b"}];
+-    }
+-  }
+diff --git a/tools.go b/tools.go
+index a35b07b..361c303 100644
+--- a/tools.go
++++ b/tools.go
+@@ -1,11 +1,10 @@
+-//go:build tools
+ // +build tools
+ 
+ package main
+ 
+ import (
++	_ "google.golang.org/protobuf/cmd/protoc-gen-go"
+ 	_ "golang.org/x/lint/golint"
+-	_ "golang.org/x/net/context"
+ 	_ "golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow"
+-	_ "google.golang.org/protobuf/cmd/protoc-gen-go"
++	_ "golang.org/x/net/context"
+ )
+diff --git a/validate/validate.h b/validate/validate.h
+index 8ad4c8b..15e2c4b 100644
+--- a/validate/validate.h
++++ b/validate/validate.h
+@@ -59,8 +59,7 @@ public:
+ 
+   static bool CheckMessage(const T& m, ValidationMsg* err)
+   {
+-    // Run typeid() on the variable vs. the type to allow polymorphic lookup of the validator.
+-    auto val = static_cast<Validator<T>*>(validators()[std::type_index(typeid(m))]);
++    auto val = static_cast<Validator<T>*>(validators()[std::type_index(typeid(T))]);
+     if (val) {
+       return val->check_(m, err);
+     }

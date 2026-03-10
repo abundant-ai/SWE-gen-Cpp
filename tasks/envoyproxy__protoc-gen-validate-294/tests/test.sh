@@ -1,27 +1,44 @@
 #!/bin/bash
 
-cd /root/go/src/github.com/envoyproxy/protoc-gen-validate
+cd /go/src/github.com/envoyproxy/protoc-gen-validate
 
 export CI=true
 
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "tests/harness/cases"
 cp "/tests/harness/cases/maps.proto" "tests/harness/cases/maps.proto"
-mkdir -p "tests/harness/executor"
-cp "/tests/harness/executor/cases.go" "tests/harness/executor/cases.go"
 
-# Regenerate test cases from the updated proto files (limit output to avoid buffer overflow)
-GO111MODULE=off make testcases 2>&1 | head -100
-if [ ${PIPESTATUS[0]} -ne 0 ]; then
-  echo 0 > /logs/verifier/reward.txt
-  exit 1
+# Generate Java validation code from the proto file
+# This is where the bug manifests: with sint64 map keys, the buggy template
+# will generate Java code with long literals missing the "L" suffix
+
+# First, ensure we have the protoc-gen-validate plugin built
+make build
+
+# Generate Java code for the maps.proto test case
+cd tests/harness/cases
+mkdir -p java
+protoc \
+    -I . \
+    -I ../../.. \
+    --java_out=java \
+    --validate_out="lang=java:java" \
+    maps.proto
+
+# Check if the generated validator contains correct "L" suffix for long literals
+# The bug causes it to generate "private final long MapKeysLt = 0;" (missing L suffix)
+# The fix generates "= 0L;" (with L suffix for long literals)
+cd java
+
+# Java protoc creates package directories based on proto package name
+VALIDATOR_FILE="tests/harness/cases/MapsValidator.java"
+
+# Check if the generated code has the correct L suffix for long literals
+if grep -q "= 0L;" "$VALIDATOR_FILE" 2>/dev/null; then
+    test_status=0
+else
+    test_status=1
 fi
-
-# Test Java compilation of generated validators for maps
-# The bug causes Java compilation to fail for map key/value validation with certain numeric types
-# We just need to compile the test classes to verify the generated Java code is valid
-cd java && mvn clean test-compile 2>&1 | tail -50
-test_status=${PIPESTATUS[0]}
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

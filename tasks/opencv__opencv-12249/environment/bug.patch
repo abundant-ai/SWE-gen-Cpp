@@ -1,0 +1,643 @@
+diff --git a/modules/dnn/include/opencv2/dnn/dnn.hpp b/modules/dnn/include/opencv2/dnn/dnn.hpp
+index 0a6743e33a..0736e8aa4a 100644
+--- a/modules/dnn/include/opencv2/dnn/dnn.hpp
++++ b/modules/dnn/include/opencv2/dnn/dnn.hpp
+@@ -922,11 +922,6 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+                                CV_OUT std::vector<int>& indices,
+                                const float eta = 1.f, const int top_k = 0);
+ 
+-    CV_EXPORTS_W void NMSBoxes(const std::vector<Rect2d>& bboxes, const std::vector<float>& scores,
+-                               const float score_threshold, const float nms_threshold,
+-                               CV_OUT std::vector<int>& indices,
+-                               const float eta = 1.f, const int top_k = 0);
+-
+     CV_EXPORTS_AS(NMSBoxesRotated) void NMSBoxes(const std::vector<RotatedRect>& bboxes, const std::vector<float>& scores,
+                              const float score_threshold, const float nms_threshold,
+                              CV_OUT std::vector<int>& indices,
+diff --git a/modules/dnn/src/layers/region_layer.cpp b/modules/dnn/src/layers/region_layer.cpp
+index 2d74443e08..596cf71c62 100644
+--- a/modules/dnn/src/layers/region_layer.cpp
++++ b/modules/dnn/src/layers/region_layer.cpp
+@@ -90,13 +90,8 @@ public:
+                          std::vector<MatShape> &internals) const CV_OVERRIDE
+     {
+         CV_Assert(inputs.size() > 0);
+-        // channels == cell_size*anchors
+         CV_Assert(inputs[0][3] == (1 + coords + classes)*anchors);
+-        int batch_size = inputs[0][0];
+-        if(batch_size > 1)
+-            outputs = std::vector<MatShape>(1, shape(batch_size, inputs[0][1] * inputs[0][2] * anchors, inputs[0][3] / anchors));
+-        else
+-            outputs = std::vector<MatShape>(1, shape(inputs[0][1] * inputs[0][2] * anchors, inputs[0][3] / anchors));
++        outputs = std::vector<MatShape>(1, shape(inputs[0][1] * inputs[0][2] * anchors, inputs[0][3] / anchors));
+         return false;
+     }
+ 
+@@ -142,28 +137,24 @@ public:
+             UMat& inpBlob = inputs[ii];
+             UMat& outBlob = outputs[ii];
+ 
+-            int batch_size = inpBlob.size[0];
+             int rows = inpBlob.size[1];
+             int cols = inpBlob.size[2];
+ 
+-            // channels == cell_size*anchors, see l. 94
+-            int sample_size = cell_size*rows*cols*anchors;
+-
+             ocl::Kernel logistic_kernel("logistic_activ", ocl::dnn::region_oclsrc);
+-            size_t nanchors = rows*cols*anchors*batch_size;
+-            logistic_kernel.set(0, (int)nanchors);
++            size_t global = rows*cols*anchors;
++            logistic_kernel.set(0, (int)global);
+             logistic_kernel.set(1, ocl::KernelArg::PtrReadOnly(inpBlob));
+             logistic_kernel.set(2, (int)cell_size);
+             logistic_kernel.set(3, ocl::KernelArg::PtrWriteOnly(outBlob));
+-            logistic_kernel.run(1, &nanchors, NULL, false);
++            logistic_kernel.run(1, &global, NULL, false);
+ 
+             if (useSoftmax)
+             {
+                 // Yolo v2
+                 // softmax activation for Probability, for each grid cell (X x Y x Anchor-index)
+                 ocl::Kernel softmax_kernel("softmax_activ", ocl::dnn::region_oclsrc);
+-                size_t nanchors = rows*cols*anchors*batch_size;
+-                softmax_kernel.set(0, (int)nanchors);
++                size_t nthreads = rows*cols*anchors;
++                softmax_kernel.set(0, (int)nthreads);
+                 softmax_kernel.set(1, ocl::KernelArg::PtrReadOnly(inpBlob));
+                 softmax_kernel.set(2, ocl::KernelArg::PtrReadOnly(blob_umat));
+                 softmax_kernel.set(3, (int)cell_size);
+@@ -174,15 +165,14 @@ public:
+                 softmax_kernel.set(8, (int)anchors);
+                 softmax_kernel.set(9, (float)thresh);
+                 softmax_kernel.set(10, ocl::KernelArg::PtrWriteOnly(outBlob));
+-                if (!softmax_kernel.run(1, &nanchors, NULL, false))
++                if (!softmax_kernel.run(1, &nthreads, NULL, false))
+                     return false;
+             }
+ 
+             if (nmsThreshold > 0) {
+                 Mat mat = outBlob.getMat(ACCESS_WRITE);
+                 float *dstData = mat.ptr<float>();
+-                for (int b = 0; b < batch_size; ++b)
+-                    do_nms_sort(dstData + b*sample_size, rows*cols*anchors, thresh, nmsThreshold);
++                do_nms_sort(dstData, rows*cols*anchors, thresh, nmsThreshold);
+             }
+ 
+         }
+@@ -222,17 +212,8 @@ public:
+             Mat &inpBlob = inputs[ii];
+             Mat &outBlob = outputs[ii];
+ 
+-            int batch_size = inpBlob.size[0];
+             int rows = inpBlob.size[1];
+             int cols = inpBlob.size[2];
+-
+-            // address length for one image in batch, both for input and output
+-            int sample_size = cell_size*rows*cols*anchors;
+-
+-            // assert that the comment above is true
+-            CV_Assert(sample_size*batch_size == inpBlob.total());
+-            CV_Assert(sample_size*batch_size == outBlob.total());
+-
+             CV_Assert(inputs.size() < 2 || inputs[1].dims == 4);
+             int hNorm = inputs.size() > 1 ? inputs[1].size[2] : rows;
+             int wNorm = inputs.size() > 1 ? inputs[1].size[3] : cols;
+@@ -241,66 +222,69 @@ public:
+             float *dstData = outBlob.ptr<float>();
+ 
+             // logistic activation for t0, for each grid cell (X x Y x Anchor-index)
+-            for (int i = 0; i < batch_size*rows*cols*anchors; ++i) {
++            for (int i = 0; i < rows*cols*anchors; ++i) {
+                 int index = cell_size*i;
+                 float x = srcData[index + 4];
+                 dstData[index + 4] = logistic_activate(x);	// logistic activation
+             }
+ 
+             if (useSoftmax) {  // Yolo v2
+-                for (int i = 0; i < batch_size*rows*cols*anchors; ++i) {
++                // softmax activation for Probability, for each grid cell (X x Y x Anchor-index)
++                for (int i = 0; i < rows*cols*anchors; ++i) {
+                     int index = cell_size*i;
+                     softmax_activate(srcData + index + 5, classes, 1, dstData + index + 5);
+                 }
+             }
+             else if (useLogistic) {  // Yolo v3
+-                for (int i = 0; i < batch_size*rows*cols*anchors; ++i){
++                for (int i = 0; i < rows*cols*anchors; ++i)
++                {
+                     int index = cell_size*i;
+                     const float* input = srcData + index + 5;
+                     float* output = dstData + index + 5;
+-                    for (int c = 0; c < classes; ++c)
+-                        output[c] = logistic_activate(input[c]);
++                    for (int i = 0; i < classes; ++i)
++                        output[i] = logistic_activate(input[i]);
+                 }
+             }
+-            for (int b = 0; b < batch_size; ++b)
+-                for (int x = 0; x < cols; ++x)
+-                    for(int y = 0; y < rows; ++y)
+-                        for (int a = 0; a < anchors; ++a) {
+-                            // relative start address for image b within the batch data
+-                            int index_sample_offset = sample_size*b;
+-                            int index = (y*cols + x)*anchors + a;  // index for each grid-cell & anchor
+-                            int p_index = index_sample_offset + index * cell_size + 4;
+-                            float scale = dstData[p_index];
+-                            if (classfix == -1 && scale < .5) scale = 0;  // if(t0 < 0.5) t0 = 0;
+-                            int box_index = index_sample_offset + index * cell_size;
+-
+-                            dstData[box_index + 0] = (x + logistic_activate(srcData[box_index + 0])) / cols;
+-                            dstData[box_index + 1] = (y + logistic_activate(srcData[box_index + 1])) / rows;
+-                            dstData[box_index + 2] = exp(srcData[box_index + 2]) * biasData[2 * a] / hNorm;
+-                            dstData[box_index + 3] = exp(srcData[box_index + 3]) * biasData[2 * a + 1] / wNorm;
+-
+-                            int class_index = index_sample_offset + index * cell_size + 5;
+-                            for (int j = 0; j < classes; ++j) {
+-                                float prob = scale*dstData[class_index + j];  // prob = IoU(box, object) = t0 * class-probability
+-                                dstData[class_index + j] = (prob > thresh) ? prob : 0;  // if (IoU < threshold) IoU = 0;
+-                            }
++            for (int x = 0; x < cols; ++x)
++                for(int y = 0; y < rows; ++y)
++                    for (int a = 0; a < anchors; ++a) {
++                        int index = (y*cols + x)*anchors + a;  // index for each grid-cell & anchor
++                        int p_index = index * cell_size + 4;
++                        float scale = dstData[p_index];
++                        if (classfix == -1 && scale < .5) scale = 0;  // if(t0 < 0.5) t0 = 0;
++                        int box_index = index * cell_size;
++
++                        dstData[box_index + 0] = (x + logistic_activate(srcData[box_index + 0])) / cols;
++                        dstData[box_index + 1] = (y + logistic_activate(srcData[box_index + 1])) / rows;
++                        dstData[box_index + 2] = exp(srcData[box_index + 2]) * biasData[2 * a] / hNorm;
++                        dstData[box_index + 3] = exp(srcData[box_index + 3]) * biasData[2 * a + 1] / wNorm;
++
++                        int class_index = index * cell_size + 5;
++
++                        for (int j = 0; j < classes; ++j) {
++                            float prob = scale*dstData[class_index + j];  // prob = IoU(box, object) = t0 * class-probability
++                            dstData[class_index + j] = (prob > thresh) ? prob : 0;  // if (IoU < threshold) IoU = 0;
+                         }
++                    }
+             if (nmsThreshold > 0) {
+-                for (int b = 0; b < batch_size; ++b){
+-                    do_nms_sort(dstData+b*sample_size, rows*cols*anchors, thresh, nmsThreshold);
+-                }
++                do_nms_sort(dstData, rows*cols*anchors, thresh, nmsThreshold);
+             }
+         }
+     }
+ 
++    static inline float rectOverlap(const Rect2f& a, const Rect2f& b)
++    {
++        return 1.0f - jaccardDistance(a, b);
++    }
++
+     void do_nms_sort(float *detections, int total, float score_thresh, float nms_thresh)
+     {
+-        std::vector<Rect2d> boxes(total);
++        std::vector<Rect2f> boxes(total);
+         std::vector<float> scores(total);
+ 
+         for (int i = 0; i < total; ++i)
+         {
+-            Rect2d &b = boxes[i];
++            Rect2f &b = boxes[i];
+             int box_index = i * (classes + coords + 1);
+             b.width = detections[box_index + 2];
+             b.height = detections[box_index + 3];
+@@ -318,7 +302,7 @@ public:
+                 scores[i] = detections[class_index + k];
+                 detections[class_index + k] = 0;
+             }
+-            NMSBoxes(boxes, scores, score_thresh, nms_thresh, indices);
++            NMSFast_(boxes, scores, score_thresh, nms_thresh, 1, 0, indices, rectOverlap);
+             for (int i = 0, n = indices.size(); i < n; ++i)
+             {
+                 int box_index = indices[i] * (classes + coords + 1);
+diff --git a/modules/dnn/src/layers/reorg_layer.cpp b/modules/dnn/src/layers/reorg_layer.cpp
+index c0defb36d2..224bfee54d 100644
+--- a/modules/dnn/src/layers/reorg_layer.cpp
++++ b/modules/dnn/src/layers/reorg_layer.cpp
+@@ -109,13 +109,10 @@ public:
+ 
+             UMat& srcBlob = inputs[i];
+             UMat& dstBlob = outputs[0];
+-
+-            int batch_size = srcBlob.size[0];
+             int channels = srcBlob.size[1];
+             int height = srcBlob.size[2];
+             int width = srcBlob.size[3];
+-
+-            size_t nthreads = batch_size * channels * height * width;
++            size_t nthreads = channels * height * width;
+ 
+             kernel.set(0, (int)nthreads);
+             kernel.set(1, ocl::KernelArg::PtrReadOnly(srcBlob));
+@@ -160,22 +157,19 @@ public:
+             const float *srcData = srcBlob.ptr<float>();
+ 
+             int channels = inputShape[1], height = inputShape[2], width = inputShape[3];
+-            int sample_size = channels*height*width;
+-            int batch_size = inputShape[0];
+ 
+             int out_c = channels / (reorgStride*reorgStride);
+-            for (int b = 0; b < batch_size; ++b) {
+-                for (int k = 0; k < channels; ++k) {
+-                    for (int j = 0; j < height; ++j) {
+-                        for (int i = 0; i < width; ++i) {
+-                            int out_index = i + width*(j + height*k);
+-                            int c2 = k % out_c;
+-                            int offset = k / out_c;
+-                            int w2 = i*reorgStride + offset % reorgStride;
+-                            int h2 = j*reorgStride + offset / reorgStride;
+-                            int in_index = w2 + width*reorgStride*(h2 + height*reorgStride*c2);
+-                            dstData[b*sample_size + out_index] = srcData[b*sample_size + in_index];
+-                        }
++
++            for (int k = 0; k < channels; ++k) {
++                for (int j = 0; j < height; ++j) {
++                    for (int i = 0; i < width; ++i) {
++                        int out_index = i + width*(j + height*k);
++                        int c2 = k % out_c;
++                        int offset = k / out_c;
++                        int w2 = i*reorgStride + offset % reorgStride;
++                        int h2 = j*reorgStride + offset / reorgStride;
++                        int in_index = w2 + width*reorgStride*(h2 + height*reorgStride*c2);
++                        dstData[out_index] = srcData[in_index];
+                     }
+                 }
+             }
+diff --git a/modules/dnn/src/nms.cpp b/modules/dnn/src/nms.cpp
+index 0ae590f501..051a9cbd28 100644
+--- a/modules/dnn/src/nms.cpp
++++ b/modules/dnn/src/nms.cpp
+@@ -16,8 +16,7 @@ namespace dnn
+ {
+ CV__DNN_EXPERIMENTAL_NS_BEGIN
+ 
+-template <typename T>
+-static inline float rectOverlap(const T& a, const T& b)
++static inline float rectOverlap(const Rect& a, const Rect& b)
+ {
+     return 1.f - static_cast<float>(jaccardDistance(a, b));
+ }
+@@ -31,15 +30,6 @@ void NMSBoxes(const std::vector<Rect>& bboxes, const std::vector<float>& scores,
+     NMSFast_(bboxes, scores, score_threshold, nms_threshold, eta, top_k, indices, rectOverlap);
+ }
+ 
+-void NMSBoxes(const std::vector<Rect2d>& bboxes, const std::vector<float>& scores,
+-                          const float score_threshold, const float nms_threshold,
+-                          std::vector<int>& indices, const float eta, const int top_k)
+-{
+-    CV_Assert_N(bboxes.size() == scores.size(), score_threshold >= 0,
+-        nms_threshold >= 0, eta > 0);
+-    NMSFast_(bboxes, scores, score_threshold, nms_threshold, eta, top_k, indices, rectOverlap);
+-}
+-
+ static inline float rotatedRectIOU(const RotatedRect& a, const RotatedRect& b)
+ {
+     std::vector<Point2f> inter;
+diff --git a/modules/dnn/src/opencl/region.cl b/modules/dnn/src/opencl/region.cl
+index e7a7b7d2b1..d33ac782c4 100644
+--- a/modules/dnn/src/opencl/region.cl
++++ b/modules/dnn/src/opencl/region.cl
+@@ -84,9 +84,9 @@ __kernel void softmax_activ(const int count,
+             output[i] = e;
+         }
+ 
+-        int y = (index / (anchors * cols)) % rows;
+-        int x = (index / anchors) % cols;
+-        int a = index % anchors;
++        int y = index / anchors / cols;
++        int x = index / anchors % cols;
++        int a = index - anchors * (x + y * cols);
+         float scale = dst[box_index + 4];
+         if (classfix == -1 && scale < .5) scale = 0;
+ 
+diff --git a/modules/dnn/src/opencl/reorg.cl b/modules/dnn/src/opencl/reorg.cl
+index 7802239ad7..62df3cceca 100644
+--- a/modules/dnn/src/opencl/reorg.cl
++++ b/modules/dnn/src/opencl/reorg.cl
+@@ -53,18 +53,15 @@ __kernel void reorg(const int count,
+ {
+     for (int index = get_global_id(0); index < count; index += get_global_size(0))
+     {
+-        int sample_size = channels*height*width;
+-        int b = index/sample_size;
+-        int new_index = index%sample_size;
+-        int k = new_index / (height * width);
+-        int j = (new_index - (k * height * width)) / width;
+-        int i = new_index % width;
++        int k = index / (height * width);
++        int j = (index - (k * height * width)) / width;
++        int i = (index - (k * height * width)) % width;
+         int out_c = channels / (reorgStride*reorgStride);
+         int c2 = k % out_c;
+         int offset = k / out_c;
+         int w2 = i*reorgStride + offset % reorgStride;
+         int h2 = j*reorgStride + offset / reorgStride;
+         int in_index = w2 + width*reorgStride*(h2 + height*reorgStride*c2);
+-        dst[index] = src[b*sample_size + in_index];
++        dst[index] = src[in_index];
+     }
+ }
+diff --git a/modules/dnn/test/test_darknet_importer.cpp b/modules/dnn/test/test_darknet_importer.cpp
+index ab4a0e708c..077498d92e 100644
+--- a/modules/dnn/test/test_darknet_importer.cpp
++++ b/modules/dnn/test/test_darknet_importer.cpp
+@@ -53,17 +53,6 @@ static std::string _tf(TString filename)
+     return (getOpenCVExtraDir() + "/dnn/") + filename;
+ }
+ 
+-static std::vector<String> getOutputsNames(const Net& net)
+-{
+-    std::vector<String> names;
+-    std::vector<int> outLayers = net.getUnconnectedOutLayers();
+-    std::vector<String> layersNames = net.getLayerNames();
+-    names.resize(outLayers.size());
+-    for (size_t i = 0; i < outLayers.size(); ++i)
+-          names[i] = layersNames[outLayers[i] - 1];
+-    return names;
+-}
+-
+ TEST(Test_Darknet, read_tiny_yolo_voc)
+ {
+     Net net = readNetFromDarknet(_tf("tiny-yolo-voc.cfg"));
+@@ -132,24 +121,16 @@ class Test_Darknet_nets : public DNNTestLayer
+ public:
+     // Test object detection network from Darknet framework.
+     void testDarknetModel(const std::string& cfg, const std::string& weights,
+-                          const std::vector<std::vector<int> >& refClassIds,
+-                          const std::vector<std::vector<float> >& refConfidences,
+-                          const std::vector<std::vector<Rect2d> >& refBoxes,
+-                          double scoreDiff, double iouDiff, float confThreshold = 0.24, float nmsThreshold = 0.4)
++                          const std::vector<cv::String>& outNames,
++                          const std::vector<int>& refClassIds,
++                          const std::vector<float>& refConfidences,
++                          const std::vector<Rect2d>& refBoxes,
++                          double scoreDiff, double iouDiff, float confThreshold = 0.24)
+     {
+         checkBackend();
+ 
+-        Mat img1 = imread(_tf("dog416.png"));
+-        Mat img2 = imread(_tf("street.png"));
+-        std::vector<Mat> samples(2);
+-        samples[0] = img1; samples[1] = img2;
+-
+-        // determine test type, whether batch or single img
+-        int batch_size = refClassIds.size();
+-        CV_Assert(batch_size == 1 || batch_size == 2);
+-        samples.resize(batch_size);
+-
+-        Mat inp = blobFromImages(samples, 1.0/255, Size(416, 416), Scalar(), true, false);
++        Mat sample = imread(_tf("dog416.png"));
++        Mat inp = blobFromImage(sample, 1.0/255, Size(416, 416), Scalar(), true, false);
+ 
+         Net net = readNet(findDataFile("dnn/" + cfg, false),
+                           findDataFile("dnn/" + weights, false));
+@@ -157,187 +138,84 @@ public:
+         net.setPreferableTarget(target);
+         net.setInput(inp);
+         std::vector<Mat> outs;
+-        net.forward(outs, getOutputsNames(net));
+-
+-        for (int b = 0; b < batch_size; ++b)
+-        {
+-            std::vector<int> classIds;
+-            std::vector<float> confidences;
+-            std::vector<Rect2d> boxes;
+-            for (int i = 0; i < outs.size(); ++i)
+-            {
+-                Mat out;
+-                if (batch_size > 1){
+-                    // get the sample slice from 3D matrix (batch, box, classes+5)
+-                    Range ranges[3] = {Range(b, b+1), Range::all(), Range::all()};
+-                    out = outs[i](ranges).reshape(1, outs[i].size[1]);
+-                }else{
+-                    out = outs[i];
+-                }
+-                for (int j = 0; j < out.rows; ++j)
+-                {
+-                    Mat scores = out.row(j).colRange(5, out.cols);
+-                    double confidence;
+-                    Point maxLoc;
+-                    minMaxLoc(scores, 0, &confidence, 0, &maxLoc);
+-
+-                    if (confidence > confThreshold) {
+-                        float* detection = out.ptr<float>(j);
+-                        double centerX = detection[0];
+-                        double centerY = detection[1];
+-                        double width = detection[2];
+-                        double height = detection[3];
+-                        boxes.push_back(Rect2d(centerX - 0.5 * width, centerY - 0.5 * height,
+-                                            width, height));
+-                        confidences.push_back(confidence);
+-                        classIds.push_back(maxLoc.x);
+-                    }
+-                }
+-            }
+-
+-            // here we need NMS of boxes
+-            std::vector<int> indices;
+-            NMSBoxes(boxes, confidences, confThreshold, nmsThreshold, indices);
+-
+-            std::vector<int> nms_classIds;
+-            std::vector<float> nms_confidences;
+-            std::vector<Rect2d> nms_boxes;
+-
+-            for (size_t i = 0; i < indices.size(); ++i)
+-            {
+-                int idx = indices[i];
+-                Rect2d box = boxes[idx];
+-                float conf = confidences[idx];
+-                int class_id = classIds[idx];
+-                nms_boxes.push_back(box);
+-                nms_confidences.push_back(conf);
+-                nms_classIds.push_back(class_id);
+-            }
+-
+-            normAssertDetections(refClassIds[b], refConfidences[b], refBoxes[b], nms_classIds,
+-                             nms_confidences, nms_boxes, format("batch size %d, sample %d\n", batch_size, b).c_str(), confThreshold, scoreDiff, iouDiff);
+-        }
+-    }
+-
+-    void testDarknetModel(const std::string& cfg, const std::string& weights,
+-                          const std::vector<int>& refClassIds,
+-                          const std::vector<float>& refConfidences,
+-                          const std::vector<Rect2d>& refBoxes,
+-                          double scoreDiff, double iouDiff, float confThreshold = 0.24, float nmsThreshold = 0.4)
+-    {
+-        testDarknetModel(cfg, weights,
+-                         std::vector<std::vector<int> >(1, refClassIds),
+-                         std::vector<std::vector<float> >(1, refConfidences),
+-                         std::vector<std::vector<Rect2d> >(1, refBoxes),
+-                         scoreDiff, iouDiff, confThreshold, nmsThreshold);
+-    }
++        net.forward(outs, outNames);
+ 
+-    void testDarknetModel(const std::string& cfg, const std::string& weights,
+-                          const cv::Mat& ref, double scoreDiff, double iouDiff,
+-                          float confThreshold = 0.24, float nmsThreshold = 0.4)
+-    {
+-        CV_Assert(ref.cols == 7);
+-        std::vector<std::vector<int> > refClassIds;
+-        std::vector<std::vector<float> > refScores;
+-        std::vector<std::vector<Rect2d> > refBoxes;
+-        for (int i = 0; i < ref.rows; ++i)
++        std::vector<int> classIds;
++        std::vector<float> confidences;
++        std::vector<Rect2d> boxes;
++        for (int i = 0; i < outs.size(); ++i)
+         {
+-            int batchId = static_cast<int>(ref.at<float>(i, 0));
+-            int classId = static_cast<int>(ref.at<float>(i, 1));
+-            float score = ref.at<float>(i, 2);
+-            float left  = ref.at<float>(i, 3);
+-            float top   = ref.at<float>(i, 4);
+-            float right  = ref.at<float>(i, 5);
+-            float bottom = ref.at<float>(i, 6);
+-            Rect2d box(left, top, right - left, bottom - top);
+-            if (batchId >= refClassIds.size())
++            Mat& out = outs[i];
++            for (int j = 0; j < out.rows; ++j)
+             {
+-                refClassIds.resize(batchId + 1);
+-                refScores.resize(batchId + 1);
+-                refBoxes.resize(batchId + 1);
++                Mat scores = out.row(j).colRange(5, out.cols);
++                double confidence;
++                Point maxLoc;
++                minMaxLoc(scores, 0, &confidence, 0, &maxLoc);
++
++                float* detection = out.ptr<float>(j);
++                double centerX = detection[0];
++                double centerY = detection[1];
++                double width = detection[2];
++                double height = detection[3];
++                boxes.push_back(Rect2d(centerX - 0.5 * width, centerY - 0.5 * height,
++                                       width, height));
++                confidences.push_back(confidence);
++                classIds.push_back(maxLoc.x);
+             }
+-            refClassIds[batchId].push_back(classId);
+-            refScores[batchId].push_back(score);
+-            refBoxes[batchId].push_back(box);
+         }
+-        testDarknetModel(cfg, weights, refClassIds, refScores, refBoxes,
+-                         scoreDiff, iouDiff, confThreshold, nmsThreshold);
++        normAssertDetections(refClassIds, refConfidences, refBoxes, classIds,
++                             confidences, boxes, "", confThreshold, scoreDiff, iouDiff);
+     }
+ };
+ 
+ TEST_P(Test_Darknet_nets, YoloVoc)
+ {
+-    // batchId, classId, confidence, left, top, right, bottom
+-    Mat ref = (Mat_<float>(6, 7) << 0, 6,  0.750469f, 0.577374f, 0.127391f, 0.902949f, 0.300809f,  // a car
+-                                    0, 1,  0.780879f, 0.270762f, 0.264102f, 0.732475f, 0.745412f,  // a bicycle
+-                                    0, 11, 0.901615f, 0.1386f,   0.338509f, 0.421337f, 0.938789f,  // a dog
+-                                    1, 14, 0.623813f, 0.183179f, 0.381921f, 0.247726f, 0.625847f,  // a person
+-                                    1, 6,  0.667770f, 0.446555f, 0.453578f, 0.499986f, 0.519167f,  // a car
+-                                    1, 6,  0.844947f, 0.637058f, 0.460398f, 0.828508f, 0.66427f);  // a car
+-
++    std::vector<cv::String> outNames(1, "detection_out");
++
++    std::vector<int> classIds(3);
++    std::vector<float> confidences(3);
++    std::vector<Rect2d> boxes(3);
++    classIds[0] = 6;  confidences[0] = 0.750469f; boxes[0] = Rect2d(0.577374, 0.127391, 0.325575, 0.173418);  // a car
++    classIds[1] = 1;  confidences[1] = 0.780879f; boxes[1] = Rect2d(0.270762, 0.264102, 0.461713, 0.48131); // a bicycle
++    classIds[2] = 11; confidences[2] = 0.901615f; boxes[2] = Rect2d(0.1386, 0.338509, 0.282737, 0.60028);  // a dog
+     double scoreDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 1e-2 : 8e-5;
+-    double iouDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.018 : 3e-4;
+-    double nmsThreshold = (target == DNN_TARGET_MYRIAD) ? 0.397 : 0.4;
+-
+-    std::string config_file = "yolo-voc.cfg";
+-    std::string weights_file = "yolo-voc.weights";
+-
+-    // batch size 1
+-    testDarknetModel(config_file, weights_file, ref.rowRange(0, 3), scoreDiff, iouDiff);
+-
+-    // batch size 2
+-    testDarknetModel(config_file, weights_file, ref, scoreDiff, iouDiff, 0.24, nmsThreshold);
++    double iouDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.013 : 3e-5;
++    testDarknetModel("yolo-voc.cfg", "yolo-voc.weights", outNames,
++                     classIds, confidences, boxes, scoreDiff, iouDiff);
+ }
+ 
+ TEST_P(Test_Darknet_nets, TinyYoloVoc)
+ {
+-    // batchId, classId, confidence, left, top, right, bottom
+-    Mat ref = (Mat_<float>(4, 7) << 0, 6,  0.761967f, 0.579042f, 0.159161f, 0.894482f, 0.31994f,   // a car
+-                                    0, 11, 0.780595f, 0.129696f, 0.386467f, 0.445275f, 0.920994f,  // a dog
+-                                    1, 6,  0.651450f, 0.460526f, 0.458019f, 0.522527f, 0.5341f,    // a car
+-                                    1, 6,  0.928758f, 0.651024f, 0.463539f, 0.823784f, 0.654998f); // a car
+-
++    std::vector<cv::String> outNames(1, "detection_out");
++    std::vector<int> classIds(2);
++    std::vector<float> confidences(2);
++    std::vector<Rect2d> boxes(2);
++    classIds[0] = 6;  confidences[0] = 0.761967f; boxes[0] = Rect2d(0.579042, 0.159161, 0.31544, 0.160779);  // a car
++    classIds[1] = 11; confidences[1] = 0.780595f; boxes[1] = Rect2d(0.129696, 0.386467, 0.315579, 0.534527);  // a dog
+     double scoreDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 8e-3 : 8e-5;
+-    double iouDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.018 : 3e-4;
+-
+-    std::string config_file = "tiny-yolo-voc.cfg";
+-    std::string weights_file = "tiny-yolo-voc.weights";
+-
+-    // batch size 1
+-    testDarknetModel(config_file, weights_file, ref.rowRange(0, 2), scoreDiff, iouDiff);
+-
+-    // batch size 2
+-    testDarknetModel(config_file, weights_file, ref, scoreDiff, iouDiff);
++    double iouDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 8e-3 : 3e-5;
++    testDarknetModel("tiny-yolo-voc.cfg", "tiny-yolo-voc.weights", outNames,
++                     classIds, confidences, boxes, scoreDiff, iouDiff);
+ }
+ 
+ TEST_P(Test_Darknet_nets, YOLOv3)
+ {
+-    // batchId, classId, confidence, left, top, right, bottom
+-    Mat ref = (Mat_<float>(9, 7) << 0, 7,  0.952983f, 0.614622f, 0.150257f, 0.901369f, 0.289251f,  // a truck
+-                                    0, 1,  0.987908f, 0.150913f, 0.221933f, 0.742255f, 0.74626f,   // a bicycle
+-                                    0, 16, 0.998836f, 0.160024f, 0.389964f, 0.417885f, 0.943716f,  // a dog (COCO)
+-                                    1, 9,  0.384801f, 0.659824f, 0.372389f, 0.673926f, 0.429412f,  // a traffic light
+-                                    1, 9,  0.733283f, 0.376029f, 0.315694f, 0.401776f, 0.395165f,  // a traffic light
+-                                    1, 9,  0.785352f, 0.665503f, 0.373543f, 0.688893f, 0.439245f,  // a traffic light
+-                                    1, 0,  0.980052f, 0.195856f, 0.378454f, 0.258626f, 0.629258f,  // a person
+-                                    1, 2,  0.989633f, 0.450719f, 0.463353f, 0.496305f, 0.522258f,  // a car
+-                                    1, 2,  0.997412f, 0.647584f, 0.459939f, 0.821038f, 0.663947f); // a car
+-
+-    double scoreDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.0047 : 8e-5;
+-    double iouDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.018 : 3e-4;
+-
+-    std::string config_file = "yolov3.cfg";
+-    std::string weights_file = "yolov3.weights";
+-
+-    // batch size 1
+-    testDarknetModel(config_file, weights_file, ref.rowRange(0, 3), scoreDiff, iouDiff);
+-
+-    if ((backend != DNN_BACKEND_INFERENCE_ENGINE || target != DNN_TARGET_MYRIAD) &&
+-        (backend != DNN_BACKEND_INFERENCE_ENGINE || target != DNN_TARGET_OPENCL))
+-    {
+-        // batch size 2
+-        testDarknetModel(config_file, weights_file, ref, scoreDiff, iouDiff);
+-    }
++    std::vector<cv::String> outNames(3);
++    outNames[0] = "yolo_82";
++    outNames[1] = "yolo_94";
++    outNames[2] = "yolo_106";
++
++    std::vector<int> classIds(3);
++    std::vector<float> confidences(3);
++    std::vector<Rect2d> boxes(3);
++    classIds[0] = 7;  confidences[0] = 0.952983f; boxes[0] = Rect2d(0.614622, 0.150257, 0.286747, 0.138994);  // a truck
++    classIds[1] = 1; confidences[1] = 0.987908f; boxes[1] = Rect2d(0.150913, 0.221933, 0.591342, 0.524327);  // a bicycle
++    classIds[2] = 16; confidences[2] = 0.998836f; boxes[2] = Rect2d(0.160024, 0.389964, 0.257861, 0.553752);  // a dog (COCO)
++    double scoreDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 4e-3 : 8e-5;
++    double iouDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.011 : 3e-5;
++    testDarknetModel("yolov3.cfg", "yolov3.weights", outNames,
++                     classIds, confidences, boxes, scoreDiff, iouDiff);
+ }
+ 
+ INSTANTIATE_TEST_CASE_P(/**/, Test_Darknet_nets, dnnBackendsAndTargets());

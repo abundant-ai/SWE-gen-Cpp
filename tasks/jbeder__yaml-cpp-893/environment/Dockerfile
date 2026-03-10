@@ -9,10 +9,18 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install additional system packages needed for yaml-cpp
+# Install additional packages for yaml-cpp (C++ project)
 RUN apt-get update && apt-get install -y \
     cmake \
+    libgtest-dev \
+    libgmock-dev \
+    locales \
     && rm -rf /var/lib/apt/lists/*
+
+# Generate locales for proper character encoding in tests
+RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && \
+    sed -i '/de_DE.UTF-8/s/^# //g' /etc/locale.gen && \
+    locale-gen
 
 WORKDIR /app
 
@@ -25,25 +33,26 @@ RUN git clone https://github.com/jbeder/yaml-cpp.git src && \
 
 WORKDIR /app/src
 
-# Configure the build
-RUN cmake -B build \
+# Build the project with CMake
+RUN mkdir -p build && cd build && \
+    cmake .. \
+    -DYAML_CPP_BUILD_TESTS=ON \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_CXX_STANDARD=17 \
-    -DYAML_CPP_BUILD_TESTS=ON \
-    -DYAML_BUILD_SHARED_LIBS=OFF \
-    -DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized"
+    -DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized" && \
+    make -j2
 
-# Build the project initially
-RUN cmake --build build --config Debug
-
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+# Reset git state so bug.patch applies cleanly
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
-# Remove .swp file first as it's a binary file that may differ
-RUN rm -f src/.emitterstate.h.swp
 COPY bug.patch /tmp/bug.patch
-RUN patch -p1 --force < /tmp/bug.patch && rm /tmp/bug.patch
+RUN rm -f src/.emitterstate.h.swp && \
+    patch -p1 --force < /tmp/bug.patch && \
+    rm /tmp/bug.patch
+
+# Note: Bug introduces compilation error (missing #include <algorithm>), so we cannot rebuild here
+# The test.sh will copy the fixed test file and rebuild before running tests
 
 RUN rm -rf /app/src/.git
 

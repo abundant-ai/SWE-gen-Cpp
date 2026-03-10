@@ -6,39 +6,27 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/format-test.cc" "test/format-test.cc"
 
-test_status=0
-
-# Reconfigure CMake after copying new test files
-echo "Reconfiguring CMake..."
+# Reconfigure CMake to pick up updated test files
 cd build
-if ! cmake .. \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_STANDARD=20 \
-    -DFMT_TEST=ON \
-    -DCMAKE_C_COMPILER=clang \
-    -DCMAKE_CXX_COMPILER=clang++ 2>&1; then
-    echo "FAIL: CMake reconfiguration failed"
+cmake ..
+cmake_status=$?
+
+if [ $cmake_status -ne 0 ]; then
+  echo "Failed to reconfigure CMake" >&2
+  test_status=1
+else
+  # Build and run the format-test executable
+  cmake --build . --target format-test
+  build_status=$?
+
+  if [ $build_status -ne 0 ]; then
+    echo "Failed to build format-test" >&2
     test_status=1
-fi
-
-if [ $test_status -eq 0 ]; then
-    # Build the specific test file
-    echo "Building format-test..."
-    if ! cmake --build . --target format-test 2>&1; then
-        echo "FAIL: format-test build failed"
-        test_status=1
-    fi
-fi
-
-if [ $test_status -eq 0 ]; then
-    # Run the test executable
-    echo "Running format-test..."
-    if ! ./bin/format-test 2>&1; then
-        echo "FAIL: format-test execution failed"
-        test_status=1
-    else
-        echo "PASS: format-test passed"
-    fi
+  else
+    # Run the test executable (located in build/bin directory)
+    bin/format-test
+    test_status=$?
+  fi
 fi
 
 if [ $test_status -eq 0 ]; then

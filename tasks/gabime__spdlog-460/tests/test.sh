@@ -10,16 +10,22 @@ cp "/tests/tests.vcxproj" "tests/tests.vcxproj"
 mkdir -p "tests"
 cp "/tests/tests.vcxproj.filters" "tests/tests.vcxproj.filters"
 
-# Build and run tests using the Makefile
-cd /app/src/tests
-make rebuild 2>&1 || {
+# Rebuild with updated test files
+cd build
+cmake .. -DSPDLOG_BUILD_TESTS=ON -DSPDLOG_BUILD_EXAMPLES=OFF -DSPDLOG_BUILD_BENCH=OFF -DCMAKE_CXX_FLAGS="-DSPDLOG_FMT_PRINTF" 2>&1 || {
+    echo "CMake configuration failed"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+}
+
+make -j2 2>&1 || {
     echo "Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-# Run the tests binary
-./tests
+# Run the unit tests (executable is in tests subdirectory)
+./tests/catch_tests 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

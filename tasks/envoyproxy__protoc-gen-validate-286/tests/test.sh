@@ -1,25 +1,41 @@
 #!/bin/bash
 
-cd /root/go/src/github.com/envoyproxy/protoc-gen-validate
+cd /go/src/github.com/envoyproxy/protoc-gen-validate
 
 export CI=true
 
-# Rebuild protoc-gen-validate to ensure templates compile
-# The bug.patch modifies C++ templates to mark pattern validation as unimplemented
-# The fix.patch adds RE2-based pattern validation
-GO111MODULE=off make build 2>&1 | tail -50
-if [ ${PIPESTATUS[0]} -ne 0 ]; then
-  echo 0 > /logs/verifier/reward.txt
-  exit 1
+# Copy HEAD test files from /tests (overwrites BASE state)
+mkdir -p "tests/harness/executor"
+cp "/tests/harness/executor/cases.go" "tests/harness/executor/cases.go"
+
+# Rebuild the protoc-gen-validate plugin after copying the fixed cases.go
+make build
+
+# Generate C++ validation code from a test proto with pattern rules
+# This tests that pattern validation is correctly implemented in C++ templates
+cd tests/harness/cases
+mkdir -p cpp
+protoc \
+    -I . \
+    -I ../../.. \
+    --cpp_out=cpp \
+    --validate_out="lang=cc:cpp" \
+    strings.proto
+
+# Check if the generated C++ validator contains RE2 pattern matching code
+# The bug removes RE2 support, the fix adds it back
+VALIDATOR_FILE="cpp/strings.pb.validate.cc"
+
+# RE2::FullMatch is the key indicator that pattern validation is implemented
+if grep -q "RE2::FullMatch" "$VALIDATOR_FILE" 2>/dev/null; then
+    test_status=0
+else
+    test_status=1
 fi
 
-# Check that the C++ template includes RE2 header (sign that pattern validation is implemented)
-# With bug: pattern validation is marked unimplemented, no RE2 include
-# With fix: RE2 header is included for pattern matching
-if grep -q '#include "re2/re2.h"' templates/cc/file.go; then
+if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt
-  exit 0
 else
   echo 0 > /logs/verifier/reward.txt
-  exit 1
 fi
+exit "$test_status"

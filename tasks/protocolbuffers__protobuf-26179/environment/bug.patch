@@ -1,0 +1,358 @@
+diff --git a/src/google/protobuf/BUILD.bazel b/src/google/protobuf/BUILD.bazel
+index e51e8b360..eb25ca04e 100644
+--- a/src/google/protobuf/BUILD.bazel
++++ b/src/google/protobuf/BUILD.bazel
+@@ -969,26 +969,6 @@ cc_library(
+     ],
+ )
+ 
+-cc_test(
+-    name = "repeated_field_proxy_test",
+-    size = "small",
+-    srcs = [
+-        "repeated_field_proxy_test.cc",
+-    ],
+-    deps = [
+-        ":arena",
+-        ":protobuf",
+-        ":protobuf_lite",
+-        ":repeated_field_proxy",
+-        ":test_textproto",
+-        "//src/google/protobuf/test_protos:test_cc_protos",
+-        "@abseil-cpp//absl/strings:cord",
+-        "@abseil-cpp//absl/strings:string_view",
+-        "@googletest//:gtest",
+-        "@googletest//:gtest_main",
+-    ],
+-)
+-
+ # This provides just the header files for use in projects that need to build
+ # shared libraries for dynamic loading. This target is available until Bazel
+ # adds native support for such use cases.
+diff --git a/src/google/protobuf/repeated_field_proxy.h b/src/google/protobuf/repeated_field_proxy.h
+index 0b287cdbc..3662fc1bf 100644
+--- a/src/google/protobuf/repeated_field_proxy.h
++++ b/src/google/protobuf/repeated_field_proxy.h
+@@ -24,8 +24,8 @@ class RepeatedFieldProxy;
+ 
+ namespace internal {
+ 
+-template <typename T, typename... Args>
+-RepeatedFieldProxy<T> ConstructRepeatedFieldProxy(Args&&... args);
++template <typename ElementType>
++class TestOnlyRepeatedFieldContainer;
+ 
+ // RepeatedFieldTraits is a type trait that maps an element type to the concrete
+ // container type that will back the repeated field in the containing message.
+@@ -184,24 +184,13 @@ class RepeatedFieldProxy final
+   using reference =
+       typename internal::RepeatedFieldTraits<ElementType>::reference;
+ 
+-  using Base::field;
+-
+  public:
+   RepeatedFieldProxy(const RepeatedFieldProxy& other) = default;
+   RepeatedFieldProxy& operator=(const RepeatedFieldProxy&) = default;
+ 
+-  // Returns a type which references the element at the given index. Performs
+-  // bounds checking in accordance with `bounds_check_mode_*`.
+-  [[nodiscard]] reference operator[](size_type index) const {
+-    return field()[index];
+-  }
+-
+  private:
+   friend RepeatedFieldProxy<const ElementType>;
+-
+-  template <typename T, typename... Args>
+-  friend RepeatedFieldProxy<T> internal::ConstructRepeatedFieldProxy(
+-      Args&&... args);
++  friend internal::TestOnlyRepeatedFieldContainer<ElementType>;
+ 
+   RepeatedFieldProxy(RepeatedFieldType& field, Arena* arena)
+       : Base(field), arena_(arena) {
+@@ -221,8 +210,6 @@ class RepeatedFieldProxy<const ElementType> final
+ 
+  protected:
+   using Base = internal::RepeatedFieldProxyBase<const ElementType>;
+-  using typename Base::const_reference;
+-  using typename Base::size_type;
+ 
+   // Inherit constructors, but don't publicly expose them.
+   //
+@@ -232,8 +219,6 @@ class RepeatedFieldProxy<const ElementType> final
+   // freely change the layout of the underlying repeated field.
+   using Base::Base;
+ 
+-  using Base::field;
+-
+  public:
+   RepeatedFieldProxy(const RepeatedFieldProxy& other) = default;
+   RepeatedFieldProxy& operator=(const RepeatedFieldProxy&) = default;
+@@ -245,33 +230,13 @@ class RepeatedFieldProxy<const ElementType> final
+   RepeatedFieldProxy(RepeatedFieldProxy<ElementType> other)
+       : Base(other.field()) {}
+ 
+-  // Returns a type which references the element at the given index. Performs
+-  // bounds checking in accordance with `bounds_check_mode_*`.
+-  [[nodiscard]] const_reference operator[](size_type index) const {
+-    return field()[index];
+-  }
+-
+  private:
+-  template <typename T, typename... Args>
+-  friend RepeatedFieldProxy<T> internal::ConstructRepeatedFieldProxy(
+-      Args&&... args);
++  friend internal::TestOnlyRepeatedFieldContainer<ElementType>;
+ 
+   // Note that we don't need an arena pointer here, since we don't mutate the
+   // underlying repeated field.
+ };
+ 
+-namespace internal {
+-
+-// A helper function to construct a RepeatedFieldProxy.
+-//
+-// This should never be called outside of Protobuf internals.
+-template <typename T, typename... Args>
+-inline RepeatedFieldProxy<T> ConstructRepeatedFieldProxy(Args&&... args) {
+-  return RepeatedFieldProxy<T>(std::forward<Args>(args)...);
+-}
+-
+-}  // namespace internal
+-
+ }  // namespace protobuf
+ }  // namespace google
+ 
+diff --git a/src/google/protobuf/repeated_field_proxy_test.cc b/src/google/protobuf/repeated_field_proxy_test.cc
+deleted file mode 100644
+index d1b5e6c41..000000000
+--- a/src/google/protobuf/repeated_field_proxy_test.cc
++++ /dev/null
+@@ -1,214 +0,0 @@
+-#include "google/protobuf/repeated_field_proxy.h"
+-
+-#include <cstdint>
+-#include <string>
+-
+-#include <gmock/gmock.h>
+-#include <gtest/gtest.h>
+-#include "absl/strings/cord.h"
+-#include "absl/strings/string_view.h"
+-#include "google/protobuf/arena.h"
+-#include "google/protobuf/repeated_field.h"
+-#include "google/protobuf/repeated_ptr_field.h"
+-#include "google/protobuf/test_protos/repeated_field_proxy_test.pb.h"
+-#include "google/protobuf/test_textproto.h"
+-
+-namespace google {
+-namespace protobuf {
+-namespace internal {
+-namespace {
+-
+-using ::proto2_unittest::RepeatedFieldProxyTestSimpleMessage;
+-
+-template <typename T>
+-T StrAs(absl::string_view s) {
+-  return T(s);
+-}
+-
+-// A test-only container for a repeated field that manages construction and
+-// destruction of the underlying repeated field, and can construct proxies.
+-//
+-// This is necessary because RepeatedFieldProxy has no public constructors,
+-// aside from copy assignment.
+-template <typename T>
+-class TestOnlyRepeatedFieldContainer {
+-  using FieldType = typename internal::RepeatedFieldTraits<T>::type;
+-
+- public:
+-  static TestOnlyRepeatedFieldContainer<T> New(Arena* arena) {
+-    return TestOnlyRepeatedFieldContainer<T>(Arena::Create<FieldType>(arena),
+-                                             arena);
+-  }
+-
+-  ~TestOnlyRepeatedFieldContainer() {
+-    if (arena_ == nullptr) {
+-      delete field_;
+-    }
+-  }
+-
+-  FieldType& operator*() { return *field_; }
+-  const FieldType& operator*() const { return *field_; }
+-
+-  FieldType* operator->() { return &*field_; }
+-  const FieldType* operator->() const { return &*field_; }
+-
+-  RepeatedFieldProxy<T> MakeProxy() {
+-    return internal::ConstructRepeatedFieldProxy<T>(*field_, arena_);
+-  }
+-  RepeatedFieldProxy<const T> MakeConstProxy() const {
+-    return internal::ConstructRepeatedFieldProxy<const T>(*field_);
+-  }
+-
+- private:
+-  TestOnlyRepeatedFieldContainer(FieldType* field, Arena* arena)
+-      : field_(field), arena_(arena) {}
+-
+-  FieldType* field_;
+-  Arena* arena_;
+-};
+-
+-class RepeatedFieldProxyTest : public testing::TestWithParam<bool> {
+- protected:
+-  bool UseArena() const { return GetParam(); }
+-  Arena* arena() { return UseArena() ? &arena_ : nullptr; }
+-
+-  template <typename T>
+-  TestOnlyRepeatedFieldContainer<T> MakeRepeatedFieldContainer() {
+-    return TestOnlyRepeatedFieldContainer<T>::New(arena());
+-  }
+-
+- private:
+-  Arena arena_;
+-};
+-
+-TEST_P(RepeatedFieldProxyTest, ArrayIndexing) {
+-  auto field =
+-      MakeRepeatedFieldContainer<RepeatedFieldProxyTestSimpleMessage>();
+-  field->Add()->set_value(1);
+-  field->Add()->set_value(2);
+-  field->Add()->set_value(3);
+-
+-  {
+-    auto proxy = field.MakeProxy();
+-    EXPECT_THAT(proxy[0], EqualsProto(R"pb(value: 1)pb"));
+-    EXPECT_THAT(proxy[1], EqualsProto(R"pb(value: 2)pb"));
+-    EXPECT_THAT(proxy[2], EqualsProto(R"pb(value: 3)pb"));
+-  }
+-
+-  {
+-    auto proxy = field.MakeConstProxy();
+-    EXPECT_THAT(proxy[0], EqualsProto(R"pb(value: 1)pb"));
+-    EXPECT_THAT(proxy[1], EqualsProto(R"pb(value: 2)pb"));
+-    EXPECT_THAT(proxy[2], EqualsProto(R"pb(value: 3)pb"));
+-  }
+-}
+-
+-TEST_P(RepeatedFieldProxyTest, ArrayIndexingStringView) {
+-  auto field = MakeRepeatedFieldContainer<absl::string_view>();
+-  field->Add("1");
+-  field->Add("2");
+-  field->Add("3");
+-
+-  {
+-    auto proxy = field.MakeProxy();
+-    EXPECT_THAT(proxy[0], "1");
+-    EXPECT_THAT(proxy[1], "2");
+-    EXPECT_THAT(proxy[2], "3");
+-  }
+-
+-  {
+-    auto proxy = field.MakeConstProxy();
+-    EXPECT_THAT(proxy[0], "1");
+-    EXPECT_THAT(proxy[1], "2");
+-    EXPECT_THAT(proxy[2], "3");
+-  }
+-}
+-
+-TEST_P(RepeatedFieldProxyTest, MutateElementPrimitive) {
+-  auto field = MakeRepeatedFieldContainer<int32_t>();
+-  field->Add(1);
+-  field->Add(2);
+-  field->Add(3);
+-
+-  {
+-    auto proxy = field.MakeProxy();
+-    proxy[0] = 4;
+-
+-    EXPECT_EQ(proxy[0], 4);
+-    EXPECT_EQ(proxy[1], 2);
+-    EXPECT_EQ(proxy[2], 3);
+-  }
+-}
+-
+-TEST_P(RepeatedFieldProxyTest, MutateElementString) {
+-  auto field = MakeRepeatedFieldContainer<std::string>();
+-  field->Add("1");
+-  field->Add("2");
+-  field->Add("3");
+-  field->Add("4");
+-
+-  {
+-    auto proxy = field.MakeProxy();
+-    proxy[0] = "5";
+-    proxy[1] = StrAs<std::string>("6");
+-    const char* c_str = "7";
+-    proxy[2] = c_str;
+-    proxy[3] = StrAs<absl::string_view>("8");
+-
+-    EXPECT_EQ(proxy[0], "5");
+-    EXPECT_EQ(proxy[1], "6");
+-    EXPECT_EQ(proxy[2], "7");
+-    EXPECT_EQ(proxy[3], "8");
+-  }
+-}
+-
+-TEST_P(RepeatedFieldProxyTest, MutateElementCord) {
+-  auto field = MakeRepeatedFieldContainer<absl::Cord>();
+-  field->Add(absl::Cord("1"));
+-  field->Add(absl::Cord("2"));
+-  field->Add(absl::Cord("3"));
+-  field->Add(absl::Cord("4"));
+-
+-  {
+-    auto proxy = field.MakeProxy();
+-
+-    proxy[0] = "5";
+-    proxy[1] = std::string("6");
+-    const char* c_str = "7";
+-    proxy[2] = c_str;
+-    proxy[3] = absl::string_view("8");
+-
+-    EXPECT_EQ(proxy[0], "5");
+-    EXPECT_EQ(proxy[1], "6");
+-    EXPECT_EQ(proxy[2], "7");
+-    EXPECT_EQ(proxy[3], "8");
+-  }
+-}
+-
+-TEST_P(RepeatedFieldProxyTest, MutateElementMessage) {
+-  auto field =
+-      MakeRepeatedFieldContainer<RepeatedFieldProxyTestSimpleMessage>();
+-  field->Add()->set_value(1);
+-  field->Add()->set_value(2);
+-  field->Add()->set_value(3);
+-
+-  {
+-    auto proxy = field.MakeProxy();
+-    proxy[2].set_value(4);
+-
+-    EXPECT_THAT(proxy[0], EqualsProto(R"pb(value: 1)pb"));
+-    EXPECT_THAT(proxy[1], EqualsProto(R"pb(value: 2)pb"));
+-    EXPECT_THAT(proxy[2], EqualsProto(R"pb(value: 4)pb"));
+-  }
+-}
+-
+-INSTANTIATE_TEST_SUITE_P(RepeatedFieldProxyTest, RepeatedFieldProxyTest,
+-                         testing::Bool(),
+-                         [](const testing::TestParamInfo<bool>& info) {
+-                           return info.param ? "WithArena" : "WithoutArena";
+-                         });
+-
+-}  // namespace
+-}  // namespace internal
+-}  // namespace protobuf
+-}  // namespace google
+diff --git a/src/google/protobuf/test_protos/repeated_field_proxy_test.proto b/src/google/protobuf/test_protos/repeated_field_proxy_test.proto
+deleted file mode 100644
+index f3da15580..000000000
+--- a/src/google/protobuf/test_protos/repeated_field_proxy_test.proto
++++ /dev/null
+@@ -1,7 +0,0 @@
+-edition = "2024";
+-
+-package proto2_unittest;
+-
+-message RepeatedFieldProxyTestSimpleMessage {
+-  int32 value = 1;
+-}

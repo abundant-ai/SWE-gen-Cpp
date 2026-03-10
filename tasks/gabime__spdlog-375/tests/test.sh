@@ -6,16 +6,25 @@ cd /app/src
 mkdir -p "tests"
 cp "/tests/file_log.cpp" "tests/file_log.cpp"
 
-# Build and run tests using the Makefile
-cd /app/src/tests
-make rebuild 2>&1 || {
+# Rebuild with updated test files (clear build directory to ensure CMake picks up changes)
+rm -rf build
+mkdir -p build
+cd build
+cmake .. -DSPDLOG_BUILD_TESTS=ON -DSPDLOG_BUILD_EXAMPLES=OFF -DSPDLOG_BUILD_BENCH=OFF -DCMAKE_CXX_FLAGS="-DSPDLOG_FMT_PRINTF" 2>&1 || {
+    echo "CMake configuration failed"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+}
+
+make -j2 2>&1 || {
     echo "Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-# Run the tests binary
-./tests
+# Run the unit tests (from tests subdirectory where logs directory exists)
+cd tests
+./catch_tests 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

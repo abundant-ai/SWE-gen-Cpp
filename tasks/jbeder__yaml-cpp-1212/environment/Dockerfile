@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-# Base system packages (common to all languages)
+# Base system packages
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -9,10 +9,18 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install additional system packages needed for yaml-cpp
+# Install C++ development tools and CMake
 RUN apt-get update && apt-get install -y \
     cmake \
+    libgtest-dev \
+    libgmock-dev \
+    locales \
     && rm -rf /var/lib/apt/lists/*
+
+# Generate locales needed for locale-sensitive tests
+RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && \
+    sed -i '/de_DE.UTF-8/s/^# //g' /etc/locale.gen && \
+    locale-gen
 
 WORKDIR /app
 
@@ -25,22 +33,23 @@ RUN git clone https://github.com/jbeder/yaml-cpp.git src && \
 
 WORKDIR /app/src
 
-# Configure the build
-RUN cmake -B build \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=17 \
+# Build the project with CMake
+RUN mkdir -p build && cd build && \
+    cmake .. \
     -DYAML_CPP_BUILD_TESTS=ON \
-    -DYAML_BUILD_SHARED_LIBS=OFF
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DCMAKE_CXX_STANDARD=17 && \
+    make -j2
 
-# Build the project initially
-RUN cmake --build build --config Debug
-
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
+
+# Rebuild after applying bug.patch (C++ is a compiled language)
+RUN cd build && make -j2
 
 RUN rm -rf /app/src/.git
 

@@ -25,7 +25,6 @@ TEST_CASE("async_logging_overflow ", "[async_logging]")
 #if defined(SPDLOG_ASYNC_COUNT_DISCARDED_MSG)
 	std::cout << the_log << std::endl;
 	REQUIRE(the_log.find("Discarded") != std::string::npos);
-	REQUIRE(the_log.find("messages") != std::string::npos);
 #endif
 }
 

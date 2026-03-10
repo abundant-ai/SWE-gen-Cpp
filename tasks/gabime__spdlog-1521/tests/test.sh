@@ -8,38 +8,23 @@ cp "/tests/CMakeLists.txt" "tests/CMakeLists.txt"
 mkdir -p "tests"
 cp "/tests/test_time_point.cpp" "tests/test_time_point.cpp"
 
-# Rebuild to incorporate the new test files
-rm -rf build
+# Build and run tests for specific tags
 mkdir -p build
 cd build
-
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=11 \
-    -DSPDLOG_BUILD_TESTS=ON \
-    -DSPDLOG_BUILD_TESTS_HO=OFF \
-    -DSPDLOG_BUILD_EXAMPLE=OFF || {
+cmake -DSPDLOG_BUILD_TESTS=ON .. 2>&1 || {
     echo "CMake configuration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-make -j2 2>&1 || {
+cmake --build . --target spdlog-utests 2>&1 || {
     echo "Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-# Check if test binary was built successfully
-if [ ! -f tests/spdlog-utests ]; then
-    echo "Build failed"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-cd ..
-# Run only the tests for this PR (time_point)
-./build/tests/spdlog-utests "[time_point]"
+# Run tests - test time_point functionality
+./tests/spdlog-utests "[time_point log_msg]" 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

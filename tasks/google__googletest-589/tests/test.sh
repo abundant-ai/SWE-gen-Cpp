@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-# Trap any error and write reward=0
-trap 'echo 0 > /logs/verifier/reward.txt' EXIT
+# Trap errors and write reward=0
+trap 'echo 0 > /logs/verifier/reward.txt' ERR
 
 cd /app/src
 
@@ -10,26 +10,18 @@ cd /app/src
 mkdir -p "googlemock/test"
 cp "/tests/googlemock/test/gmock_test.cc" "googlemock/test/gmock_test.cc"
 
-# Try to reconfigure and rebuild (this will fail if autotools config is broken)
-cd googletest
-autoreconf -fvi >/dev/null 2>&1
-./configure >/dev/null 2>&1
-make -j4 >/dev/null 2>&1
+# Rebuild with autotools
+cd googlemock
 
-cd ../googlemock
-autoreconf -fvi >/dev/null 2>&1
-./configure >/dev/null 2>&1
-make -j4 >/dev/null 2>&1
+# Reconfigure and rebuild
+autoreconf -fvi 2>&1
+./configure 2>&1
+make -j4 2>&1
 
-# Compile the test manually (gmock_test is not in the standard TESTS list)
-g++ -std=c++11 -I../googletest/include -Iinclude -I. -I../googletest \
-    -pthread test/gmock_test.cc lib/.libs/libgmock.a lib/.libs/libgmock_main.a ../googletest/lib/.libs/libgtest.a \
-    -o test_gmock_test
+# Run the specific test
+make check 2>&1
 
-# Run the test
-./test_gmock_test
-
-# If we got here, test passed
-trap - EXIT  # Clear the trap
+# If we got here, build and tests passed
+trap - ERR  # Clear the trap
 echo 1 > /logs/verifier/reward.txt
 exit 0

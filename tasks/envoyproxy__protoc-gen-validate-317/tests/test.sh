@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd /root/go/src/github.com/envoyproxy/protoc-gen-validate
+cd /go/src/github.com/envoyproxy/protoc-gen-validate
 
 export CI=true
 
@@ -10,13 +10,11 @@ cp "/tests/java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingCli
 mkdir -p "java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc"
 cp "/tests/java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptorTest.java" "java/pgv-java-grpc/src/test/java/io/envoyproxy/pgv/grpc/ValidatingServerInterceptorTest.java"
 
-# Compile the pgv-java-grpc module (including proto files and test code)
-cd java
-mvn test-compile -pl pgv-java-grpc -am
+# Recompile Java modules after changes (the agent may have applied a fix)
+cd java && mvn clean install -DskipTests
 
-# Run the specific test classes for this PR
-cd pgv-java-grpc
-mvn surefire:test -Dtest=ValidatingClientInterceptorTest,ValidatingServerInterceptorTest
+# Run specific test classes with Maven
+mvn test -Dtest=ValidatingClientInterceptorTest,ValidatingServerInterceptorTest -pl pgv-java-grpc
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

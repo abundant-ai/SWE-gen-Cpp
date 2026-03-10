@@ -1,0 +1,459 @@
+diff --git a/modules/core/misc/python/pyopencv_umat.hpp b/modules/core/misc/python/pyopencv_umat.hpp
+new file mode 100644
+index 0000000000..b49b71b10c
+--- /dev/null
++++ b/modules/core/misc/python/pyopencv_umat.hpp
+@@ -0,0 +1,37 @@
++#ifdef HAVE_OPENCV_CORE
++
++#include "opencv2/core/mat.hpp"
++
++typedef std::vector<Range> vector_Range;
++
++CV_PY_TO_CLASS(UMat);
++CV_PY_FROM_CLASS(UMat);
++CV_PY_TO_ENUM(UMatUsageFlags);
++
++static bool cv_mappable_to(const Ptr<Mat>& src, Ptr<UMat>& dst)
++{
++    //dst.reset(new UMat(src->getUMat(ACCESS_RW)));
++    dst.reset(new UMat());
++    src->copyTo(*dst);
++    return true;
++}
++
++static void* cv_UMat_queue()
++{
++    return cv::ocl::Queue::getDefault().ptr();
++}
++
++static void* cv_UMat_context()
++{
++    return cv::ocl::Context::getDefault().ptr();
++}
++
++static Mat cv_UMat_get(const UMat* _self)
++{
++    Mat m;
++    m.allocator = &g_numpyAllocator;
++    _self->copyTo(m);
++    return m;
++}
++
++#endif
+diff --git a/modules/core/misc/python/shadow_umat.hpp b/modules/core/misc/python/shadow_umat.hpp
+new file mode 100644
+index 0000000000..107aedb928
+--- /dev/null
++++ b/modules/core/misc/python/shadow_umat.hpp
+@@ -0,0 +1,59 @@
++#error This is a shadow header file, which is not intended for processing by any compiler. \
++       Only bindings parser should handle this file.
++
++namespace cv
++{
++
++class CV_EXPORTS_W UMat
++{
++public:
++    //! default constructor
++    CV_WRAP UMat(UMatUsageFlags usageFlags = USAGE_DEFAULT);
++    //! constructs 2D matrix of the specified size and type
++    // (_type is CV_8UC1, CV_64FC3, CV_32SC(12) etc.)
++    CV_WRAP UMat(int rows, int cols, int type, UMatUsageFlags usageFlags = USAGE_DEFAULT);
++    CV_WRAP UMat(Size size, int type, UMatUsageFlags usageFlags = USAGE_DEFAULT);
++    //! constucts 2D matrix and fills it with the specified value _s.
++    CV_WRAP UMat(int rows, int cols, int type, const Scalar& s, UMatUsageFlags usageFlags = USAGE_DEFAULT);
++    CV_WRAP UMat(Size size, int type, const Scalar& s, UMatUsageFlags usageFlags = USAGE_DEFAULT);
++
++    //! Mat is mappable to UMat
++    CV_WRAP_MAPPABLE(Ptr<Mat>);
++
++    //! returns the OpenCL queue used by OpenCV UMat
++    CV_WRAP_PHANTOM(static void* queue());
++
++    //! returns the OpenCL context used by OpenCV UMat
++    CV_WRAP_PHANTOM(static void* context());
++
++    //! copy constructor
++    CV_WRAP UMat(const UMat& m);
++
++    //! creates a matrix header for a part of the bigger matrix
++    CV_WRAP UMat(const UMat& m, const Range& rowRange, const Range& colRange = Range::all());
++    CV_WRAP UMat(const UMat& m, const Rect& roi);
++    CV_WRAP UMat(const UMat& m, const std::vector<Range>& ranges);
++
++    //CV_WRAP_AS(get) Mat getMat(int flags CV_WRAP_DEFAULT(ACCESS_RW)) const;
++    //! returns a numpy matrix
++    CV_WRAP_PHANTOM(Mat get() const);
++
++    //! returns true iff the matrix data is continuous
++    // (i.e. when there are no gaps between successive rows).
++    // similar to CV_IS_MAT_CONT(cvmat->type)
++    CV_WRAP bool isContinuous() const;
++
++    //! returns true if the matrix is a submatrix of another matrix
++    CV_WRAP bool isSubmatrix() const;
++
++    /*! Returns the OpenCL buffer handle on which UMat operates on.
++    The UMat instance should be kept alive during the use of the handle to prevent the buffer to be
++    returned to the OpenCV buffer pool.
++    */
++    CV_WRAP void* handle(int accessFlags) const;
++
++    // offset of the submatrix (or 0)
++    CV_PROP_RW size_t offset;
++};
++
++} // namespace cv
+diff --git a/modules/python/bindings/CMakeLists.txt b/modules/python/bindings/CMakeLists.txt
+index 81cf1337b6..dd9caacbf8 100644
+--- a/modules/python/bindings/CMakeLists.txt
++++ b/modules/python/bindings/CMakeLists.txt
+@@ -26,6 +26,8 @@ foreach(m ${OPENCV_PYTHON_MODULES})
+       list(APPEND opencv_hdrs "${hdr}")
+     endif()
+   endforeach()
++  file(GLOB hdr ${OPENCV_MODULE_${m}_LOCATION}/misc/python/shadow*.hpp)
++  list(APPEND opencv_hdrs ${hdr})
+   file(GLOB userdef_hdrs ${OPENCV_MODULE_${m}_LOCATION}/misc/python/pyopencv*.hpp)
+   list(APPEND opencv_userdef_hdrs ${userdef_hdrs})
+ endforeach(m)
+diff --git a/modules/python/src2/cv2.cpp b/modules/python/src2/cv2.cpp
+index 15a6939727..89d0aa31f1 100644
+--- a/modules/python/src2/cv2.cpp
++++ b/modules/python/src2/cv2.cpp
+@@ -554,275 +554,6 @@ PyObject* pyopencv_from(const cv::Ptr<T>& p)
+     return pyopencv_from(*p);
+ }
+ 
+-typedef struct {
+-    PyObject_HEAD
+-    UMat* um;
+-} cv2_UMatWrapperObject;
+-
+-static bool PyObject_IsUMat(PyObject *o);
+-
+-// UMatWrapper init - try to map arguments from python to UMat constructors
+-static int UMatWrapper_init(PyObject* self_, PyObject *args, PyObject *kwds)
+-{
+-    cv2_UMatWrapperObject* self = (cv2_UMatWrapperObject*)self_;
+-    if (self == NULL)
+-    {
+-        PyErr_SetString(PyExc_TypeError, "Internal error");
+-        return -1;
+-    }
+-    self->um = NULL;
+-    {
+-        // constructor ()
+-        const char *kwlist[] = {NULL};
+-        if (PyArg_ParseTupleAndKeywords(args, kwds, "", (char**) kwlist)) {
+-            self->um = new UMat();
+-            return 0;
+-        }
+-        PyErr_Clear();
+-    }
+-    {
+-        // constructor (rows, cols, type)
+-        const char *kwlist[] = {"rows", "cols", "type", NULL};
+-        int rows, cols, type;
+-        if (PyArg_ParseTupleAndKeywords(args, kwds, "iii", (char**) kwlist, &rows, &cols, &type)) {
+-            self->um = new UMat(rows, cols, type);
+-            return 0;
+-        }
+-        PyErr_Clear();
+-    }
+-    {
+-        // constructor (m, rowRange, colRange)
+-        const char *kwlist[] = {"m", "rowRange", "colRange", NULL};
+-        PyObject *obj = NULL;
+-        int y0 = -1, y1 = -1, x0 = -1, x1 = -1;
+-        if (PyArg_ParseTupleAndKeywords(args, kwds, "O(ii)|(ii)", (char**) kwlist, &obj, &y0, &y1, &x0, &x1) && PyObject_IsUMat(obj)) {
+-            UMat *um_other = ((cv2_UMatWrapperObject *) obj)->um;
+-            Range rowRange(y0, y1);
+-            Range colRange = (x0 >= 0 && x1 >= 0) ? Range(x0, x1) : Range::all();
+-            self->um = new UMat(*um_other, rowRange, colRange);
+-            return 0;
+-        }
+-        PyErr_Clear();
+-    }
+-    {
+-        // constructor (m)
+-        const char *kwlist[] = {"m", NULL};
+-        PyObject *obj = NULL;
+-        if (PyArg_ParseTupleAndKeywords(args, kwds, "O", (char**) kwlist, &obj)) {
+-            // constructor (UMat m)
+-            if (PyObject_IsUMat(obj)) {
+-                UMat *um_other = ((cv2_UMatWrapperObject *) obj)->um;
+-                self->um = new UMat(*um_other);
+-                return 0;
+-            }
+-            // python specific constructor from array like object
+-            Mat m;
+-            if (pyopencv_to(obj, m, ArgInfo("UMatWrapper.np_mat", 0))) {
+-                self->um = new UMat();
+-                m.copyTo(*self->um);
+-                return 0;
+-            }
+-        }
+-        PyErr_Clear();
+-    }
+-    PyErr_SetString(PyExc_TypeError, "no matching UMat constructor found/supported");
+-    return -1;
+-}
+-
+-static void UMatWrapper_dealloc(cv2_UMatWrapperObject* self)
+-{
+-    if (self->um)
+-        delete self->um;
+-#if PY_MAJOR_VERSION >= 3
+-    Py_TYPE(self)->tp_free((PyObject*)self);
+-#else
+-    self->ob_type->tp_free((PyObject*)self);
+-#endif
+-}
+-
+-// UMatWrapper.get() - returns numpy array by transferring UMat data to Mat and than wrapping it to numpy array
+-// (using numpy allocator - and so without unnecessary copy)
+-static PyObject * UMatWrapper_get(PyObject* self_, PyObject * /*args*/)
+-{
+-    cv2_UMatWrapperObject* self = (cv2_UMatWrapperObject*)self_;
+-    if (self == NULL)
+-        return failmsgp("Incorrect type of self (must be 'cv2_UMatWrapperObject')");
+-    Mat m;
+-    m.allocator = &g_numpyAllocator;
+-    self->um->copyTo(m);
+-
+-    return pyopencv_from(m);
+-}
+-
+-// UMatWrapper.handle() - returns the OpenCL handle of the UMat object
+-static PyObject * UMatWrapper_handle(PyObject* self_, PyObject *args, PyObject *kwds)
+-{
+-    cv2_UMatWrapperObject* self = (cv2_UMatWrapperObject*)self_;
+-    if (self == NULL)
+-        return failmsgp("Incorrect type of self (must be 'cv2_UMatWrapperObject')");
+-    const char *kwlist[] = {"accessFlags", NULL};
+-    int accessFlags;
+-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "i", (char**) kwlist, &accessFlags))
+-        return 0;
+-    return PyLong_FromVoidPtr(self->um->handle(accessFlags));
+-}
+-
+-// UMatWrapper.isContinuous() - returns true if the matrix data is continuous
+-static PyObject * UMatWrapper_isContinuous(PyObject* self_, PyObject * /*args*/)
+-{
+-    cv2_UMatWrapperObject* self = (cv2_UMatWrapperObject*)self_;
+-    if (self == NULL)
+-        return failmsgp("Incorrect type of self (must be 'cv2_UMatWrapperObject')");
+-    return PyBool_FromLong(self->um->isContinuous());
+-}
+-
+-// UMatWrapper.isContinuous() - returns true if the matrix is a submatrix of another matrix
+-static PyObject * UMatWrapper_isSubmatrix(PyObject* self_, PyObject * /*args*/)
+-{
+-    cv2_UMatWrapperObject* self = (cv2_UMatWrapperObject*)self_;
+-    if (self == NULL)
+-        return failmsgp("Incorrect type of self (must be 'cv2_UMatWrapperObject')");
+-    return PyBool_FromLong(self->um->isSubmatrix());
+-}
+-
+-// UMatWrapper.context() - returns the OpenCL context used by OpenCV UMat
+-static PyObject * UMatWrapper_context(PyObject* /*self_*/, PyObject * /*args*/)
+-{
+-    return PyLong_FromVoidPtr(cv::ocl::Context::getDefault().ptr());
+-}
+-
+-// UMatWrapper.context() - returns the OpenCL queue used by OpenCV UMat
+-static PyObject * UMatWrapper_queue(PyObject* /*self_*/, PyObject * /*args*/)
+-{
+-    return PyLong_FromVoidPtr(cv::ocl::Queue::getDefault().ptr());
+-}
+-
+-static PyObject * UMatWrapper_offset_getter(PyObject* self_, void*)
+-{
+-    cv2_UMatWrapperObject* self = (cv2_UMatWrapperObject*)self_;
+-    if (self == NULL)
+-        return failmsgp("Incorrect type of self (must be 'cv2_UMatWrapperObject')");
+-    return PyLong_FromSsize_t(self->um->offset);
+-}
+-
+-static PyMethodDef UMatWrapper_methods[] = {
+-        {"get", CV_PY_FN_NOARGS(UMatWrapper_get),
+-                "Returns numpy array"
+-        },
+-        {"handle", CV_PY_FN_WITH_KW(UMatWrapper_handle),
+-                "Returns UMat native handle"
+-        },
+-        {"isContinuous", CV_PY_FN_NOARGS(UMatWrapper_isContinuous),
+-                "Returns true if the matrix data is continuous"
+-        },
+-        {"isSubmatrix", CV_PY_FN_NOARGS(UMatWrapper_isSubmatrix),
+-                "Returns true if the matrix is a submatrix of another matrix"
+-        },
+-        {"context", CV_PY_FN_NOARGS_(UMatWrapper_context, METH_STATIC),
+-                "Returns OpenCL context handle"
+-        },
+-        {"queue", CV_PY_FN_NOARGS_(UMatWrapper_queue, METH_STATIC),
+-                "Returns OpenCL queue handle"
+-        },
+-        {NULL, NULL, 0, NULL}  /* Sentinel */
+-};
+-
+-static PyGetSetDef UMatWrapper_getset[] = {
+-        {(char*) "offset", (getter) UMatWrapper_offset_getter, NULL, NULL, NULL},
+-        {NULL, NULL, NULL, NULL, NULL}  /* Sentinel */
+-};
+-
+-static PyTypeObject cv2_UMatWrapperType = {
+-#if PY_MAJOR_VERSION >= 3
+-        PyVarObject_HEAD_INIT(NULL, 0)
+-#else
+-        PyObject_HEAD_INIT(NULL)
+-        0,                             /*ob_size*/
+-#endif
+-        "cv2.UMat",                    /* tp_name */
+-        sizeof(cv2_UMatWrapperObject), /* tp_basicsize */
+-        0,                             /* tp_itemsize */
+-      (destructor)UMatWrapper_dealloc, /* tp_dealloc */
+-        0,                             /* tp_print */
+-        0,                             /* tp_getattr */
+-        0,                             /* tp_setattr */
+-        0,                             /* tp_reserved */
+-        0,                             /* tp_repr */
+-        0,                             /* tp_as_number */
+-        0,                             /* tp_as_sequence */
+-        0,                             /* tp_as_mapping */
+-        0,                             /* tp_hash  */
+-        0,                             /* tp_call */
+-        0,                             /* tp_str */
+-        0,                             /* tp_getattro */
+-        0,                             /* tp_setattro */
+-        0,                             /* tp_as_buffer */
+-        Py_TPFLAGS_DEFAULT,            /* tp_flags */
+-        "OpenCV 3 UMat wrapper. Used for T-API support.", /* tp_doc */
+-        0,                             /* tp_traverse */
+-        0,                             /* tp_clear */
+-        0,                             /* tp_richcompare */
+-        0,                             /* tp_weaklistoffset */
+-        0,                             /* tp_iter */
+-        0,                             /* tp_iternext */
+-        UMatWrapper_methods,           /* tp_methods */
+-        0,                             /* tp_members */
+-        UMatWrapper_getset,            /* tp_getset */
+-        0,                             /* tp_base */
+-        0,                             /* tp_dict */
+-        0,                             /* tp_descr_get */
+-        0,                             /* tp_descr_set */
+-        0,                             /* tp_dictoffset */
+-        (initproc)UMatWrapper_init,    /* tp_init */
+-        0,                             /* tp_alloc */
+-        PyType_GenericNew,             /* tp_new */
+-        0,                             /* tp_free */
+-        0,                             /* tp_is_gc */
+-        0,                             /* tp_bases */
+-        0,                             /* tp_mro */
+-        0,                             /* tp_cache */
+-        0,                             /* tp_subclasses */
+-        0,                             /* tp_weaklist */
+-        0,                             /* tp_del */
+-        0,                             /* tp_version_tag */
+-#if PY_MAJOR_VERSION >= 3
+-        0,                             /* tp_finalize */
+-#endif
+-};
+-
+-static bool PyObject_IsUMat(PyObject *o) {
+-    return (o != NULL) && PyObject_TypeCheck(o, &cv2_UMatWrapperType);
+-}
+-
+-static bool pyopencv_to(PyObject* o, UMat& um, const ArgInfo info) {
+-    if (PyObject_IsUMat(o)) {
+-        um = *((cv2_UMatWrapperObject *) o)->um;
+-        return true;
+-    }
+-
+-    Mat m;
+-    if (!pyopencv_to(o, m, info)) {
+-        return false;
+-    }
+-
+-    m.copyTo(um);
+-    return true;
+-}
+-
+-template<>
+-bool pyopencv_to(PyObject* o, UMat& um, const char* name)
+-{
+-    return pyopencv_to(o, um, ArgInfo(name, 0));
+-}
+-
+-template<>
+-PyObject* pyopencv_from(const UMat& m)
+-{
+-    PyObject *o = PyObject_CallObject((PyObject *) &cv2_UMatWrapperType, NULL);
+-    *((cv2_UMatWrapperObject *) o)->um = m;
+-    return o;
+-}
+-
+ template<>
+ bool pyopencv_to(PyObject* obj, void*& ptr, const char* name)
+ {
+@@ -2060,15 +1791,6 @@ void initcv2()
+   Py_DECREF(opencv_error_dict);
+   PyDict_SetItemString(d, "error", opencv_error);
+ 
+-//Registering UMatWrapper python class in cv2 module:
+-  if (PyType_Ready(&cv2_UMatWrapperType) < 0)
+-#if PY_MAJOR_VERSION >= 3
+-    return NULL;
+-#else
+-    return;
+-#endif
+-
+-
+ #if PY_MAJOR_VERSION >= 3
+ #define PUBLISH_OBJECT(name, type) Py_INCREF(&type);\
+   PyModule_AddObject(m, name, (PyObject *)&type);
+@@ -2079,8 +1801,6 @@ void initcv2()
+   PyModule_AddObject(m, name, (PyObject *)&type);
+ #endif
+ 
+-  PUBLISH_OBJECT("UMat", cv2_UMatWrapperType);
+-
+ #include "pyopencv_generated_type_publish.h"
+ 
+ #define PUBLISH(I) PyDict_SetItemString(d, #I, PyInt_FromLong(I))
+diff --git a/modules/python/src2/gen2.py b/modules/python/src2/gen2.py
+index 78ad36eb6c..497fe8e11b 100755
+--- a/modules/python/src2/gen2.py
++++ b/modules/python/src2/gen2.py
+@@ -740,7 +740,7 @@ class FuncInfo(object):
+                 if v.rettype:
+                     code_decl += "    " + v.rettype + " retval;\n"
+                     code_fcall += "retval = "
+-                if ismethod and not self.is_static:
++                if not v.isphantom and ismethod and not self.is_static:
+                     code_fcall += "_self_->" + self.cname
+                 else:
+                     code_fcall += self.cname
+@@ -961,7 +961,8 @@ class PythonWrapperGenerator(object):
+             func.add_variant(decl, isphantom)
+         else:
+             if classname and not isconstructor:
+-                cname = barename
++                if not isphantom:
++                    cname = barename
+                 func_map = self.classes[classname].methods
+             else:
+                 func_map = self.namespaces.setdefault(namespace, Namespace()).funcs
+@@ -1019,7 +1020,8 @@ class PythonWrapperGenerator(object):
+             decls = self.parser.parse(hdr)
+             if len(decls) == 0:
+                 continue
+-            self.code_include.write( '#include "{0}"\n'.format(hdr[hdr.rindex('opencv2/'):]) )
++            if hdr.find('opencv2/') >= 0: #Avoid including the shadow files
++                self.code_include.write( '#include "{0}"\n'.format(hdr[hdr.rindex('opencv2/'):]) )
+             for decl in decls:
+                 name = decl[0]
+                 if name.startswith("struct") or name.startswith("class"):

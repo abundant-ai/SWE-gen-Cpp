@@ -7,10 +7,9 @@ mkdir -p "tests"
 cp "/tests/Makefile" "tests/Makefile"
 cp "/tests/TopicTree.cpp" "tests/TopicTree.cpp"
 
-# Run the TopicTree test
-# Compile TopicTree.cpp with C++17 and address sanitizer, then run it
+# Compile and run TopicTree test
 cd tests
-g++ -std=c++17 -fsanitize=address -I.. TopicTree.cpp -o TopicTree
+${CXX:-g++} -std=c++17 -fsanitize=address TopicTree.cpp -o TopicTree
 ./TopicTree
 test_status=$?
 

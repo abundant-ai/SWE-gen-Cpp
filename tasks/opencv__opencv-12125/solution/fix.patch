@@ -1,0 +1,201 @@
+diff --git a/modules/dnn/src/tensorflow/tf_importer.cpp b/modules/dnn/src/tensorflow/tf_importer.cpp
+index fcca577094..fdd81b09ba 100644
+--- a/modules/dnn/src/tensorflow/tf_importer.cpp
++++ b/modules/dnn/src/tensorflow/tf_importer.cpp
+@@ -716,6 +716,8 @@ void TFImporter::populateNet(Net dstNet)
+ 
+     // find all Const layers for params
+     std::map<String, int> value_id;
++    // A map with constant blobs which are shared between multiple layers.
++    std::map<String, Mat> sharedWeights;
+     addConstNodes(netBin, value_id, layers_to_ignore);
+     addConstNodes(netTxt, value_id, layers_to_ignore);
+ 
+@@ -805,52 +807,65 @@ void TFImporter::populateNet(Net dstNet)
+                 }
+             }
+ 
+-            const tensorflow::TensorProto& kernelTensor = getConstBlob(layer, value_id);
+-            kernelFromTensor(kernelTensor, layerParams.blobs[0]);
+-            releaseTensor(const_cast<tensorflow::TensorProto*>(&kernelTensor));
+-            int* kshape = layerParams.blobs[0].size.p;
+-            const int outCh = kshape[0];
+-            const int inCh = kshape[1];
+-            const int height = kshape[2];
+-            const int width = kshape[3];
+-            if (type == "DepthwiseConv2dNative")
++            int kernelTensorInpId = -1;
++            const tensorflow::TensorProto& kernelTensor = getConstBlob(layer, value_id, -1, &kernelTensorInpId);
++            const String kernelTensorName = layer.input(kernelTensorInpId);
++            std::map<String, Mat>::iterator sharedWeightsIt = sharedWeights.find(kernelTensorName);
++            if (sharedWeightsIt == sharedWeights.end())
+             {
+-                CV_Assert(!locPredTransposed);
+-                const int chMultiplier = kshape[0];
+-
+-                Mat copy = layerParams.blobs[0].clone();
+-                float* src = (float*)copy.data;
+-                float* dst = (float*)layerParams.blobs[0].data;
+-                for (int i = 0; i < chMultiplier; ++i)
+-                    for (int j = 0; j < inCh; ++j)
+-                        for (int s = 0; s < height * width; ++s)
+-                            {
+-                                int src_i = (i * inCh + j) * height * width + s;
+-                                int dst_i = (j * chMultiplier + i) * height* width + s;
+-                                dst[dst_i] = src[src_i];
+-                            }
+-                // TODO Use reshape instead
+-                kshape[0] = inCh * chMultiplier;
+-                kshape[1] = 1;
+-                size_t* kstep = layerParams.blobs[0].step.p;
+-                kstep[0] = kstep[1]; // fix steps too
+-            }
+-            layerParams.set("kernel_h", height);
+-            layerParams.set("kernel_w", width);
+-            layerParams.set("num_output", outCh);
++                kernelFromTensor(kernelTensor, layerParams.blobs[0]);
++                releaseTensor(const_cast<tensorflow::TensorProto*>(&kernelTensor));
++
++                int* kshape = layerParams.blobs[0].size.p;
++                const int outCh = kshape[0];
++                const int inCh = kshape[1];
++                const int height = kshape[2];
++                const int width = kshape[3];
++                if (type == "DepthwiseConv2dNative")
++                {
++                    CV_Assert(!locPredTransposed);
++                    const int chMultiplier = kshape[0];
++
++                    Mat copy = layerParams.blobs[0].clone();
++                    float* src = (float*)copy.data;
++                    float* dst = (float*)layerParams.blobs[0].data;
++                    for (int i = 0; i < chMultiplier; ++i)
++                        for (int j = 0; j < inCh; ++j)
++                            for (int s = 0; s < height * width; ++s)
++                                {
++                                    int src_i = (i * inCh + j) * height * width + s;
++                                    int dst_i = (j * chMultiplier + i) * height* width + s;
++                                    dst[dst_i] = src[src_i];
++                                }
++                    // TODO Use reshape instead
++                    kshape[0] = inCh * chMultiplier;
++                    kshape[1] = 1;
++                    size_t* kstep = layerParams.blobs[0].step.p;
++                    kstep[0] = kstep[1]; // fix steps too
++                }
+ 
+-            // Shuffle output channels from yxYX to xyXY.
+-            if (locPredTransposed)
+-            {
+-                const int slice = height * width * inCh;
+-                for (int i = 0; i < outCh; i += 2)
++                // Shuffle output channels from yxYX to xyXY.
++                if (locPredTransposed)
+                 {
+-                    cv::Mat src(1, slice, CV_32F, layerParams.blobs[0].ptr<float>(i));
+-                    cv::Mat dst(1, slice, CV_32F, layerParams.blobs[0].ptr<float>(i + 1));
+-                    std::swap_ranges(src.begin<float>(), src.end<float>(), dst.begin<float>());
++                    const int slice = height * width * inCh;
++                    for (int i = 0; i < outCh; i += 2)
++                    {
++                        cv::Mat src(1, slice, CV_32F, layerParams.blobs[0].ptr<float>(i));
++                        cv::Mat dst(1, slice, CV_32F, layerParams.blobs[0].ptr<float>(i + 1));
++                        std::swap_ranges(src.begin<float>(), src.end<float>(), dst.begin<float>());
++                    }
+                 }
++                sharedWeights[kernelTensorName] = layerParams.blobs[0];
++            }
++            else
++            {
++                layerParams.blobs[0] = sharedWeightsIt->second;
+             }
+ 
++            layerParams.set("kernel_h", layerParams.blobs[0].size[2]);
++            layerParams.set("kernel_w", layerParams.blobs[0].size[3]);
++            layerParams.set("num_output", layerParams.blobs[0].size[0]);
++
+             setStrides(layerParams, layer);
+             setPadding(layerParams, layer);
+ 
+diff --git a/samples/dnn/tf_text_graph_ssd.py b/samples/dnn/tf_text_graph_ssd.py
+index 1bf4079113..f6a8b152cb 100644
+--- a/samples/dnn/tf_text_graph_ssd.py
++++ b/samples/dnn/tf_text_graph_ssd.py
+@@ -29,6 +29,11 @@ parser.add_argument('--aspect_ratios', default=[1.0, 2.0, 0.5, 3.0, 0.333], type
+                     help='Hyper-parameter of ssd_anchor_generator from config file.')
+ parser.add_argument('--image_width', default=300, type=int, help='Training images width.')
+ parser.add_argument('--image_height', default=300, type=int, help='Training images height.')
++parser.add_argument('--not_reduce_boxes_in_lowest_layer', default=False, action='store_true',
++                    help='A boolean to indicate whether the fixed 3 boxes per '
++                         'location is used in the lowest achors generation layer.')
++parser.add_argument('--box_predictor', default='convolutional', type=str,
++                    choices=['convolutional', 'weight_shared_convolutional'])
+ args = parser.parse_args()
+ 
+ # Nodes that should be kept.
+@@ -194,12 +199,18 @@ def addConcatNode(name, inputs, axisNodeName):
+ addConstNode('concat/axis_flatten', [-1])
+ addConstNode('PriorBox/concat/axis', [-2])
+ 
+-for label in ['ClassPredictor', 'BoxEncodingPredictor']:
++for label in ['ClassPredictor', 'BoxEncodingPredictor' if args.box_predictor is 'convolutional' else 'BoxPredictor']:
+     concatInputs = []
+     for i in range(args.num_layers):
+         # Flatten predictions
+         flatten = NodeDef()
+-        inpName = 'BoxPredictor_%d/%s/BiasAdd' % (i, label)
++        if args.box_predictor is 'convolutional':
++            inpName = 'BoxPredictor_%d/%s/BiasAdd' % (i, label)
++        else:
++            if i == 0:
++                inpName = 'WeightSharedConvolutionalBoxPredictor/%s/BiasAdd' % label
++            else:
++                inpName = 'WeightSharedConvolutionalBoxPredictor_%d/%s/BiasAdd' % (i, label)
+         flatten.input.append(inpName)
+         flatten.name = inpName + '/Flatten'
+         flatten.op = 'Flatten'
+@@ -210,7 +221,9 @@ for label in ['ClassPredictor', 'BoxEncodingPredictor']:
+ 
+ idx = 0
+ for node in graph_def.node:
+-    if node.name == ('BoxPredictor_%d/BoxEncodingPredictor/Conv2D' % idx):
++    if node.name == ('BoxPredictor_%d/BoxEncodingPredictor/Conv2D' % idx) or \
++       node.name == ('WeightSharedConvolutionalBoxPredictor_%d/BoxPredictor/Conv2D' % idx) or \
++       node.name == 'WeightSharedConvolutionalBoxPredictor/BoxPredictor/Conv2D':
+         text_format.Merge('b: true', node.attr["loc_pred_transposed"])
+         idx += 1
+ assert(idx == args.num_layers)
+@@ -224,13 +237,19 @@ for i in range(args.num_layers):
+     priorBox = NodeDef()
+     priorBox.name = 'PriorBox_%d' % i
+     priorBox.op = 'PriorBox'
+-    priorBox.input.append('BoxPredictor_%d/BoxEncodingPredictor/BiasAdd' % i)
++    if args.box_predictor is 'convolutional':
++        priorBox.input.append('BoxPredictor_%d/BoxEncodingPredictor/BiasAdd' % i)
++    else:
++        if i == 0:
++            priorBox.input.append('WeightSharedConvolutionalBoxPredictor/BoxPredictor/Conv2D')
++        else:
++            priorBox.input.append('WeightSharedConvolutionalBoxPredictor_%d/BoxPredictor/BiasAdd' % i)
+     priorBox.input.append(graph_def.node[0].name)  # image_tensor
+ 
+     text_format.Merge('b: false', priorBox.attr["flip"])
+     text_format.Merge('b: false', priorBox.attr["clip"])
+ 
+-    if i == 0:
++    if i == 0 and not args.not_reduce_boxes_in_lowest_layer:
+         widths = [0.1, args.min_scale * sqrt(2.0), args.min_scale * sqrt(0.5)]
+         heights = [0.1, args.min_scale / sqrt(2.0), args.min_scale / sqrt(0.5)]
+     else:
+@@ -261,7 +280,10 @@ detectionOut = NodeDef()
+ detectionOut.name = 'detection_out'
+ detectionOut.op = 'DetectionOutput'
+ 
+-detectionOut.input.append('BoxEncodingPredictor/concat')
++if args.box_predictor == 'convolutional':
++    detectionOut.input.append('BoxEncodingPredictor/concat')
++else:
++    detectionOut.input.append('BoxPredictor/concat')
+ detectionOut.input.append(sigmoid.name)
+ detectionOut.input.append('PriorBox/concat')
+ 

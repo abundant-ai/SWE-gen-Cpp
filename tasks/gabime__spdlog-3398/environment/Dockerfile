@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y \
 # Install CMake (required for building spdlog)
 RUN apt-get update && apt-get install -y \
     cmake \
-    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -26,22 +25,12 @@ RUN git clone https://github.com/gabime/spdlog.git src && \
 
 WORKDIR /app/src
 
-# Build spdlog initially
-RUN mkdir -p build && cd build && \
-    cmake .. \
-        -DCMAKE_BUILD_TYPE=Debug \
-        -DCMAKE_CXX_STANDARD=11 \
-        -DSPDLOG_BUILD_TESTS=ON \
-        -DSPDLOG_BUILD_TESTS_HO=OFF \
-        -DSPDLOG_BUILD_EXAMPLE=OFF && \
-    make -j$(nproc)
-
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
+# Reset any tracked files before applying bug.patch
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
-RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
+RUN patch -p1 --no-backup-if-mismatch --reject-file=- < /tmp/bug.patch || [ $? -eq 1 ] && rm /tmp/bug.patch
 
 RUN rm -rf /app/src/.git
 

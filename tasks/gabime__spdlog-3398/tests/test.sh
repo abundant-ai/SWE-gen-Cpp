@@ -6,38 +6,25 @@ cd /app/src
 mkdir -p "tests"
 cp "/tests/test_registry.cpp" "tests/test_registry.cpp"
 
-# Rebuild to incorporate the new test file
-rm -rf build
+# Build and run tests using CMake
 mkdir -p build
 cd build
-
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=11 \
-    -DSPDLOG_BUILD_TESTS=ON \
-    -DSPDLOG_BUILD_TESTS_HO=OFF \
-    -DSPDLOG_BUILD_EXAMPLE=OFF || {
+cmake -DSPDLOG_BUILD_TESTS=ON .. 2>&1 || {
     echo "CMake configuration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-make -j2 || {
+# Build the test executable
+cmake --build . --target spdlog-utests 2>&1 || {
     echo "Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-# Check if test binary was built successfully
-if [ ! -f tests/spdlog-utests ]; then
-    echo "Build failed"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-cd ..
-# Run the registry tests
-./build/tests/spdlog-utests "[registry]"
+# Run tests from test_registry.cpp
+# Catch2 allows filtering tests - we run all tests from the registry test file
+./tests/spdlog-utests "[registry]" 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

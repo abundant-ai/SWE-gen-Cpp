@@ -1,0 +1,264 @@
+diff --git a/modules/dnn/CMakeLists.txt b/modules/dnn/CMakeLists.txt
+index 64fefb3509..40b573f45a 100644
+--- a/modules/dnn/CMakeLists.txt
++++ b/modules/dnn/CMakeLists.txt
+@@ -95,7 +95,7 @@ ocv_glob_module_sources(${sources_options} SOURCES ${fw_srcs})
+ ocv_create_module(${libs} ${INF_ENGINE_TARGET})
+ ocv_add_samples()
+ ocv_add_accuracy_tests(${INF_ENGINE_TARGET})
+-ocv_add_perf_tests()
++ocv_add_perf_tests(${INF_ENGINE_TARGET})
+ 
+ ocv_option(${the_module}_PERF_CAFFE "Add performance tests of Caffe framework" OFF)
+ ocv_option(${the_module}_PERF_CLCAFFE "Add performance tests of clCaffe framework" OFF)
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index bc18695521..214ac9961b 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1676,14 +1676,6 @@ struct Net::Impl
+             // with the current layer if they follow it. Normally, the are fused with the convolution layer,
+             // but some of them (like activation) may be fused with fully-connected, elemwise (+) and
+             // some other layers.
+-
+-            // TODO: OpenCL target support more fusion styles.
+-            if ( preferableBackend == DNN_BACKEND_OPENCV && IS_DNN_OPENCL_TARGET(preferableTarget) &&
+-                 (!cv::ocl::useOpenCL() || (ld.layerInstance->type != "Convolution" &&
+-                 ld.layerInstance->type != "MVN" && ld.layerInstance->type != "Pooling" &&
+-                 ld.layerInstance->type != "Concat")) )
+-                continue;
+-
+             Ptr<Layer>& currLayer = ld.layerInstance;
+             if( ld.consumers.size() == 1 && pinsToKeep.count(LayerPin(lid, 0)) == 0 )
+             {
+@@ -1717,6 +1709,13 @@ struct Net::Impl
+                 if (preferableBackend != DNN_BACKEND_OPENCV)
+                     continue;  // Go to the next layer.
+ 
++                // TODO: OpenCL target support more fusion styles.
++                if ( preferableBackend == DNN_BACKEND_OPENCV && IS_DNN_OPENCL_TARGET(preferableTarget) &&
++                     (!cv::ocl::useOpenCL() || (ld.layerInstance->type != "Convolution" &&
++                     ld.layerInstance->type != "MVN" && ld.layerInstance->type != "Pooling" &&
++                     ld.layerInstance->type != "Concat")) )
++                    continue;
++
+                 while (nextData)
+                 {
+                     // For now, OpenCL target support fusion with activation of ReLU/ChannelsPReLU/Power/Tanh
+diff --git a/modules/dnn/src/layers/convolution_layer.cpp b/modules/dnn/src/layers/convolution_layer.cpp
+index 169e280840..54b324538a 100644
+--- a/modules/dnn/src/layers/convolution_layer.cpp
++++ b/modules/dnn/src/layers/convolution_layer.cpp
+@@ -350,12 +350,14 @@ public:
+         return false;
+     }
+ 
+-    void fuseWeights(const Mat& w, const Mat& b)
++    void fuseWeights(const Mat& w_, const Mat& b_)
+     {
+         // Convolution weights have OIHW data layout. Parameters fusion in case of
+         // (conv(I) + b1 ) * w + b2
+         // means to replace convolution's weights to [w*conv(I)] and bias to [b1 * w + b2]
+         const int outCn = weightsMat.size[0];
++        Mat w = w_.total() == 1 ? Mat(1, outCn, CV_32F, Scalar(w_.at<float>(0))) : w_;
++        Mat b = b_.total() == 1 ? Mat(1, outCn, CV_32F, Scalar(b_.at<float>(0))) : b_;
+         CV_Assert_N(!weightsMat.empty(), biasvec.size() == outCn + 2,
+                     w.empty() || outCn == w.total(), b.empty() || outCn == b.total());
+ 
+diff --git a/modules/dnn/src/layers/elementwise_layers.cpp b/modules/dnn/src/layers/elementwise_layers.cpp
+index 0a5ed54ca8..74c89e62de 100644
+--- a/modules/dnn/src/layers/elementwise_layers.cpp
++++ b/modules/dnn/src/layers/elementwise_layers.cpp
+@@ -161,6 +161,16 @@ public:
+         return Ptr<BackendNode>();
+     }
+ 
++    virtual bool tryFuse(Ptr<dnn::Layer>& top) CV_OVERRIDE
++    {
++        return func.tryFuse(top);
++    }
++
++    void getScaleShift(Mat& scale_, Mat& shift_) const CV_OVERRIDE
++    {
++        func.getScaleShift(scale_, shift_);
++    }
++
+     bool getMemoryShapes(const std::vector<MatShape> &inputs,
+                          const int requiredOutputs,
+                          std::vector<MatShape> &outputs,
+@@ -343,6 +353,10 @@ struct ReLUFunctor
+     }
+ #endif  // HAVE_INF_ENGINE
+ 
++    bool tryFuse(Ptr<dnn::Layer>&) { return false; }
++
++    void getScaleShift(Mat&, Mat&) const {}
++
+     int64 getFLOPSPerElement() const { return 1; }
+ };
+ 
+@@ -448,6 +462,10 @@ struct ReLU6Functor
+     }
+ #endif  // HAVE_INF_ENGINE
+ 
++    bool tryFuse(Ptr<dnn::Layer>&) { return false; }
++
++    void getScaleShift(Mat&, Mat&) const {}
++
+     int64 getFLOPSPerElement() const { return 2; }
+ };
+ 
+@@ -518,6 +536,10 @@ struct TanHFunctor
+     }
+ #endif  // HAVE_INF_ENGINE
+ 
++    bool tryFuse(Ptr<dnn::Layer>&) { return false; }
++
++    void getScaleShift(Mat&, Mat&) const {}
++
+     int64 getFLOPSPerElement() const { return 1; }
+ };
+ 
+@@ -588,6 +610,10 @@ struct SigmoidFunctor
+     }
+ #endif  // HAVE_INF_ENGINE
+ 
++    bool tryFuse(Ptr<dnn::Layer>&) { return false; }
++
++    void getScaleShift(Mat&, Mat&) const {}
++
+     int64 getFLOPSPerElement() const { return 3; }
+ };
+ 
+@@ -659,6 +685,10 @@ struct ELUFunctor
+     }
+ #endif  // HAVE_INF_ENGINE
+ 
++    bool tryFuse(Ptr<dnn::Layer>&) { return false; }
++
++    void getScaleShift(Mat&, Mat&) const {}
++
+     int64 getFLOPSPerElement() const { return 2; }
+ };
+ 
+@@ -727,6 +757,10 @@ struct AbsValFunctor
+     }
+ #endif  // HAVE_INF_ENGINE
+ 
++    bool tryFuse(Ptr<dnn::Layer>&) { return false; }
++
++    void getScaleShift(Mat&, Mat&) const {}
++
+     int64 getFLOPSPerElement() const { return 1; }
+ };
+ 
+@@ -775,6 +809,10 @@ struct BNLLFunctor
+     }
+ #endif  // HAVE_INF_ENGINE
+ 
++    bool tryFuse(Ptr<dnn::Layer>&) { return false; }
++
++    void getScaleShift(Mat&, Mat&) const {}
++
+     int64 getFLOPSPerElement() const { return 5; }
+ };
+ 
+@@ -875,15 +913,51 @@ struct PowerFunctor
+ #ifdef HAVE_INF_ENGINE
+     InferenceEngine::CNNLayerPtr initInfEngine(InferenceEngine::LayerParams& lp)
+     {
+-        lp.type = "Power";
+-        std::shared_ptr<InferenceEngine::PowerLayer> ieLayer(new InferenceEngine::PowerLayer(lp));
+-        ieLayer->power = power;
+-        ieLayer->scale = scale;
+-        ieLayer->offset = shift;
+-        return ieLayer;
++        if (power == 1.0f && scale == 1.0f && shift == 0.0f)
++        {
++            // It looks like there is a bug in Inference Engine for DNN_TARGET_OPENCL and DNN_TARGET_OPENCL_FP16
++            // if power layer do nothing so we replace it to Identity.
++            lp.type = "Split";
++            return std::shared_ptr<InferenceEngine::SplitLayer>(new InferenceEngine::SplitLayer(lp));
++        }
++        else
++        {
++            lp.type = "Power";
++            std::shared_ptr<InferenceEngine::PowerLayer> ieLayer(new InferenceEngine::PowerLayer(lp));
++            ieLayer->power = power;
++            ieLayer->scale = scale;
++            ieLayer->offset = shift;
++            return ieLayer;
++        }
+     }
+ #endif  // HAVE_INF_ENGINE
+ 
++    bool tryFuse(Ptr<dnn::Layer>& top)
++    {
++        if (power != 1.0f && shift != 0.0f)
++            return false;
++
++        Mat w, b;
++        top->getScaleShift(w, b);
++        if ((w.empty() && b.empty()) || w.total() > 1 || b.total() > 1)
++            return false;
++
++        float nextScale = w.empty() ? 1.0f : w.at<float>(0);
++        float nextShift = b.empty() ? 0.0f : b.at<float>(0);
++        scale = std::pow(scale, power) * nextScale;
++        shift = nextScale * shift + nextShift;
++        return true;
++    }
++
++    void getScaleShift(Mat& _scale, Mat& _shift) const
++    {
++        if (power == 1.0f)
++        {
++            _scale = Mat(1, 1, CV_32F, Scalar(scale));
++            _shift = Mat(1, 1, CV_32F, Scalar(shift));
++        }
++    }
++
+     int64 getFLOPSPerElement() const { return power == 1 ? 2 : 10; }
+ };
+ 
+@@ -989,6 +1063,10 @@ struct ChannelsPReLUFunctor
+     }
+ #endif  // HAVE_INF_ENGINE
+ 
++    bool tryFuse(Ptr<dnn::Layer>&) { return false; }
++
++    void getScaleShift(Mat&, Mat&) const {}
++
+     int64 getFLOPSPerElement() const { return 1; }
+ };
+ 
+diff --git a/samples/dnn/tf_text_graph_faster_rcnn.py b/samples/dnn/tf_text_graph_faster_rcnn.py
+index d18d82bfae..b02b0c5ca6 100644
+--- a/samples/dnn/tf_text_graph_faster_rcnn.py
++++ b/samples/dnn/tf_text_graph_faster_rcnn.py
+@@ -29,6 +29,8 @@ scopesToKeep = ('FirstStageFeatureExtractor', 'Conv',
+                 'MaxPool2D',
+                 'SecondStageFeatureExtractor',
+                 'SecondStageBoxPredictor',
++                'Preprocessor/sub',
++                'Preprocessor/mul',
+                 'image_tensor')
+ 
+ scopesToIgnore = ('FirstStageFeatureExtractor/Assert',
+diff --git a/samples/dnn/tf_text_graph_ssd.py b/samples/dnn/tf_text_graph_ssd.py
+index 0d4a41f34a..c07bc760a8 100644
+--- a/samples/dnn/tf_text_graph_ssd.py
++++ b/samples/dnn/tf_text_graph_ssd.py
+@@ -39,10 +39,11 @@ args = parser.parse_args()
+ 
+ # Nodes that should be kept.
+ keepOps = ['Conv2D', 'BiasAdd', 'Add', 'Relu6', 'Placeholder', 'FusedBatchNorm',
+-           'DepthwiseConv2dNative', 'ConcatV2', 'Mul', 'MaxPool', 'AvgPool', 'Identity']
++           'DepthwiseConv2dNative', 'ConcatV2', 'Mul', 'MaxPool', 'AvgPool', 'Identity',
++           'Sub']
+ 
+ # Node with which prefixes should be removed
+-prefixesToRemove = ('MultipleGridAnchorGenerator/', 'Postprocessor/', 'Preprocessor/')
++prefixesToRemove = ('MultipleGridAnchorGenerator/', 'Postprocessor/', 'Preprocessor/map')
+ 
+ # Read the graph.
+ with tf.gfile.FastGFile(args.input, 'rb') as f:

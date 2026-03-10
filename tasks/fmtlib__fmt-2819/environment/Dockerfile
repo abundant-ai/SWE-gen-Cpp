@@ -9,9 +9,10 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CMake for building the C++ project
+# Install C++ build dependencies
 RUN apt-get update && apt-get install -y \
     cmake \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -25,24 +26,26 @@ RUN git clone https://github.com/fmtlib/fmt.git src && \
 
 WORKDIR /app/src
 
-# Configure the project with CMake
+# Configure with G++ and C++20 (required to trigger the named argument bug)
 RUN mkdir -p build && cd build && cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_STANDARD=20 \
-    -DFMT_TEST=ON
+    -DFMT_TEST=ON \
+    -DBUILD_SHARED_LIBS=ON \
+    -DCMAKE_CXX_STANDARD=20
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+# Reset any modified files before applying bug.patch
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Reconfigure after applying bug.patch
+# Reconfigure CMake after applying patch
 RUN cd build && cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_STANDARD=20 \
-    -DFMT_TEST=ON
+    -DFMT_TEST=ON \
+    -DBUILD_SHARED_LIBS=ON \
+    -DCMAKE_CXX_STANDARD=20
 
 RUN rm -rf /app/src/.git
 

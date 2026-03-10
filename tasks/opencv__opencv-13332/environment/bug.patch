@@ -1,0 +1,447 @@
+diff --git a/modules/dnn/include/opencv2/dnn/dnn.hpp b/modules/dnn/include/opencv2/dnn/dnn.hpp
+index 2e34b4ae7d..3b26bb2421 100644
+--- a/modules/dnn/include/opencv2/dnn/dnn.hpp
++++ b/modules/dnn/include/opencv2/dnn/dnn.hpp
+@@ -93,9 +93,6 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+         DNN_TARGET_FPGA
+     };
+ 
+-    CV_EXPORTS std::vector< std::pair<Backend, Target> > getAvailableBackends();
+-    CV_EXPORTS std::vector<Target> getAvailableTargets(Backend be);
+-
+     /** @brief This class provides all data needed to initialize layer.
+      *
+      * It includes dictionary with scalar params (which can be read by using Dict interface),
+diff --git a/modules/dnn/perf/perf_net.cpp b/modules/dnn/perf/perf_net.cpp
+index cc95cc58ae..03d7a233f3 100644
+--- a/modules/dnn/perf/perf_net.cpp
++++ b/modules/dnn/perf/perf_net.cpp
+@@ -31,6 +31,23 @@ public:
+     void processNet(std::string weights, std::string proto, std::string halide_scheduler,
+                     const Mat& input, const std::string& outputLayer = "")
+     {
++        if (backend == DNN_BACKEND_OPENCV && (target == DNN_TARGET_OPENCL || target == DNN_TARGET_OPENCL_FP16))
++        {
++#if defined(HAVE_OPENCL)
++            if (!cv::ocl::useOpenCL())
++#endif
++            {
++                throw cvtest::SkipTestException("OpenCL is not available/disabled in OpenCV");
++            }
++        }
++        if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
++        {
++            if (!checkIETarget(DNN_TARGET_MYRIAD))
++            {
++                throw SkipTestException("Myriad is not available/disabled in OpenCV");
++            }
++        }
++
+         randu(input, 0.0f, 1.0f);
+ 
+         weights = findDataFile(weights, false);
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index d1fdbccde7..036726da28 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -74,104 +74,6 @@ static int PARAM_DNN_BACKEND_DEFAULT = (int)utils::getConfigurationParameterSize
+ #endif
+ );
+ 
+-//==================================================================================================
+-
+-class BackendRegistry
+-{
+-public:
+-    typedef std::vector< std::pair<Backend, Target> > BackendsList;
+-    const BackendsList & getBackends() const { return backends; }
+-    static BackendRegistry & getRegistry()
+-    {
+-        static BackendRegistry impl;
+-        return impl;
+-    }
+-private:
+-    BackendRegistry()
+-    {
+-#ifdef HAVE_HALIDE
+-        backends.push_back(std::make_pair(DNN_BACKEND_HALIDE, DNN_TARGET_CPU));
+-#  ifdef HAVE_OPENCL
+-        if (cv::ocl::useOpenCL())
+-            backends.push_back(std::make_pair(DNN_BACKEND_HALIDE, DNN_TARGET_OPENCL));
+-#  endif
+-#endif // HAVE_HALIDE
+-
+-#ifdef HAVE_INF_ENGINE
+-        if (checkIETarget(DNN_TARGET_CPU))
+-            backends.push_back(std::make_pair(DNN_BACKEND_INFERENCE_ENGINE, DNN_TARGET_CPU));
+-        if (checkIETarget(DNN_TARGET_MYRIAD))
+-            backends.push_back(std::make_pair(DNN_BACKEND_INFERENCE_ENGINE, DNN_TARGET_MYRIAD));
+-        if (checkIETarget(DNN_TARGET_FPGA))
+-            backends.push_back(std::make_pair(DNN_BACKEND_INFERENCE_ENGINE, DNN_TARGET_FPGA));
+-#  ifdef HAVE_OPENCL
+-        if (cv::ocl::useOpenCL() && ocl::Device::getDefault().isIntel())
+-        {
+-            if (checkIETarget(DNN_TARGET_OPENCL))
+-                backends.push_back(std::make_pair(DNN_BACKEND_INFERENCE_ENGINE, DNN_TARGET_OPENCL));
+-            if (checkIETarget(DNN_TARGET_OPENCL_FP16))
+-                backends.push_back(std::make_pair(DNN_BACKEND_INFERENCE_ENGINE, DNN_TARGET_OPENCL_FP16));
+-        }
+-#  endif
+-#endif // HAVE_INF_ENGINE
+-
+-#ifdef HAVE_OPENCL
+-        if (cv::ocl::useOpenCL())
+-        {
+-            backends.push_back(std::make_pair(DNN_BACKEND_OPENCV, DNN_TARGET_OPENCL));
+-            backends.push_back(std::make_pair(DNN_BACKEND_OPENCV, DNN_TARGET_OPENCL_FP16));
+-        }
+-#endif
+-
+-        backends.push_back(std::make_pair(DNN_BACKEND_OPENCV, DNN_TARGET_CPU));
+-    }
+-    static inline bool checkIETarget(int target)
+-    {
+-#ifndef HAVE_INF_ENGINE
+-        return false;
+-#else
+-        cv::dnn::Net net;
+-        cv::dnn::LayerParams lp;
+-        net.addLayerToPrev("testLayer", "Identity", lp);
+-        net.setPreferableBackend(cv::dnn::DNN_BACKEND_INFERENCE_ENGINE);
+-        net.setPreferableTarget(target);
+-        static int inpDims[] = {1, 2, 3, 4};
+-        net.setInput(cv::Mat(4, &inpDims[0], CV_32FC1, cv::Scalar(0)));
+-        try
+-        {
+-            net.forward();
+-        }
+-        catch(...)
+-        {
+-            return false;
+-        }
+-        return true;
+-#endif
+-    }
+-
+-    BackendsList backends;
+-};
+-
+-
+-std::vector< std::pair<Backend, Target> > getAvailableBackends()
+-{
+-    return BackendRegistry::getRegistry().getBackends();
+-}
+-
+-std::vector<Target> getAvailableTargets(Backend be)
+-{
+-    std::vector<Target> result;
+-    const BackendRegistry::BackendsList all_backends = getAvailableBackends();
+-    for(BackendRegistry::BackendsList::const_iterator i = all_backends.begin(); i != all_backends.end(); ++i )
+-    {
+-        if (i->first == be)
+-            result.push_back(i->second);
+-    }
+-    return result;
+-}
+-
+-//==================================================================================================
+-
+ // Additional checks (slowdowns execution!)
+ static bool DNN_CHECK_NAN_INF = utils::getConfigurationParameterBool("OPENCV_DNN_CHECK_NAN_INF", false);
+ static bool DNN_CHECK_NAN_INF_DUMP = utils::getConfigurationParameterBool("OPENCV_DNN_CHECK_NAN_INF_DUMP", false);
+diff --git a/modules/dnn/test/test_backends.cpp b/modules/dnn/test/test_backends.cpp
+index ab8f31d463..a1216a5c45 100644
+--- a/modules/dnn/test/test_backends.cpp
++++ b/modules/dnn/test/test_backends.cpp
+@@ -292,6 +292,6 @@ TEST_P(DNNTestNetwork, FastNeuralStyle_eccv16)
+     processNet("dnn/fast_neural_style_eccv16_starry_night.t7", "", inp, "", "", l1, lInf);
+ }
+ 
+-INSTANTIATE_TEST_CASE_P(/*nothing*/, DNNTestNetwork, dnnBackendsAndTargets());
++INSTANTIATE_TEST_CASE_P(/*nothing*/, DNNTestNetwork, dnnBackendsAndTargets(true, true, false));
+ 
+ }} // namespace
+diff --git a/modules/dnn/test/test_caffe_importer.cpp b/modules/dnn/test/test_caffe_importer.cpp
+index 2ed07b301f..4ad3d54067 100644
+--- a/modules/dnn/test/test_caffe_importer.cpp
++++ b/modules/dnn/test/test_caffe_importer.cpp
+@@ -300,11 +300,10 @@ INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_ResNet50,
+ typedef testing::TestWithParam<Target> Reproducibility_SqueezeNet_v1_1;
+ TEST_P(Reproducibility_SqueezeNet_v1_1, Accuracy)
+ {
+-    int targetId = GetParam();
+-    if(targetId == DNN_TARGET_OPENCL_FP16)
+-        throw SkipTestException("This test does not support FP16");
+     Net net = readNetFromCaffe(findDataFile("dnn/squeezenet_v1.1.prototxt", false),
+                                findDataFile("dnn/squeezenet_v1.1.caffemodel", false));
++
++    int targetId = GetParam();
+     net.setPreferableBackend(DNN_BACKEND_OPENCV);
+     net.setPreferableTarget(targetId);
+ 
+@@ -325,8 +324,7 @@ TEST_P(Reproducibility_SqueezeNet_v1_1, Accuracy)
+     Mat ref = blobFromNPY(_tf("squeezenet_v1.1_prob.npy"));
+     normAssert(ref, out);
+ }
+-INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_SqueezeNet_v1_1,
+-    testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
++INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_SqueezeNet_v1_1, availableDnnTargets());
+ 
+ TEST(Reproducibility_AlexNet_fp16, Accuracy)
+ {
+diff --git a/modules/dnn/test/test_common.hpp b/modules/dnn/test/test_common.hpp
+index 6e1140bb3b..9e9b25ef95 100644
+--- a/modules/dnn/test/test_common.hpp
++++ b/modules/dnn/test/test_common.hpp
+@@ -189,6 +189,30 @@ static inline void normAssertDetections(cv::Mat ref, cv::Mat out, const char *co
+                          testBoxes, comment, confThreshold, scores_diff, boxes_iou_diff);
+ }
+ 
++static inline bool checkIETarget(int target)
++{
++#ifndef HAVE_INF_ENGINE
++    return false;
++#else
++    cv::dnn::Net net;
++    cv::dnn::LayerParams lp;
++    net.addLayerToPrev("testLayer", "Identity", lp);
++    net.setPreferableBackend(cv::dnn::DNN_BACKEND_INFERENCE_ENGINE);
++    net.setPreferableTarget(target);
++    static int inpDims[] = {1, 2, 3, 4};
++    net.setInput(cv::Mat(4, &inpDims[0], CV_32FC1, cv::Scalar(0)));
++    try
++    {
++        net.forward();
++    }
++    catch(...)
++    {
++        return false;
++    }
++    return true;
++#endif
++}
++
+ static inline bool readFileInMemory(const std::string& filename, std::string& content)
+ {
+     std::ios::openmode mode = std::ios::in | std::ios::binary;
+@@ -213,31 +237,49 @@ namespace opencv_test {
+ using namespace cv::dnn;
+ 
+ static inline
+-testing::internal::ParamGenerator< tuple<Backend, Target> > dnnBackendsAndTargets(
++testing::internal::ParamGenerator<tuple<Backend, Target> > dnnBackendsAndTargets(
+         bool withInferenceEngine = true,
+         bool withHalide = false,
+         bool withCpuOCV = true
+ )
+ {
+-    std::vector< tuple<Backend, Target> > targets;
+-    std::vector< Target > available;
++    std::vector<tuple<Backend, Target> > targets;
++#ifdef HAVE_HALIDE
+     if (withHalide)
+     {
+-        available = getAvailableTargets(DNN_BACKEND_HALIDE);
+-        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
+-            targets.push_back(make_tuple(DNN_BACKEND_HALIDE, *i));
++        targets.push_back(make_tuple(DNN_BACKEND_HALIDE, DNN_TARGET_CPU));
++#ifdef HAVE_OPENCL
++        if (cv::ocl::useOpenCL())
++            targets.push_back(make_tuple(DNN_BACKEND_HALIDE, DNN_TARGET_OPENCL));
++#endif
+     }
++#endif
++#ifdef HAVE_INF_ENGINE
+     if (withInferenceEngine)
+     {
+-        available = getAvailableTargets(DNN_BACKEND_INFERENCE_ENGINE);
+-        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
+-            targets.push_back(make_tuple(DNN_BACKEND_INFERENCE_ENGINE, *i));
++        targets.push_back(make_tuple(DNN_BACKEND_INFERENCE_ENGINE, DNN_TARGET_CPU));
++#ifdef HAVE_OPENCL
++        if (cv::ocl::useOpenCL() && ocl::Device::getDefault().isIntel())
++        {
++            targets.push_back(make_tuple(DNN_BACKEND_INFERENCE_ENGINE, DNN_TARGET_OPENCL));
++            targets.push_back(make_tuple(DNN_BACKEND_INFERENCE_ENGINE, DNN_TARGET_OPENCL_FP16));
++        }
++#endif
++        if (checkIETarget(DNN_TARGET_MYRIAD))
++            targets.push_back(make_tuple(DNN_BACKEND_INFERENCE_ENGINE, DNN_TARGET_MYRIAD));
+     }
++#endif
++    if (withCpuOCV)
++        targets.push_back(make_tuple(DNN_BACKEND_OPENCV, DNN_TARGET_CPU));
++#ifdef HAVE_OPENCL
++    if (cv::ocl::useOpenCL())
+     {
+-        available = getAvailableTargets(DNN_BACKEND_OPENCV);
+-        for (std::vector< Target >::const_iterator i = available.begin(); i != available.end(); ++i)
+-            targets.push_back(make_tuple(DNN_BACKEND_OPENCV, *i));
++        targets.push_back(make_tuple(DNN_BACKEND_OPENCV, DNN_TARGET_OPENCL));
++        targets.push_back(make_tuple(DNN_BACKEND_OPENCV, DNN_TARGET_OPENCL_FP16));
+     }
++#endif
++    if (targets.empty())  // validate at least CPU mode
++        targets.push_back(make_tuple(DNN_BACKEND_OPENCV, DNN_TARGET_CPU));
+     return testing::ValuesIn(targets);
+ }
+ 
+@@ -247,6 +289,21 @@ testing::internal::ParamGenerator< tuple<Backend, Target> > dnnBackendsAndTarget
+ namespace opencv_test {
+ using namespace cv::dnn;
+ 
++static inline
++testing::internal::ParamGenerator<Target> availableDnnTargets()
++{
++    static std::vector<Target> targets;
++    if (targets.empty())
++    {
++        targets.push_back(DNN_TARGET_CPU);
++#ifdef HAVE_OPENCL
++        if (cv::ocl::useOpenCL())
++            targets.push_back(DNN_TARGET_OPENCL);
++#endif
++    }
++    return testing::ValuesIn(targets);
++}
++
+ class DNNTestLayer : public TestWithParam<tuple<Backend, Target> >
+ {
+ public:
+@@ -275,10 +332,23 @@ public:
+        }
+    }
+ 
+-    static void checkBackend(int backend, int target, Mat* inp = 0, Mat* ref = 0)
+-    {
++   static void checkBackend(int backend, int target, Mat* inp = 0, Mat* ref = 0)
++   {
++       if (backend == DNN_BACKEND_OPENCV && (target == DNN_TARGET_OPENCL || target == DNN_TARGET_OPENCL_FP16))
++       {
++#ifdef HAVE_OPENCL
++           if (!cv::ocl::useOpenCL())
++#endif
++           {
++               throw SkipTestException("OpenCL is not available/disabled in OpenCV");
++           }
++       }
+        if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+        {
++           if (!checkIETarget(DNN_TARGET_MYRIAD))
++           {
++               throw SkipTestException("Myriad is not available/disabled in OpenCV");
++           }
+ #if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE < 2018030000
+            if (inp && ref && inp->size[0] != 1)
+            {
+diff --git a/modules/dnn/test/test_googlenet.cpp b/modules/dnn/test/test_googlenet.cpp
+index 3db0c47997..37064c35c4 100644
+--- a/modules/dnn/test/test_googlenet.cpp
++++ b/modules/dnn/test/test_googlenet.cpp
+@@ -55,11 +55,9 @@ static std::string _tf(TString filename)
+ typedef testing::TestWithParam<Target> Reproducibility_GoogLeNet;
+ TEST_P(Reproducibility_GoogLeNet, Batching)
+ {
+-    const int targetId = GetParam();
+-    if(targetId == DNN_TARGET_OPENCL_FP16)
+-        throw SkipTestException("This test does not support FP16");
+     Net net = readNetFromCaffe(findDataFile("dnn/bvlc_googlenet.prototxt", false),
+                                findDataFile("dnn/bvlc_googlenet.caffemodel", false));
++    int targetId = GetParam();
+     net.setPreferableBackend(DNN_BACKEND_OPENCV);
+     net.setPreferableTarget(targetId);
+ 
+@@ -86,11 +84,9 @@ TEST_P(Reproducibility_GoogLeNet, Batching)
+ 
+ TEST_P(Reproducibility_GoogLeNet, IntermediateBlobs)
+ {
+-    const int targetId = GetParam();
+-    if(targetId == DNN_TARGET_OPENCL_FP16)
+-        throw SkipTestException("This test does not support FP16");
+     Net net = readNetFromCaffe(findDataFile("dnn/bvlc_googlenet.prototxt", false),
+                                findDataFile("dnn/bvlc_googlenet.caffemodel", false));
++    int targetId = GetParam();
+     net.setPreferableBackend(DNN_BACKEND_OPENCV);
+     net.setPreferableTarget(targetId);
+ 
+@@ -117,11 +113,9 @@ TEST_P(Reproducibility_GoogLeNet, IntermediateBlobs)
+ 
+ TEST_P(Reproducibility_GoogLeNet, SeveralCalls)
+ {
+-    const int targetId = GetParam();
+-    if(targetId == DNN_TARGET_OPENCL_FP16)
+-        throw SkipTestException("This test does not support FP16");
+     Net net = readNetFromCaffe(findDataFile("dnn/bvlc_googlenet.prototxt", false),
+                                findDataFile("dnn/bvlc_googlenet.caffemodel", false));
++    int targetId = GetParam();
+     net.setPreferableBackend(DNN_BACKEND_OPENCV);
+     net.setPreferableTarget(targetId);
+ 
+@@ -149,7 +143,6 @@ TEST_P(Reproducibility_GoogLeNet, SeveralCalls)
+     normAssert(outs[0], ref, "", 1E-4, 1E-2);
+ }
+ 
+-INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_GoogLeNet,
+-    testing::ValuesIn(getAvailableTargets(DNN_BACKEND_OPENCV)));
++INSTANTIATE_TEST_CASE_P(/**/, Reproducibility_GoogLeNet, availableDnnTargets());
+ 
+ }} // namespace
+diff --git a/modules/dnn/test/test_ie_models.cpp b/modules/dnn/test/test_ie_models.cpp
+index db718eb2c5..a8404e09a2 100644
+--- a/modules/dnn/test/test_ie_models.cpp
++++ b/modules/dnn/test/test_ie_models.cpp
+@@ -203,8 +203,7 @@ TEST_P(DNNTestOpenVINO, models)
+     std::map<std::string, cv::Mat> inputsMap;
+     std::map<std::string, cv::Mat> ieOutputsMap, cvOutputsMap;
+     // Single Myriad device cannot be shared across multiple processes.
+-    if (target == DNN_TARGET_MYRIAD)
+-        resetMyriadDevice();
++    resetMyriadDevice();
+     runIE(target, xmlPath, binPath, inputsMap, ieOutputsMap);
+     runCV(target, xmlPath, binPath, inputsMap, cvOutputsMap);
+ 
+@@ -246,10 +245,27 @@ static testing::internal::ParamGenerator<String> intelModels()
+     return ValuesIn(modelsNames);
+ }
+ 
+-INSTANTIATE_TEST_CASE_P(/**/,
+-    DNNTestOpenVINO,
+-    Combine(testing::ValuesIn(getAvailableTargets(DNN_BACKEND_INFERENCE_ENGINE)), intelModels())
+-);
++static testing::internal::ParamGenerator<Target> dnnDLIETargets()
++{
++    std::vector<Target> targets;
++    targets.push_back(DNN_TARGET_CPU);
++#ifdef HAVE_OPENCL
++    if (cv::ocl::useOpenCL() && ocl::Device::getDefault().isIntel())
++    {
++        targets.push_back(DNN_TARGET_OPENCL);
++        targets.push_back(DNN_TARGET_OPENCL_FP16);
++    }
++#endif
++    if (checkIETarget(DNN_TARGET_MYRIAD))
++        targets.push_back(DNN_TARGET_MYRIAD);
++    if (checkIETarget(DNN_TARGET_FPGA))
++        targets.push_back(DNN_TARGET_FPGA);
++    return testing::ValuesIn(targets);
++}
++
++INSTANTIATE_TEST_CASE_P(/**/, DNNTestOpenVINO, Combine(
++    dnnDLIETargets(), intelModels()
++));
+ 
+ }}
+ #endif  // HAVE_INF_ENGINE
+diff --git a/modules/dnn/test/test_misc.cpp b/modules/dnn/test/test_misc.cpp
+index 685ee02856..327de6f27d 100644
+--- a/modules/dnn/test/test_misc.cpp
++++ b/modules/dnn/test/test_misc.cpp
+@@ -157,6 +157,8 @@ TEST_P(setInput, normalization)
+     const int target   = get<1>(get<3>(GetParam()));
+     const bool kSwapRB = true;
+ 
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD && !checkIETarget(DNN_TARGET_MYRIAD))
++        throw SkipTestException("Myriad is not available/disabled in OpenCV");
+     if (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16 && dtype != CV_32F)
+         throw SkipTestException("");
+ 

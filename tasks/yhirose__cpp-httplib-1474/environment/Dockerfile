@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y \
     libbrotli-dev \
     libzstd-dev \
     python3 \
+    file \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -31,19 +32,7 @@ RUN git clone https://github.com/yhirose/cpp-httplib.git src && \
 
 WORKDIR /app/src
 
-# Generate SSL certificates needed by tests
-RUN cd test && \
-    openssl genrsa 2048 > key.pem && \
-    openssl req -new -batch -config test.conf -key key.pem | openssl x509 -days 3650 -req -signkey key.pem > cert.pem && \
-    openssl req -x509 -config test.conf -key key.pem -sha256 -days 3650 -nodes -out cert2.pem -extensions SAN && \
-    openssl genrsa 2048 > rootCA.key.pem && \
-    openssl req -x509 -new -batch -config test.rootCA.conf -key rootCA.key.pem -days 1024 > rootCA.cert.pem && \
-    openssl genrsa 2048 > client.key.pem && \
-    openssl req -new -batch -config test.conf -key client.key.pem | openssl x509 -days 370 -req -CA rootCA.cert.pem -CAkey rootCA.key.pem -CAcreateserial > client.cert.pem && \
-    openssl genrsa -passout pass:test123! 2048 > key_encrypted.pem && \
-    openssl req -new -batch -config test.conf -key key_encrypted.pem | openssl x509 -days 3650 -req -signkey key_encrypted.pem > cert_encrypted.pem
-
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)

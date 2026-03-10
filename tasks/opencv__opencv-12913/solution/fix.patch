@@ -1,0 +1,258 @@
+diff --git a/cmake/OpenCVDetectInferenceEngine.cmake b/cmake/OpenCVDetectInferenceEngine.cmake
+index e36eb0852b..d41f9243b4 100644
+--- a/cmake/OpenCVDetectInferenceEngine.cmake
++++ b/cmake/OpenCVDetectInferenceEngine.cmake
+@@ -78,9 +78,9 @@ endif()
+ 
+ if(INF_ENGINE_TARGET)
+   if(NOT INF_ENGINE_RELEASE)
+-    message(WARNING "InferenceEngine version have not been set, 2018R3 will be used by default. Set INF_ENGINE_RELEASE variable if you experience build errors.")
++    message(WARNING "InferenceEngine version have not been set, 2018R4 will be used by default. Set INF_ENGINE_RELEASE variable if you experience build errors.")
+   endif()
+-  set(INF_ENGINE_RELEASE "2018030000" CACHE STRING "Force IE version, should be in form YYYYAABBCC (e.g. 2018R2.0.2 -> 2018020002)")
++  set(INF_ENGINE_RELEASE "2018040000" CACHE STRING "Force IE version, should be in form YYYYAABBCC (e.g. 2018R2.0.2 -> 2018020002)")
+   set_target_properties(${INF_ENGINE_TARGET} PROPERTIES
+     INTERFACE_COMPILE_DEFINITIONS "HAVE_INF_ENGINE=1;INF_ENGINE_RELEASE=${INF_ENGINE_RELEASE}"
+   )
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index ed5451fc2e..7aa9d963cc 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1568,6 +1568,23 @@ struct Net::Impl
+ 
+             if (!ieNode->net->isInitialized())
+             {
++#if INF_ENGINE_VER_MAJOR_GT(INF_ENGINE_RELEASE_2018R3)
++                // For networks which is built in runtime we need to specify a
++                // version of it's hyperparameters.
++                std::string versionTrigger = "<net name=\"TestInput\" version=\"3\" batch=\"1\">"
++                                               "<layers>"
++                                                 "<layer name=\"data\" type=\"Input\" precision=\"FP32\" id=\"0\">"
++                                                   "<output>"
++                                                     "<port id=\"0\">"
++                                                       "<dim>1</dim>"
++                                                     "</port>"
++                                                   "</output>"
++                                                 "</layer>"
++                                               "</layers>"
++                                             "</net>";
++                InferenceEngine::CNNNetReader reader;
++                reader.ReadNetwork(versionTrigger.data(), versionTrigger.size());
++#endif
+                 ieNode->net->init(preferableTarget);
+                 ld.skip = false;
+             }
+diff --git a/modules/dnn/src/layers/blank_layer.cpp b/modules/dnn/src/layers/blank_layer.cpp
+index b85621f9a0..c8737a567a 100644
+--- a/modules/dnn/src/layers/blank_layer.cpp
++++ b/modules/dnn/src/layers/blank_layer.cpp
+@@ -107,14 +107,21 @@ public:
+                 inputs[i].copyTo(outputs[i]);
+     }
+ 
+-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
++    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >& inputs) CV_OVERRIDE
+     {
+ #ifdef HAVE_INF_ENGINE
++        InferenceEngine::DataPtr input = infEngineDataNode(inputs[0]);
++        CV_Assert(!input->dims.empty());
++
+         InferenceEngine::LayerParams lp;
+         lp.name = name;
+         lp.type = "Split";
+         lp.precision = InferenceEngine::Precision::FP32;
+         std::shared_ptr<InferenceEngine::SplitLayer> ieLayer(new InferenceEngine::SplitLayer(lp));
++#if INF_ENGINE_VER_MAJOR_GT(INF_ENGINE_RELEASE_2018R3)
++        ieLayer->params["axis"] = format("%d", input->dims.size() - 1);
++        ieLayer->params["out_sizes"] = format("%d", input->dims[0]);
++#endif
+         return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+ #endif  // HAVE_INF_ENGINE
+         return Ptr<BackendNode>();
+diff --git a/modules/dnn/src/layers/convolution_layer.cpp b/modules/dnn/src/layers/convolution_layer.cpp
+index cfd0ee00c4..bc61e39517 100644
+--- a/modules/dnn/src/layers/convolution_layer.cpp
++++ b/modules/dnn/src/layers/convolution_layer.cpp
+@@ -460,6 +460,12 @@ public:
+         ieLayer->_pads_end.insert(InferenceEngine::Y_AXIS, pad.height);
+         ieLayer->_dilation.insert(InferenceEngine::X_AXIS, dilation.width);
+         ieLayer->_dilation.insert(InferenceEngine::Y_AXIS, dilation.height);
++        ieLayer->params["output"] = format("%d", outCn);
++        ieLayer->params["kernel"] = format("%d,%d,%d,%d", outCn, inpGroupCn, kernel.height, kernel.width);
++        ieLayer->params["pads_begin"] = format("%d,%d", pad.height, pad.width);
++        ieLayer->params["pads_end"] = format("%d,%d", pad.height, pad.width);
++        ieLayer->params["strides"] = format("%d,%d", stride.height, stride.width);
++        ieLayer->params["dilations"] = format("%d,%d", dilation.height, dilation.width);
+ #else
+         ieLayer->_kernel_x = kernel.width;
+         ieLayer->_kernel_y = kernel.height;
+diff --git a/modules/dnn/src/layers/crop_layer.cpp b/modules/dnn/src/layers/crop_layer.cpp
+index fb878bb5e6..83731fbfcc 100644
+--- a/modules/dnn/src/layers/crop_layer.cpp
++++ b/modules/dnn/src/layers/crop_layer.cpp
+@@ -156,6 +156,14 @@ public:
+ 
+         CV_Assert(crop_ranges.size() == 4);
+ 
++#if INF_ENGINE_VER_MAJOR_GT(INF_ENGINE_RELEASE_2018R3)
++        for (int i = 0; i < 4; ++i)
++        {
++            ieLayer->axis.push_back(i);
++            ieLayer->offset.push_back(crop_ranges[i].start);
++            ieLayer->dim.push_back(crop_ranges[i].end - crop_ranges[i].start);
++        }
++#else
+         ieLayer->axis.push_back(0);  // batch
+         ieLayer->offset.push_back(crop_ranges[0].start);
+         ieLayer->dim.push_back(crop_ranges[0].end - crop_ranges[0].start);
+@@ -171,7 +179,7 @@ public:
+         ieLayer->axis.push_back(2);  // width
+         ieLayer->offset.push_back(crop_ranges[3].start);
+         ieLayer->dim.push_back(crop_ranges[3].end - crop_ranges[3].start);
+-
++#endif
+         return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+ #endif  // HAVE_INF_ENGINE
+         return Ptr<BackendNode>();
+diff --git a/modules/dnn/src/layers/fully_connected_layer.cpp b/modules/dnn/src/layers/fully_connected_layer.cpp
+index f36813ff18..552b1c25af 100644
+--- a/modules/dnn/src/layers/fully_connected_layer.cpp
++++ b/modules/dnn/src/layers/fully_connected_layer.cpp
+@@ -449,6 +449,9 @@ public:
+         std::shared_ptr<InferenceEngine::FullyConnectedLayer> ieLayer(new InferenceEngine::FullyConnectedLayer(lp));
+ 
+         ieLayer->_out_num = blobs[0].size[0];
++#if INF_ENGINE_VER_MAJOR_GT(INF_ENGINE_RELEASE_2018R3)
++        ieLayer->params["out-size"] = format("%d", blobs[0].size[0]);
++#endif
+         ieLayer->_weights = wrapToInfEngineBlob(blobs[0], {(size_t)blobs[0].size[0], (size_t)blobs[0].size[1], 1, 1}, InferenceEngine::Layout::OIHW);
+         if (blobs.size() > 1)
+             ieLayer->_biases = wrapToInfEngineBlob(blobs[1], {(size_t)ieLayer->_out_num}, InferenceEngine::Layout::C);
+diff --git a/modules/dnn/src/layers/pooling_layer.cpp b/modules/dnn/src/layers/pooling_layer.cpp
+index 94c4c757b3..2b745035a5 100644
+--- a/modules/dnn/src/layers/pooling_layer.cpp
++++ b/modules/dnn/src/layers/pooling_layer.cpp
+@@ -275,6 +275,10 @@ public:
+             poolLayer->_padding.insert(InferenceEngine::Y_AXIS, pad_t);
+             poolLayer->_pads_end.insert(InferenceEngine::X_AXIS, pad_r);
+             poolLayer->_pads_end.insert(InferenceEngine::Y_AXIS, pad_b);
++            poolLayer->params["kernel"] = format("%d,%d", kernel.height, kernel.width);
++            poolLayer->params["pads_begin"] = format("%d,%d", pad_t, pad_l);
++            poolLayer->params["pads_end"] = format("%d,%d", pad_b, pad_r);
++            poolLayer->params["strides"] = format("%d,%d", stride.height, stride.width);
+ #else
+             poolLayer->_kernel_x = kernel.width;
+             poolLayer->_kernel_y = kernel.height;
+diff --git a/modules/dnn/src/layers/resize_layer.cpp b/modules/dnn/src/layers/resize_layer.cpp
+index c090ad82ff..6aa32150b6 100644
+--- a/modules/dnn/src/layers/resize_layer.cpp
++++ b/modules/dnn/src/layers/resize_layer.cpp
+@@ -51,9 +51,14 @@ public:
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
++#ifdef HAVE_INF_ENGINE
+         if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-            return interpolation == "nearest" && preferableTarget != DNN_TARGET_MYRIAD;
++        {
++            return (interpolation == "nearest" && preferableTarget != DNN_TARGET_MYRIAD) ||
++                   (interpolation == "bilinear" && INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2018R4));
++        }
+         else
++#endif
+             return backendId == DNN_BACKEND_OPENCV;
+     }
+ 
+@@ -160,15 +165,27 @@ public:
+ #ifdef HAVE_INF_ENGINE
+         InferenceEngine::LayerParams lp;
+         lp.name = name;
+-        lp.type = "Resample";
+         lp.precision = InferenceEngine::Precision::FP32;
+-
+-        std::shared_ptr<InferenceEngine::CNNLayer> ieLayer(new InferenceEngine::CNNLayer(lp));
+-        ieLayer->params["type"] = "caffe.ResampleParameter.NEAREST";
+-        ieLayer->params["antialias"] = "0";
++        std::shared_ptr<InferenceEngine::CNNLayer> ieLayer;
++        if (interpolation == "nearest")
++        {
++            lp.type = "Resample";
++            ieLayer = std::shared_ptr<InferenceEngine::CNNLayer>(new InferenceEngine::CNNLayer(lp));
++            ieLayer->params["type"] = "caffe.ResampleParameter.NEAREST";
++            ieLayer->params["antialias"] = "0";
++        }
++        else if (interpolation == "bilinear")
++        {
++            lp.type = "Interp";
++            ieLayer = std::shared_ptr<InferenceEngine::CNNLayer>(new InferenceEngine::CNNLayer(lp));
++            ieLayer->params["pad_beg"] = "0";
++            ieLayer->params["pad_end"] = "0";
++            ieLayer->params["align_corners"] = "0";
++        }
++        else
++            CV_Error(Error::StsNotImplemented, "Unsupported interpolation: " + interpolation);
+         ieLayer->params["width"] = cv::format("%d", outWidth);
+         ieLayer->params["height"] = cv::format("%d", outHeight);
+-
+         return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+ #endif  // HAVE_INF_ENGINE
+         return Ptr<BackendNode>();
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index ae837a7a0b..f8f8a0b51f 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -309,7 +309,7 @@ void InfEngineBackendNet::setTargetDevice(InferenceEngine::TargetDevice device)
+ 
+ InferenceEngine::TargetDevice InfEngineBackendNet::getTargetDevice() noexcept
+ {
+-    return targetDevice;
++    return const_cast<const InfEngineBackendNet*>(this)->getTargetDevice();
+ }
+ 
+ InferenceEngine::TargetDevice InfEngineBackendNet::getTargetDevice() const noexcept
+@@ -387,6 +387,27 @@ void InfEngineBackendNet::init(int targetId)
+             }
+         }
+         CV_Assert(!inputs.empty());
++
++#if INF_ENGINE_VER_MAJOR_GT(INF_ENGINE_RELEASE_2018R3)
++        for (const auto& inp : inputs)
++        {
++            InferenceEngine::LayerParams lp;
++            lp.name = inp.first;
++            lp.type = "Input";
++            lp.precision = InferenceEngine::Precision::FP32;
++            std::shared_ptr<InferenceEngine::CNNLayer> inpLayer(new InferenceEngine::CNNLayer(lp));
++
++            layers.push_back(inpLayer);
++
++            InferenceEngine::DataPtr dataPtr = inp.second->getInputData();
++            // TODO: remove precision dependency (see setInput.normalization tests)
++            if (dataPtr->precision == InferenceEngine::Precision::FP32)
++            {
++                inpLayer->outData.assign(1, dataPtr);
++                dataPtr->creatorLayer = InferenceEngine::CNNLayerWeakPtr(inpLayer);
++            }
++        }
++#endif
+     }
+ 
+     if (outputs.empty())
+diff --git a/modules/dnn/src/op_inf_engine.hpp b/modules/dnn/src/op_inf_engine.hpp
+index f04a5c636c..ffaeb288b2 100644
+--- a/modules/dnn/src/op_inf_engine.hpp
++++ b/modules/dnn/src/op_inf_engine.hpp
+@@ -25,10 +25,11 @@
+ #define INF_ENGINE_RELEASE_2018R1 2018010000
+ #define INF_ENGINE_RELEASE_2018R2 2018020000
+ #define INF_ENGINE_RELEASE_2018R3 2018030000
++#define INF_ENGINE_RELEASE_2018R4 2018040000
+ 
+ #ifndef INF_ENGINE_RELEASE
+-#warning("IE version have not been provided via command-line. Using 2018R2 by default")
+-#define INF_ENGINE_RELEASE INF_ENGINE_RELEASE_2018R2
++#warning("IE version have not been provided via command-line. Using 2018R4 by default")
++#define INF_ENGINE_RELEASE INF_ENGINE_RELEASE_2018R4
+ #endif
+ 
+ #define INF_ENGINE_VER_MAJOR_GT(ver) (((INF_ENGINE_RELEASE) / 10000) > ((ver) / 10000))

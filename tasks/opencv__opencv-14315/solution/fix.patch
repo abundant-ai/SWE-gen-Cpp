@@ -1,0 +1,101 @@
+diff --git a/modules/dnn/src/layers/flatten_layer.cpp b/modules/dnn/src/layers/flatten_layer.cpp
+index 3a704dca81..8672ea3e4f 100644
+--- a/modules/dnn/src/layers/flatten_layer.cpp
++++ b/modules/dnn/src/layers/flatten_layer.cpp
+@@ -105,6 +105,16 @@ public:
+         return true;
+     }
+ 
++    void finalize(InputArrayOfArrays inputs_arr, OutputArrayOfArrays) CV_OVERRIDE
++    {
++        std::vector<Mat> inputs;
++        inputs_arr.getMatVector(inputs);
++
++        int numAxes = inputs[0].dims;
++        _startAxis = clamp(_startAxis, numAxes);
++        _endAxis = clamp(_endAxis, numAxes);
++    }
++
+ #ifdef HAVE_OPENCL
+     bool forward_ocl(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr)
+     {
+diff --git a/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp b/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp
+index 37e57505da..7f1001888a 100644
+--- a/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp
++++ b/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp
+@@ -646,6 +646,30 @@ public:
+     }
+ };
+ 
++class SoftMaxSlimV2Subgraph : public Subgraph
++{
++public:
++    SoftMaxSlimV2Subgraph()
++    {
++        int input = addNodeToMatch("");
++        int shape = addNodeToMatch("Shape", input);
++        int shape_2 = addNodeToMatch("Shape", input);
++        int rank = addNodeToMatch("Const");
++        int y = addNodeToMatch("Const");
++        int sub = addNodeToMatch("Sub", rank, y);
++        int begin = addNodeToMatch("Pack", sub);
++        int size = addNodeToMatch("Const");
++        int slice = addNodeToMatch("Slice", shape, begin, size);
++        int values = addNodeToMatch("Const");
++        int axis = addNodeToMatch("Const");
++        int concat = addNodeToMatch("ConcatV2", values, slice, axis);
++        int reshape = addNodeToMatch("Reshape", input, concat);
++        int softmax = addNodeToMatch("Softmax", reshape);
++        addNodeToMatch("Reshape", softmax, shape_2);
++        setFusedNode("Softmax", input);
++    }
++};
++
+ void simplifySubgraphs(tensorflow::GraphDef& net)
+ {
+     std::vector<Ptr<Subgraph> > subgraphs;
+@@ -663,6 +687,7 @@ void simplifySubgraphs(tensorflow::GraphDef& net)
+     subgraphs.push_back(Ptr<Subgraph>(new UpsamplingKerasSubgraph()));
+     subgraphs.push_back(Ptr<Subgraph>(new ReshapeAsShapeSubgraph()));
+     subgraphs.push_back(Ptr<Subgraph>(new SoftMaxSlimSubgraph()));
++    subgraphs.push_back(Ptr<Subgraph>(new SoftMaxSlimV2Subgraph()));
+ 
+     int numNodes = net.node_size();
+     std::vector<int> matchedNodesIds;
+diff --git a/modules/dnn/src/tensorflow/tf_importer.cpp b/modules/dnn/src/tensorflow/tf_importer.cpp
+index a1628104f7..15aecba095 100644
+--- a/modules/dnn/src/tensorflow/tf_importer.cpp
++++ b/modules/dnn/src/tensorflow/tf_importer.cpp
+@@ -1125,18 +1125,25 @@ void TFImporter::populateNet(Net dstNet)
+             {
+                 CV_Assert(hasLayerAttr(layer, "squeeze_dims"));
+                 const tensorflow::AttrValue& dims = getLayerAttr(layer, "squeeze_dims");
+-                if (inpLayout == DATA_LAYOUT_NHWC)
++                std::vector<int> dimsVector(dims.list().i_size());
++                for (int i = 0; i < dimsVector.size(); ++i)
++                    dimsVector[i] = dims.list().i(i);
++
++                // Flatten layer can squeeze dimensions range into one.
++                std::sort(dimsVector.begin(), dimsVector.end());
++                for (int i = 1; i < dimsVector.size(); ++i)
+                 {
+-                    if (dims.list().i_size() != 2 || dims.list().i(0) != 1 || dims.list().i(1) != 2)
++                    if (dimsVector[i] != dimsVector[i - 1] + 1)
+                         CV_Error(Error::StsNotImplemented, "Unsupported squeeze configuration");
+                 }
+-                else if (inpLayout == DATA_LAYOUT_NCHW)
++                int start = dimsVector.front() - 1, end = dimsVector.back();
++                if (start == -1 && end == 0)  // squeeze 0th dimension
+                 {
+-                    if (dims.list().i_size() != 2 || dims.list().i(0) != 2 || dims.list().i(1) != 3)
+-                        CV_Error(Error::StsNotImplemented, "Unsupported squeeze configuration");
++                    start = 0;
++                    end = 1;
+                 }
+-                else
+-                    CV_Error(Error::StsNotImplemented, "Unsupported squeeze configuration");
++                layerParams.set("axis", start);
++                layerParams.set("end_axis", end);
+             }
+             if (inpLayout == DATA_LAYOUT_NHWC)
+             {

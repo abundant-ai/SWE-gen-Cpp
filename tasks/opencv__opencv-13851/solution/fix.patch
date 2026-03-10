@@ -1,0 +1,594 @@
+diff --git a/doc/tutorials/gapi/anisotropic_segmentation/porting_anisotropic_segmentation.markdown b/doc/tutorials/gapi/anisotropic_segmentation/porting_anisotropic_segmentation.markdown
+index cf0190373f..f84b96e031 100644
+--- a/doc/tutorials/gapi/anisotropic_segmentation/porting_anisotropic_segmentation.markdown
++++ b/doc/tutorials/gapi/anisotropic_segmentation/porting_anisotropic_segmentation.markdown
+@@ -306,25 +306,17 @@ G-API to utilize appropriate Fluid functions in our graph.
+ 
+ Kernel packages are combinable -- in the above example, we take "Core"
+ and "ImgProc" Fluid kernel packages and combine it into a single
+-one. See documentation reference on cv::gapi::combine and
+-cv::unite_policy on package combination options.
++one. See documentation reference on cv::gapi::combine.
+ 
+ If no kernel packages are specified in options, G-API is using
+ _default_ package which consists of default OpenCV implementations and
+ thus G-API graphs are executed via OpenCV functions by default. OpenCV
+ backend provides broader functional coverage than any other
+ backend. If a kernel package is specified, like in this example, then
+-it is being combined with the _default_ one with
+-cv::unite_policy::REPLACE. It means that user-specified
+-implementations will replace default implementations in case of
++it is being combined with the _default_.
++It means that user-specified implementations will replace default implementations in case of
+ conflict.
+ 
+-Kernel packages may contain a mix of kernels, in particular, multiple
+-implementations of the same kernel. For example, a single kernel
+-package may contain both OpenCV and Fluid implementations of kernel
+-"Filter2D". In this case, the implementation selection preference can
+-be specified with a special compilation parameter cv::gapi::lookup_order.
+-
+ <!-- FIXME Document this process better as a part of regular -->
+ <!-- documentation, not a tutorial kind of thing -->
+ 
+diff --git a/modules/gapi/include/opencv2/gapi/cpu/gcpukernel.hpp b/modules/gapi/include/opencv2/gapi/cpu/gcpukernel.hpp
+index 80392fe0f2..95979422b4 100644
+--- a/modules/gapi/include/opencv2/gapi/cpu/gcpukernel.hpp
++++ b/modules/gapi/include/opencv2/gapi/cpu/gcpukernel.hpp
+@@ -43,13 +43,12 @@ namespace cpu
+      * stack. Every backend is hardware-oriented and thus can run its
+      * kernels efficiently on the target platform.
+      *
+-     * Backends are usually "back boxes" for G-API users -- on the API
++     * Backends are usually "black boxes" for G-API users -- on the API
+      * side, all backends are represented as different objects of the
+-     * same class cv::gapi::GBackend. User can manipulate with backends
+-     * mainly by specifying which kernels to use or where to look up
+-     * for kernels first.
++     * same class cv::gapi::GBackend.
++     * User can manipulate with backends by specifying which kernels to use.
+      *
+-     * @sa @ref gapi_hld, cv::gapi::lookup_order()
++     * @sa @ref gapi_hld
+      */
+ 
+     /**
+diff --git a/modules/gapi/include/opencv2/gapi/gkernel.hpp b/modules/gapi/include/opencv2/gapi/gkernel.hpp
+index af184248dc..db9ac7606b 100644
+--- a/modules/gapi/include/opencv2/gapi/gkernel.hpp
++++ b/modules/gapi/include/opencv2/gapi/gkernel.hpp
+@@ -14,7 +14,6 @@
+ #include <type_traits> // false_type, true_type
+ #include <unordered_map> // map (for GKernelPackage)
+ #include <utility> // tuple
+-#include <vector>  // lookup order
+ 
+ #include <opencv2/gapi/gcommon.hpp> // CompileArgTag
+ #include <opencv2/gapi/util/util.hpp> // Seq
+@@ -24,7 +23,6 @@
+ #include <opencv2/gapi/gtype_traits.hpp> // GTypeTraits
+ #include <opencv2/gapi/util/compiler_hints.hpp> //suppress_unused_warning
+ 
+-
+ namespace cv {
+ 
+ using GShapes = std::vector<GShape>;
+@@ -57,7 +55,6 @@ namespace detail
+     //
+     namespace
+     {
+-
+         template<typename T> struct Yield;
+         template<> struct Yield<cv::GMat>
+         {
+@@ -248,13 +245,6 @@ public:
+ 
+ namespace cv
+ {
+-// Declare <unite> in cv:: namespace
+-enum class unite_policy
+-{
+-    REPLACE,
+-    KEEP
+-};
+-
+ namespace gapi
+ {
+     // Prework: model "Device" API before it gets to G-API headers.
+@@ -303,33 +293,6 @@ namespace gapi {
+      * @{
+      */
+ 
+-    // Lookup order is in fact a vector of Backends to traverse during look-up
+-    /**
+-     * @brief Priority list of backends to use during kernel
+-     *   resolution process.
+-     *
+-     * Priority is descending -- the first backend in the list has the
+-     * top priority, and the last one has the lowest priority.
+-     *
+-     * If there's multiple implementations available for a kernel at
+-     * the moment of graph compilation, a kernel (and thus a backend)
+-     * will be selected according to this order (if the parameter is passed).
+-     *
+-     * Default order is not specified (and by default, only
+-     * CPU(OpenCV) backend is involved in graph compilation).
+-     */
+-    using GLookupOrder = std::vector<GBackend>;
+-    /**
+-     * @brief Create a backend lookup order -- priority list of
+-     * backends to use during graph compilation process.
+-     *
+-     * @sa GLookupOrder, @ref gapi_std_backends
+-     */
+-    inline GLookupOrder lookup_order(std::initializer_list<GBackend> &&list)
+-    {
+-        return GLookupOrder(std::move(list));
+-    }
+-
+     // FIXME: Hide implementation
+     /**
+      * @brief A container class for heterogeneous kernel
+@@ -353,20 +316,16 @@ namespace gapi {
+      * one since G-API kernel implementations are _types_, not objects.
+      *
+      * Finally, two kernel packages can be combined into a new one
+-     * with function cv::gapi::combine(). There are different rules
+-     * apply to this process, see also cv::gapi::unite_policy for
+-     * details.
++     * with function cv::gapi::combine().
+      */
+     class GAPI_EXPORTS GKernelPackage
+     {
+-        /// @private
+-        using S = std::unordered_map<std::string, GKernelImpl>;
+ 
+         /// @private
+-        using M = std::unordered_map<GBackend, S>;
++        using M = std::unordered_map<std::string, std::pair<GBackend, GKernelImpl>>;
+ 
+         /// @private
+-        M m_backend_kernels;
++        M m_id_kernels;
+ 
+     protected:
+         /// @private
+@@ -398,10 +357,9 @@ namespace gapi {
+         template<typename KImpl>
+         bool includes() const
+         {
+-            const auto set_iter = m_backend_kernels.find(KImpl::backend());
+-            return (set_iter != m_backend_kernels.end())
+-                ? (set_iter->second.count(KImpl::API::id()) > 0)
+-                : false;
++            auto kernel_it = m_id_kernels.find(KImpl::API::id());
++            return kernel_it != m_id_kernels.end() &&
++                   kernel_it->second.first == KImpl::backend();
+         }
+ 
+         /**
+@@ -439,47 +397,37 @@ namespace gapi {
+         }
+ 
+         /**
+-         * @brief Find a kernel (by its API), given the look-up order.
++         * @brief Find a kernel (by its API)
+          *
+-         * If order is empty, returns first suitable implementation.
++         * Returns implementation corresponding id.
+          * Throws if nothing found.
+          *
+          * @return Backend which hosts matching kernel implementation.
+          *
+-         * @sa cv::gapi::lookup_order
+          */
+         template<typename KAPI>
+-        GBackend lookup(const GLookupOrder &order = {}) const
++        GBackend lookup() const
+         {
+-            return lookup(KAPI::id(), order).first;
++            return lookup(KAPI::id()).first;
+         }
+ 
+         /// @private
+         std::pair<cv::gapi::GBackend, cv::GKernelImpl>
+-        lookup(const std::string &id, const GLookupOrder &order = {}) const;
++        lookup(const std::string &id) const;
+ 
+         // FIXME: No overwrites allowed?
+         /**
+          * @brief Put a new kernel implementation KImpl into package.
+-         *
+-         * @param up unite policy to use. If the package has already
+-         * implementation for this kernel (probably from another
+-         * backend), and cv::unite_policy::KEEP is passed, the
+-         * existing implementation remains in package; on
+-         * cv::unite_policy::REPLACE all other existing
+-         * implementations are first dropped from the package.
+          */
+         template<typename KImpl>
+-        void include(const cv::unite_policy up = cv::unite_policy::KEEP)
++        void include()
+         {
+             auto backend     = KImpl::backend();
+             auto kernel_id   = KImpl::API::id();
+             auto kernel_impl = GKernelImpl{KImpl::kernel()};
+-            if (up == cv::unite_policy::REPLACE) removeAPI(kernel_id);
+-            else GAPI_Assert(up == cv::unite_policy::KEEP);
++            removeAPI(kernel_id);
+ 
+-            // Regardless of the policy, store new impl in its storage slot.
+-            m_backend_kernels[backend][kernel_id] = std::move(kernel_impl);
++            m_id_kernels[kernel_id] = std::make_pair(backend, kernel_impl);
+         }
+ 
+         /**
+@@ -492,23 +440,14 @@ namespace gapi {
+         // TODO: Doxygen bug -- it wants me to place this comment
+         // here, not below.
+         /**
+-         * @brief Create a new package based on `lhs` and `rhs`,
+-         * with unity policy defined by `policy`.
++         * @brief Create a new package based on `lhs` and `rhs`.
+          *
+          * @param lhs "Left-hand-side" package in the process
+          * @param rhs "Right-hand-side" package in the process
+-         * @param policy Unite policy which is used in case of conflicts
+-         * -- when the same kernel API is implemented in both packages by
+-         * different backends; cv::unite_policy::KEEP keeps both
+-         * implementation in the resulting package, while
+-         * cv::unite_policy::REPLACE gives precedence two kernels from
+-         * "Right-hand-side".
+-         *
+          * @return a new kernel package.
+          */
+         friend GAPI_EXPORTS GKernelPackage combine(const GKernelPackage  &lhs,
+-                                                   const GKernelPackage  &rhs,
+-                                                   const cv::unite_policy policy);
++                                                   const GKernelPackage  &rhs);
+     };
+ 
+     /**
+@@ -540,6 +479,7 @@ namespace gapi {
+         // and parentheses are used to hide function call in the expanded sequence.
+         // Leading 0 helps to handle case when KK is an empty list (kernels<>()).
+ 
++        static_assert(detail::all_unique<typename KK::API...>::value, "Kernels API must be unique");
+         int unused[] = { 0, (pkg.include<KK>(), 0)... };
+         cv::util::suppress_unused_warning(unused);
+         return pkg;
+@@ -548,8 +488,17 @@ namespace gapi {
+     /** @} */
+ 
+     GAPI_EXPORTS GKernelPackage combine(const GKernelPackage  &lhs,
+-                                        const GKernelPackage  &rhs,
+-                                        const cv::unite_policy policy);
++                                        const GKernelPackage  &rhs);
++    /**
++     * @brief cv::use_only() is a special combinator which hints G-API to use only
++     * kernels specified in cv::GComputation::compile() (and not to extend kernels available by
++     * default with that package).
++     */
++    struct GAPI_EXPORTS use_only
++    {
++        GKernelPackage pkg;
++    };
++
+ } // namespace gapi
+ 
+ namespace detail
+@@ -558,9 +507,10 @@ namespace detail
+     {
+         static const char* tag() { return "gapi.kernel_package"; }
+     };
+-    template<> struct CompileArgTag<cv::gapi::GLookupOrder>
++
++    template<> struct CompileArgTag<cv::gapi::use_only>
+     {
+-        static const char* tag() { return "gapi.lookup_order"; }
++        static const char* tag() { return "gapi.use_only"; }
+     };
+ } // namespace detail
+ } // namespace cv
+diff --git a/modules/gapi/include/opencv2/gapi/util/util.hpp b/modules/gapi/include/opencv2/gapi/util/util.hpp
+index d0378e0e52..a62c0c5cf9 100644
+--- a/modules/gapi/include/opencv2/gapi/util/util.hpp
++++ b/modules/gapi/include/opencv2/gapi/util/util.hpp
+@@ -84,6 +84,19 @@ namespace detail
+     {
+         static constexpr const std::size_t value = S;
+     };
++
++    template <typename...>
++    struct contains : std::false_type{};
++
++    template <typename T1, typename T2, typename... Ts>
++    struct contains<T1, T2, Ts...> : std::integral_constant<bool, std::is_same<T1, T2>::value ||
++                                                                  contains<T1, Ts...>::value> {};
++    template <typename...>
++    struct all_unique : std::true_type{};
++
++    template <typename T1, typename... Ts>
++    struct all_unique<T1, Ts...> : std::integral_constant<bool, !contains<T1, Ts...>::value &&
++                                                                 all_unique<Ts...>::value> {};
+ } // namespace detail
+ } // namespace cv
+ 
+diff --git a/modules/gapi/samples/api_ref_snippets.cpp b/modules/gapi/samples/api_ref_snippets.cpp
+index 5e8859da19..2793aee98e 100644
+--- a/modules/gapi/samples/api_ref_snippets.cpp
++++ b/modules/gapi/samples/api_ref_snippets.cpp
+@@ -49,8 +49,7 @@ int main(int argc, char *argv[])
+     //! [apply_with_param]
+     cv::gapi::GKernelPackage kernels = cv::gapi::combine
+         (cv::gapi::core::fluid::kernels(),
+-         cv::gapi::imgproc::fluid::kernels(),
+-         cv::unite_policy::KEEP);
++         cv::gapi::imgproc::fluid::kernels());
+     sobelEdge.apply(input, output, cv::compile_args(kernels));
+     //! [apply_with_param]
+ 
+diff --git a/modules/gapi/src/api/gkernel.cpp b/modules/gapi/src/api/gkernel.cpp
+index f8c851abf2..fb5dd615bd 100644
+--- a/modules/gapi/src/api/gkernel.cpp
++++ b/modules/gapi/src/api/gkernel.cpp
+@@ -20,128 +20,73 @@
+ // GKernelPackage public implementation ////////////////////////////////////////
+ void cv::gapi::GKernelPackage::remove(const cv::gapi::GBackend& backend)
+ {
+-    m_backend_kernels.erase(backend);
++    std::vector<std::string> id_deleted_kernels;
++    for (const auto& p : m_id_kernels)
++    {
++        if (p.second.first == backend)
++        {
++            id_deleted_kernels.push_back(p.first);
++        }
++    }
++
++    for (const auto& kernel_id : id_deleted_kernels)
++    {
++        m_id_kernels.erase(kernel_id);
++    }
+ }
+ 
+ bool cv::gapi::GKernelPackage::includesAPI(const std::string &id) const
+ {
+-    // In current form not very efficient (n * log n)
+-    auto it = std::find_if(m_backend_kernels.begin(),
+-                           m_backend_kernels.end(),
+-                           [&id](const M::value_type &p) {
+-                               return ade::util::contains(p.second, id);
+-                           });
+-    return (it != m_backend_kernels.end());
++    return ade::util::contains(m_id_kernels, id);
+ }
+ 
+ void cv::gapi::GKernelPackage::removeAPI(const std::string &id)
+ {
+-    for (auto &bk : m_backend_kernels)
+-        bk.second.erase(id);
++    m_id_kernels.erase(id);
+ }
+ 
+ std::size_t cv::gapi::GKernelPackage::size() const
+ {
+-    return std::accumulate(m_backend_kernels.begin(),
+-                           m_backend_kernels.end(),
+-                           static_cast<std::size_t>(0u),
+-                           [](std::size_t acc, const M::value_type& v) {
+-                               return acc + v.second.size();
+-                           });
++    return m_id_kernels.size();
+ }
+ 
+ cv::gapi::GKernelPackage cv::gapi::combine(const GKernelPackage  &lhs,
+-                                           const GKernelPackage  &rhs,
+-                                           const cv::unite_policy policy)
++                                           const GKernelPackage  &rhs)
+ {
+ 
+-    if (policy == cv::unite_policy::REPLACE)
+-    {
+-        // REPLACE policy: if there is a collision, prefer RHS
+-        // to LHS
++        // If there is a collision, prefer RHS to LHS
+         // since RHS package has a precedense, start with its copy
+         GKernelPackage result(rhs);
+         // now iterate over LHS package and put kernel if and only
+         // if there's no such one
+-        for (const auto &backend : lhs.m_backend_kernels)
++        for (const auto& kernel : lhs.m_id_kernels)
+         {
+-            for (const auto &kimpl : backend.second)
++            if (!result.includesAPI(kernel.first))
+             {
+-                if (!result.includesAPI(kimpl.first))
+-                    result.m_backend_kernels[backend.first].insert(kimpl);
++                result.m_id_kernels.emplace(kernel.first, kernel.second);
+             }
+         }
+         return result;
+-    }
+-    else if (policy == cv::unite_policy::KEEP)
+-    {
+-        // KEEP policy: if there is a collision, just keep two versions
+-        // of a kernel
+-        GKernelPackage result(lhs);
+-        for (const auto &p : rhs.m_backend_kernels)
+-        {
+-            result.m_backend_kernels[p.first].insert(p.second.begin(),
+-                                                     p.second.end());
+-        }
+-        return result;
+-    }
+-    else GAPI_Assert(false);
+-    return GKernelPackage();
+ }
+ 
+ std::pair<cv::gapi::GBackend, cv::GKernelImpl>
+-cv::gapi::GKernelPackage::lookup(const std::string &id,
+-                                 const GLookupOrder &order) const
++cv::gapi::GKernelPackage::lookup(const std::string &id) const
+ {
+-    if (order.empty())
++    auto kernel_it = m_id_kernels.find(id);
++    if (kernel_it != m_id_kernels.end())
+     {
+-        // If order is empty, return what comes first
+-        auto it = std::find_if(m_backend_kernels.begin(),
+-                               m_backend_kernels.end(),
+-                               [&id](const M::value_type &p) {
+-                                   return ade::util::contains(p.second, id);
+-                               });
+-        if (it != m_backend_kernels.end())
+-        {
+-            // FIXME: Two lookups!
+-            return std::make_pair(it->first, it->second.find(id)->second);
+-        }
++        return kernel_it->second;
+     }
+-    else
+-    {
+-        // There is order, so:
+-        // 1. Limit search scope only to specified backends
+-        //    FIXME: Currently it is not configurable if search can fall-back
+-        //    to other backends (not listed in order) if kernel hasn't been found
+-        //    in the look-up list
+-        // 2. Query backends in the specified order
+-        for (const auto &selected_backend : order)
+-        {
+-            const auto kernels_it = m_backend_kernels.find(selected_backend);
+-            if (kernels_it == m_backend_kernels.end())
+-            {
+-                GAPI_LOG_WARNING(NULL,
+-                                 "Backend "
+-                                  << &selected_backend.priv() // FIXME: name instead
+-                                  << " was listed in lookup list but was not found "
+-                                     "in the package");
+-                continue;
+-            }
+-            if (ade::util::contains(kernels_it->second, id))
+-            {
+-                // FIXME: two lookups!
+-                return std::make_pair(selected_backend, kernels_it->second.find(id)->second);
+-            }
+-        }
+-    }
+-
+-    // If reached here, kernel was not found among selected backends.
++    // If reached here, kernel was not found.
+     util::throw_error(std::logic_error("Kernel " + id + " was not found"));
+ }
+ 
+ std::vector<cv::gapi::GBackend> cv::gapi::GKernelPackage::backends() const
+ {
+-    std::vector<cv::gapi::GBackend> result;
+-    for (const auto &p : m_backend_kernels) result.emplace_back(p.first);
+-    return result;
++    using kernel_type = std::pair<std::string, std::pair<cv::gapi::GBackend, cv::GKernelImpl>>;
++    std::unordered_set<cv::gapi::GBackend> unique_set;
++    ade::util::transform(m_id_kernels, std::inserter(unique_set, unique_set.end()),
++                                       [](const kernel_type& k) { return k.second.first; });
++
++    return std::vector<cv::gapi::GBackend>(unique_set.begin(), unique_set.end());
+ }
+diff --git a/modules/gapi/src/compiler/gcompiler.cpp b/modules/gapi/src/compiler/gcompiler.cpp
+index 83d4da1b77..667784171c 100644
+--- a/modules/gapi/src/compiler/gcompiler.cpp
++++ b/modules/gapi/src/compiler/gcompiler.cpp
+@@ -48,16 +48,19 @@ namespace
+ {
+     cv::gapi::GKernelPackage getKernelPackage(cv::GCompileArgs &args)
+     {
++        auto has_use_only = cv::gimpl::getCompileArg<cv::gapi::use_only>(args);
++        if (has_use_only)
++            return has_use_only.value().pkg;
++
+         static auto ocv_pkg =
+ #if !defined(GAPI_STANDALONE)
+             combine(cv::gapi::core::cpu::kernels(),
+-                    cv::gapi::imgproc::cpu::kernels(),
+-                    cv::unite_policy::KEEP);
++                    cv::gapi::imgproc::cpu::kernels());
+ #else
+             cv::gapi::GKernelPackage();
+ #endif // !defined(GAPI_STANDALONE)
+         auto user_pkg = cv::gimpl::getCompileArg<cv::gapi::GKernelPackage>(args);
+-        return combine(ocv_pkg, user_pkg.value_or(cv::gapi::GKernelPackage{}), cv::unite_policy::REPLACE);
++        return combine(ocv_pkg, user_pkg.value_or(cv::gapi::GKernelPackage{}));
+     }
+ 
+     cv::util::optional<std::string> getGraphDumpDirectory(cv::GCompileArgs& args)
+@@ -87,7 +90,6 @@ cv::gimpl::GCompiler::GCompiler(const cv::GComputation &c,
+ {
+     using namespace std::placeholders;
+     m_all_kernels       = getKernelPackage(m_args);
+-    auto lookup_order   = getCompileArg<gapi::GLookupOrder>(m_args).value_or(gapi::GLookupOrder());
+     auto dump_path      = getGraphDumpDirectory(m_args);
+ 
+     m_e.addPassStage("init");
+@@ -107,8 +109,7 @@ cv::gimpl::GCompiler::GCompiler(const cv::GComputation &c,
+ 
+     m_e.addPassStage("kernels");
+     m_e.addPass("kernels", "resolve_kernels", std::bind(passes::resolveKernels, _1,
+-                                                     std::ref(m_all_kernels), // NB: and not copied here
+-                                                     lookup_order));
++                                              std::ref(m_all_kernels))); // NB: and not copied here
+     m_e.addPass("kernels", "check_islands_content", passes::checkIslandsContent);
+ 
+     m_e.addPassStage("meta");
+diff --git a/modules/gapi/src/compiler/passes/kernels.cpp b/modules/gapi/src/compiler/passes/kernels.cpp
+index 0feb7b1b15..1d9eac69e1 100644
+--- a/modules/gapi/src/compiler/passes/kernels.cpp
++++ b/modules/gapi/src/compiler/passes/kernels.cpp
+@@ -101,8 +101,7 @@ namespace
+ // This pass, given the kernel package, selects a kernel implementation
+ // for every operation in the graph
+ void cv::gimpl::passes::resolveKernels(ade::passes::PassContext   &ctx,
+-                                       const gapi::GKernelPackage &kernels,
+-                                       const gapi::GLookupOrder   &order)
++                                       const gapi::GKernelPackage &kernels)
+ {
+     std::unordered_set<cv::gapi::GBackend> active_backends;
+ 
+@@ -114,8 +113,7 @@ void cv::gimpl::passes::resolveKernels(ade::passes::PassContext   &ctx,
+             auto &op = gr.metadata(nh).get<Op>();
+             cv::gapi::GBackend selected_backend;
+             cv::GKernelImpl    selected_impl;
+-            std::tie(selected_backend, selected_impl)
+-                = kernels.lookup(op.k.name, order);
++            std::tie(selected_backend, selected_impl) = kernels.lookup(op.k.name);
+ 
+             selected_backend.priv().unpackKernel(ctx.graph, nh, selected_impl);
+             op.backend = selected_backend;
+diff --git a/modules/gapi/src/compiler/passes/passes.hpp b/modules/gapi/src/compiler/passes/passes.hpp
+index 14f6acdc0c..4daddab451 100644
+--- a/modules/gapi/src/compiler/passes/passes.hpp
++++ b/modules/gapi/src/compiler/passes/passes.hpp
+@@ -44,9 +44,8 @@ void storeResultingMeta(ade::passes::PassContext &ctx);
+ void expandKernels(ade::passes::PassContext &ctx,
+                    const gapi::GKernelPackage& kernels);
+ 
+-void resolveKernels(ade::passes::PassContext       &ctx,
+-                    const gapi::GKernelPackage &kernels,
+-                    const gapi::GLookupOrder   &order);
++void resolveKernels(ade::passes::PassContext   &ctx,
++                    const gapi::GKernelPackage &kernels);
+ 
+ void fuseIslands(ade::passes::PassContext &ctx);
+ void syncIslandTags(ade::passes::PassContext &ctx);
+diff --git a/samples/cpp/tutorial_code/gapi/porting_anisotropic_image_segmentation/porting_anisotropic_image_segmentation_gapi_fluid.cpp b/samples/cpp/tutorial_code/gapi/porting_anisotropic_image_segmentation/porting_anisotropic_image_segmentation_gapi_fluid.cpp
+index 71271c37f7..2d528aa412 100644
+--- a/samples/cpp/tutorial_code/gapi/porting_anisotropic_image_segmentation/porting_anisotropic_image_segmentation_gapi_fluid.cpp
++++ b/samples/cpp/tutorial_code/gapi/porting_anisotropic_image_segmentation/porting_anisotropic_image_segmentation_gapi_fluid.cpp
+@@ -65,8 +65,7 @@ int main()
+     // Prepare the kernel package and run the graph
+     cv::gapi::GKernelPackage fluid_kernels = cv::gapi::combine        // Define a custom kernel package:
+         (cv::gapi::core::fluid::kernels(),                            // ...with Fluid Core kernels
+-         cv::gapi::imgproc::fluid::kernels(),                         // ...and Fluid ImgProc kernels
+-         cv::unite_policy::KEEP);
++         cv::gapi::imgproc::fluid::kernels());                        // ...and Fluid ImgProc kernels
+     //! [kernel_pkg]
+     //! [kernel_hotfix]
+     fluid_kernels.remove<cv::gapi::imgproc::GBoxFilter>();            // Remove Fluid Box filter as unsuitable,

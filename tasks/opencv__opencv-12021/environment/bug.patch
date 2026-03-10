@@ -1,0 +1,145 @@
+diff --git a/modules/dnn/src/tensorflow/tf_importer.cpp b/modules/dnn/src/tensorflow/tf_importer.cpp
+index 6c16502aa2..89732b45ad 100644
+--- a/modules/dnn/src/tensorflow/tf_importer.cpp
++++ b/modules/dnn/src/tensorflow/tf_importer.cpp
+@@ -771,13 +771,6 @@ void TFImporter::populateNet(Net dstNet)
+                 type = layer.op();
+             }
+ 
+-            // For the object detection networks, TensorFlow Object Detection API
+-            // predicts deltas for bounding boxes in yxYX (ymin, xmin, ymax, xmax)
+-            // order. We can manage it at DetectionOutput layer parsing predictions
+-            // or shuffle last convolution's weights.
+-            bool locPredTransposed = hasLayerAttr(layer, "loc_pred_transposed") &&
+-                                     getLayerAttr(layer, "loc_pred_transposed").b();
+-
+             layerParams.set("bias_term", false);
+             layerParams.blobs.resize(1);
+ 
+@@ -791,32 +784,18 @@ void TFImporter::populateNet(Net dstNet)
+                 blobFromTensor(getConstBlob(net.node(weights_layer_index), value_id), layerParams.blobs[1]);
+                 ExcludeLayer(net, weights_layer_index, 0, false);
+                 layers_to_ignore.insert(next_layers[0].first);
+-
+-                // Shuffle bias from yxYX to xyXY.
+-                if (locPredTransposed)
+-                {
+-                    const int numWeights = layerParams.blobs[1].total();
+-                    float* biasData = reinterpret_cast<float*>(layerParams.blobs[1].data);
+-                    CV_Assert(numWeights % 4 == 0);
+-                    for (int i = 0; i < numWeights; i += 2)
+-                    {
+-                        std::swap(biasData[i], biasData[i + 1]);
+-                    }
+-                }
+             }
+ 
+             const tensorflow::TensorProto& kernelTensor = getConstBlob(layer, value_id);
+             kernelFromTensor(kernelTensor, layerParams.blobs[0]);
+             releaseTensor(const_cast<tensorflow::TensorProto*>(&kernelTensor));
+             int* kshape = layerParams.blobs[0].size.p;
+-            const int outCh = kshape[0];
+-            const int inCh = kshape[1];
+-            const int height = kshape[2];
+-            const int width = kshape[3];
+             if (type == "DepthwiseConv2dNative")
+             {
+-                CV_Assert(!locPredTransposed);
+                 const int chMultiplier = kshape[0];
++                const int inCh = kshape[1];
++                const int height = kshape[2];
++                const int width = kshape[3];
+ 
+                 Mat copy = layerParams.blobs[0].clone();
+                 float* src = (float*)copy.data;
+@@ -835,21 +814,9 @@ void TFImporter::populateNet(Net dstNet)
+                 size_t* kstep = layerParams.blobs[0].step.p;
+                 kstep[0] = kstep[1]; // fix steps too
+             }
+-            layerParams.set("kernel_h", height);
+-            layerParams.set("kernel_w", width);
+-            layerParams.set("num_output", outCh);
+-
+-            // Shuffle output channels from yxYX to xyXY.
+-            if (locPredTransposed)
+-            {
+-                const int slice = height * width * inCh;
+-                for (int i = 0; i < outCh; i += 2)
+-                {
+-                    cv::Mat src(1, slice, CV_32F, layerParams.blobs[0].ptr<float>(i));
+-                    cv::Mat dst(1, slice, CV_32F, layerParams.blobs[0].ptr<float>(i + 1));
+-                    std::swap_ranges(src.begin<float>(), src.end<float>(), dst.begin<float>());
+-                }
+-            }
++            layerParams.set("kernel_h", kshape[2]);
++            layerParams.set("kernel_w", kshape[3]);
++            layerParams.set("num_output", kshape[0]);
+ 
+             setStrides(layerParams, layer);
+             setPadding(layerParams, layer);
+diff --git a/modules/dnn/test/test_tf_importer.cpp b/modules/dnn/test/test_tf_importer.cpp
+index 8b0a20747b..6ab0e41e18 100644
+--- a/modules/dnn/test/test_tf_importer.cpp
++++ b/modules/dnn/test/test_tf_importer.cpp
+@@ -309,7 +309,7 @@ TEST_P(Test_TensorFlow_nets, Inception_v2_SSD)
+                                     0, 10, 0.95932811, 0.38349164, 0.32528657, 0.40387636, 0.39165527,
+                                     0, 10, 0.93973452, 0.66561931, 0.37841269, 0.68074018, 0.42907384);
+     double scoreDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 5e-3 : default_l1;
+-    double iouDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.09 : default_lInf;
++    double iouDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.025 : default_lInf;
+     normAssertDetections(ref, out, "", 0.5, scoreDiff, iouDiff);
+ }
+ 
+diff --git a/samples/dnn/tf_text_graph_ssd.py b/samples/dnn/tf_text_graph_ssd.py
+index 1bf4079113..851e0d881e 100644
+--- a/samples/dnn/tf_text_graph_ssd.py
++++ b/samples/dnn/tf_text_graph_ssd.py
+@@ -208,18 +208,12 @@ for label in ['ClassPredictor', 'BoxEncodingPredictor']:
+         graph_def.node.extend([flatten])
+     addConcatNode('%s/concat' % label, concatInputs, 'concat/axis_flatten')
+ 
+-idx = 0
+-for node in graph_def.node:
+-    if node.name == ('BoxPredictor_%d/BoxEncodingPredictor/Conv2D' % idx):
+-        text_format.Merge('b: true', node.attr["loc_pred_transposed"])
+-        idx += 1
+-assert(idx == args.num_layers)
+-
+ # Add layers that generate anchors (bounding boxes proposals).
+ scales = [args.min_scale + (args.max_scale - args.min_scale) * i / (args.num_layers - 1)
+           for i in range(args.num_layers)] + [1.0]
+ 
+ priorBoxes = []
++addConstNode('reshape_prior_boxes_to_4d', [1, 2, -1, 1])
+ for i in range(args.num_layers):
+     priorBox = NodeDef()
+     priorBox.name = 'PriorBox_%d' % i
+@@ -246,9 +240,18 @@ for i in range(args.num_layers):
+     text_format.Merge(tensorMsg([0.1, 0.1, 0.2, 0.2]), priorBox.attr["variance"])
+ 
+     graph_def.node.extend([priorBox])
+-    priorBoxes.append(priorBox.name)
+ 
+-addConcatNode('PriorBox/concat', priorBoxes, 'concat/axis_flatten')
++    # Reshape from 1x2xN to 1x2xNx1
++    reshape = NodeDef()
++    reshape.name = priorBox.name + '/4d'
++    reshape.op = 'Reshape'
++    reshape.input.append(priorBox.name)
++    reshape.input.append('reshape_prior_boxes_to_4d')
++    graph_def.node.extend([reshape])
++
++    priorBoxes.append(reshape.name)
++
++addConcatNode('PriorBox/concat', priorBoxes, 'PriorBox/concat/axis')
+ 
+ # Sigmoid for classes predictions and DetectionOutput layer
+ sigmoid = NodeDef()
+@@ -273,6 +276,7 @@ text_format.Merge('i: 100', detectionOut.attr['top_k'])
+ text_format.Merge('s: "CENTER_SIZE"', detectionOut.attr['code_type'])
+ text_format.Merge('i: 100', detectionOut.attr['keep_top_k'])
+ text_format.Merge('f: 0.01', detectionOut.attr['confidence_threshold'])
++text_format.Merge('b: true', detectionOut.attr['loc_pred_transposed'])
+ 
+ graph_def.node.extend([detectionOut])
+ 

@@ -9,10 +9,10 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install C++ development tools and dependencies
+# Install C++ compiler (Clang), CMake, and dependencies for Crow
 RUN apt-get update && apt-get install -y \
     cmake \
-    g++ \
+    ninja-build \
     clang \
     libasio-dev \
     libssl-dev \
@@ -31,18 +31,24 @@ RUN git clone https://github.com/CrowCpp/Crow.git src && \
 
 WORKDIR /app/src
 
-# Configure and build the project with CMake
-# Use memory-saving compiler flags to prevent OOM during compilation
-RUN cmake \
+# Use Clang as the C++ compiler
+ENV CC=clang
+ENV CXX=clang++
+
+# Configure and build Crow with CMake (enable tests and sanitizers, disable examples)
+RUN cmake -Bbuild -H. \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DCROW_BUILD_TESTS=ON \
+    -DCROW_BUILD_EXAMPLES=OFF \
     -DCROW_ENABLE_SSL=ON \
     -DCROW_ENABLE_COMPRESSION=ON \
-    -DCROW_BUILD_TESTS=ON \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_FLAGS="-O1 --param ggc-min-expand=10 --param ggc-min-heapsize=32768" \
-    -B build && \
-    cmake --build build --config Release --target unittest -- -j1
+    -DCROW_ENABLE_SANITIZERS=ON \
+    -G Ninja
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+# Build only the test target
+RUN cmake --build build --target unittest
+
+# Reset any tracked files modified during build so bug.patch applies cleanly
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
@@ -50,7 +56,7 @@ COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
 # Rebuild after applying bug.patch (C++ is a compiled language)
-RUN cmake --build build --config Release --target unittest -- -j1
+RUN cmake --build build --target unittest
 
 RUN rm -rf /app/src/.git
 

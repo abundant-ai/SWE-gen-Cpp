@@ -1,0 +1,287 @@
+diff --git a/modules/highgui/src/precomp.hpp b/modules/highgui/src/precomp.hpp
+index 6472899686..0f94bc7513 100644
+--- a/modules/highgui/src/precomp.hpp
++++ b/modules/highgui/src/precomp.hpp
+@@ -123,39 +123,4 @@ double cvGetOpenGlProp_QT(const char* name);
+ double cvGetPropVisible_QT(const char* name);
+ #endif
+ 
+-inline void convertToShow(const cv::Mat &src, cv::Mat &dst, bool toRGB = true)
+-{
+-    const int src_depth = src.depth();
+-    CV_Assert(src_depth != CV_16F && src_depth != CV_32S);
+-    cv::Mat tmp;
+-    switch(src_depth)
+-    {
+-    case CV_8U:
+-        tmp = src;
+-        break;
+-    case CV_8S:
+-        cv::convertScaleAbs(src, tmp, 1, 127);
+-        break;
+-    case CV_16S:
+-        cv::convertScaleAbs(src, tmp, 1/255., 127);
+-        break;
+-    case CV_16U:
+-        cv::convertScaleAbs(src, tmp, 1/255.);
+-        break;
+-    case CV_32F:
+-    case CV_64F: // assuming image has values in range [0, 1)
+-        cv::convertScaleAbs(src, tmp, 256.);
+-        break;
+-    }
+-    cv::cvtColor(tmp, dst, toRGB ? cv::COLOR_BGR2RGB : cv::COLOR_BGRA2BGR, dst.channels());
+-}
+-
+-inline void convertToShow(const cv::Mat &src, const CvMat* arr, bool toRGB = true)
+-{
+-    cv::Mat dst = cv::cvarrToMat(arr);
+-    convertToShow(src, dst, toRGB);
+-    CV_Assert(dst.data == arr->data.ptr);
+-}
+-
+-
+ #endif /* __HIGHGUI_H_ */
+diff --git a/modules/highgui/src/window_QT.cpp b/modules/highgui/src/window_QT.cpp
+index f2af4230c5..9fd8093ad0 100644
+--- a/modules/highgui/src/window_QT.cpp
++++ b/modules/highgui/src/window_QT.cpp
+@@ -2556,7 +2556,17 @@ void DefaultViewPort::updateImage(const CvArr* arr)
+ 
+     nbChannelOriginImage = cvGetElemType(mat);
+     CV_Assert(origin == 0);
+-    convertToShow(cv::cvarrToMat(mat), image2Draw_mat);
++    cv::Mat src = cv::cvarrToMat(mat), dst = cv::cvarrToMat(image2Draw_mat);
++
++    cv::Mat tmp;
++    int src_depth = src.depth();
++    double scale = src_depth <= CV_8S ? 1 : src_depth <= CV_32S ? 1./256 : 255;
++    double shift = src_depth == CV_8S || src_depth == CV_16S ? 128 : 0;
++    cv::convertScaleAbs(src, tmp, scale, shift);
++
++    cv::cvtColor(tmp, dst, cv::COLOR_BGR2RGB, dst.channels());
++    CV_Assert(dst.data == image2Draw_mat->data.ptr);
++
+     viewport()->update();
+ }
+ 
+diff --git a/modules/highgui/src/window_cocoa.mm b/modules/highgui/src/window_cocoa.mm
+index 95f339f485..3fe658a09a 100644
+--- a/modules/highgui/src/window_cocoa.mm
++++ b/modules/highgui/src/window_cocoa.mm
+@@ -946,7 +946,7 @@ static NSSize constrainAspectRatio(NSSize base, NSSize constraint) {
+ 
+     if (bitmap) {
+         cv::Mat dst(arrMat.rows, arrMat.cols, CV_8UC3, [bitmap bitmapData], [bitmap bytesPerRow]);
+-        convertToShow(arrMat, dst);
++        cv::cvtColor(arrMat, dst, cv::COLOR_BGR2RGB);
+     }
+     else {
+         // It's not guaranteed to like the bitsPerPixel:24, but this is a lot slower so we'd rather not do it
+@@ -960,8 +960,8 @@ static NSSize constrainAspectRatio(NSSize base, NSSize constraint) {
+             colorSpaceName:NSDeviceRGBColorSpace
+             bytesPerRow:(arrMat.cols * 4)
+             bitsPerPixel:32];
+-        cv::Mat dst(arrMat.rows, arrMat.cols, CV_8UC4, [bitmap bitmapData], [bitmap bytesPerRow]);
+-        convertToShow(arrMat, dst);
++        cv::Mat dst(arrMat.rows, arrMat.cols, CV_8UC3, [bitmap bitmapData], [bitmap bytesPerRow]);
++        cv::cvtColor(arrMat, dst, cv::COLOR_BGR2RGBA);
+     }
+ 
+     if( image ) {
+diff --git a/modules/highgui/src/window_gtk.cpp b/modules/highgui/src/window_gtk.cpp
+index 6b79245e8e..77704734d3 100644
+--- a/modules/highgui/src/window_gtk.cpp
++++ b/modules/highgui/src/window_gtk.cpp
+@@ -141,7 +141,9 @@ void cvImageWidgetSetImage(CvImageWidget * widget, const CvArr *arr){
+         gtk_widget_queue_resize( GTK_WIDGET( widget ) );
+     }
+     CV_Assert(origin == 0);
+-    convertToShow(cv::cvarrToMat(arr), widget->original_image);
++    cv::Mat src = cv::cvarrToMat(arr), dst = cv::cvarrToMat(widget->original_image);
++    cv::cvtColor(src, dst, cv::COLOR_BGR2RGB, dst.channels());
++    CV_Assert(dst.data == widget->original_image->data.ptr);
+     if(widget->scaled_image){
+         cvResize( widget->original_image, widget->scaled_image, CV_INTER_AREA );
+     }
+diff --git a/modules/highgui/src/window_w32.cpp b/modules/highgui/src/window_w32.cpp
+index ec995ba836..bed57073dc 100644
+--- a/modules/highgui/src/window_w32.cpp
++++ b/modules/highgui/src/window_w32.cpp
+@@ -1206,10 +1206,18 @@ cvShowImage( const char* name, const CvArr* arr )
+     }
+ 
+     {
++        cv::Mat src = cv::cvarrToMat(image);
+         cv::Mat dst(size.cy, size.cx, CV_8UC3, dst_ptr, (size.cx * channels + 3) & -4);
+-        convertToShow(cv::cvarrToMat(image), dst, false);
+-        CV_Assert(dst.data == (uchar*)dst_ptr);
++
++        cv::Mat tmp;
++        int src_depth = src.depth();
++        double scale = src_depth <= CV_8S ? 1 : src_depth <= CV_32S ? 1./256 : 255;
++        double shift = src_depth == CV_8S || src_depth == CV_16S ? 128 : 0;
++        cv::convertScaleAbs(src, tmp, scale, shift);
++        cv::cvtColor(tmp, dst, cv::COLOR_BGRA2BGR, dst.channels());
+         cv::flip(dst, dst, 0);
++
++        CV_Assert(dst.data == (uchar*)dst_ptr);
+     }
+ 
+     // ony resize window if needed
+diff --git a/modules/highgui/test/test_gui.cpp b/modules/highgui/test/test_gui.cpp
+index d69477b5aa..1b69e3d67c 100644
+--- a/modules/highgui/test/test_gui.cpp
++++ b/modules/highgui/test/test_gui.cpp
+@@ -44,110 +44,54 @@
+ 
+ namespace opencv_test { namespace {
+ 
+-inline void verify_size(const std::string &nm, const cv::Mat &img)
+-{
+-    EXPECT_NO_THROW(imshow(nm, img));
+-    EXPECT_EQ(-1, waitKey(100));
+-    Rect rc;
+-    EXPECT_NO_THROW(rc = getWindowImageRect(nm));
+-    EXPECT_EQ(rc.size(), img.size());
+-}
++#if defined HAVE_GTK || defined HAVE_QT || defined HAVE_WIN32UI || defined HAVE_COCOA
+ 
+-#if !defined HAVE_GTK && !defined HAVE_QT && !defined HAVE_WIN32UI && !defined HAVE_COCOA
+-TEST(Highgui_GUI, DISABLED_regression)
+-#else
+-TEST(Highgui_GUI, regression)
+-#endif
++class CV_HighGuiOnlyGuiTest : public cvtest::BaseTest
+ {
+-    const std::string window_name("opencv_highgui_test_window");
+-    const cv::Size image_size(800, 600);
+-
+-    EXPECT_NO_THROW(destroyAllWindows());
+-    ASSERT_NO_THROW(namedWindow(window_name));
+-    const vector<int> channels = {1, 3, 4};
+-    const vector<int> depths = {CV_8U, CV_8S, CV_16U, CV_16S, CV_32F, CV_64F};
+-    for(int cn : channels)
+-    {
+-        SCOPED_TRACE(cn);
+-        for(int depth : depths)
+-        {
+-            SCOPED_TRACE(depth);
+-            double min_val = 0.;
+-            double max_val = 256.;
+-            switch(depth)
+-            {
+-            case CV_8S:
+-                min_val = static_cast<double>(-0x7F);
+-                max_val = static_cast<double>(0x7F + 1);
+-                break;
+-            case CV_16S:
+-                min_val = static_cast<double>(-0x7FFF);
+-                max_val = static_cast<double>(0x7FFF + 1);
+-                break;
+-            case CV_16U:
+-                max_val = static_cast<double>(0xFFFF + 1);
+-                break;
+-            case CV_32F:
+-            case CV_64F:
+-                max_val = 1.0;
+-                break;
+-            }
+-            Mat m = cvtest::randomMat(TS::ptr()->get_rng(), image_size, CV_MAKE_TYPE(depth, cn), min_val, max_val, false);
+-            verify_size(window_name, m);
+-
+-            Mat bgr(image_size, CV_MAKE_TYPE(depth, cn));
+-            int b_g = image_size.width / 3, g_r = b_g * 2;
+-            if (cn > 1)
+-            {
+-                bgr.colRange(0, b_g).setTo(cv::Scalar(max_val, min_val, min_val));
+-                bgr.colRange(b_g, g_r).setTo(cv::Scalar(min_val, max_val, min_val));
+-                bgr.colRange(g_r, image_size.width).setTo(cv::Scalar(min_val, min_val, max_val));
+-            }
+-            else
+-            {
+-                bgr.colRange(0, b_g).setTo(cv::Scalar::all(min_val));
+-                bgr.colRange(b_g, g_r).setTo(cv::Scalar::all((min_val + max_val) / 2));
+-                bgr.colRange(g_r, image_size.width).setTo(cv::Scalar::all(max_val));
+-            }
+-            verify_size(window_name, bgr);
+-        }
+-    }
+-    EXPECT_NO_THROW(destroyAllWindows());
+-}
++protected:
++    void run(int);
++};
+ 
+-//==================================================================================================
++static void Foo(int /*k*/, void* /*z*/) {}
+ 
+-static void Foo(int, void* counter)
++void CV_HighGuiOnlyGuiTest::run( int /*start_from */)
+ {
+-    if (counter)
+-    {
+-        int *counter_int = static_cast<int*>(counter);
+-        (*counter_int)++;
+-    }
+-}
++    ts->printf(ts->LOG, "GUI 0\n");
++    destroyAllWindows();
+ 
+-#if !defined HAVE_GTK && !defined HAVE_QT && !defined HAVE_WIN32UI
+-// && !defined HAVE_COCOA - TODO: fails on Mac?
+-TEST(Highgui_GUI, DISABLED_trackbar)
+-#else
+-TEST(Highgui_GUI, trackbar)
+-#endif
+-{
++    ts->printf(ts->LOG, "GUI 1\n");
++    namedWindow("Win");
++
++    ts->printf(ts->LOG, "GUI 2\n");
++    Mat m(256, 256, CV_8U);
++    m = Scalar(128);
++
++    ts->printf(ts->LOG, "GUI 3\n");
++    imshow("Win", m);
++
++    ts->printf(ts->LOG, "GUI 4\n");
+     int value = 50;
+-    int callback_count = 0;
+-    const std::string window_name("trackbar_test_window");
+-    const std::string trackbar_name("trackbar");
+-
+-    EXPECT_NO_THROW(destroyAllWindows());
+-    ASSERT_NO_THROW(namedWindow(window_name));
+-    EXPECT_EQ((int)1, createTrackbar(trackbar_name, window_name, &value, 100, Foo, &callback_count));
+-    EXPECT_EQ(value, getTrackbarPos(trackbar_name, window_name));
+-    EXPECT_EQ(0, callback_count);
+-    EXPECT_NO_THROW(setTrackbarPos(trackbar_name, window_name, 90));
+-    EXPECT_EQ(1, callback_count);
+-    EXPECT_EQ(90, value);
+-    EXPECT_EQ(90, getTrackbarPos(trackbar_name, window_name));
+-    EXPECT_NO_THROW(destroyAllWindows());
++
++    ts->printf(ts->LOG, "GUI 5\n");
++    createTrackbar( "trackbar", "Win", &value, 100, Foo, &value);
++
++    ts->printf(ts->LOG, "GUI 6\n");
++    getTrackbarPos( "trackbar", "Win" );
++
++    ts->printf(ts->LOG, "GUI 7\n");
++    waitKey(500);
++
++    ts->printf(ts->LOG, "GUI 8\n");
++    Rect rc = getWindowImageRect("Win");
++    std::cout << "window image rect: " << rc << std::endl;
++
++    ts->printf(ts->LOG, "GUI 9\n");
++    destroyAllWindows();
++    ts->set_failed_test_info(cvtest::TS::OK);
+ }
+ 
++TEST(Highgui_GUI,    regression) { CV_HighGuiOnlyGuiTest test; test.safe_run(); }
++
++#endif
++
+ }} // namespace

@@ -28,38 +28,29 @@ RUN git clone https://github.com/catchorg/Catch2.git src && \
 
 WORKDIR /app/src
 
-# Use Clang as the C++ compiler (required for unreachable-code warnings)
+# Use Clang as the C++ compiler
 ENV CC=clang
 ENV CXX=clang++
-# Suppress unrelated literal operator warning for Clang 18 compatibility
-ENV CXXFLAGS="-Wno-error=deprecated-literal-operator"
+ENV CXXFLAGS="-Wno-error=deprecated-literal-operator -Wno-error=unused-but-set-variable"
 
-# Configure and build Catch2 with CMake
-# Enable development build which treats warnings as errors
+# Fix missing cstdint includes - add to all relevant source/header files
+RUN find src/catch2 -type f \( -name "*.cpp" -o -name "*.hpp" \) \
+    -exec grep -l "uint\(8\|16\|32\|64\)_t" {} \; | \
+    xargs -I {} sh -c 'grep -q "#include <cstdint>" {} || sed -i "7i #include <cstdint>" {}'
+
+# Configure and build Catch2 with CMake (enable tests)
 RUN cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
     -DCATCH_BUILD_TESTING=ON \
-    -DCATCH_BUILD_EXTRA_TESTS=ON \
-    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
+    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator -Wno-error=unused-but-set-variable" \
     -G Ninja
-
-# Fix missing <cstdint> includes that were added in a later commit
-# The PR 2114 code uses uint64_t/uint8_t/uint32_t but forgot to include <cstdint>
-RUN sed -i '15i #include <cstdint>' src/catch2/internal/catch_string_manip.hpp && \
-    sed -i '10i #include <cstdint>' src/catch2/catch_test_case_info.hpp && \
-    sed -i '10i #include <cstdint>' src/catch2/internal/catch_xmlwriter.cpp
-
-# Fix unused variable warning in catch_session.cpp (reporterIdx is incremented but never used)
-RUN sed -i '/reporterIdx++;/a\                (void)reporterIdx; \/\/ Suppress unused variable warning' src/catch2/catch_session.cpp
 
 # Fix MINSIGSTKSZ constexpr issue with newer glibc - hardcode a safe value
 RUN find . \( -name "*.cpp" -o -name "*.hpp" \) -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
-    xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' && \
-    find extras -name "*.cpp" -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
     xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' || true
 
-# Build will fail if there are unreachable-code warnings (development build treats warnings as errors)
+# Build Catch2
 RUN cmake --build build
 
 # If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
@@ -69,18 +60,13 @@ RUN git reset --hard
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Fix missing includes again (undone by git reset)
-RUN sed -i '15i #include <cstdint>' src/catch2/internal/catch_string_manip.hpp && \
-    sed -i '10i #include <cstdint>' src/catch2/catch_test_case_info.hpp && \
-    sed -i '10i #include <cstdint>' src/catch2/internal/catch_xmlwriter.cpp
-
-# Fix unused variable warning again (undone by git reset)
-RUN sed -i '/reporterIdx++;/a\                (void)reporterIdx; \/\/ Suppress unused variable warning' src/catch2/catch_session.cpp
+# Fix missing cstdint includes again (undone by git reset and patch)
+RUN find src/catch2 -type f \( -name "*.cpp" -o -name "*.hpp" \) \
+    -exec grep -l "uint\(8\|16\|32\|64\)_t" {} \; | \
+    xargs -I {} sh -c 'grep -q "#include <cstdint>" {} || sed -i "7i #include <cstdint>" {}'
 
 # Fix MINSIGSTKSZ constexpr issue again (undone by git reset)
 RUN find . \( -name "*.cpp" -o -name "*.hpp" \) -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
-    xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' && \
-    find extras -name "*.cpp" -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
     xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' || true
 
 # Rebuild after applying bug.patch (C++ is a compiled language)

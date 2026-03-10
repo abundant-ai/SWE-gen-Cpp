@@ -1,0 +1,594 @@
+diff --git a/modules/core/include/opencv2/core/cuda.hpp b/modules/core/include/opencv2/core/cuda.hpp
+index 820aba71ec..0ee9b74273 100644
+--- a/modules/core/include/opencv2/core/cuda.hpp
++++ b/modules/core/include/opencv2/core/cuda.hpp
+@@ -305,9 +305,6 @@ public:
+     //! returns true if GpuMat data is NULL
+     bool empty() const;
+ 
+-    //! internal use method: updates the continuity flag
+-    void updateContinuityFlag();
+-
+     /*! includes several bit-fields:
+     - the magic signature
+     - continuity flag
+diff --git a/modules/core/include/opencv2/core/mat.hpp b/modules/core/include/opencv2/core/mat.hpp
+index 7be97c803e..c1980c56c0 100644
+--- a/modules/core/include/opencv2/core/mat.hpp
++++ b/modules/core/include/opencv2/core/mat.hpp
+@@ -2092,9 +2092,6 @@ public:
+     static MatAllocator* getDefaultAllocator();
+     static void setDefaultAllocator(MatAllocator* allocator);
+ 
+-    //! internal use method: updates the continuity flag
+-    void updateContinuityFlag();
+-
+     //! interaction with UMat
+     UMatData* u;
+ 
+@@ -2568,9 +2565,6 @@ public:
+     //! and the standard allocator
+     static MatAllocator* getStdAllocator();
+ 
+-    //! internal use method: updates the continuity flag
+-    void updateContinuityFlag();
+-
+     // black-box container of UMat data
+     UMatData* u;
+ 
+diff --git a/modules/core/include/opencv2/core/mat.inl.hpp b/modules/core/include/opencv2/core/mat.inl.hpp
+index a0c43f1534..ab481277b2 100644
+--- a/modules/core/include/opencv2/core/mat.inl.hpp
++++ b/modules/core/include/opencv2/core/mat.inl.hpp
+@@ -505,20 +505,24 @@ Mat::Mat(int _rows, int _cols, int _type, void* _data, size_t _step)
+     if( _step == AUTO_STEP )
+     {
+         _step = minstep;
++        flags |= CONTINUOUS_FLAG;
+     }
+     else
+     {
+         CV_DbgAssert( _step >= minstep );
++
+         if (_step % esz1 != 0)
+         {
+             CV_Error(Error::BadStep, "Step must be a multiple of esz1");
+         }
++
++        if (_step == minstep || rows == 1)
++            flags |= CONTINUOUS_FLAG;
+     }
+     step[0] = _step;
+     step[1] = esz;
+     datalimit = datastart + _step * rows;
+     dataend = datalimit - _step + minstep;
+-    updateContinuityFlag();
+ }
+ 
+ inline
+@@ -534,6 +538,7 @@ Mat::Mat(Size _sz, int _type, void* _data, size_t _step)
+     if( _step == AUTO_STEP )
+     {
+         _step = minstep;
++        flags |= CONTINUOUS_FLAG;
+     }
+     else
+     {
+@@ -543,12 +548,14 @@ Mat::Mat(Size _sz, int _type, void* _data, size_t _step)
+         {
+             CV_Error(Error::BadStep, "Step must be a multiple of esz1");
+         }
++
++        if (_step == minstep || rows == 1)
++            flags |= CONTINUOUS_FLAG;
+     }
+     step[0] = _step;
+     step[1] = esz;
+     datalimit = datastart + _step*rows;
+     dataend = datalimit - _step + minstep;
+-    updateContinuityFlag();
+ }
+ 
+ template<typename _Tp> inline
+diff --git a/modules/core/misc/java/test/MatTest.java b/modules/core/misc/java/test/MatTest.java
+index a497bba1f2..7d0731aa71 100644
+--- a/modules/core/misc/java/test/MatTest.java
++++ b/modules/core/misc/java/test/MatTest.java
+@@ -489,7 +489,7 @@ public class MatTest extends OpenCVTestCase {
+     public void testIsContinuous() {
+         assertTrue(gray0.isContinuous());
+ 
+-        Mat subMat = gray0.submat(0, gray0.rows() / 2, 0, gray0.cols() / 2);
++        Mat subMat = gray0.submat(0, 0, gray0.rows() / 2, gray0.cols() / 2);
+         assertFalse(subMat.isContinuous());
+     }
+ 
+@@ -937,7 +937,7 @@ public class MatTest extends OpenCVTestCase {
+     }
+ 
+     public void testSubmatRect() {
+-        Mat submat = gray255.submat(new Rect(5, 5, gray255.cols() / 2, gray255.rows() / 2));
++        Mat submat = gray255.submat(new Rect(5, gray255.rows() / 2, 5, gray255.cols() / 2));
+         assertTrue(submat.isSubmatrix());
+         assertFalse(submat.isContinuous());
+ 
+diff --git a/modules/core/src/cuda_gpu_mat.cpp b/modules/core/src/cuda_gpu_mat.cpp
+index 0624032460..9514ec2037 100644
+--- a/modules/core/src/cuda_gpu_mat.cpp
++++ b/modules/core/src/cuda_gpu_mat.cpp
+@@ -46,13 +46,6 @@
+ using namespace cv;
+ using namespace cv::cuda;
+ 
+-void cv::cuda::GpuMat::updateContinuityFlag()
+-{
+-    int sz[] = { rows, cols };
+-    size_t steps[] = { step, elemSize() };
+-    flags = cv::updateContinuityFlag(flags, 2, sz, steps);
+-}
+-
+ cv::cuda::GpuMat::GpuMat(int rows_, int cols_, int type_, void* data_, size_t step_) :
+     flags(Mat::MAGIC_VAL + (type_ & Mat::TYPE_MASK)), rows(rows_), cols(cols_),
+     step(step_), data((uchar*)data_), refcount(0),
+@@ -64,6 +57,7 @@ cv::cuda::GpuMat::GpuMat(int rows_, int cols_, int type_, void* data_, size_t st
+     if (step == Mat::AUTO_STEP)
+     {
+         step = minstep;
++        flags |= Mat::CONTINUOUS_FLAG;
+     }
+     else
+     {
+@@ -71,10 +65,11 @@ cv::cuda::GpuMat::GpuMat(int rows_, int cols_, int type_, void* data_, size_t st
+             step = minstep;
+ 
+         CV_DbgAssert( step >= minstep );
++
++        flags |= step == minstep ? Mat::CONTINUOUS_FLAG : 0;
+     }
+ 
+     dataend += step * (rows - 1) + minstep;
+-    updateContinuityFlag();
+ }
+ 
+ cv::cuda::GpuMat::GpuMat(Size size_, int type_, void* data_, size_t step_) :
+@@ -88,6 +83,7 @@ cv::cuda::GpuMat::GpuMat(Size size_, int type_, void* data_, size_t step_) :
+     if (step == Mat::AUTO_STEP)
+     {
+         step = minstep;
++        flags |= Mat::CONTINUOUS_FLAG;
+     }
+     else
+     {
+@@ -95,10 +91,11 @@ cv::cuda::GpuMat::GpuMat(Size size_, int type_, void* data_, size_t step_) :
+             step = minstep;
+ 
+         CV_DbgAssert( step >= minstep );
++
++        flags |= step == minstep ? Mat::CONTINUOUS_FLAG : 0;
+     }
+ 
+     dataend += step * (rows - 1) + minstep;
+-    updateContinuityFlag();
+ }
+ 
+ cv::cuda::GpuMat::GpuMat(const GpuMat& m, Range rowRange_, Range colRange_)
+@@ -130,15 +127,17 @@ cv::cuda::GpuMat::GpuMat(const GpuMat& m, Range rowRange_, Range colRange_)
+ 
+         cols = colRange_.size();
+         data += colRange_.start*elemSize();
++        flags &= cols < m.cols ? ~Mat::CONTINUOUS_FLAG : -1;
+     }
+ 
++    if (rows == 1)
++        flags |= Mat::CONTINUOUS_FLAG;
++
+     if (refcount)
+         CV_XADD(refcount, 1);
+ 
+     if (rows <= 0 || cols <= 0)
+         rows = cols = 0;
+-
+-    updateContinuityFlag();
+ }
+ 
+ cv::cuda::GpuMat::GpuMat(const GpuMat& m, Rect roi) :
+@@ -147,19 +146,16 @@ cv::cuda::GpuMat::GpuMat(const GpuMat& m, Rect roi) :
+     datastart(m.datastart), dataend(m.dataend),
+     allocator(m.allocator)
+ {
++    flags &= roi.width < m.cols ? ~Mat::CONTINUOUS_FLAG : -1;
+     data += roi.x * elemSize();
+ 
+-    CV_Assert( 0 <= roi.x && 0 <= roi.width &&
+-               roi.x + roi.width <= m.cols &&
+-               0 <= roi.y && 0 <= roi.height &&
+-               roi.y + roi.height <= m.rows );
++    CV_Assert( 0 <= roi.x && 0 <= roi.width && roi.x + roi.width <= m.cols && 0 <= roi.y && 0 <= roi.height && roi.y + roi.height <= m.rows );
+ 
+     if (refcount)
+         CV_XADD(refcount, 1);
+ 
+     if (rows <= 0 || cols <= 0)
+         rows = cols = 0;
+-    updateContinuityFlag();
+ }
+ 
+ GpuMat cv::cuda::GpuMat::reshape(int new_cn, int new_rows) const
+@@ -249,7 +245,11 @@ GpuMat& cv::cuda::GpuMat::adjustROI(int dtop, int dbottom, int dleft, int dright
+     rows = row2 - row1;
+     cols = col2 - col1;
+ 
+-    updateContinuityFlag();
++    if (esz * cols == step || rows == 1)
++        flags |= Mat::CONTINUOUS_FLAG;
++    else
++        flags &= ~Mat::CONTINUOUS_FLAG;
++
+     return *this;
+ }
+ 
+diff --git a/modules/core/src/cuda_host_mem.cpp b/modules/core/src/cuda_host_mem.cpp
+index af2fc05fe0..37b2314c96 100644
+--- a/modules/core/src/cuda_host_mem.cpp
++++ b/modules/core/src/cuda_host_mem.cpp
+@@ -201,13 +201,10 @@ void cv::cuda::HostMem::create(int rows_, int cols_, int type_)
+ 
+     if (rows_ > 0 && cols_ > 0)
+     {
+-        flags = Mat::MAGIC_VAL + type_;
++        flags = Mat::MAGIC_VAL + Mat::CONTINUOUS_FLAG + type_;
+         rows = rows_;
+         cols = cols_;
+         step = elemSize() * cols;
+-        int sz[] = { rows, cols };
+-        size_t steps[] = { step, CV_ELEM_SIZE(type_) };
+-        flags = updateContinuityFlag(flags, 2, sz, steps);
+ 
+         if (alloc_type == SHARED)
+         {
+diff --git a/modules/core/src/matrix.cpp b/modules/core/src/matrix.cpp
+index a003fd4b01..d9d7ebef97 100644
+--- a/modules/core/src/matrix.cpp
++++ b/modules/core/src/matrix.cpp
+@@ -262,36 +262,31 @@ void setSize( Mat& m, int _dims, const int* _sz, const size_t* _steps, bool auto
+     }
+ }
+ 
+-int updateContinuityFlag(int flags, int dims, const int* size, const size_t* step)
++static void updateContinuityFlag(Mat& m)
+ {
+     int i, j;
+-    for( i = 0; i < dims; i++ )
++    for( i = 0; i < m.dims; i++ )
+     {
+-        if( size[i] > 1 )
++        if( m.size[i] > 1 )
+             break;
+     }
+ 
+-    uint64 t = (uint64)size[std::min(i, dims-1)]*CV_MAT_CN(flags);
+-    for( j = dims-1; j > i; j-- )
++    for( j = m.dims-1; j > i; j-- )
+     {
+-        t *= size[j];
+-        if( step[j]*size[j] < step[j-1] )
++        if( m.step[j]*m.size[j] < m.step[j-1] )
+             break;
+     }
+ 
+-    if( j <= i && t == (uint64)(int)t )
+-        return flags | Mat::CONTINUOUS_FLAG;
+-    return flags & ~Mat::CONTINUOUS_FLAG;
+-}
+-
+-void Mat::updateContinuityFlag()
+-{
+-    flags = cv::updateContinuityFlag(flags, dims, size.p, step.p);
++    uint64 t = (uint64)m.step[0]*m.size[0];
++    if( j <= i && t == (size_t)t )
++        m.flags |= Mat::CONTINUOUS_FLAG;
++    else
++        m.flags &= ~Mat::CONTINUOUS_FLAG;
+ }
+ 
+ void finalizeHdr(Mat& m)
+ {
+-    m.updateContinuityFlag();
++    updateContinuityFlag(m);
+     int d = m.dims;
+     if( d > 2 )
+         m.rows = m.cols = -1;
+@@ -432,6 +427,7 @@ Mat::Mat(const Mat& m, const Range& _rowRange, const Range& _colRange)
+                        && _colRange.end <= m.cols );
+             cols = _colRange.size();
+             data += _colRange.start*elemSize();
++            flags &= cols < m.cols ? ~CONTINUOUS_FLAG : -1;
+             flags |= SUBMATRIX_FLAG;
+         }
+     }
+@@ -441,7 +437,8 @@ Mat::Mat(const Mat& m, const Range& _rowRange, const Range& _colRange)
+         CV_RETHROW();
+     }
+ 
+-    updateContinuityFlag();
++    if( rows == 1 )
++        flags |= CONTINUOUS_FLAG;
+ 
+     if( rows <= 0 || cols <= 0 )
+     {
+@@ -458,6 +455,8 @@ Mat::Mat(const Mat& m, const Rect& roi)
+     allocator(m.allocator), u(m.u), size(&rows)
+ {
+     CV_Assert( m.dims <= 2 );
++    flags &= roi.width < m.cols ? ~CONTINUOUS_FLAG : -1;
++    flags |= roi.height == 1 ? CONTINUOUS_FLAG : 0;
+ 
+     size_t esz = CV_ELEM_SIZE(flags);
+     data += roi.x*esz;
+@@ -469,7 +468,6 @@ Mat::Mat(const Mat& m, const Rect& roi)
+         flags |= SUBMATRIX_FLAG;
+ 
+     step[0] = m.step[0]; step[1] = esz;
+-    updateContinuityFlag();
+ 
+     if( rows <= 0 || cols <= 0 )
+     {
+@@ -524,7 +522,7 @@ Mat::Mat(const Mat& m, const Range* ranges)
+             flags |= SUBMATRIX_FLAG;
+         }
+     }
+-    updateContinuityFlag();
++    updateContinuityFlag(*this);
+ }
+ 
+ Mat::Mat(const Mat& m, const std::vector<Range>& ranges)
+@@ -550,7 +548,7 @@ Mat::Mat(const Mat& m, const std::vector<Range>& ranges)
+             flags |= SUBMATRIX_FLAG;
+         }
+     }
+-    updateContinuityFlag();
++    updateContinuityFlag(*this);
+ }
+ 
+ 
+@@ -577,7 +575,10 @@ Mat Mat::diag(int d) const
+     m.size[1] = m.cols = 1;
+     m.step[0] += (len > 1 ? esz : 0);
+ 
+-    m.updateContinuityFlag();
++    if( m.rows > 1 )
++        m.flags &= ~CONTINUOUS_FLAG;
++    else
++        m.flags |= CONTINUOUS_FLAG;
+ 
+     if( size() != Size(1,1) )
+         m.flags |= SUBMATRIX_FLAG;
+@@ -596,6 +597,13 @@ void Mat::pop_back(size_t nelems)
+     {
+         size.p[0] -= (int)nelems;
+         dataend -= nelems*step.p[0];
++        /*if( size.p[0] <= 1 )
++        {
++            if( dims <= 2 )
++                flags |= CONTINUOUS_FLAG;
++            else
++                updateContinuityFlag(*this);
++        }*/
+     }
+ }
+ 
+@@ -610,10 +618,7 @@ void Mat::push_back_(const void* elem)
+     memcpy(data + r*step.p[0], elem, esz);
+     size.p[0] = r + 1;
+     dataend += step.p[0];
+-    uint64 tsz = size.p[0];
+-    for( int i = 1; i < dims; i++ )
+-        tsz *= size.p[i];
+-    if( esz < step.p[0] || tsz != (uint64)(int)tsz )
++    if( esz < step.p[0] )
+         flags &= ~CONTINUOUS_FLAG;
+ }
+ 
+@@ -787,7 +792,10 @@ Mat& Mat::adjustROI( int dtop, int dbottom, int dleft, int dright )
+     data += (row1 - ofs.y)*step + (col1 - ofs.x)*esz;
+     rows = row2 - row1; cols = col2 - col1;
+     size.p[0] = rows; size.p[1] = cols;
+-    updateContinuityFlag();
++    if( esz*cols == step[0] || rows == 1 )
++        flags |= CONTINUOUS_FLAG;
++    else
++        flags &= ~CONTINUOUS_FLAG;
+     return *this;
+ }
+ 
+diff --git a/modules/core/src/matrix_c.cpp b/modules/core/src/matrix_c.cpp
+index 6d299f7531..28583cd05c 100644
+--- a/modules/core/src/matrix_c.cpp
++++ b/modules/core/src/matrix_c.cpp
+@@ -120,8 +120,8 @@ static Mat iplImageToMat(const IplImage* img, bool copyData)
+     }
+     m.datalimit = m.datastart + m.step.p[0]*m.rows;
+     m.dataend = m.datastart + m.step.p[0]*(m.rows-1) + esz*m.cols;
++    m.flags |= (m.cols*esz == m.step.p[0] || m.rows == 1 ? Mat::CONTINUOUS_FLAG : 0);
+     m.step[1] = esz;
+-    m.updateContinuityFlag();
+ 
+     if( copyData )
+     {
+diff --git a/modules/core/src/ocl.cpp b/modules/core/src/ocl.cpp
+index 59b649feaa..142f90aeec 100644
+--- a/modules/core/src/ocl.cpp
++++ b/modules/core/src/ocl.cpp
+@@ -5681,6 +5681,8 @@ namespace cv {
+ // three funcs below are implemented in umatrix.cpp
+ void setSize( UMat& m, int _dims, const int* _sz, const size_t* _steps,
+               bool autoSteps = false );
++
++void updateContinuityFlag(UMat& m);
+ void finalizeHdr(UMat& m);
+ 
+ } // namespace cv
+diff --git a/modules/core/src/precomp.hpp b/modules/core/src/precomp.hpp
+index 54d0a227cd..3d6835fd0d 100644
+--- a/modules/core/src/precomp.hpp
++++ b/modules/core/src/precomp.hpp
+@@ -197,7 +197,6 @@ inline Size getContinuousSize( const Mat& m1, const Mat& m2,
+ 
+ void setSize( Mat& m, int _dims, const int* _sz, const size_t* _steps, bool autoSteps=false );
+ void finalizeHdr(Mat& m);
+-int updateContinuityFlag(int flags, int dims, const int* size, const size_t* step);
+ 
+ struct NoVec
+ {
+diff --git a/modules/core/src/umatrix.cpp b/modules/core/src/umatrix.cpp
+index f89f777b52..303b6bec12 100644
+--- a/modules/core/src/umatrix.cpp
++++ b/modules/core/src/umatrix.cpp
+@@ -318,15 +318,32 @@ void setSize( UMat& m, int _dims, const int* _sz,
+ }
+ 
+ 
+-void UMat::updateContinuityFlag()
++void updateContinuityFlag(UMat& m)
+ {
+-    flags = cv::updateContinuityFlag(flags, dims, size.p, step.p);
++    int i, j;
++    for( i = 0; i < m.dims; i++ )
++    {
++        if( m.size[i] > 1 )
++            break;
++    }
++
++    for( j = m.dims-1; j > i; j-- )
++    {
++        if( m.step[j]*m.size[j] < m.step[j-1] )
++            break;
++    }
++
++    uint64 total = (uint64)m.step[0]*m.size[0];
++    if( j <= i && total == (size_t)total )
++        m.flags |= UMat::CONTINUOUS_FLAG;
++    else
++        m.flags &= ~UMat::CONTINUOUS_FLAG;
+ }
+ 
+ 
+ void finalizeHdr(UMat& m)
+ {
+-    m.updateContinuityFlag();
++    updateContinuityFlag(m);
+     int d = m.dims;
+     if( d > 2 )
+         m.rows = m.cols = -1;
+@@ -520,10 +537,12 @@ UMat::UMat(const UMat& m, const Range& _rowRange, const Range& _colRange)
+         CV_Assert( 0 <= _colRange.start && _colRange.start <= _colRange.end && _colRange.end <= m.cols );
+         cols = _colRange.size();
+         offset += _colRange.start*elemSize();
++        flags &= cols < m.cols ? ~CONTINUOUS_FLAG : -1;
+         flags |= SUBMATRIX_FLAG;
+     }
+ 
+-    updateContinuityFlag();
++    if( rows == 1 )
++        flags |= CONTINUOUS_FLAG;
+ 
+     if( rows <= 0 || cols <= 0 )
+     {
+@@ -538,6 +557,8 @@ UMat::UMat(const UMat& m, const Rect& roi)
+     allocator(m.allocator), usageFlags(m.usageFlags), u(m.u), offset(m.offset + roi.y*m.step[0]), size(&rows)
+ {
+     CV_Assert( m.dims <= 2 );
++    flags &= roi.width < m.cols ? ~CONTINUOUS_FLAG : -1;
++    flags |= roi.height == 1 ? CONTINUOUS_FLAG : 0;
+ 
+     size_t esz = CV_ELEM_SIZE(flags);
+     offset += roi.x*esz;
+@@ -549,7 +570,6 @@ UMat::UMat(const UMat& m, const Rect& roi)
+         flags |= SUBMATRIX_FLAG;
+ 
+     step[0] = m.step[0]; step[1] = esz;
+-    updateContinuityFlag();
+ 
+     if( rows <= 0 || cols <= 0 )
+     {
+@@ -581,7 +601,7 @@ UMat::UMat(const UMat& m, const Range* ranges)
+             flags |= SUBMATRIX_FLAG;
+         }
+     }
+-    updateContinuityFlag();
++    updateContinuityFlag(*this);
+ }
+ 
+ UMat::UMat(const UMat& m, const std::vector<Range>& ranges)
+@@ -606,7 +626,7 @@ UMat::UMat(const UMat& m, const std::vector<Range>& ranges)
+             flags |= SUBMATRIX_FLAG;
+         }
+     }
+-    updateContinuityFlag();
++    updateContinuityFlag(*this);
+ }
+ 
+ UMat UMat::diag(int d) const
+@@ -632,7 +652,10 @@ UMat UMat::diag(int d) const
+     m.size[1] = m.cols = 1;
+     m.step[0] += (len > 1 ? esz : 0);
+ 
+-    m.updateContinuityFlag();
++    if( m.rows > 1 )
++        m.flags &= ~CONTINUOUS_FLAG;
++    else
++        m.flags |= CONTINUOUS_FLAG;
+ 
+     if( size() != Size(1,1) )
+         m.flags |= SUBMATRIX_FLAG;
+@@ -678,7 +701,10 @@ UMat& UMat::adjustROI( int dtop, int dbottom, int dleft, int dright )
+     offset += (row1 - ofs.y)*step + (col1 - ofs.x)*esz;
+     rows = row2 - row1; cols = col2 - col1;
+     size.p[0] = rows; size.p[1] = cols;
+-    updateContinuityFlag();
++    if( esz*cols == step[0] || rows == 1 )
++        flags |= CONTINUOUS_FLAG;
++    else
++        flags &= ~CONTINUOUS_FLAG;
+     return *this;
+ }
+ 
+diff --git a/modules/imgproc/test/test_thresh.cpp b/modules/imgproc/test/test_thresh.cpp
+index 8064eed992..833d9e7f87 100644
+--- a/modules/imgproc/test/test_thresh.cpp
++++ b/modules/imgproc/test/test_thresh.cpp
+@@ -420,34 +420,4 @@ void CV_ThreshTest::prepare_to_validation( int /*test_case_idx*/ )
+ 
+ TEST(Imgproc_Threshold, accuracy) { CV_ThreshTest test; test.safe_run(); }
+ 
+-#if defined(_M_X64) || defined(__x86_64__)
+-TEST(Imgproc_Threshold, huge) /* since the test needs a lot of memory, enable it only on 64-bit Intel/AMD platforms, otherwise it may take a lot of time because of heavy swapping */
+-#else
+-TEST(DISABLED_Imgproc_Threshold, huge)
+-#endif
+-{
+-    Mat m;
+-    try
+-    {
+-        m.create(65000, 40000, CV_8U);
+-    }
+-    catch(...)
+-    {
+-    }
+-
+-    if( !m.empty() )
+-    {
+-        ASSERT_FALSE(m.isContinuous());
+-
+-        uint64 i, n = (uint64)m.rows*m.cols;
+-        for( i = 0; i < n; i++ )
+-            m.data[i] = (uchar)(i & 255);
+-
+-        cv::threshold(m, m, 127, 255, cv::THRESH_BINARY);
+-        int nz = cv::countNonZero(m);
+-        ASSERT_EQ(nz, (int)(n/2));
+-    }
+-    // just skip the test if there is no enough memory
+-}
+-
+ }} // namespace

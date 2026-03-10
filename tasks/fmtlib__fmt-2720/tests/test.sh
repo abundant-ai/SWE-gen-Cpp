@@ -6,16 +6,18 @@ cd /app/src
 mkdir -p "test"
 cp "/tests/compile-test.cc" "test/compile-test.cc"
 
-test_status=0
-
-# Build the specific test file
+# Build the specific test using CMake
 cd build
-echo "Building compile-test..."
-if ! cmake --build . --target compile-test 2>&1; then
-    echo "FAIL: compile-test build failed"
-    test_status=1
+cmake --build . --target compile-test
+build_status=$?
+
+if [ $build_status -ne 0 ]; then
+  echo "Failed to build compile-test" >&2
+  test_status=1
 else
-    echo "PASS: compile-test built successfully"
+  # Run the test executable
+  ./bin/compile-test
+  test_status=$?
 fi
 
 if [ $test_status -eq 0 ]; then

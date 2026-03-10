@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CMake (required for building spdlog)
+# Install CMake build tool
 RUN apt-get update && apt-get install -y \
     cmake \
     && rm -rf /var/lib/apt/lists/*
@@ -25,12 +25,20 @@ RUN git clone https://github.com/gabime/spdlog.git src && \
 
 WORKDIR /app/src
 
-# Reset any tracked files before applying bug.patch
-RUN git reset --hard
+# Convert line endings to Unix format before applying patch
+RUN apt-get update && apt-get install -y dos2unix && rm -rf /var/lib/apt/lists/* && \
+    find . -type f \( -name "*.md" -o -name "*.vcxproj" -o -name "*.filters" -o -name "*.cpp" -o -name "*.h" -o -name "Makefile" -o -name ".travis.yml" \) -exec dos2unix {} \; 2>/dev/null || true
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
-RUN patch -p1 --no-backup-if-mismatch --reject-file=- < /tmp/bug.patch || [ $? -eq 1 ] && rm /tmp/bug.patch
+RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
+
+# Rebuild after applying bug.patch (C++ is a compiled language)
+RUN rm -rf build && \
+    mkdir -p build && \
+    cd build && \
+    cmake .. -DSPDLOG_BUILD_TESTS=ON -DSPDLOG_BUILD_EXAMPLES=OFF -DSPDLOG_BUILD_BENCH=OFF -DCMAKE_CXX_FLAGS="-DSPDLOG_FMT_PRINTF" && \
+    make -j$(nproc)
 
 RUN rm -rf /app/src/.git
 

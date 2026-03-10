@@ -1,0 +1,135 @@
+diff --git a/modules/dnn/include/opencv2/dnn/dnn.hpp b/modules/dnn/include/opencv2/dnn/dnn.hpp
+index 20a953b895..3b26bb2421 100644
+--- a/modules/dnn/include/opencv2/dnn/dnn.hpp
++++ b/modules/dnn/include/opencv2/dnn/dnn.hpp
+@@ -88,7 +88,9 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+         DNN_TARGET_CPU,
+         DNN_TARGET_OPENCL,
+         DNN_TARGET_OPENCL_FP16,
+-        DNN_TARGET_MYRIAD
++        DNN_TARGET_MYRIAD,
++        //! FPGA device with CPU fallbacks using Inference Engine's Heterogeneous plugin.
++        DNN_TARGET_FPGA
+     };
+ 
+     /** @brief This class provides all data needed to initialize layer.
+@@ -501,6 +503,7 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+          * | DNN_TARGET_OPENCL      |                  + |                            + |                  + |
+          * | DNN_TARGET_OPENCL_FP16 |                  + |                            + |                    |
+          * | DNN_TARGET_MYRIAD      |                    |                            + |                    |
++         * | DNN_TARGET_FPGA        |                    |                            + |                    |
+          */
+         CV_WRAP void setPreferableTarget(int targetId);
+ 
+diff --git a/modules/dnn/perf/perf_net.cpp b/modules/dnn/perf/perf_net.cpp
+index 1647db3b31..03d7a233f3 100644
+--- a/modules/dnn/perf/perf_net.cpp
++++ b/modules/dnn/perf/perf_net.cpp
+@@ -42,7 +42,7 @@ public:
+         }
+         if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+         {
+-            if (!checkMyriadTarget())
++            if (!checkIETarget(DNN_TARGET_MYRIAD))
+             {
+                 throw SkipTestException("Myriad is not available/disabled in OpenCV");
+             }
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 087769ac3f..036726da28 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1077,7 +1077,8 @@ struct Net::Impl
+                   preferableTarget == DNN_TARGET_CPU ||
+                   preferableTarget == DNN_TARGET_OPENCL ||
+                   preferableTarget == DNN_TARGET_OPENCL_FP16 ||
+-                  preferableTarget == DNN_TARGET_MYRIAD);
++                  preferableTarget == DNN_TARGET_MYRIAD ||
++                  preferableTarget == DNN_TARGET_FPGA);
+         if (!netWasAllocated || this->blobsToKeep != blobsToKeep_)
+         {
+             if (preferableBackend == DNN_BACKEND_OPENCV && IS_DNN_OPENCL_TARGET(preferableTarget))
+@@ -1512,7 +1513,9 @@ struct Net::Impl
+             ieNode->net = net;
+ 
+             auto weightableLayer = std::dynamic_pointer_cast<InferenceEngine::WeightableLayer>(ieNode->layer);
+-            if ((preferableTarget == DNN_TARGET_OPENCL_FP16 || preferableTarget == DNN_TARGET_MYRIAD) && !fused)
++            if ((preferableTarget == DNN_TARGET_OPENCL_FP16 ||
++                 preferableTarget == DNN_TARGET_MYRIAD ||
++                 preferableTarget == DNN_TARGET_FPGA) && !fused)
+             {
+                 ieNode->layer->precision = InferenceEngine::Precision::FP16;
+                 if (weightableLayer)
+diff --git a/modules/dnn/src/layers/convolution_layer.cpp b/modules/dnn/src/layers/convolution_layer.cpp
+index bc61e39517..9daceb5c13 100644
+--- a/modules/dnn/src/layers/convolution_layer.cpp
++++ b/modules/dnn/src/layers/convolution_layer.cpp
+@@ -219,9 +219,14 @@ public:
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
++#ifdef HAVE_INF_ENGINE
+         if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-            return preferableTarget != DNN_TARGET_MYRIAD || dilation.width == dilation.height;
++        {
++            return INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2018R4) ||
++                   (preferableTarget != DNN_TARGET_MYRIAD || dilation.width == dilation.height);
++        }
+         else
++#endif
+             return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+     }
+ 
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index 4d75f8f2e9..144369063e 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -302,7 +302,8 @@ void InfEngineBackendNet::setTargetDevice(InferenceEngine::TargetDevice device)
+ {
+     if (device != InferenceEngine::TargetDevice::eCPU &&
+         device != InferenceEngine::TargetDevice::eGPU &&
+-        device != InferenceEngine::TargetDevice::eMYRIAD)
++        device != InferenceEngine::TargetDevice::eMYRIAD &&
++        device != InferenceEngine::TargetDevice::eFPGA)
+         CV_Error(Error::StsNotImplemented, "");
+     targetDevice = device;
+ }
+@@ -314,7 +315,8 @@ InferenceEngine::TargetDevice InfEngineBackendNet::getTargetDevice() noexcept
+ 
+ InferenceEngine::TargetDevice InfEngineBackendNet::getTargetDevice() const noexcept
+ {
+-    return targetDevice;
++    return targetDevice == InferenceEngine::TargetDevice::eFPGA ?
++           InferenceEngine::TargetDevice::eHETERO : targetDevice;
+ }
+ 
+ InferenceEngine::StatusCode InfEngineBackendNet::setBatchSize(const size_t) noexcept
+@@ -466,6 +468,11 @@ void InfEngineBackendNet::init(int targetId)
+         setPrecision(InferenceEngine::Precision::FP16);
+         setTargetDevice(InferenceEngine::TargetDevice::eMYRIAD); break;
+     }
++    case DNN_TARGET_FPGA:
++    {
++        setPrecision(InferenceEngine::Precision::FP16);
++        setTargetDevice(InferenceEngine::TargetDevice::eFPGA); break;
++    }
+     default:
+         CV_Error(Error::StsError, format("Unknown target identifier: %d", targetId));
+     }
+@@ -489,10 +496,15 @@ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+         }
+         else
+         {
+-            enginePtr = InferenceEngine::PluginDispatcher({""}).getSuitablePlugin(targetDevice);
++            auto dispatcher = InferenceEngine::PluginDispatcher({""});
++            if (targetDevice == InferenceEngine::TargetDevice::eFPGA)
++                enginePtr = dispatcher.getPluginByDevice("HETERO:FPGA,CPU");
++            else
++                enginePtr = dispatcher.getSuitablePlugin(targetDevice);
+             sharedPlugins[targetDevice] = enginePtr;
+ 
+-            if (targetDevice == InferenceEngine::TargetDevice::eCPU)
++            if (targetDevice == InferenceEngine::TargetDevice::eCPU ||
++                targetDevice == InferenceEngine::TargetDevice::eFPGA)
+             {
+                 std::string suffixes[] = {"_avx2", "_sse4", ""};
+                 bool haveFeature[] = {

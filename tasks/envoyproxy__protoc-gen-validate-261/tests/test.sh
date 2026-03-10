@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd /root/go/src/github.com/envoyproxy/protoc-gen-validate
+cd /go/src/github.com/envoyproxy/protoc-gen-validate
 
 export CI=true
 
@@ -14,44 +14,52 @@ cp "/tests/harness/executor/cases.go" "tests/harness/executor/cases.go"
 mkdir -p "tests/harness/python"
 cp "/tests/harness/python/harness.py" "tests/harness/python/harness.py"
 
-# Rebuild protoc-gen-validate to ensure templates compile
-GO111MODULE=off make build 2>&1 | tail -50
-if [ ${PIPESTATUS[0]} -ne 0 ]; then
-  echo 0 > /logs/verifier/reward.txt
-  exit 1
-fi
+# Rebuild the protoc-gen-validate plugin and regenerate test cases after copying the fixed files
+make build && make testcases
 
-# The fix adds support for bytes, repeated, maps, and oneof validation in Python
-# We test by checking that the validator.py file contains the necessary template functions
-# that were removed in bug.patch and restored in fix.patch
+# Generate harness.pb.go (required by test executor)
+cd tests/harness && protoc -I . \
+    --go_out="Mvalidate/validate.proto=github.com/envoyproxy/protoc-gen-validate/validate,Mgoogle/protobuf/any.proto=github.com/golang/protobuf/ptypes/any,Mgoogle/protobuf/duration.proto=github.com/golang/protobuf/ptypes/duration,Mgoogle/protobuf/struct.proto=github.com/golang/protobuf/ptypes/struct,Mgoogle/protobuf/timestamp.proto=github.com/golang/protobuf/ptypes/timestamp,Mgoogle/protobuf/wrappers.proto=github.com/golang/protobuf/ptypes/wrappers,Mgoogle/protobuf/descriptor.proto=github.com/golang/protobuf/protoc-gen-go/descriptor,Mgogoproto/gogo.proto=github.com/envoyproxy/protoc-gen-validate/gogoproto:./go" \
+    harness.proto
+cd /go/src/github.com/envoyproxy/protoc-gen-validate
 
-# Check for bytes_template function (validates bytes fields)
-if grep -q "def bytes_template" validate/validator.py; then
-  test_status=0
-else
-  test_status=1
-fi
+# Generate Python protobuf files (required for Python harness)
+# First generate validate_pb2.py
+protoc -I . --python_out=. validate/validate.proto
 
-# Check for repeated_template function (validates repeated fields)
-if [ $test_status -eq 0 ] && grep -q "def repeated_template" validate/validator.py; then
-  test_status=0
-else
-  test_status=1
-fi
+# Generate harness_pb2.py
+cd tests/harness && protoc -I . -I ../.. --python_out=. harness.proto
 
-# Check for map_template function (validates map fields)
-if [ $test_status -eq 0 ] && grep -q "def map_template" validate/validator.py; then
-  test_status=0
-else
-  test_status=1
-fi
+# Generate test case protobuf files
+cd /go/src/github.com/envoyproxy/protoc-gen-validate/tests/harness/cases/other_package
+protoc -I . -I ../../../.. --python_out=. ./*.proto
 
-# Check for oneof validation in file_template (validates oneof required fields)
-if [ $test_status -eq 0 ] && grep -q "for oneof in p.DESCRIPTOR.oneofs" validate/validator.py; then
-  test_status=0
-else
-  test_status=1
-fi
+cd /go/src/github.com/envoyproxy/protoc-gen-validate/tests/harness/cases
+protoc -I . -I ../../.. --python_out=. ./*.proto
+
+cd /go/src/github.com/envoyproxy/protoc-gen-validate
+
+# Create __init__.py files to make tests a proper Python package
+touch validate/__init__.py
+touch tests/__init__.py
+touch tests/harness/__init__.py
+touch tests/harness/cases/__init__.py
+touch tests/harness/cases/other_package/__init__.py
+
+# Create python-harness wrapper script (executor expects this executable)
+cat > tests/harness/python/python-harness << 'EOF'
+#!/bin/bash
+cd /go/src/github.com/envoyproxy/protoc-gen-validate
+export PYTHONPATH=/go/src/github.com/envoyproxy/protoc-gen-validate:$PYTHONPATH
+python3 tests/harness/python/harness.py
+EOF
+chmod +x tests/harness/python/python-harness
+
+# Run the Python test harness
+# This tests Python validation for all test cases including the ones modified in this PR
+# The test harness (executor) will run Python validation on all test cases defined in cases.go
+go run ./tests/harness/executor/*.go -python
+test_status=$?
 
 if [ $test_status -eq 0 ]; then
   echo 1 > /logs/verifier/reward.txt

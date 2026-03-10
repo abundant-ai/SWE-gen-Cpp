@@ -10,7 +10,6 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install C++ compiler (Clang) and CMake
-# Use Clang because the deprecated warnings are specific to Clang
 RUN apt-get update && apt-get install -y \
     cmake \
     clang \
@@ -32,16 +31,15 @@ RUN git clone https://github.com/google/googletest.git src && \
 WORKDIR /app/src
 
 # Build Google Test/Mock with CMake
-# Only build the core libraries first (some test files have compilation errors at this commit)
 RUN mkdir -p build && cd build && \
     cmake -Dgtest_build_samples=ON \
           -Dgtest_build_tests=ON \
           -Dgmock_build_tests=ON \
           -DCMAKE_CXX_FLAGS="-w" \
           .. && \
-    make -j4 gtest gtest_main
+    make -j4 gmock-nice-strict_test
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
@@ -49,7 +47,7 @@ COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
 # Rebuild after applying bug.patch (C++ is a compiled language)
-RUN cd build && make -j4 gtest gtest_main
+RUN cd build && make -j4 gmock-nice-strict_test
 
 RUN rm -rf /app/src/.git
 

@@ -2,27 +2,22 @@
 
 cd /app/src
 
-# Fix compilation issue: add const to less comparator
-sed -i 's/bool operator ()(const node\* l, const node\* r) {return l->m_index < r->m_index;}/bool operator ()(const node* l, const node* r) const {return l->m_index < r->m_index;}/' include/yaml-cpp/node/detail/node.h
-
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test/integration"
 cp "/tests/integration/emitter_test.cpp" "test/integration/emitter_test.cpp"
 mkdir -p "test/node"
 cp "/tests/node/node_test.cpp" "test/node/node_test.cpp"
 
-# Rebuild the test executable with the updated test files
-cmake --build build --config Debug 2>&1
-rebuild_status=$?
-
-if [ $rebuild_status -ne 0 ]; then
-  echo "Rebuild failed with status $rebuild_status" >&2
+# Rebuild the test binary with the updated test files
+cd build
+if ! make -j2 run-tests; then
+  echo "ERROR: Failed to build tests with HEAD test files" >&2
   echo 0 > /logs/verifier/reward.txt
-  exit $rebuild_status
+  exit 1
 fi
 
-# Run only the specific tests from emitter_test.cpp and node_test.cpp
-./build/test/run-tests --gtest_filter=EmitterTest.*:NodeTest.*
+# Run only tests from EmitterTest and NodeTest suites (from emitter_test.cpp and node_test.cpp)
+./test/run-tests --gtest_filter="EmitterTest.*:NodeTest.*"
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

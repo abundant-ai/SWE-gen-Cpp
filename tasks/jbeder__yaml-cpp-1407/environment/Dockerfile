@@ -9,16 +9,12 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install additional system packages needed for yaml-cpp
+# Install C++ development tools and CMake
 RUN apt-get update && apt-get install -y \
     cmake \
-    python3 \
-    python3-pip \
-    locales \
+    libgtest-dev \
+    libgmock-dev \
     && rm -rf /var/lib/apt/lists/*
-
-# Generate locales for testing (de_DE uses comma as decimal separator)
-RUN locale-gen de_DE.UTF-8
 
 WORKDIR /app
 
@@ -31,18 +27,12 @@ RUN git clone https://github.com/jbeder/yaml-cpp.git src && \
 
 WORKDIR /app/src
 
-ENV LANG=de_DE.UTF-8
-ENV LC_ALL=de_DE.UTF-8
-
-# Configure the build
-RUN cmake -B build \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=17 \
+# Build the project with CMake
+RUN mkdir -p build && cd build && \
+    cmake .. \
     -DYAML_CPP_BUILD_TESTS=ON \
-    -DYAML_BUILD_SHARED_LIBS=OFF
-
-# Build the project initially
-RUN cmake --build build --config Debug
+    -DCMAKE_BUILD_TYPE=Debug && \
+    make -j2
 
 # If install/build steps touched tracked files, reset them so bug.patch applies cleanly
 RUN git reset --hard
@@ -50,6 +40,9 @@ RUN git reset --hard
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
+
+# Rebuild after applying bug.patch (C++ is a compiled language)
+RUN cd build && make -j2
 
 RUN rm -rf /app/src/.git
 

@@ -1,0 +1,287 @@
+diff --git a/Makefile b/Makefile
+index f32b5ff..63853a0 100644
+--- a/Makefile
++++ b/Makefile
+@@ -33,7 +33,7 @@ build: validate/validate.pb.go
+ .PHONY: bazel
+ bazel:
+ 	# generate the PGV plugin with Bazel
+-	bazel build //tests/... --incompatible_new_actions_api=false
++	bazel build //tests/...
+ 
+ .PHONY: build_generation_tests
+ build_generation_tests:
+diff --git a/bazel/pgv_proto_library.bzl b/bazel/pgv_proto_library.bzl
+index bc66d37..a98aa30 100644
+--- a/bazel/pgv_proto_library.bzl
++++ b/bazel/pgv_proto_library.bzl
+@@ -1,5 +1,7 @@
+ load("@io_bazel_rules_go//proto:compiler.bzl", "go_proto_compiler")
+ load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
++load("@rules_cc//cc:defs.bzl", "cc_library")
++load("@rules_python//python:defs.bzl", "py_library")
+ load(":protobuf.bzl", "cc_proto_gen_validate", "java_proto_gen_validate", "python_proto_gen_validate")
+ 
+ def pgv_go_proto_library(name, proto = None, deps = [], **kwargs):
+@@ -56,8 +58,7 @@ def pgv_cc_proto_library(
+         name = name + "_validate",
+         deps = deps,
+     )
+-
+-    native.cc_library(
++    cc_library(
+         name = name,
+         hdrs = [":" + name + "_validate"],
+         srcs = [":" + name + "_validate"],
+@@ -92,8 +93,7 @@ def pgv_python_proto_library(
+         name = name + "_validate",
+         deps = deps,
+     )
+-
+-    native.py_library(
++    py_library(
+         name = name,
+         srcs = [name + "_validate"],
+         deps = python_deps + [
+diff --git a/bazel/protobuf.bzl b/bazel/protobuf.bzl
+index 34d140d..5655aea 100644
+--- a/bazel/protobuf.bzl
++++ b/bazel/protobuf.bzl
+@@ -1,23 +1,25 @@
+ load("@bazel_tools//tools/jdk:toolchain_utils.bzl", "find_java_runtime_toolchain", "find_java_toolchain")
+ load("@rules_proto//proto:defs.bzl", "ProtoInfo")
+ 
+-def _proto_path(proto):
+-    """
+-    The proto path is not really a file path
+-    It's the path to the proto that was seen when the descriptor file was generated.
+-    """
+-    path = proto.path
+-    root = proto.root.path
+-    ws = proto.owner.workspace_root
+-    if path.startswith(root):
+-        path = path[len(root):]
+-    if path.startswith("/"):
+-        path = path[1:]
+-    if path.startswith(ws):
+-        path = path[len(ws):]
+-    if path.startswith("/"):
+-        path = path[1:]
+-    return path
++# Borrowed from https://github.com/grpc/grpc-java/blob/v1.28.0/java_grpc_library.bzl#L59
++# "repository" here is for Bazel builds that span multiple WORKSPACES.
++def _path_ignoring_repository(f):
++    # Bazel creates a _virtual_imports directory in case the .proto source files
++    # need to be accessed at a path that's different from their source path:
++    # https://github.com/bazelbuild/bazel/blob/0.27.1/src/main/java/com/google/devtools/build/lib/rules/proto/ProtoCommon.java#L289
++    #
++    # In that case, the import path of the .proto file is the path relative to
++    # the virtual imports directory of the rule in question.
++    virtual_imports = "/_virtual_imports/"
++    if virtual_imports in f.path:
++        return f.path.split(virtual_imports)[1].split("/", 1)[1]
++    elif len(f.owner.workspace_root) == 0:
++        # |f| is in the main repository
++        return f.short_path
++    else:
++        # If |f| is a generated file, it will have "bazel-out/*/genfiles" prefix
++        # before "external/workspace", so we need to add the starting index of "external/workspace"
++        return f.path[f.path.find(f.owner.workspace_root) + len(f.owner.workspace_root) + 1:]
+ 
+ def _protoc_cc_output_files(proto_file_sources):
+     cc_hdrs = []
+@@ -112,7 +114,7 @@ def _protoc_gen_validate_impl(ctx, lang, protos, out_files, protoc_args, package
+     descriptor_args = [ds.path for ds in tds.to_list()]
+ 
+     if len(descriptor_args) != 0:
+-        protoc_args += ["--descriptor_set_in=%s" % ctx.configuration.host_path_separator.join(descriptor_args)]
++        protoc_args.append("--descriptor_set_in=%s" % ctx.configuration.host_path_separator.join(descriptor_args))
+ 
+     package_command = package_command.format(dir_out = dir_out)
+ 
+@@ -124,7 +126,7 @@ def _protoc_gen_validate_impl(ctx, lang, protos, out_files, protoc_args, package
+             ctx.executable._protoc.path + " $@",
+             package_command,
+         ]),
+-        arguments = protoc_args + [_proto_path(proto) for proto in protos],
++        arguments = protoc_args + [_path_ignoring_repository(proto) for proto in protos],
+         mnemonic = "ProtoGenValidate" + lang.capitalize() + "Generate",
+         use_default_shell_env = True,
+     )
+@@ -166,7 +168,7 @@ _ProtoValidateSourceInfo = provider(
+ )
+ 
+ def _create_include_path(include):
+-    return "--proto_path={0}={1}".format(_proto_path(include), include.path)
++    return "--proto_path={0}={1}".format(_path_ignoring_repository(include), include.path)
+ 
+ def _java_proto_gen_validate_aspect_impl(target, ctx):
+     proto_info = target[ProtoInfo]
+@@ -179,7 +181,7 @@ def _java_proto_gen_validate_aspect_impl(target, ctx):
+     args.add(ctx.executable._plugin.path, format = "--plugin=protoc-gen-validate=%s")
+     args.add("--validate_out={0}:{1}".format(options, srcjar.path))
+     args.add_all(includes, map_each = _create_include_path)
+-    args.add_all(srcs, map_each = _proto_path)
++    args.add_all(srcs, map_each = _path_ignoring_repository)
+ 
+     ctx.actions.run(
+         inputs = depset(transitive = [proto_info.transitive_imports]),
+diff --git a/bazel/repositories.bzl b/bazel/repositories.bzl
+index 7744d8a..c2438cd 100644
+--- a/bazel/repositories.bzl
++++ b/bazel/repositories.bzl
+@@ -8,8 +8,8 @@ def pgv_dependencies():
+     if not native.existing_rule("io_bazel_rules_go"):
+         http_archive(
+             name = "io_bazel_rules_go",
+-            urls = ["https://github.com/bazelbuild/rules_go/releases/download/v0.21.0/rules_go-v0.21.0.tar.gz"],
+-            sha256 = "b27e55d2dcc9e6020e17614ae6e0374818a3e3ce6f2024036e688ada24110444",
++            urls = ["https://github.com/bazelbuild/rules_go/releases/download/v0.22.2/rules_go-v0.22.2.tar.gz"],
++            sha256 = "142dd33e38b563605f0d20e89d9ef9eda0fc3cb539a14be1bdb1350de2eda659",
+         )
+ 
+     if not native.existing_rule("bazel_gazelle"):
+@@ -22,9 +22,9 @@ def pgv_dependencies():
+     if not native.existing_rule("com_google_protobuf"):
+         http_archive(
+             name = "com_google_protobuf",
+-            url = "https://github.com/protocolbuffers/protobuf/releases/download/v3.9.1/protobuf-all-3.9.1.tar.gz",
+-            sha256 = "3040a5b946d9df7aa89c0bf6981330bf92b7844fd90e71b61da0c721e421a421",
+-            strip_prefix = "protobuf-3.9.1",
++            url = "https://github.com/protocolbuffers/protobuf/archive/v3.11.4.tar.gz",
++            sha256 = "a79d19dcdf9139fa4b81206e318e33d245c4c9da1ffed21c87288ed4380426f9",
++            strip_prefix = "protobuf-3.11.4",
+         )
+ 
+     # TODO(akonradi): This shouldn't be necesary since the same http_archive block is imported by
+@@ -47,40 +47,34 @@ def pgv_dependencies():
+         )
+ 
+     if not native.existing_rule("six"):
+-        native.bind(
+-            name = "six",
+-            actual = "@six_archive//:six",
+-        )
+-
+-    if not native.existing_rule("six_archive"):
+         http_archive(
+-            name = "six_archive",
+-            build_file = "@com_google_protobuf//:six.BUILD",
+-            sha256 = "105f8d68616f8248e24bf0e9372ef04d3cc10104f1980f54d57b2ce73a5ad56a",
+-            url = "https://pypi.python.org/packages/source/s/six/six-1.10.0.tar.gz#md5=34eed507548117b2ab523ab14b2f8b55",
++            name = "six",
++            build_file = "@com_google_protobuf//:third_party/six.BUILD",
++            sha256 = "d16a0141ec1a18405cd4ce8b4613101da75da0e9a7aec5bdd4fa804d0e0eba73",
++            urls = ["https://pypi.python.org/packages/source/s/six/six-1.12.0.tar.gz"],
+         )
+ 
+     if not native.existing_rule("com_google_re2j"):
+         jvm_maven_import_external(
+             name = "com_google_re2j",
+             artifact = "com.google.re2j:re2j:1.2",
+-	    artifact_sha256 = "e9dc705fd4c570344b54a7146b2e3a819cdc271a29793f4acc1a93b56a388e59",
++            artifact_sha256 = "e9dc705fd4c570344b54a7146b2e3a819cdc271a29793f4acc1a93b56a388e59",
+             server_urls = MAVEN_SERVER_URLS,
+         )
+ 
+     if not native.existing_rule("com_googlesource_code_re2"):
+         http_archive(
+             name = "com_googlesource_code_re2",
+-            sha256 = "38bc0426ee15b5ed67957017fd18201965df0721327be13f60496f2b356e3e01",
+-            strip_prefix = "re2-2019-08-01",
+-            urls = ["https://github.com/google/re2/archive/2019-08-01.tar.gz"],
++            sha256 = "04ee2aaebaa5038554683329afc494e684c30f82f2a1e47eb62450e59338f84d",
++            strip_prefix = "re2-2020-03-03",
++            urls = ["https://github.com/google/re2/archive/2020-03-03.tar.gz"],
+         )
+ 
+     if not native.existing_rule("com_google_guava"):
+         jvm_maven_import_external(
+             name = "com_google_guava",
+             artifact = "com.google.guava:guava:27.0-jre",
+-	    artifact_sha256 = "63b09db6861011e7fb2481be7790c7fd4b03f0bb884b3de2ecba8823ad19bf3f",
++            artifact_sha256 = "63b09db6861011e7fb2481be7790c7fd4b03f0bb884b3de2ecba8823ad19bf3f",
+             server_urls = MAVEN_SERVER_URLS,
+         )
+ 
+@@ -94,7 +88,7 @@ def pgv_dependencies():
+         jvm_maven_import_external(
+             name = "com_google_gson",
+             artifact = "com.google.code.gson:gson:2.8.5",
+-	    artifact_sha256 = "233a0149fc365c9f6edbd683cfe266b19bdc773be98eabdaf6b3c924b48e7d81",
++            artifact_sha256 = "233a0149fc365c9f6edbd683cfe266b19bdc773be98eabdaf6b3c924b48e7d81",
+             server_urls = MAVEN_SERVER_URLS,
+         )
+ 
+@@ -108,7 +102,7 @@ def pgv_dependencies():
+         jvm_maven_import_external(
+             name = "error_prone_annotations_maven",
+             artifact = "com.google.errorprone:error_prone_annotations:2.3.2",
+-	    artifact_sha256 = "357cd6cfb067c969226c442451502aee13800a24e950fdfde77bcdb4565a668d",
++            artifact_sha256 = "357cd6cfb067c969226c442451502aee13800a24e950fdfde77bcdb4565a668d",
+             server_urls = MAVEN_SERVER_URLS,
+         )
+ 
+@@ -122,7 +116,7 @@ def pgv_dependencies():
+         jvm_maven_import_external(
+             name = "org_apache_commons_validator",
+             artifact = "commons-validator:commons-validator:1.6",
+-	    artifact_sha256 = "bd62795d7068a69cbea333f6dbf9c9c1a6ad7521443fb57202a44874f240ba25",
++            artifact_sha256 = "bd62795d7068a69cbea333f6dbf9c9c1a6ad7521443fb57202a44874f240ba25",
+             server_urls = MAVEN_SERVER_URLS,
+         )
+ 
+@@ -137,7 +131,7 @@ def pgv_dependencies():
+     if not native.existing_rule("rules_proto"):
+         http_archive(
+             name = "rules_proto",
+-	    sha256 = "73ebe9d15ba42401c785f9d0aeebccd73bd80bf6b8ac78f74996d31f2c0ad7a6",
+-	    strip_prefix = "rules_proto-2c0468366367d7ed97a1f702f9cd7155ab3f73c5",
+-            urls = ["https://github.com/bazelbuild/rules_proto/archive/2c0468366367d7ed97a1f702f9cd7155ab3f73c5.tar.gz"],
++            sha256 = "2490dca4f249b8a9a3ab07bd1ba6eca085aaf8e45a734af92aad0c42d9dc7aaf",
++            strip_prefix = "rules_proto-218ffa7dfa5408492dc86c01ee637614f8695c45",
++            urls = ["https://github.com/bazelbuild/rules_proto/archive/218ffa7dfa5408492dc86c01ee637614f8695c45.tar.gz"],
+         )
+diff --git a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/BUILD b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/BUILD
+index b3db50e..2839b30 100644
+--- a/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/BUILD
++++ b/java/pgv-java-stub/src/main/java/io/envoyproxy/pgv/BUILD
+@@ -1,3 +1,5 @@
++load("@rules_java//java:defs.bzl", "java_library")
++
+ java_library(
+     name = "pgv",
+     srcs = glob(["*.java"]),
+diff --git a/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/BUILD b/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/BUILD
+index 04290e0..6b38dbb 100644
+--- a/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/BUILD
++++ b/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/BUILD
+@@ -1,3 +1,5 @@
++load("@rules_java//java:defs.bzl", "java_library")
++
+ java_library(
+     name = "pgv",
+     visibility = ["//visibility:public"],
+diff --git a/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/validation/BUILD b/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/validation/BUILD
+index b899863..b8cc8ea 100644
+--- a/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/validation/BUILD
++++ b/java/pgv-java-validation/src/main/java/io/envoyproxy/pgv/validation/BUILD
+@@ -1,3 +1,5 @@
++load("@rules_java//java:defs.bzl", "java_library")
++
+ java_library(
+     name = "java_harness",
+     srcs = glob(["*.java"]),
+diff --git a/validate/BUILD b/validate/BUILD
+index 0f58042..187a58c 100644
+--- a/validate/BUILD
++++ b/validate/BUILD
+@@ -2,6 +2,8 @@
+ 
+ load("@com_google_protobuf//:protobuf.bzl", "py_proto_library")
+ load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
++load("@rules_cc//cc:defs.bzl", "cc_library", "cc_proto_library")
++load("@rules_java//java:defs.bzl", "java_proto_library")
+ load("@rules_proto//proto:defs.bzl", "proto_library")
+ 
+ proto_library(

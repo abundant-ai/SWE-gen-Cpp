@@ -32,7 +32,6 @@ RUN git clone https://github.com/google/googletest.git src && \
 WORKDIR /app/src
 
 # Build Google Test/Mock with CMake
-# Disable all warnings being treated as errors (old codebase with newer compiler)
 RUN mkdir -p build && cd build && \
     cmake -Dgtest_build_samples=ON \
           -Dgtest_build_tests=ON \

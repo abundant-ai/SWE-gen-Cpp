@@ -1,0 +1,102 @@
+diff --git a/include/fmt/base.h b/include/fmt/base.h
+index cd9a794f..fa4cc994 100644
+--- a/include/fmt/base.h
++++ b/include/fmt/base.h
+@@ -1808,6 +1808,8 @@ template <typename T> class buffer {
+   /// Appends data to the end of the buffer.
+   template <typename U>
+   FMT_CONSTEXPR20 void append(const U* begin, const U* end) {
++    static_assert(std::is_same<T, U>::value || std::is_same<U, char>::value,
++                  "U must be T or char to prevent static_cast overflow");
+     while (begin != end) {
+       auto size = size_;
+       auto free_cap = capacity_ - size;
+@@ -1820,7 +1822,7 @@ template <typename T> class buffer {
+       }
+       // A loop is faster than memcpy on small sizes.
+       T* out = ptr_ + size;
+-      for (size_t i = 0; i < count; ++i) out[i] = begin[i];
++      for (size_t i = 0; i < count; ++i) out[i] = static_cast<T>(begin[i]);
+       size_ += count;
+       begin += count;
+     }
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index 94c98701..0b960259 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -1097,8 +1097,8 @@ inline auto digits2_i(size_t value) noexcept -> const char* {
+ }
+ 
+ template <typename Char> constexpr auto getsign(sign s) -> Char {
+-  return static_cast<char>(((' ' << 24) | ('+' << 16) | ('-' << 8)) >>
+-                           (static_cast<int>(s) * 8));
++  return static_cast<Char>(static_cast<char>(
++      ((' ' << 24) | ('+' << 16) | ('-' << 8)) >> (static_cast<int>(s) * 8)));
+ }
+ 
+ template <typename T> FMT_CONSTEXPR auto count_digits_fallback(T n) -> int {
+@@ -3621,8 +3621,8 @@ FMT_CONSTEXPR20 auto write(OutputIt out, T value) -> OutputIt {
+       memcpy(ptr, prefix, 2);
+       ptr += 2;
+     } else {
+-      *ptr++ = prefix[0];
+-      *ptr++ = prefix[1];
++      *ptr++ = static_cast<Char>(prefix[0]);
++      *ptr++ = static_cast<Char>(prefix[1]);
+     }
+     if (abs_exponent >= 100) {
+       *ptr++ = static_cast<Char>('0' + abs_exponent / 100);
+diff --git a/include/fmt/xchar.h b/include/fmt/xchar.h
+index 9ba1b90b..1f29e666 100644
+--- a/include/fmt/xchar.h
++++ b/include/fmt/xchar.h
+@@ -141,17 +141,22 @@ auto arg(const wchar_t* name, const T& arg) -> detail::named_arg<T, wchar_t> {
+   return {name, arg};
+ }
+ 
+-template <typename It, typename Sentinel>
+-auto join(It begin, Sentinel end, wstring_view sep)
+-    -> join_view<It, Sentinel, wchar_t> {
+-  return {begin, end, sep};
++template <typename It, typename Sentinel, typename S,
++          typename Char = typename decltype(detail::to_string_view(
++              std::declval<S>()))::value_type,
++          FMT_ENABLE_IF(detail::is_exotic_char<Char>::value)>
++auto join(It begin, Sentinel end, S&& sep) -> join_view<It, Sentinel, Char> {
++  return {begin, end, detail::to_string_view(sep)};
+ }
+ 
+-template <typename Range, FMT_ENABLE_IF(!is_tuple_like<Range>::value)>
+-auto join(Range&& range, wstring_view sep)
+-    -> join_view<decltype(std::begin(range)), decltype(std::end(range)),
+-                 wchar_t> {
+-  return join(std::begin(range), std::end(range), sep);
++template <typename Range, typename S,
++          typename Char = typename decltype(detail::to_string_view(
++              std::declval<S>()))::value_type,
++          FMT_ENABLE_IF(detail::is_exotic_char<Char>::value &&
++                        !is_tuple_like<Range>::value)>
++auto join(Range&& range, S&& sep)
++    -> join_view<decltype(std::begin(range)), decltype(std::end(range)), Char> {
++  return {std::begin(range), std::end(range), detail::to_string_view(sep)};
+ }
+ 
+ template <typename T>
+@@ -160,10 +165,13 @@ auto join(std::initializer_list<T> list, wstring_view sep)
+   return join(std::begin(list), std::end(list), sep);
+ }
+ 
+-template <typename Tuple, FMT_ENABLE_IF(is_tuple_like<Tuple>::value)>
+-auto join(const Tuple& tuple, basic_string_view<wchar_t> sep)
+-    -> tuple_join_view<Tuple, wchar_t> {
+-  return {tuple, sep};
++template <typename Tuple, typename S,
++          typename Char = typename decltype(detail::to_string_view(
++              std::declval<S>()))::value_type,
++          FMT_ENABLE_IF(detail::is_exotic_char<Char>::value&&
++                            is_tuple_like<Tuple>::value)>
++auto join(const Tuple& tuple, S&& sep) -> tuple_join_view<Tuple, Char> {
++  return {tuple, detail::to_string_view(sep)};
+ }
+ 
+ template <typename Char, FMT_ENABLE_IF(!std::is_same<Char, char>::value)>

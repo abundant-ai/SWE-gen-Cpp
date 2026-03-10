@@ -33,35 +33,46 @@ cp "/tests/SelfTest/IntrospectiveTests/Sharding.tests.cpp" "tests/SelfTest/Intro
 mkdir -p "tests/TestScripts"
 cp "/tests/TestScripts/testSharding.py" "tests/TestScripts/testSharding.py"
 
-# Reconfigure CMake to pick up the updated test files
+# Reconfigure CMake with testing enabled
 if ! cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
     -DCATCH_BUILD_TESTING=ON \
-    -DCATCH_BUILD_EXTRA_TESTS=ON \
-    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
+    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator -Wno-error=unused-but-set-variable" \
     -G Ninja 2>&1; then
     echo "FAIL: CMake reconfiguration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Rebuild to pick up changes (including the new sharding functionality and updated test cases)
+# Rebuild to incorporate the updated test files
 if ! cmake --build build 2>&1; then
     echo "FAIL: Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Run the Python sharding test script to validate sharding functionality
-# The script requires the path to the SelfTest executable as an argument
-if ! python3 tests/TestScripts/testSharding.py build/tests/SelfTest 2>&1; then
+# Run the SelfTest executable directly to test Sharding and CmdLine
+if ! ./build/tests/SelfTest "Sharding" --reporter console --success 2>&1; then
     echo "FAIL: Sharding tests failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-echo "SUCCESS: Build succeeded and sharding tests passed"
+if ! ./build/tests/SelfTest "[sharding]" --reporter console --success 2>&1; then
+    echo "FAIL: [sharding] tag tests failed"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+# Run the Python test script for sharding with the SelfTest executable path
+if ! python3 tests/TestScripts/testSharding.py ./build/tests/SelfTest 2>&1; then
+    echo "FAIL: Python sharding test script failed"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+echo "SUCCESS: All tests passed"
 test_status=0
 
 if [ $test_status -eq 0 ]; then

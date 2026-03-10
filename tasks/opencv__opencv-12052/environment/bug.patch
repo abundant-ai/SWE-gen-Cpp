@@ -1,0 +1,782 @@
+diff --git a/modules/dnn/include/opencv2/dnn/dnn.hpp b/modules/dnn/include/opencv2/dnn/dnn.hpp
+index c737177128..0809891942 100644
+--- a/modules/dnn/include/opencv2/dnn/dnn.hpp
++++ b/modules/dnn/include/opencv2/dnn/dnn.hpp
+@@ -201,7 +201,7 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+          *  @param[out] outputs allocated output blobs, which will store results of the computation.
+          *  @param[out] internals allocated internal blobs
+          */
+-        virtual void forward(InputArrayOfArrays inputs, OutputArrayOfArrays outputs, OutputArrayOfArrays internals);
++        virtual void forward(InputArrayOfArrays inputs, OutputArrayOfArrays outputs, OutputArrayOfArrays internals) = 0;
+ 
+         /** @brief Given the @p input blobs, computes the output @p blobs.
+          *  @param[in]  inputs  the input blobs.
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 202be4d2c0..5014365fdd 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -3071,14 +3071,6 @@ std::vector<Mat> Layer::finalize(const std::vector<Mat> &inputs)
+     return outputs;
+ }
+ 
+-void Layer::forward(InputArrayOfArrays inputs, OutputArrayOfArrays outputs, OutputArrayOfArrays internals)
+-{
+-    CV_TRACE_FUNCTION();
+-    CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+-
+-    Layer::forward_fallback(inputs, outputs, internals);
+-}
+-
+ void Layer::forward_fallback(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr)
+ {
+     CV_TRACE_FUNCTION();
+diff --git a/modules/dnn/src/layers/detection_output_layer.cpp b/modules/dnn/src/layers/detection_output_layer.cpp
+index fdcaab02e3..f4d4d2b822 100644
+--- a/modules/dnn/src/layers/detection_output_layer.cpp
++++ b/modules/dnn/src/layers/detection_output_layer.cpp
+@@ -196,7 +196,7 @@ public:
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+         return backendId == DNN_BACKEND_OPENCV ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE && !_locPredTransposed && _bboxesNormalized;
++               backendId == DNN_BACKEND_INFERENCE_ENGINE && haveInfEngine() && !_locPredTransposed;
+     }
+ 
+     bool getMemoryShapes(const std::vector<MatShape> &inputs,
+@@ -411,12 +411,9 @@ public:
+         CV_TRACE_FUNCTION();
+         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+ 
+-        if (_bboxesNormalized)
+-        {
+-            CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget) &&
+-                       OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
+-                       forward_ocl(inputs_arr, outputs_arr, internals_arr))
+-        }
++        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget) &&
++                   OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
++                   forward_ocl(inputs_arr, outputs_arr, internals_arr))
+ 
+         Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
+     }
+diff --git a/modules/dnn/src/layers/pooling_layer.cpp b/modules/dnn/src/layers/pooling_layer.cpp
+index 4e0fea21d8..775a044b44 100644
+--- a/modules/dnn/src/layers/pooling_layer.cpp
++++ b/modules/dnn/src/layers/pooling_layer.cpp
+@@ -135,17 +135,10 @@ public:
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-        {
+-            if (preferableTarget == DNN_TARGET_MYRIAD)
+-                return type == MAX || type == AVE;
+-            else
+-                return type != STOCHASTIC;
+-        }
+-        else
+-            return backendId == DNN_BACKEND_OPENCV ||
+-                   backendId == DNN_BACKEND_HALIDE && haveHalide() &&
+-                   (type == MAX || type == AVE && !pad.width && !pad.height);
++        return backendId == DNN_BACKEND_OPENCV ||
++               backendId == DNN_BACKEND_HALIDE && haveHalide() &&
++               (type == MAX || type == AVE && !pad.width && !pad.height) ||
++               backendId == DNN_BACKEND_INFERENCE_ENGINE && haveInfEngine() && (type == MAX || type == AVE);
+     }
+ 
+ #ifdef HAVE_OPENCL
+@@ -199,11 +192,8 @@ public:
+         CV_TRACE_FUNCTION();
+         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+ 
+-        if (type == MAX || type == AVE || type == STOCHASTIC)
+-        {
+-            CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
+-                       forward_ocl(inputs_arr, outputs_arr, internals_arr))
+-        }
++        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
++                   forward_ocl(inputs_arr, outputs_arr, internals_arr))
+ 
+         Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
+     }
+@@ -248,41 +238,22 @@ public:
+ #ifdef HAVE_INF_ENGINE
+         InferenceEngine::LayerParams lp;
+         lp.name = name;
++        lp.type = "Pooling";
+         lp.precision = InferenceEngine::Precision::FP32;
+-
+-        std::shared_ptr<InferenceEngine::CNNLayer> ieLayer;
+-        if (type == MAX || type == AVE)
+-        {
+-            lp.type = "Pooling";
+-            InferenceEngine::PoolingLayer* poolLayer = new InferenceEngine::PoolingLayer(lp);
+-            poolLayer->_kernel_x = kernel.width;
+-            poolLayer->_kernel_y = kernel.height;
+-            poolLayer->_stride_x = stride.width;
+-            poolLayer->_stride_y = stride.height;
+-            poolLayer->_padding_x = pad.width;
+-            poolLayer->_padding_y = pad.height;
+-            poolLayer->_exclude_pad = type == AVE && padMode == "SAME";
+-            poolLayer->params["rounding-type"] = ceilMode ? "ceil" : "floor";
+-            poolLayer->_type = type == MAX ? InferenceEngine::PoolingLayer::PoolType::MAX :
+-                                             InferenceEngine::PoolingLayer::PoolType::AVG;
+-            ieLayer = std::shared_ptr<InferenceEngine::CNNLayer>(poolLayer);
+-        }
+-        else if (type == ROI)
+-        {
+-            lp.type = "ROIPooling";
+-            ieLayer = std::shared_ptr<InferenceEngine::CNNLayer>(new InferenceEngine::CNNLayer(lp));
+-            ieLayer->params["pooled_w"] = format("%d", pooledSize.width);
+-            ieLayer->params["pooled_h"] = format("%d", pooledSize.height);
+-            ieLayer->params["spatial_scale"] = format("%f", spatialScale);
+-        }
+-        else if (type == PSROI)
+-        {
+-            lp.type = "PSROIPooling";
+-            ieLayer = std::shared_ptr<InferenceEngine::CNNLayer>(new InferenceEngine::CNNLayer(lp));
+-            ieLayer->params["output_dim"] = format("%d", psRoiOutChannels);
+-            ieLayer->params["group_size"] = format("%d", pooledSize.width);
+-            ieLayer->params["spatial_scale"] = format("%f", spatialScale);
+-        }
++        std::shared_ptr<InferenceEngine::PoolingLayer> ieLayer(new InferenceEngine::PoolingLayer(lp));
++
++        ieLayer->_kernel_x = kernel.width;
++        ieLayer->_kernel_y = kernel.height;
++        ieLayer->_stride_x = stride.width;
++        ieLayer->_stride_y = stride.height;
++        ieLayer->_padding_x = pad.width;
++        ieLayer->_padding_y = pad.height;
++        ieLayer->_exclude_pad = type == AVE && padMode == "SAME";
++        ieLayer->params["rounding-type"] = ceilMode ? "ceil" : "floor";
++        if (type == MAX)
++            ieLayer->_type = InferenceEngine::PoolingLayer::PoolType::MAX;
++        else if (type == AVE)
++            ieLayer->_type = InferenceEngine::PoolingLayer::PoolType::AVG;
+         else
+             CV_Error(Error::StsNotImplemented, "Unsupported pooling type");
+ 
+diff --git a/modules/dnn/src/layers/proposal_layer.cpp b/modules/dnn/src/layers/proposal_layer.cpp
+index cdc5e2250a..44671268a7 100644
+--- a/modules/dnn/src/layers/proposal_layer.cpp
++++ b/modules/dnn/src/layers/proposal_layer.cpp
+@@ -6,7 +6,6 @@
+ // Third party copyrights are property of their respective owners.
+ #include "../precomp.hpp"
+ #include "layers_common.hpp"
+-#include "../op_inf_engine.hpp"
+ 
+ namespace cv { namespace dnn {
+ 
+@@ -17,14 +16,14 @@ public:
+     {
+         setParamsFrom(params);
+ 
+-        featStride = params.get<uint32_t>("feat_stride", 16);
+-        baseSize = params.get<uint32_t>("base_size", 16);
++        uint32_t featStride = params.get<uint32_t>("feat_stride", 16);
++        uint32_t baseSize = params.get<uint32_t>("base_size", 16);
+         // uint32_t minSize = params.get<uint32_t>("min_size", 16);
+-        keepTopBeforeNMS = params.get<uint32_t>("pre_nms_topn", 6000);
++        uint32_t keepTopBeforeNMS = params.get<uint32_t>("pre_nms_topn", 6000);
+         keepTopAfterNMS = params.get<uint32_t>("post_nms_topn", 300);
+-        nmsThreshold = params.get<float>("nms_thresh", 0.7);
+-        ratios = params.get("ratio");
+-        scales = params.get("scale");
++        float nmsThreshold = params.get<float>("nms_thresh", 0.7);
++        DictValue ratios = params.get("ratio");
++        DictValue scales = params.get("scale");
+ 
+         {
+             LayerParams lp;
+@@ -84,12 +83,6 @@ public:
+         }
+     }
+ 
+-    virtual bool supportBackend(int backendId) CV_OVERRIDE
+-    {
+-        return backendId == DNN_BACKEND_OPENCV ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE && preferableTarget != DNN_TARGET_MYRIAD;
+-    }
+-
+     bool getMemoryShapes(const std::vector<MatShape> &inputs,
+                          const int requiredOutputs,
+                          std::vector<MatShape> &outputs,
+@@ -319,38 +312,6 @@ public:
+                 outputs[i].rowRange(numDets, keepTopAfterNMS).setTo(0);
+     }
+ 
+-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
+-    {
+-#ifdef HAVE_INF_ENGINE
+-        InferenceEngine::LayerParams lp;
+-        lp.name = name;
+-        lp.type = "Proposal";
+-        lp.precision = InferenceEngine::Precision::FP32;
+-        std::shared_ptr<InferenceEngine::CNNLayer> ieLayer(new InferenceEngine::CNNLayer(lp));
+-
+-        ieLayer->params["base_size"] = format("%d", baseSize);
+-        ieLayer->params["feat_stride"] = format("%d", featStride);
+-        ieLayer->params["min_size"] = "16";
+-        ieLayer->params["nms_thresh"] = format("%f", nmsThreshold);
+-        ieLayer->params["post_nms_topn"] = format("%d", keepTopAfterNMS);
+-        ieLayer->params["pre_nms_topn"] = format("%d", keepTopBeforeNMS);
+-        if (ratios.size())
+-        {
+-            ieLayer->params["ratio"] = format("%f", ratios.get<float>(0));
+-            for (int i = 1; i < ratios.size(); ++i)
+-                ieLayer->params["ratio"] += format(",%f", ratios.get<float>(i));
+-        }
+-        if (scales.size())
+-        {
+-            ieLayer->params["scale"] = format("%f", scales.get<float>(0));
+-            for (int i = 1; i < scales.size(); ++i)
+-                ieLayer->params["scale"] += format(",%f", scales.get<float>(i));
+-        }
+-        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+-#endif  // HAVE_INF_ENGINE
+-        return Ptr<BackendNode>();
+-    }
+-
+ private:
+     // A first half of channels are background scores. We need only a second one.
+     static Mat getObjectScores(const Mat& m)
+@@ -381,10 +342,8 @@ private:
+ 
+     Ptr<PermuteLayer> deltasPermute;
+     Ptr<PermuteLayer> scoresPermute;
+-    uint32_t keepTopBeforeNMS, keepTopAfterNMS, featStride, baseSize;
++    uint32_t keepTopAfterNMS;
+     Mat fakeImageBlob;
+-    float nmsThreshold;
+-    DictValue ratios, scales;
+ #ifdef HAVE_OPENCL
+     UMat umat_fakeImageBlob;
+ #endif
+diff --git a/modules/dnn/src/ocl4dnn/src/ocl4dnn_pool.cpp b/modules/dnn/src/ocl4dnn/src/ocl4dnn_pool.cpp
+index 77cd3a6337..8b74248b64 100644
+--- a/modules/dnn/src/ocl4dnn/src/ocl4dnn_pool.cpp
++++ b/modules/dnn/src/ocl4dnn/src/ocl4dnn_pool.cpp
+@@ -183,9 +183,8 @@ bool OCL4DNNPool<Dtype>::Forward(const UMat& bottom,
+             ocl::Kernel oclk_sto_pool_forward(
+                 kname.c_str(),
+                 ocl::dnn::ocl4dnn_pooling_oclsrc,
+-                format(" -D Dtype=%s -D KERNEL_STO_POOL=1 -D KERNEL_W=%d -D KERNEL_H=%d"
++                format("-D KERNEL_STO_POOL=1 -D KERNEL_W=%d -D KERNEL_H=%d"
+                        " -D STRIDE_W=%d -D STRIDE_H=%d",
+-                       (use_half) ? "half" : "float",
+                        kernel_w_, kernel_h_,
+                        stride_w_, stride_h_
+                 ));
+diff --git a/modules/dnn/src/opencl/ocl4dnn_pooling.cl b/modules/dnn/src/opencl/ocl4dnn_pooling.cl
+index 77d2e5ba33..501f5a5e87 100644
+--- a/modules/dnn/src/opencl/ocl4dnn_pooling.cl
++++ b/modules/dnn/src/opencl/ocl4dnn_pooling.cl
+@@ -104,7 +104,7 @@ __kernel void
+ #elif defined KERNEL_AVE_POOL
+ 
+ __kernel void TEMPLATE(ave_pool_forward, Dtype)(
+-    const int nthreads, __global const Dtype* bottom_data,
++    const int nthreads, __global const Dtype* const bottom_data,
+     const int channels, const int height, const int width,
+     const int pooled_height, const int pooled_width,
+     __global Dtype* top_data)
+@@ -150,7 +150,7 @@ __kernel void TEMPLATE(ave_pool_forward, Dtype)(
+ #elif defined KERNEL_STO_POOL
+ 
+ __kernel void TEMPLATE(sto_pool_forward_test,Dtype)(
+-    const int nthreads, __global const Dtype* bottom_data,
++    const int nthreads, __global const Dtype* const bottom_data,
+     const int channels, const int height, const int width,
+     const int pooled_height, const int pooled_width,
+     __global Dtype* top_data)
+diff --git a/modules/dnn/src/torch/torch_importer.cpp b/modules/dnn/src/torch/torch_importer.cpp
+index 52bc0ce8a3..049c83f606 100644
+--- a/modules/dnn/src/torch/torch_importer.cpp
++++ b/modules/dnn/src/torch/torch_importer.cpp
+@@ -938,16 +938,6 @@ struct TorchImporter
+                 layerParams.set("end", DictValue::arrayInt<int*>(&ends[0], 4));
+                 curModule->modules.push_back(newModule);
+             }
+-            else if (nnName == "SpatialUpSamplingNearest")
+-            {
+-                readTorchTable(scalarParams, tensorParams);
+-                CV_Assert(scalarParams.has("scale_factor"));
+-                int scale_factor = scalarParams.get<int>("scale_factor");
+-                newModule->apiType = "Resize";
+-                layerParams.set("interpolation", "nearest");
+-                layerParams.set("zoom_factor", scale_factor);
+-                curModule->modules.push_back(newModule);
+-            }
+             else
+             {
+                 // Importer does not know how to map Torch's layer type to an OpenCV's one.
+diff --git a/modules/dnn/test/test_caffe_importer.cpp b/modules/dnn/test/test_caffe_importer.cpp
+index b957b8caf4..5365b2a435 100644
+--- a/modules/dnn/test/test_caffe_importer.cpp
++++ b/modules/dnn/test/test_caffe_importer.cpp
+@@ -51,33 +51,6 @@ static std::string _tf(TString filename)
+     return (getOpenCVExtraDir() + "/dnn/") + filename;
+ }
+ 
+-class Test_Caffe_nets : public DNNTestLayer
+-{
+-public:
+-    void testFaster(const std::string& proto, const std::string& model, const Mat& ref,
+-                    double scoreDiff = 0.0, double iouDiff = 0.0)
+-    {
+-        checkBackend();
+-        Net net = readNetFromCaffe(findDataFile("dnn/" + proto, false),
+-                                   findDataFile("dnn/" + model, false));
+-        net.setPreferableBackend(backend);
+-        net.setPreferableTarget(target);
+-        Mat img = imread(findDataFile("dnn/dog416.png", false));
+-        resize(img, img, Size(800, 600));
+-        Mat blob = blobFromImage(img, 1.0, Size(), Scalar(102.9801, 115.9465, 122.7717), false, false);
+-        Mat imInfo = (Mat_<float>(1, 3) << img.rows, img.cols, 1.6f);
+-
+-        net.setInput(blob, "data");
+-        net.setInput(imInfo, "im_info");
+-        // Output has shape 1x1xNx7 where N - number of detections.
+-        // An every detection is a vector of values [id, classId, confidence, left, top, right, bottom]
+-        Mat out = net.forward();
+-        scoreDiff = scoreDiff ? scoreDiff : default_l1;
+-        iouDiff = iouDiff ? iouDiff : default_lInf;
+-        normAssertDetections(ref, out, ("model name: " + model).c_str(), 0.8, scoreDiff, iouDiff);
+-    }
+-};
+-
+ TEST(Test_Caffe, memory_read)
+ {
+     const string proto = findDataFile("dnn/bvlc_googlenet.prototxt", false);
+@@ -371,15 +344,9 @@ TEST(Reproducibility_GoogLeNet_fp16, Accuracy)
+ }
+ 
+ // https://github.com/richzhang/colorization
+-TEST_P(Test_Caffe_nets, Colorization)
++TEST(Reproducibility_Colorization, Accuracy)
+ {
+-    checkBackend();
+-    if ((backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16) ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD) ||
+-        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
+-        throw SkipTestException("");
+-
+-    const float l1 = 4e-4;
++    const float l1 = 3e-5;
+     const float lInf = 3e-3;
+ 
+     Mat inp = blobFromNPY(_tf("colorization_inp.npy"));
+@@ -389,8 +356,7 @@ TEST_P(Test_Caffe_nets, Colorization)
+     const string proto = findDataFile("dnn/colorization_deploy_v2.prototxt", false);
+     const string model = findDataFile("dnn/colorization_release_v2.caffemodel", false);
+     Net net = readNetFromCaffe(proto, model);
+-    net.setPreferableBackend(backend);
+-    net.setPreferableTarget(target);
++    net.setPreferableBackend(DNN_BACKEND_OPENCV);
+ 
+     net.getLayer(net.getLayerId("class8_ab"))->blobs.push_back(kernel);
+     net.getLayer(net.getLayerId("conv8_313_rh"))->blobs.push_back(Mat(1, 313, CV_32F, 2.606));
+@@ -481,40 +447,39 @@ INSTANTIATE_TEST_CASE_P(Test_Caffe, opencv_face_detector,
+     )
+ );
+ 
+-TEST_P(Test_Caffe_nets, FasterRCNN_vgg16)
++TEST(Test_Caffe, FasterRCNN_and_RFCN)
+ {
+-    if ((backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD) ||
+-        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
+-        throw SkipTestException("");
+-    static Mat ref = (Mat_<float>(3, 7) << 0, 2, 0.949398, 99.2454, 210.141, 601.205, 462.849,
+-                                           0, 7, 0.997022, 481.841, 92.3218, 722.685, 175.953,
+-                                           0, 12, 0.993028, 133.221, 189.377, 350.994, 563.166);
+-    testFaster("faster_rcnn_vgg16.prototxt", "VGG16_faster_rcnn_final.caffemodel", ref);
+-}
++    std::string models[] = {"VGG16_faster_rcnn_final.caffemodel", "ZF_faster_rcnn_final.caffemodel",
++                            "resnet50_rfcn_final.caffemodel"};
++    std::string protos[] = {"faster_rcnn_vgg16.prototxt", "faster_rcnn_zf.prototxt",
++                            "rfcn_pascal_voc_resnet50.prototxt"};
++    Mat refs[] = {(Mat_<float>(3, 7) << 0, 2, 0.949398, 99.2454, 210.141, 601.205, 462.849,
++                                        0, 7, 0.997022, 481.841, 92.3218, 722.685, 175.953,
++                                        0, 12, 0.993028, 133.221, 189.377, 350.994, 563.166),
++                  (Mat_<float>(3, 7) << 0, 2, 0.90121, 120.407, 115.83, 570.586, 528.395,
++                                        0, 7, 0.988779, 469.849, 75.1756, 718.64, 186.762,
++                                        0, 12, 0.967198, 138.588, 206.843, 329.766, 553.176),
++                  (Mat_<float>(2, 7) << 0, 7, 0.991359, 491.822, 81.1668, 702.573, 178.234,
++                                        0, 12, 0.94786, 132.093, 223.903, 338.077, 566.16)};
++    for (int i = 0; i < 3; ++i)
++    {
++        std::string proto = findDataFile("dnn/" + protos[i], false);
++        std::string model = findDataFile("dnn/" + models[i], false);
+ 
+-TEST_P(Test_Caffe_nets, FasterRCNN_zf)
+-{
+-    if ((backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16) ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD) ||
+-        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
+-        throw SkipTestException("");
+-    static Mat ref = (Mat_<float>(3, 7) << 0, 2, 0.90121, 120.407, 115.83, 570.586, 528.395,
+-                                           0, 7, 0.988779, 469.849, 75.1756, 718.64, 186.762,
+-                                           0, 12, 0.967198, 138.588, 206.843, 329.766, 553.176);
+-    testFaster("faster_rcnn_zf.prototxt", "ZF_faster_rcnn_final.caffemodel", ref);
+-}
++        Net net = readNetFromCaffe(proto, model);
++        net.setPreferableBackend(DNN_BACKEND_OPENCV);
++        Mat img = imread(findDataFile("dnn/dog416.png", false));
++        resize(img, img, Size(800, 600));
++        Mat blob = blobFromImage(img, 1.0, Size(), Scalar(102.9801, 115.9465, 122.7717), false, false);
++        Mat imInfo = (Mat_<float>(1, 3) << img.rows, img.cols, 1.6f);
+ 
+-TEST_P(Test_Caffe_nets, RFCN)
+-{
+-    if ((backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16) ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD) ||
+-        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
+-        throw SkipTestException("");
+-    static Mat ref = (Mat_<float>(2, 7) << 0, 7, 0.991359, 491.822, 81.1668, 702.573, 178.234,
+-                                           0, 12, 0.94786, 132.093, 223.903, 338.077, 566.16);
+-    testFaster("rfcn_pascal_voc_resnet50.prototxt", "resnet50_rfcn_final.caffemodel", ref);
++        net.setInput(blob, "data");
++        net.setInput(imInfo, "im_info");
++        // Output has shape 1x1xNx7 where N - number of detections.
++        // An every detection is a vector of values [id, classId, confidence, left, top, right, bottom]
++        Mat out = net.forward();
++        normAssertDetections(refs[i], out, ("model name: " + models[i]).c_str(), 0.8);
++    }
+ }
+ 
+-INSTANTIATE_TEST_CASE_P(/**/, Test_Caffe_nets, dnnBackendsAndTargets());
+-
+ }} // namespace
+diff --git a/modules/dnn/test/test_layers.cpp b/modules/dnn/test/test_layers.cpp
+index 77a326417c..3ebb4172d9 100644
+--- a/modules/dnn/test/test_layers.cpp
++++ b/modules/dnn/test/test_layers.cpp
+@@ -1205,6 +1205,14 @@ public:
+         }
+     }
+ 
++    void forward(InputArrayOfArrays inputs, OutputArrayOfArrays outputs, OutputArrayOfArrays internals) CV_OVERRIDE
++    {
++        CV_TRACE_FUNCTION();
++        CV_TRACE_ARG_VALUE(name, "name", name.c_str());
++
++        Layer::forward_fallback(inputs, outputs, internals);
++    }
++
+ private:
+     int outWidth, outHeight, zoomFactor;
+ };
+@@ -1217,7 +1225,7 @@ TEST_P(Test_Caffe_layers, DISABLED_Interp)  // requires patched protobuf (availa
+ {
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+         throw SkipTestException("");
+-    // Test a custom layer.
++    // Test a cusom layer.
+     CV_DNN_REGISTER_LAYER_CLASS(Interp, CustomInterpLayer);
+     try
+     {
+diff --git a/modules/dnn/test/test_torch_importer.cpp b/modules/dnn/test/test_torch_importer.cpp
+index c07c5b39d8..37966a1f93 100644
+--- a/modules/dnn/test/test_torch_importer.cpp
++++ b/modules/dnn/test/test_torch_importer.cpp
+@@ -69,119 +69,100 @@ TEST(Torch_Importer, simple_read)
+     ASSERT_FALSE(net.empty());
+ }
+ 
+-class Test_Torch_layers : public DNNTestLayer
++static void runTorchNet(String prefix, int targetId = DNN_TARGET_CPU, String outLayerName = "",
++                        bool check2ndBlob = false, bool isBinary = false)
+ {
+-public:
+-    void runTorchNet(const String& prefix, String outLayerName = "",
+-                     bool check2ndBlob = false, bool isBinary = false,
+-                     double l1 = 0.0, double lInf = 0.0)
+-    {
+-        String suffix = (isBinary) ? ".dat" : ".txt";
+-
+-        Mat inp, outRef;
+-        ASSERT_NO_THROW( inp = readTorchBlob(_tf(prefix + "_input" + suffix), isBinary) );
+-        ASSERT_NO_THROW( outRef = readTorchBlob(_tf(prefix + "_output" + suffix), isBinary) );
++    String suffix = (isBinary) ? ".dat" : ".txt";
+ 
+-        checkBackend(backend, target, &inp, &outRef);
++    Net net = readNetFromTorch(_tf(prefix + "_net" + suffix), isBinary);
++    ASSERT_FALSE(net.empty());
+ 
+-        Net net = readNetFromTorch(_tf(prefix + "_net" + suffix), isBinary);
+-        ASSERT_FALSE(net.empty());
++    net.setPreferableBackend(DNN_BACKEND_OPENCV);
++    net.setPreferableTarget(targetId);
+ 
+-        net.setPreferableBackend(backend);
+-        net.setPreferableTarget(target);
++    Mat inp, outRef;
++    ASSERT_NO_THROW( inp = readTorchBlob(_tf(prefix + "_input" + suffix), isBinary) );
++    ASSERT_NO_THROW( outRef = readTorchBlob(_tf(prefix + "_output" + suffix), isBinary) );
+ 
+-        if (outLayerName.empty())
+-            outLayerName = net.getLayerNames().back();
++    if (outLayerName.empty())
++        outLayerName = net.getLayerNames().back();
+ 
+-        net.setInput(inp);
+-        std::vector<Mat> outBlobs;
+-        net.forward(outBlobs, outLayerName);
+-        l1 = l1 ? l1 : default_l1;
+-        lInf = lInf ? lInf : default_lInf;
+-        normAssert(outRef, outBlobs[0], "", l1, lInf);
++    net.setInput(inp);
++    std::vector<Mat> outBlobs;
++    net.forward(outBlobs, outLayerName);
++    normAssert(outRef, outBlobs[0]);
+ 
+-        if (check2ndBlob && backend != DNN_BACKEND_INFERENCE_ENGINE)
+-        {
+-            Mat out2 = outBlobs[1];
+-            Mat ref2 = readTorchBlob(_tf(prefix + "_output_2" + suffix), isBinary);
+-            normAssert(out2, ref2, "", l1, lInf);
+-        }
++    if (check2ndBlob)
++    {
++        Mat out2 = outBlobs[1];
++        Mat ref2 = readTorchBlob(_tf(prefix + "_output_2" + suffix), isBinary);
++        normAssert(out2, ref2);
+     }
+-};
++}
++
++typedef testing::TestWithParam<Target> Test_Torch_layers;
+ 
+ TEST_P(Test_Torch_layers, run_convolution)
+ {
+-    if ((backend == DNN_BACKEND_INFERENCE_ENGINE && target != DNN_TARGET_CPU) ||
+-        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
+-        throw SkipTestException("");
+-    runTorchNet("net_conv", "", false, true);
++    runTorchNet("net_conv", GetParam(), "", false, true);
+ }
+ 
+ TEST_P(Test_Torch_layers, run_pool_max)
+ {
+-    if (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16)
+-        throw SkipTestException("");
+-    runTorchNet("net_pool_max", "", true);
++    runTorchNet("net_pool_max", GetParam(), "", true);
+ }
+ 
+ TEST_P(Test_Torch_layers, run_pool_ave)
+ {
+-    runTorchNet("net_pool_ave");
++    runTorchNet("net_pool_ave", GetParam());
+ }
+ 
+ TEST_P(Test_Torch_layers, run_reshape)
+ {
+-    runTorchNet("net_reshape");
+-    runTorchNet("net_reshape_batch");
+-    runTorchNet("net_reshape_channels", "", false, true);
+-}
+-
+-TEST_P(Test_Torch_layers, run_reshape_single_sample)
+-{
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16)
+-        throw SkipTestException("");
+-    runTorchNet("net_reshape_single_sample", "", false, false,
+-                (target == DNN_TARGET_MYRIAD || target == DNN_TARGET_OPENCL_FP16) ? 0.0052 : 0.0);
++    int targetId = GetParam();
++    runTorchNet("net_reshape", targetId);
++    runTorchNet("net_reshape_batch", targetId);
++    runTorchNet("net_reshape_single_sample", targetId);
++    runTorchNet("net_reshape_channels", targetId, "", false, true);
+ }
+ 
+ TEST_P(Test_Torch_layers, run_linear)
+ {
+-    if (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16)
+-        throw SkipTestException("");
+-    runTorchNet("net_linear_2d");
++    runTorchNet("net_linear_2d", GetParam());
+ }
+ 
+ TEST_P(Test_Torch_layers, run_concat)
+ {
+-    runTorchNet("net_concat", "l5_torchMerge");
+-    runTorchNet("net_depth_concat", "", false, true, 0.0,
+-                target == DNN_TARGET_OPENCL_FP16 ? 0.021 : 0.0);
++    int targetId = GetParam();
++    runTorchNet("net_concat", targetId, "l5_torchMerge");
++    runTorchNet("net_depth_concat", targetId, "", false, true);
+ }
+ 
+ TEST_P(Test_Torch_layers, run_deconv)
+ {
+-    runTorchNet("net_deconv");
++    runTorchNet("net_deconv", GetParam());
+ }
+ 
+ TEST_P(Test_Torch_layers, run_batch_norm)
+ {
+-    runTorchNet("net_batch_norm", "", false, true);
++    runTorchNet("net_batch_norm", GetParam(), "", false, true);
+ }
+ 
+ TEST_P(Test_Torch_layers, net_prelu)
+ {
+-    runTorchNet("net_prelu");
++    runTorchNet("net_prelu", GetParam());
+ }
+ 
+ TEST_P(Test_Torch_layers, net_cadd_table)
+ {
+-    runTorchNet("net_cadd_table");
++    runTorchNet("net_cadd_table", GetParam());
+ }
+ 
+ TEST_P(Test_Torch_layers, net_softmax)
+ {
+-    runTorchNet("net_softmax");
+-    runTorchNet("net_softmax_spatial");
++    int targetId = GetParam();
++    runTorchNet("net_softmax", targetId);
++    runTorchNet("net_softmax_spatial", targetId);
+ }
+ 
+ TEST_P(Test_Torch_layers, net_logsoftmax)
+@@ -192,55 +173,40 @@ TEST_P(Test_Torch_layers, net_logsoftmax)
+ 
+ TEST_P(Test_Torch_layers, net_lp_pooling)
+ {
+-    runTorchNet("net_lp_pooling_square", "", false, true);
+-    runTorchNet("net_lp_pooling_power", "", false, true);
++    int targetId = GetParam();
++    runTorchNet("net_lp_pooling_square", targetId, "", false, true);
++    runTorchNet("net_lp_pooling_power", targetId, "", false, true);
+ }
+ 
+ TEST_P(Test_Torch_layers, net_conv_gemm_lrn)
+ {
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+-        throw SkipTestException("");
+-    runTorchNet("net_conv_gemm_lrn", "", false, true,
+-                target == DNN_TARGET_OPENCL_FP16 ? 0.046 : 0.0,
+-                target == DNN_TARGET_OPENCL_FP16 ? 0.023 : 0.0);
++    runTorchNet("net_conv_gemm_lrn", GetParam(), "", false, true);
+ }
+ 
+ TEST_P(Test_Torch_layers, net_inception_block)
+ {
+-    runTorchNet("net_inception_block", "", false, true);
++    runTorchNet("net_inception_block", GetParam(), "", false, true);
+ }
+ 
+ TEST_P(Test_Torch_layers, net_normalize)
+ {
+-    runTorchNet("net_normalize", "", false, true);
++    runTorchNet("net_normalize", GetParam(), "", false, true);
+ }
+ 
+ TEST_P(Test_Torch_layers, net_padding)
+ {
+-    runTorchNet("net_padding", "", false, true);
+-    runTorchNet("net_spatial_zero_padding", "", false, true);
+-    runTorchNet("net_spatial_reflection_padding", "", false, true);
++    int targetId = GetParam();
++    runTorchNet("net_padding", targetId, "", false, true);
++    runTorchNet("net_spatial_zero_padding", targetId, "", false, true);
++    runTorchNet("net_spatial_reflection_padding", targetId, "", false, true);
+ }
+ 
+ TEST_P(Test_Torch_layers, net_non_spatial)
+ {
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE &&
+-        (target == DNN_TARGET_OPENCL || target == DNN_TARGET_OPENCL_FP16))
+-        throw SkipTestException("");
+-    runTorchNet("net_non_spatial", "", false, true);
+-}
+-
+-TEST_P(Test_Torch_layers, run_paralel)
+-{
+-    if (backend != DNN_BACKEND_OPENCV || target != DNN_TARGET_CPU)
+-        throw SkipTestException("");
+-    runTorchNet("net_parallel", "l5_torchMerge");
++    runTorchNet("net_non_spatial", GetParam(), "", false, true);
+ }
+ 
+-TEST_P(Test_Torch_layers, net_residual)
+-{
+-    runTorchNet("net_residual", "", false, true);
+-}
++INSTANTIATE_TEST_CASE_P(/**/, Test_Torch_layers, availableDnnTargets());
+ 
+ typedef testing::TestWithParam<Target> Test_Torch_nets;
+ 
+@@ -347,6 +313,21 @@ TEST_P(Test_Torch_nets, FastNeuralStyle_accuracy)
+ 
+ INSTANTIATE_TEST_CASE_P(/**/, Test_Torch_nets, availableDnnTargets());
+ 
++// TODO: fix OpenCL and add to the rest of tests
++TEST(Torch_Importer, run_paralel)
++{
++    runTorchNet("net_parallel", DNN_TARGET_CPU, "l5_torchMerge");
++}
++
++TEST(Torch_Importer, DISABLED_run_paralel)
++{
++    runTorchNet("net_parallel", DNN_TARGET_OPENCL, "l5_torchMerge");
++}
++
++TEST(Torch_Importer, net_residual)
++{
++    runTorchNet("net_residual", DNN_TARGET_CPU, "", false, true);
++}
+ 
+ // Test a custom layer
+ // https://github.com/torch/nn/blob/master/doc/convolution.md#nn.SpatialUpSamplingNearest
+@@ -393,29 +374,17 @@ public:
+         }
+     }
+ 
++    virtual void forward(InputArrayOfArrays, OutputArrayOfArrays, OutputArrayOfArrays) CV_OVERRIDE {}
++
+ private:
+     int scale;
+ };
+ 
+-TEST_P(Test_Torch_layers, upsampling_nearest)
++TEST(Torch_Importer, upsampling_nearest)
+ {
+-    // Test a custom layer.
+     CV_DNN_REGISTER_LAYER_CLASS(SpatialUpSamplingNearest, SpatialUpSamplingNearestLayer);
+-    try
+-    {
+-        runTorchNet("net_spatial_upsampling_nearest", "", false, true);
+-    }
+-    catch (...)
+-    {
+-        LayerFactory::unregisterLayer("SpatialUpSamplingNearest");
+-        throw;
+-    }
++    runTorchNet("net_spatial_upsampling_nearest", DNN_TARGET_CPU, "", false, true);
+     LayerFactory::unregisterLayer("SpatialUpSamplingNearest");
+-
+-    // Test an implemented layer.
+-    runTorchNet("net_spatial_upsampling_nearest", "", false, true);
+ }
+ 
+-INSTANTIATE_TEST_CASE_P(/**/, Test_Torch_layers, dnnBackendsAndTargets());
+-
+ }
+diff --git a/samples/dnn/object_detection.py b/samples/dnn/object_detection.py
+index 329c349e49..386e02890d 100644
+--- a/samples/dnn/object_detection.py
++++ b/samples/dnn/object_detection.py
+@@ -190,7 +190,7 @@ while cv.waitKey(1) < 0:
+     net.setInput(blob)
+     if net.getLayer(0).outputNameToIndex('im_info') != -1:  # Faster-RCNN or R-FCN
+         frame = cv.resize(frame, (inpWidth, inpHeight))
+-        net.setInput(np.array([[inpHeight, inpWidth, 1.6]], dtype=np.float32), 'im_info')
++        net.setInput(np.array([inpHeight, inpWidth, 1.6], dtype=np.float32), 'im_info')
+     outs = net.forward(getOutputsNames(net))
+ 
+     postprocess(frame, outs)

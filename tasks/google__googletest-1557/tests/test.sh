@@ -1,34 +1,28 @@
 #!/bin/bash
+set -e
+
+# Trap errors and write reward=0
+trap 'echo 0 > /logs/verifier/reward.txt' ERR
 
 cd /app/src
 
-# Set environment variables for CTest
-export CTEST_OUTPUT_ON_FAILURE=1
-
-# Copy HEAD test files from /tests (overwrites BASE state)
+# Copy HEAD test files from /tests (includes AllowLeak tests that fail with BASE's buggy implementation)
 mkdir -p "googlemock/test"
 cp "/tests/googlemock/test/gmock-nice-strict_test.cc" "googlemock/test/gmock-nice-strict_test.cc"
 
-# Rebuild the specific test files after copying them from /tests
+# Rebuild in the existing build directory
 cd build
 
-# Reconfigure cmake to pick up the tests that were added back by fix.patch
-# With the fixed code (inline constructors), CFI should pass
-cmake -Dgtest_build_samples=ON \
-      -Dgtest_build_tests=ON \
-      -Dgmock_build_tests=ON \
-      -DCMAKE_CXX_FLAGS="-flto -fsanitize=cfi -fvisibility=hidden" \
-      -DCMAKE_EXE_LINKER_FLAGS="-flto -fsanitize=cfi" \
-      .. && \
-make -j4 gmock-nice-strict_test
+# Remove test executable to force rebuild
+rm -f googlemock/gmock-nice-strict_test
 
-# Run the specific test executables
-./googlemock/gmock-nice-strict_test
-test_status=$?
+# Rebuild the specific test target
+make -j4 gmock-nice-strict_test 2>&1
 
-if [ $test_status -eq 0 ]; then
-  echo 1 > /logs/verifier/reward.txt
-else
-  echo 0 > /logs/verifier/reward.txt
-fi
-exit "$test_status"
+# Run the test
+./googlemock/gmock-nice-strict_test 2>&1
+
+# If we got here, compilation and tests passed
+trap - ERR  # Clear the trap
+echo 1 > /logs/verifier/reward.txt
+exit 0

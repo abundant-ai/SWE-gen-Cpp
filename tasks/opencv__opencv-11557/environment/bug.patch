@@ -1,0 +1,177 @@
+diff --git a/modules/dnn/src/layers/convolution_layer.cpp b/modules/dnn/src/layers/convolution_layer.cpp
+index edadcd9bff..96a9d5b0e3 100644
+--- a/modules/dnn/src/layers/convolution_layer.cpp
++++ b/modules/dnn/src/layers/convolution_layer.cpp
+@@ -966,7 +966,8 @@ public:
+         CV_TRACE_FUNCTION();
+         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+ 
+-        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
++        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget) &&
++                   OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
+                    forward_ocl(inputs_arr, outputs_arr, internals_arr))
+ 
+         Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
+diff --git a/modules/dnn/src/layers/elementwise_layers.cpp b/modules/dnn/src/layers/elementwise_layers.cpp
+index f57ef01375..a24b913ba4 100644
+--- a/modules/dnn/src/layers/elementwise_layers.cpp
++++ b/modules/dnn/src/layers/elementwise_layers.cpp
+@@ -176,7 +176,8 @@ public:
+     {
+         CV_TRACE_FUNCTION();
+ 
+-        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(this->preferableTarget),
++        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(this->preferableTarget) &&
++                   OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
+                    func.applyOCL(inputs_arr, outputs_arr, internals_arr))
+ 
+         Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
+diff --git a/modules/dnn/src/layers/mvn_layer.cpp b/modules/dnn/src/layers/mvn_layer.cpp
+index 9e4f0ac39c..647308ae0a 100644
+--- a/modules/dnn/src/layers/mvn_layer.cpp
++++ b/modules/dnn/src/layers/mvn_layer.cpp
+@@ -73,7 +73,7 @@ public:
+ 
+     virtual bool tryFuse(Ptr<Layer>& top) CV_OVERRIDE
+     {
+-        if (!fuse_batch_norm)
++        if (preferableTarget == DNN_TARGET_OPENCL && !fuse_batch_norm)
+         {
+             top->getScaleShift(scale, shift);
+             fuse_batch_norm = !scale.empty() || !shift.empty();
+@@ -252,7 +252,8 @@ public:
+         CV_TRACE_FUNCTION();
+         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+ 
+-        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
++        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget) &&
++                   OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
+                    forward_ocl(inputs_arr, outputs_arr, internals_arr))
+ 
+         Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
+@@ -273,53 +274,25 @@ public:
+             for( i = 0; i < splitDim; i++ )
+                 newRows *= inpBlob.size[i];
+ 
+-            Mat inpMat = inpBlob.reshape(1, newRows);
+-            Mat outMat = outBlob.reshape(1, newRows);
+-
+-            if ( inpBlob.total() == newRows )
++            if (inpBlob.total() == newRows)
+             {
+                 // MVN is applied to single values at an every row.
+-                if (shift.empty())
+-                {
+-                    outBlob.setTo(0);
+-                }
+-                else
+-                {
+-                    for ( i = 0; i < newRows; i++ )
+-                    {
+-                        outMat.row(i).setTo(((float*)shift.data)[i]);
+-                    }
+-                }
++                outBlob.setTo(0);
+                 return;
+             }
+ 
++            Mat inpMat = inpBlob.reshape(1, newRows);
++            Mat outMat = outBlob.reshape(1, newRows);
++
+             Scalar mean, dev;
+             for ( i = 0; i < newRows; i++)
+             {
+                 Mat inpRow = inpMat.row(i);
+                 Mat outRow = outMat.row(i);
+-                float weight = 1.f;
+-                float bias = 0.f;
+-                if (fuse_batch_norm)
+-                {
+-                    weight = i < scale.cols ? ((float*)scale.data)[i] : weight;
+-                    bias = i < shift.cols ? ((float*)shift.data)[i] : bias;
+-                }
++
+                 cv::meanStdDev(inpRow, mean, (normVariance) ? dev : noArray());
+                 double alpha = (normVariance) ? 1/(eps + dev[0]) : 1;
+-                double normalizationScale = 1.0;
+-                double normalizationShift = 0.0;
+-                if (fuse_batch_norm)
+-                {
+-                    normalizationScale = alpha * weight;
+-                    normalizationShift = -mean[0] * normalizationScale + bias;
+-                }
+-                else
+-                {
+-                    normalizationScale = alpha;
+-                    normalizationShift = -mean[0] * alpha;
+-                }
+-                inpRow.convertTo(outRow, outRow.type(), normalizationScale, normalizationShift);
++                inpRow.convertTo(outRow, outRow.type(), alpha, -mean[0] * alpha);
+             }
+         }
+     }
+diff --git a/modules/dnn/src/layers/pooling_layer.cpp b/modules/dnn/src/layers/pooling_layer.cpp
+index 548cb8acdd..2bcce1d91e 100644
+--- a/modules/dnn/src/layers/pooling_layer.cpp
++++ b/modules/dnn/src/layers/pooling_layer.cpp
+@@ -191,7 +191,8 @@ public:
+         CV_TRACE_FUNCTION();
+         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
+ 
+-        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
++        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget) &&
++                   OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
+                    forward_ocl(inputs_arr, outputs_arr, internals_arr))
+ 
+         Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
+diff --git a/modules/dnn/src/opencl/mvn.cl b/modules/dnn/src/opencl/mvn.cl
+index ffc81a8704..49a8ebbe64 100644
+--- a/modules/dnn/src/opencl/mvn.cl
++++ b/modules/dnn/src/opencl/mvn.cl
+@@ -89,8 +89,7 @@ __kernel void CALC_MEAN(__global const Dtype* src,
+ 
+     Dtype mean_val = mean[x];
+     vec_type src_vec = load(src, index);
+-    vec_type dst_vec = src_vec - (vec_type)mean_val;
+-    dst_vec = dst_vec * dst_vec;
++    vec_type dst_vec = native_powr(src_vec - (vec_type)mean_val, 2);
+     store(dst_vec, dst, index);
+ }
+ 
+@@ -198,14 +197,10 @@ __kernel void MEAN_FUSE(__global const T * A,
+         const T4 a2 = vload4(i, src0_read + 2 * A_col_size);
+         const T4 a3 = vload4(i, src0_read + 3 * A_col_size);
+ 
+-        dot0 = convert_float4(a0) - (Dtype4)sum.x;
+-        dot1 = convert_float4(a1) - (Dtype4)sum.y;
+-        dot2 = convert_float4(a2) - (Dtype4)sum.z;
+-        dot3 = convert_float4(a3) - (Dtype4)sum.w;
+-        dot0 = dot0 * dot0;
+-        dot1 = dot1 * dot1;
+-        dot2 = dot2 * dot2;
+-        dot3 = dot3 * dot3;
++        dot0 = native_powr(convert_float4(a0) - (Dtype4)sum.x, 2);
++        dot1 = native_powr(convert_float4(a1) - (Dtype4)sum.y, 2);
++        dot2 = native_powr(convert_float4(a2) - (Dtype4)sum.z, 2);
++        dot3 = native_powr(convert_float4(a3) - (Dtype4)sum.w, 2);
+ 
+         vstore4(dot0, i, dst0_read);
+         vstore4(dot1, i, dst0_read + A_col_size);
+diff --git a/modules/dnn/test/test_tf_importer.cpp b/modules/dnn/test/test_tf_importer.cpp
+index b3f4f4a7f9..84d224e33d 100644
+--- a/modules/dnn/test/test_tf_importer.cpp
++++ b/modules/dnn/test/test_tf_importer.cpp
+@@ -160,12 +160,10 @@ TEST_P(Test_TensorFlow_layers, batch_norm)
+ TEST_P(Test_TensorFlow_layers, pooling)
+ {
+     int targetId = GetParam();
+-    cv::ocl::Device d = cv::ocl::Device::getDefault();
+-    bool loosenFlag = targetId == DNN_TARGET_OPENCL && d.isIntel() && d.type() == cv::ocl::Device::TYPE_CPU;
+     runTensorFlowNet("max_pool_even", targetId);
+     runTensorFlowNet("max_pool_odd_valid", targetId);
+     runTensorFlowNet("ave_pool_same", targetId);
+-    runTensorFlowNet("max_pool_odd_same", targetId, false, loosenFlag ? 3e-5 : 1e-5, loosenFlag ? 3e-4 : 1e-4);
++    runTensorFlowNet("max_pool_odd_same", targetId);
+     runTensorFlowNet("reduce_mean", targetId);  // an average pooling over all spatial dimensions.
+ }
+ 

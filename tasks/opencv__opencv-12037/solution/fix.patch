@@ -1,0 +1,121 @@
+diff --git a/modules/dnn/CMakeLists.txt b/modules/dnn/CMakeLists.txt
+index a2f741cda1..a4cdc18cf7 100644
+--- a/modules/dnn/CMakeLists.txt
++++ b/modules/dnn/CMakeLists.txt
+@@ -120,3 +120,9 @@ if(BUILD_PERF_TESTS)
+     endif()
+   endif()
+ endif()
++
++# Test Intel's Inference Engine models
++if(HAVE_INF_ENGINE AND TARGET opencv_test_dnn)
++  ocv_target_include_directories(opencv_test_dnn PRIVATE ${INF_ENGINE_INCLUDE_DIRS})
++  ocv_target_link_libraries(opencv_test_dnn LINK_PRIVATE ${INF_ENGINE_LIBRARIES})
++endif()
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index bcf2c2a3d9..a7c13f3a13 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -428,9 +428,8 @@ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+ 
+     try
+     {
+-        static std::map<std::string, InferenceEngine::InferenceEnginePluginPtr> sharedPlugins;
+-        std::string deviceName = InferenceEngine::getDeviceName(targetDevice);
+-        auto pluginIt = sharedPlugins.find(deviceName);
++        static std::map<InferenceEngine::TargetDevice, InferenceEngine::InferenceEnginePluginPtr> sharedPlugins;
++        auto pluginIt = sharedPlugins.find(targetDevice);
+         if (pluginIt != sharedPlugins.end())
+         {
+             enginePtr = pluginIt->second;
+@@ -438,7 +437,7 @@ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+         else
+         {
+             enginePtr = InferenceEngine::PluginDispatcher({""}).getSuitablePlugin(targetDevice);
+-            sharedPlugins[deviceName] = enginePtr;
++            sharedPlugins[targetDevice] = enginePtr;
+ 
+             if (targetDevice == InferenceEngine::TargetDevice::eCPU)
+             {
+diff --git a/modules/ts/include/opencv2/ts.hpp b/modules/ts/include/opencv2/ts.hpp
+index 7b3f732ce0..3fbea894e8 100644
+--- a/modules/ts/include/opencv2/ts.hpp
++++ b/modules/ts/include/opencv2/ts.hpp
+@@ -103,6 +103,7 @@ using std::pair;
+ using std::make_pair;
+ using testing::TestWithParam;
+ using testing::Values;
++using testing::ValuesIn;
+ using testing::Combine;
+ 
+ using cv::Mat;
+@@ -654,6 +655,11 @@ void addDataSearchSubDirectory(const std::string& subdir);
+  */
+ std::string findDataFile(const std::string& relative_path, bool required = true);
+ 
++/*! @brief Try to find requested data directory
++@sa findDataFile
++ */
++std::string findDataDirectory(const std::string& relative_path, bool required = true);
++
+ 
+ #ifndef __CV_TEST_EXEC_ARGS
+ #if defined(_MSC_VER) && (_MSC_VER <= 1400)
+diff --git a/modules/ts/src/ts.cpp b/modules/ts/src/ts.cpp
+index 06f9118a28..b1ea96bb15 100644
+--- a/modules/ts/src/ts.cpp
++++ b/modules/ts/src/ts.cpp
+@@ -772,16 +772,24 @@ void addDataSearchSubDirectory(const std::string& subdir)
+     TS::ptr()->data_search_subdir.push_back(subdir);
+ }
+ 
+-std::string findDataFile(const std::string& relative_path, bool required)
++static std::string findData(const std::string& relative_path, bool required, bool findDirectory)
+ {
+ #define TEST_TRY_FILE_WITH_PREFIX(prefix) \
+ { \
+     std::string path = path_join(prefix, relative_path); \
+     /*printf("Trying %s\n", path.c_str());*/ \
+-    FILE* f = fopen(path.c_str(), "rb"); \
+-    if(f) { \
+-       fclose(f); \
+-       return path; \
++    if (findDirectory) \
++    { \
++        if (isDirectory(path)) \
++            return path; \
++    } \
++    else \
++    { \
++        FILE* f = fopen(path.c_str(), "rb"); \
++        if(f) { \
++            fclose(f); \
++            return path; \
++        } \
+     } \
+ }
+ 
+@@ -842,11 +850,21 @@ std::string findDataFile(const std::string& relative_path, bool required)
+     }
+ #endif
+ #endif
++    const char* type = findDirectory ? "directory" : "data file";
+     if (required)
+-        CV_Error(cv::Error::StsError, cv::format("OpenCV tests: Can't find required data file: %s", relative_path.c_str()));
+-    throw SkipTestException(cv::format("OpenCV tests: Can't find data file: %s", relative_path.c_str()));
++        CV_Error(cv::Error::StsError, cv::format("OpenCV tests: Can't find required %s: %s", type, relative_path.c_str()));
++    throw SkipTestException(cv::format("OpenCV tests: Can't find %s: %s", type, relative_path.c_str()));
++}
++
++std::string findDataFile(const std::string& relative_path, bool required)
++{
++    return findData(relative_path, required, false);
+ }
+ 
++std::string findDataDirectory(const std::string& relative_path, bool required)
++{
++    return findData(relative_path, required, true);
++}
+ 
+ } //namespace cvtest
+ 

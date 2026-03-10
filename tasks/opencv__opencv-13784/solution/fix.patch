@@ -1,0 +1,371 @@
+diff --git a/modules/core/include/opencv2/core/cuda_types.hpp b/modules/core/include/opencv2/core/cuda_types.hpp
+index e2647c0455..45dc2cad1c 100644
+--- a/modules/core/include/opencv2/core/cuda_types.hpp
++++ b/modules/core/include/opencv2/core/cuda_types.hpp
+@@ -127,10 +127,12 @@ namespace cv
+         };
+ 
+         typedef PtrStepSz<unsigned char> PtrStepSzb;
++        typedef PtrStepSz<unsigned short> PtrStepSzus;
+         typedef PtrStepSz<float> PtrStepSzf;
+         typedef PtrStepSz<int> PtrStepSzi;
+ 
+         typedef PtrStep<unsigned char> PtrStepb;
++        typedef PtrStep<unsigned short> PtrStepus;
+         typedef PtrStep<float> PtrStepf;
+         typedef PtrStep<int> PtrStepi;
+ 
+diff --git a/modules/dnn/src/layers/prior_box_layer.cpp b/modules/dnn/src/layers/prior_box_layer.cpp
+index fb690d76ef..040cc7b665 100644
+--- a/modules/dnn/src/layers/prior_box_layer.cpp
++++ b/modules/dnn/src/layers/prior_box_layer.cpp
+@@ -502,9 +502,7 @@ public:
+         if (_explicitSizes)
+         {
+             InferenceEngine::Builder::PriorBoxClusteredLayer ieLayer(name);
+-
+-            CV_Assert(_stepX == _stepY);
+-            ieLayer.setStep(_stepX);
++            ieLayer.setSteps({_stepY, _stepX});
+ 
+             CV_CheckEQ(_offsetsX.size(), (size_t)1, ""); CV_CheckEQ(_offsetsY.size(), (size_t)1, ""); CV_CheckEQ(_offsetsX[0], _offsetsY[0], "");
+             ieLayer.setOffset(_offsetsX[0]);
+@@ -531,9 +529,6 @@ public:
+             if (_maxSize > 0)
+                 ieLayer.setMaxSize(_maxSize);
+ 
+-            CV_Assert(_stepX == _stepY);
+-            ieLayer.setStep(_stepX);
+-
+             CV_CheckEQ(_offsetsX.size(), (size_t)1, ""); CV_CheckEQ(_offsetsY.size(), (size_t)1, ""); CV_CheckEQ(_offsetsX[0], _offsetsY[0], "");
+             ieLayer.setOffset(_offsetsX[0]);
+ 
+@@ -541,6 +536,18 @@ public:
+             ieLayer.setFlip(false);  // We already flipped aspect ratios.
+ 
+             InferenceEngine::Builder::Layer l = ieLayer;
++            if (_stepX == _stepY)
++            {
++                l.getParameters()["step"] = _stepX;
++                l.getParameters()["step_h"] = 0.0;
++                l.getParameters()["step_w"] = 0.0;
++            }
++            else
++            {
++                l.getParameters()["step"] = 0.0;
++                l.getParameters()["step_h"] = _stepY;
++                l.getParameters()["step_w"] = _stepX;
++            }
+             if (!_aspectRatios.empty())
+             {
+                 l.getParameters()["aspect_ratio"] = _aspectRatios;
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index 1d21021e34..375786987b 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -622,7 +622,11 @@ void InfEngineBackendNet::init(int targetId)
+ 
+ #endif  // IE < R5
+ 
+-static std::map<InferenceEngine::TargetDevice, InferenceEngine::InferenceEnginePluginPtr> sharedPlugins;
++static std::map<InferenceEngine::TargetDevice, InferenceEngine::InferenceEnginePluginPtr>& getSharedPlugins()
++{
++    static std::map<InferenceEngine::TargetDevice, InferenceEngine::InferenceEnginePluginPtr> sharedPlugins;
++    return sharedPlugins;
++}
+ 
+ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+ {
+@@ -630,6 +634,8 @@ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+ 
+     try
+     {
++        AutoLock lock(getInitializationMutex());
++        auto& sharedPlugins = getSharedPlugins();
+         auto pluginIt = sharedPlugins.find(targetDevice);
+         if (pluginIt != sharedPlugins.end())
+         {
+@@ -797,7 +803,8 @@ CV__DNN_INLINE_NS_BEGIN
+ void resetMyriadDevice()
+ {
+ #ifdef HAVE_INF_ENGINE
+-    sharedPlugins.erase(InferenceEngine::TargetDevice::eMYRIAD);
++    AutoLock lock(getInitializationMutex());
++    getSharedPlugins().erase(InferenceEngine::TargetDevice::eMYRIAD);
+ #endif  // HAVE_INF_ENGINE
+ }
+ 
+diff --git a/modules/imgproc/perf/perf_cvt_color.cpp b/modules/imgproc/perf/perf_cvt_color.cpp
+index e0f32fdab6..e3af113bed 100644
+--- a/modules/imgproc/perf/perf_cvt_color.cpp
++++ b/modules/imgproc/perf/perf_cvt_color.cpp
+@@ -100,6 +100,72 @@ CV_ENUM(CvtMode,
+     COLOR_YUV2BGR, COLOR_YUV2RGB, CX_YUV2BGRA, CX_YUV2RGBA
+     )
+ 
++CV_ENUM(CvtMode16U,
++    COLOR_BGR2BGRA, COLOR_BGR2GRAY,
++    COLOR_BGR2RGB, COLOR_BGR2RGBA, COLOR_BGR2XYZ,
++    COLOR_BGR2YCrCb, COLOR_BGR2YUV,
++
++    COLOR_BGRA2BGR, COLOR_BGRA2GRAY, COLOR_BGRA2RGBA,
++    CX_BGRA2XYZ,
++    CX_BGRA2YCrCb, CX_BGRA2YUV,
++
++    COLOR_GRAY2BGR, COLOR_GRAY2BGRA,
++
++    COLOR_RGB2GRAY,
++    COLOR_RGB2XYZ, COLOR_RGB2YCrCb, COLOR_RGB2YUV,
++
++    COLOR_RGBA2BGR, COLOR_RGBA2GRAY,
++    CX_RGBA2XYZ,
++    CX_RGBA2YCrCb, CX_RGBA2YUV,
++
++    COLOR_XYZ2BGR, COLOR_XYZ2RGB, CX_XYZ2BGRA, CX_XYZ2RGBA,
++
++    COLOR_YCrCb2BGR, COLOR_YCrCb2RGB, CX_YCrCb2BGRA, CX_YCrCb2RGBA,
++    COLOR_YUV2BGR, COLOR_YUV2RGB, CX_YUV2BGRA, CX_YUV2RGBA
++    )
++
++CV_ENUM(CvtMode32F,
++    COLOR_BGR2BGRA, COLOR_BGR2GRAY,
++    COLOR_BGR2HLS, COLOR_BGR2HLS_FULL, COLOR_BGR2HSV, COLOR_BGR2HSV_FULL,
++    COLOR_BGR2Lab, COLOR_BGR2Luv, COLOR_BGR2RGB, COLOR_BGR2RGBA, COLOR_BGR2XYZ,
++    COLOR_BGR2YCrCb, COLOR_BGR2YUV,
++
++    COLOR_BGRA2BGR, COLOR_BGRA2GRAY, COLOR_BGRA2RGBA,
++    CX_BGRA2HLS, CX_BGRA2HLS_FULL, CX_BGRA2HSV, CX_BGRA2HSV_FULL,
++    CX_BGRA2Lab, CX_BGRA2Luv, CX_BGRA2XYZ,
++    CX_BGRA2YCrCb, CX_BGRA2YUV,
++
++    COLOR_GRAY2BGR, COLOR_GRAY2BGRA,
++
++    COLOR_HLS2BGR, COLOR_HLS2BGR_FULL, COLOR_HLS2RGB, COLOR_HLS2RGB_FULL,
++    CX_HLS2BGRA, CX_HLS2BGRA_FULL, CX_HLS2RGBA, CX_HLS2RGBA_FULL,
++
++    COLOR_HSV2BGR, COLOR_HSV2BGR_FULL, COLOR_HSV2RGB, COLOR_HSV2RGB_FULL,
++    CX_HSV2BGRA, CX_HSV2BGRA_FULL, CX_HSV2RGBA,    CX_HSV2RGBA_FULL,
++
++    COLOR_Lab2BGR, COLOR_Lab2LBGR, COLOR_Lab2LRGB, COLOR_Lab2RGB,
++    CX_Lab2BGRA, CX_Lab2LBGRA, CX_Lab2LRGBA, CX_Lab2RGBA,
++
++    COLOR_LBGR2Lab, COLOR_LBGR2Luv, COLOR_LRGB2Lab, COLOR_LRGB2Luv,
++    CX_LBGRA2Lab, CX_LBGRA2Luv, CX_LRGBA2Lab, CX_LRGBA2Luv,
++
++    COLOR_Luv2BGR, COLOR_Luv2LBGR, COLOR_Luv2LRGB, COLOR_Luv2RGB,
++    CX_Luv2BGRA, CX_Luv2LBGRA, CX_Luv2LRGBA, CX_Luv2RGBA,
++
++    COLOR_RGB2GRAY,
++    COLOR_RGB2HLS, COLOR_RGB2HLS_FULL, COLOR_RGB2HSV, COLOR_RGB2HSV_FULL,
++    COLOR_RGB2Lab, COLOR_RGB2Luv, COLOR_RGB2XYZ, COLOR_RGB2YCrCb, COLOR_RGB2YUV,
++
++    COLOR_RGBA2BGR, COLOR_RGBA2GRAY,
++    CX_RGBA2HLS, CX_RGBA2HLS_FULL, CX_RGBA2HSV, CX_RGBA2HSV_FULL,
++    CX_RGBA2Lab, CX_RGBA2Luv, CX_RGBA2XYZ,
++    CX_RGBA2YCrCb, CX_RGBA2YUV,
++
++    COLOR_XYZ2BGR, COLOR_XYZ2RGB, CX_XYZ2BGRA, CX_XYZ2RGBA,
++
++    COLOR_YCrCb2BGR, COLOR_YCrCb2RGB, CX_YCrCb2BGRA, CX_YCrCb2RGBA,
++    COLOR_YUV2BGR, COLOR_YUV2RGB, CX_YUV2BGRA, CX_YUV2RGBA
++    )
+ 
+ CV_ENUM(CvtModeBayer,
+     COLOR_BayerBG2BGR, COLOR_BayerBG2BGRA, COLOR_BayerBG2BGR_VNG, COLOR_BayerBG2GRAY,
+@@ -274,6 +340,60 @@ PERF_TEST_P(Size_CvtMode, cvtColor8u,
+ #endif
+ }
+ 
++
++typedef tuple<Size, CvtMode16U> Size_CvtMode16U_t;
++typedef perf::TestBaseWithParam<Size_CvtMode16U_t> Size_CvtMode16U;
++
++PERF_TEST_P(Size_CvtMode16U, DISABLED_cvtColor_16u,
++            testing::Combine(
++                testing::Values(::perf::szODD, ::perf::szVGA, ::perf::sz1080p),
++                CvtMode16U::all()
++                )
++            )
++{
++    Size sz = get<0>(GetParam());
++    int _mode = get<1>(GetParam()), mode = _mode;
++    ChPair ch = getConversionInfo(mode);
++    mode %= COLOR_COLORCVT_MAX;
++    Mat src(sz, CV_16UC(ch.scn));
++    Mat dst(sz, CV_16UC(ch.scn));
++
++    declare.time(100);
++    declare.in(src, WARMUP_RNG).out(dst);
++
++    int runs = sz.width <= 320 ? 100 : 5;
++    TEST_CYCLE_MULTIRUN(runs) cvtColor(src, dst, mode, ch.dcn);
++
++    SANITY_CHECK(dst, 1);
++}
++
++
++typedef tuple<Size, CvtMode32F> Size_CvtMode32F_t;
++typedef perf::TestBaseWithParam<Size_CvtMode32F_t> Size_CvtMode32F;
++
++PERF_TEST_P(Size_CvtMode32F, DISABLED_cvtColor_32f,
++            testing::Combine(
++                testing::Values(::perf::szODD, ::perf::szVGA, ::perf::sz1080p),
++                CvtMode32F::all()
++                )
++            )
++{
++    Size sz = get<0>(GetParam());
++    int _mode = get<1>(GetParam()), mode = _mode;
++    ChPair ch = getConversionInfo(mode);
++    mode %= COLOR_COLORCVT_MAX;
++    Mat src(sz, CV_32FC(ch.scn));
++    Mat dst(sz, CV_32FC(ch.scn));
++
++    declare.time(100);
++    declare.in(src, WARMUP_RNG).out(dst);
++
++    int runs = sz.width <= 320 ? 100 : 5;
++    TEST_CYCLE_MULTIRUN(runs) cvtColor(src, dst, mode, ch.dcn);
++
++    SANITY_CHECK_NOTHING();
++}
++
+ typedef tuple<Size, CvtModeBayer> Size_CvtMode_Bayer_t;
+ typedef perf::TestBaseWithParam<Size_CvtMode_Bayer_t> Size_CvtMode_Bayer;
+ 
+diff --git a/modules/imgproc/perf/perf_histogram.cpp b/modules/imgproc/perf/perf_histogram.cpp
+index 4f54e948bb..d80d8a6d51 100644
+--- a/modules/imgproc/perf/perf_histogram.cpp
++++ b/modules/imgproc/perf/perf_histogram.cpp
+@@ -141,18 +141,20 @@ PERF_TEST_P(Dim_Cmpmethod, compareHist,
+     SANITY_CHECK_NOTHING();
+ }
+ 
+-typedef tuple<Size, double> Sz_ClipLimit_t;
++typedef tuple<Size, double, MatType> Sz_ClipLimit_t;
+ typedef TestBaseWithParam<Sz_ClipLimit_t> Sz_ClipLimit;
+ 
+ PERF_TEST_P(Sz_ClipLimit, CLAHE,
+             testing::Combine(testing::Values(::perf::szVGA, ::perf::sz720p, ::perf::sz1080p),
+-                             testing::Values(0.0, 40.0))
++                             testing::Values(0.0, 40.0),
++                             testing::Values(MatType(CV_8UC1), MatType(CV_16UC1)))
+             )
+ {
+     const Size size = get<0>(GetParam());
+     const double clipLimit = get<1>(GetParam());
++    const int type = get<2>(GetParam());
+ 
+-    Mat src(size, CV_8UC1);
++    Mat src(size, type);
+     declare.in(src, WARMUP_RNG);
+ 
+     Ptr<CLAHE> clahe = createCLAHE(clipLimit);
+diff --git a/modules/imgproc/src/morph.cpp b/modules/imgproc/src/morph.cpp
+index 5690553b70..e4d08da8af 100644
+--- a/modules/imgproc/src/morph.cpp
++++ b/modules/imgproc/src/morph.cpp
+@@ -159,7 +159,7 @@ template<class VecUpdate> struct MorphRowVec
+             i += vtype::nlanes/2;
+         }
+ 
+-        return i;
++        return i - i % cn;
+     }
+ 
+     int ksize, anchor;
+diff --git a/modules/video/src/camshift.cpp b/modules/video/src/camshift.cpp
+index ed5426ab98..dc40462762 100644
+--- a/modules/video/src/camshift.cpp
++++ b/modules/video/src/camshift.cpp
+@@ -167,6 +167,8 @@ cv::RotatedRect cv::CamShift( InputArray _probImage, Rect& window,
+ 
+     double rotate_a = cs * cs * mu20 + 2 * cs * sn * mu11 + sn * sn * mu02;
+     double rotate_c = sn * sn * mu20 - 2 * cs * sn * mu11 + cs * cs * mu02;
++    rotate_a = std::max(0.0, rotate_a);  // avoid negative result due calculation numeric errors
++    rotate_c = std::max(0.0, rotate_c);  // avoid negative result due calculation numeric errors
+     double length = std::sqrt( rotate_a * inv_m00 ) * 4;
+     double width = std::sqrt( rotate_c * inv_m00 ) * 4;
+ 
+diff --git a/samples/dnn/tf_text_graph_mask_rcnn.py b/samples/dnn/tf_text_graph_mask_rcnn.py
+index c8803088f9..24d8790d32 100644
+--- a/samples/dnn/tf_text_graph_mask_rcnn.py
++++ b/samples/dnn/tf_text_graph_mask_rcnn.py
+@@ -25,7 +25,8 @@ scopesToIgnore = ('FirstStageFeatureExtractor/Assert',
+                   'FirstStageFeatureExtractor/Shape',
+                   'FirstStageFeatureExtractor/strided_slice',
+                   'FirstStageFeatureExtractor/GreaterEqual',
+-                  'FirstStageFeatureExtractor/LogicalAnd')
++                  'FirstStageFeatureExtractor/LogicalAnd',
++                  'Conv/required_space_to_batch_paddings')
+ 
+ # Load a config file.
+ config = readTextMessage(args.config)
+@@ -54,10 +55,30 @@ graph_def = parseTextGraph(args.output)
+ 
+ removeIdentity(graph_def)
+ 
++nodesToKeep = []
+ def to_remove(name, op):
++    if name in nodesToKeep:
++        return False
+     return op == 'Const' or name.startswith(scopesToIgnore) or not name.startswith(scopesToKeep) or \
+            (name.startswith('CropAndResize') and op != 'CropAndResize')
+ 
++# Fuse atrous convolutions (with dilations).
++nodesMap = {node.name: node for node in graph_def.node}
++for node in reversed(graph_def.node):
++    if node.op == 'BatchToSpaceND':
++        del node.input[2]
++        conv = nodesMap[node.input[0]]
++        spaceToBatchND = nodesMap[conv.input[0]]
++
++        paddingsNode = NodeDef()
++        paddingsNode.name = conv.name + '/paddings'
++        paddingsNode.op = 'Const'
++        paddingsNode.addAttr('value', [2, 2, 2, 2])
++        graph_def.node.insert(graph_def.node.index(spaceToBatchND), paddingsNode)
++        nodesToKeep.append(paddingsNode.name)
++
++        spaceToBatchND.input[2] = paddingsNode.name
++
+ removeUnusedNodesAndAttrs(to_remove, graph_def)
+ 
+ 
+@@ -106,8 +127,8 @@ heights = []
+ for a in aspect_ratios:
+     for s in scales:
+         ar = np.sqrt(a)
+-        heights.append((features_stride**2) * s / ar)
+-        widths.append((features_stride**2) * s * ar)
++        heights.append((height_stride**2) * s / ar)
++        widths.append((width_stride**2) * s * ar)
+ 
+ proposals.addAttr('width', widths)
+ proposals.addAttr('height', heights)
+@@ -252,5 +273,25 @@ graph_def.node[-1].name = 'detection_masks'
+ graph_def.node[-1].op = 'Sigmoid'
+ graph_def.node[-1].input.pop()
+ 
++def getUnconnectedNodes():
++    unconnected = [node.name for node in graph_def.node]
++    for node in graph_def.node:
++        for inp in node.input:
++            if inp in unconnected:
++                unconnected.remove(inp)
++    return unconnected
++
++while True:
++    unconnectedNodes = getUnconnectedNodes()
++    unconnectedNodes.remove(graph_def.node[-1].name)
++    if not unconnectedNodes:
++        break
++
++    for name in unconnectedNodes:
++        for i in range(len(graph_def.node)):
++            if graph_def.node[i].name == name:
++                del graph_def.node[i]
++                break
++
+ # Save as text.
+ graph_def.save(args.output)

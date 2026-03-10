@@ -1,0 +1,664 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index b5416142c9..cc2e2e35d0 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -234,7 +234,9 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+     {
+     public:
+         int type;
+-        Size kernel, stride, pad;
++        Size kernel, stride;
++        int pad_l, pad_t, pad_r, pad_b;
++        CV_DEPRECATED Size pad;
+         bool globalPooling;
+         bool computeMaxIdx;
+         String padMode;
+diff --git a/modules/dnn/src/layers/convolution_layer.cpp b/modules/dnn/src/layers/convolution_layer.cpp
+index 40719f3764..a948c6ef9d 100644
+--- a/modules/dnn/src/layers/convolution_layer.cpp
++++ b/modules/dnn/src/layers/convolution_layer.cpp
+@@ -64,10 +64,17 @@ public:
+     BaseConvolutionLayerImpl(const LayerParams &params)
+     {
+         setParamsFrom(params);
+-        getConvolutionKernelParams(params, kernel.height, kernel.width, pad.height,
+-                                   pad.width, stride.height, stride.width, dilation.height,
++        int pad_t = 0, pad_l = 0, pad_r = 0, pad_b = 0;
++        getConvolutionKernelParams(params, kernel.height, kernel.width, pad_t,
++                                   pad_l, pad_b, pad_r, stride.height, stride.width, dilation.height,
+                                    dilation.width, padMode);
+ 
++        if (pad_t != pad_b || pad_l != pad_r)
++            CV_Error(Error::StsNotImplemented, "Unsupported asymmetric padding in convolution layer");
++
++        pad.width = pad_l;
++        pad.height = pad_t;
++
+         numOutput = params.get<int>("num_output");
+         int ngroups = params.get<int>("group", 1);
+ 
+@@ -100,8 +107,18 @@ public:
+         }
+ 
+         Size outSize = Size(outputs[0].size[3], outputs[0].size[2]);
++
++        int pad_t = pad.height, pad_l = pad.width, pad_b = pad.height, pad_r = pad.width;
++
+         getConvPoolPaddings(Size(input.size[3], input.size[2]), outSize,
+-                kernel, stride, padMode, dilation, pad);
++                kernel, stride, padMode, dilation, pad_t, pad_l, pad_b, pad_r);
++
++
++        if (pad_t != pad_b || pad_l != pad_r)
++            CV_Error(Error::StsNotImplemented, "Unsupported asymmetric padding in convolution layer");
++
++        pad.width = pad_l;
++        pad.height = pad_t;
+     }
+ 
+     bool hasBias() const
+@@ -1156,9 +1173,17 @@ public:
+         std::vector<Mat> inputs, outputs;
+         inputs_arr.getMatVector(inputs);
+         outputs_arr.getMatVector(outputs);
++
++        int pad_t = pad.height, pad_l = pad.width, pad_b = pad.height, pad_r = pad.width;
+         getConvPoolPaddings(Size(outputs[0].size[3], outputs[0].size[2]),
+                             Size(inputs[0].size[3], inputs[0].size[2]),
+-                            kernel, stride, padMode, dilation, pad);
++                            kernel, stride, padMode, dilation, pad_t, pad_l, pad_b, pad_r);
++
++        if (pad_t != pad_b || pad_l != pad_r)
++            CV_Error(Error::StsNotImplemented, "Unsupported asymmetric padding in convolution layer");
++
++        pad.width = pad_l;
++        pad.height = pad_t;
+     }
+ 
+     class MatMulInvoker : public ParallelLoopBody
+diff --git a/modules/dnn/src/layers/layers_common.cpp b/modules/dnn/src/layers/layers_common.cpp
+index bf5834c864..2dbb12109d 100644
+--- a/modules/dnn/src/layers/layers_common.cpp
++++ b/modules/dnn/src/layers/layers_common.cpp
+@@ -118,9 +118,19 @@ void getKernelSize(const LayerParams &params, int &kernelH, int &kernelW)
+     CV_Assert(kernelH > 0 && kernelW > 0);
+ }
+ 
+-void getStrideAndPadding(const LayerParams &params, int &padH, int &padW, int &strideH, int &strideW, cv::String& padMode)
++void getStrideAndPadding(const LayerParams &params, int &padT, int &padL, int &padB, int &padR, int &strideH, int &strideW, cv::String& padMode)
+ {
+-    util::getParameter(params, "pad", "pad", padH, padW, true, 0);
++    if (params.has("pad_l") && params.has("pad_t") && params.has("pad_r") && params.has("pad_b")) {
++        padT = params.get<int>("pad_t");
++        padL = params.get<int>("pad_l");
++        padB = params.get<int>("pad_b");
++        padR = params.get<int>("pad_r");
++    }
++    else {
++        util::getParameter(params, "pad", "pad", padT, padL, true, 0);
++        padB = padT;
++        padR = padL;
++    }
+     util::getParameter(params, "stride", "stride", strideH, strideW, true, 1);
+ 
+     padMode = "";
+@@ -129,15 +139,15 @@ void getStrideAndPadding(const LayerParams &params, int &padH, int &padW, int &s
+         padMode = params.get<String>("pad_mode");
+     }
+ 
+-    CV_Assert(padH >= 0 && padW >= 0 && strideH > 0 && strideW > 0);
++    CV_Assert(padT >= 0 && padL >= 0 && padB >= 0 && padR >= 0 && strideH > 0 && strideW > 0);
+ }
+ }
+ 
+ 
+ void getPoolingKernelParams(const LayerParams &params, int &kernelH, int &kernelW, bool &globalPooling,
+-                            int &padH, int &padW, int &strideH, int &strideW, cv::String &padMode)
++                            int &padT, int &padL, int &padB, int &padR, int &strideH, int &strideW, cv::String &padMode)
+ {
+-    util::getStrideAndPadding(params, padH, padW, strideH, strideW, padMode);
++    util::getStrideAndPadding(params, padT, padL, padB, padR, strideH, strideW, padMode);
+ 
+     globalPooling = params.has("global_pooling") &&
+                     params.get<bool>("global_pooling");
+@@ -148,9 +158,9 @@ void getPoolingKernelParams(const LayerParams &params, int &kernelH, int &kernel
+         {
+             CV_Error(cv::Error::StsBadArg, "In global_pooling mode, kernel_size (or kernel_h and kernel_w) cannot be specified");
+         }
+-        if(padH != 0 || padW != 0 || strideH != 1 || strideW != 1)
++        if(padT != 0 || padL != 0 || padB != 0 || padR != 0 || strideH != 1 || strideW != 1)
+         {
+-            CV_Error(cv::Error::StsBadArg, "In global_pooling mode, pad_h and pad_w must be = 0, and stride_h and stride_w must be = 1");
++            CV_Error(cv::Error::StsBadArg, "In global_pooling mode, pads must be = 0, and stride_h and stride_w must be = 1");
+         }
+     }
+     else
+@@ -159,12 +169,11 @@ void getPoolingKernelParams(const LayerParams &params, int &kernelH, int &kernel
+     }
+ }
+ 
+-void getConvolutionKernelParams(const LayerParams &params, int &kernelH, int &kernelW, int &padH, int &padW,
++void getConvolutionKernelParams(const LayerParams &params, int &kernelH, int &kernelW, int &padT, int &padL, int &padB, int &padR,
+                                 int &strideH, int &strideW, int &dilationH, int &dilationW, cv::String &padMode)
+ {
+     util::getKernelSize(params, kernelH, kernelW);
+-    util::getStrideAndPadding(params, padH, padW, strideH, strideW, padMode);
+-
++    util::getStrideAndPadding(params, padT, padL, padB, padR, strideH, strideW, padMode);
+     util::getParameter(params, "dilation", "dilation", dilationH, dilationW, true, 1);
+ 
+     CV_Assert(dilationH > 0 && dilationW > 0);
+@@ -201,11 +210,11 @@ void getConvPoolOutParams(const Size& inp, const Size &kernel,
+ 
+ void getConvPoolPaddings(const Size& inp, const Size& out,
+                          const Size &kernel, const Size &stride,
+-                         const String &padMode, const Size &dilation, Size &pad)
++                         const String &padMode, const Size &dilation, int &padT, int &padL, int &padB, int &padR)
+ {
+     if (padMode == "VALID")
+     {
+-        pad = cv::Size(0,0);
++        padT = padL = padB = padR = 0;
+     }
+     else if (padMode == "SAME")
+     {
+@@ -213,7 +222,8 @@ void getConvPoolPaddings(const Size& inp, const Size& out,
+         int Pw = std::max(0, (out.width - 1) * stride.width + (dilation.width * (kernel.width - 1) + 1) - inp.width);
+         // For odd values of total padding, add more padding at the 'right'
+         // side of the given dimension.
+-        pad = cv::Size(Pw / 2, Ph / 2);
++        padT= padB = Ph / 2;
++        padL = padR = Pw / 2;
+     }
+ }
+ 
+diff --git a/modules/dnn/src/layers/layers_common.hpp b/modules/dnn/src/layers/layers_common.hpp
+index 4bb4c317e4..7fce183d6e 100644
+--- a/modules/dnn/src/layers/layers_common.hpp
++++ b/modules/dnn/src/layers/layers_common.hpp
+@@ -60,19 +60,20 @@ namespace cv
+ namespace dnn
+ {
+ 
+-void getConvolutionKernelParams(const LayerParams &params, int &kernelH, int &kernelW, int &padH, int &padW,
++void getConvolutionKernelParams(const LayerParams &params, int &kernelH, int &kernelW, int &padT, int &padL, int &padB, int &padR,
+                                 int &strideH, int &strideW, int &dilationH, int &dilationW, cv::String& padMode);
+ 
+ void getPoolingKernelParams(const LayerParams &params, int &kernelH, int &kernelW, bool &globalPooling,
+-                            int &padH, int &padW, int &strideH, int &strideW, cv::String& padMode);
++                            int &padT, int &padL, int &padB, int &padR, int &strideH, int &strideW, cv::String& padMode);
+ 
+ void getConvPoolOutParams(const Size& inp, const Size &kernel,
+                           const Size &stride, const String &padMode,
+                           const Size &dilation, Size& out);
+ 
++
+ void getConvPoolPaddings(const Size& inp, const Size& out,
+                          const Size &kernel, const Size &stride,
+-                         const String &padMode, const Size &dilation, Size &pad);
++                         const String &padMode, const Size &dilation, int &padT, int &padL, int &padB, int &padR);
+ 
+ }
+ }
+diff --git a/modules/dnn/src/layers/pooling_layer.cpp b/modules/dnn/src/layers/pooling_layer.cpp
+index 37933c777d..028f4f8b6e 100644
+--- a/modules/dnn/src/layers/pooling_layer.cpp
++++ b/modules/dnn/src/layers/pooling_layer.cpp
+@@ -85,8 +85,12 @@ public:
+                 type = STOCHASTIC;
+             else
+                 CV_Error(Error::StsBadArg, "Unknown pooling type \"" + pool + "\"");
++
+             getPoolingKernelParams(params, kernel.height, kernel.width, globalPooling,
+-                                   pad.height, pad.width, stride.height, stride.width, padMode);
++                                   pad_t, pad_l, pad_b, pad_r, stride.height, stride.width, padMode);
++
++            pad.width = pad_l;
++            pad.height = pad_t;
+         }
+         else if (params.has("pooled_w") || params.has("pooled_h"))
+         {
+@@ -130,7 +134,9 @@ public:
+             kernel = inp;
+         }
+ 
+-        getConvPoolPaddings(inp, out, kernel, stride, padMode, Size(1, 1), pad);
++        getConvPoolPaddings(inp, out, kernel, stride, padMode, Size(1, 1), pad_t, pad_l, pad_b, pad_r);
++        pad.width = pad_l;
++        pad.height = pad_t;
+ 
+ #ifdef HAVE_OPENCL
+         poolOp.release();
+@@ -149,7 +155,7 @@ public:
+         else
+             return backendId == DNN_BACKEND_OPENCV ||
+                    backendId == DNN_BACKEND_HALIDE && haveHalide() &&
+-                   (type == MAX || type == AVE && !pad.width && !pad.height);
++                   (type == MAX || type == AVE && !pad_t && !pad_l && !pad_b && !pad_r);
+     }
+ 
+ #ifdef HAVE_OPENCL
+@@ -169,7 +175,10 @@ public:
+             config.in_shape = shape(inputs[0]);
+             config.out_shape = shape(outputs[0]);
+             config.kernel = kernel;
+-            config.pad = pad;
++            config.pad_l = pad_l;
++            config.pad_t = pad_t;
++            config.pad_r = pad_r;
++            config.pad_b = pad_b;
+             config.stride = stride;
+             config.channels = inputs[0].size[1];
+             config.pool_method = type == MAX ? LIBDNN_POOLING_METHOD_MAX :
+@@ -193,7 +202,6 @@ public:
+             if (!poolOp->Forward(inpMat, outMat, maskMat))
+                 return false;
+         }
+-
+         return true;
+     }
+ #endif
+@@ -264,8 +272,10 @@ public:
+             poolLayer->_kernel_y = kernel.height;
+             poolLayer->_stride_x = stride.width;
+             poolLayer->_stride_y = stride.height;
+-            poolLayer->_padding_x = pad.width;
+-            poolLayer->_padding_y = pad.height;
++            poolLayer->_padding_x = pad_l;
++            poolLayer->_padding_y = pad_t;
++            poolLayer->params["pad-r"] = format("%d", pad_r);
++            poolLayer->params["pad-b"] = format("%d", pad_b);
+             poolLayer->_exclude_pad = type == AVE && padMode == "SAME";
+             poolLayer->params["rounding-type"] = ceilMode ? "ceil" : "floor";
+             poolLayer->_type = type == MAX ? InferenceEngine::PoolingLayer::PoolType::MAX :
+@@ -296,12 +306,14 @@ public:
+         return Ptr<BackendNode>();
+     }
+ 
++
+     class PoolingInvoker : public ParallelLoopBody
+     {
+     public:
+         const Mat* src, *rois;
+         Mat *dst, *mask;
+-        Size kernel, stride, pad;
++        Size kernel, stride;
++        int pad_l, pad_t, pad_r, pad_b;
+         bool avePoolPaddedArea;
+         int nstripes;
+         bool computeMaxIdx;
+@@ -313,7 +325,7 @@ public:
+                            computeMaxIdx(0), poolingType(MAX), spatialScale(0) {}
+ 
+         static void run(const Mat& src, const Mat& rois, Mat& dst, Mat& mask, Size kernel,
+-                        Size stride, Size pad, bool avePoolPaddedArea, int poolingType, float spatialScale,
++                        Size stride, int pad_l, int pad_t, int pad_r, int pad_b, bool avePoolPaddedArea, int poolingType, float spatialScale,
+                         bool computeMaxIdx, int nstripes)
+         {
+             CV_Assert_N(
+@@ -332,7 +344,10 @@ public:
+             p.mask = &mask;
+             p.kernel = kernel;
+             p.stride = stride;
+-            p.pad = pad;
++            p.pad_l = pad_l;
++            p.pad_t = pad_t;
++            p.pad_r = pad_r;
++            p.pad_b = pad_b;
+             p.avePoolPaddedArea = avePoolPaddedArea;
+             p.nstripes = nstripes;
+             p.computeMaxIdx = computeMaxIdx;
+@@ -359,7 +374,6 @@ public:
+             size_t stripeStart = r.start*stripeSize;
+             size_t stripeEnd = std::min(r.end*stripeSize, total);
+             int kernel_w = kernel.width, kernel_h = kernel.height;
+-            int pad_w = pad.width, pad_h = pad.height;
+             int stride_w = stride.width, stride_h = stride.height;
+             bool compMaxIdx = computeMaxIdx;
+ 
+@@ -411,8 +425,8 @@ public:
+                 }
+                 else
+                 {
+-                    ystart = y0 * stride_h - pad_h;
+-                    yend = min(ystart + kernel_h, inp_height + pad_h);
++                    ystart = y0 * stride_h - pad_t;
++                    yend = min(ystart + kernel_h, inp_height + pad_b);
+                     srcData = src->ptr<float>(n, c);
+                 }
+                 int ydelta = yend - ystart;
+@@ -428,7 +442,7 @@ public:
+                 if( poolingType == MAX)
+                     for( ; x0 < x1; x0++ )
+                     {
+-                        int xstart = x0 * stride_w - pad_w;
++                        int xstart = x0 * stride_w - pad_l;
+                         int xend = min(xstart + kernel_w, inp_width);
+                         xstart = max(xstart, 0);
+                         if (xstart >= xend || ystart >= yend)
+@@ -439,7 +453,7 @@ public:
+                             continue;
+                         }
+ #if CV_SIMD128
+-                        if( xstart > 0 && x0 + 7 < x1 && (x0 + 7) * stride_w - pad_w + kernel_w < inp_width )
++                        if( xstart > 0 && x0 + 7 < x1 && (x0 + 7) * stride_w - pad_l + kernel_w < inp_width )
+                         {
+                             if( compMaxIdx )
+                             {
+@@ -578,15 +592,15 @@ public:
+                 {
+                     for( ; x0 < x1; x0++ )
+                     {
+-                        int xstart = x0 * stride_w - pad_w;
+-                        int xend = min(xstart + kernel_w, inp_width + pad_w);
++                        int xstart = x0 * stride_w - pad_l;
++                        int xend = min(xstart + kernel_w, inp_width + pad_r);
+                         int xdelta = xend - xstart;
+                         xstart = max(xstart, 0);
+                         xend = min(xend, inp_width);
+                         float inv_kernel_area = avePoolPaddedArea ? xdelta * ydelta : ((yend - ystart) * (xend - xstart));
+                         inv_kernel_area = 1.0 / inv_kernel_area;
+ #if CV_SIMD128
+-                        if( xstart > 0 && x0 + 7 < x1 && (x0 + 7) * stride_w - pad_w + kernel_w < inp_width )
++                        if( xstart > 0 && x0 + 7 < x1 && (x0 + 7) * stride_w - pad_l + kernel_w < inp_width )
+                         {
+                             v_float32x4 sum_val0 = v_setzero_f32(), sum_val1 = v_setzero_f32();
+                             v_float32x4 ikarea = v_setall_f32(inv_kernel_area);
+@@ -695,21 +709,21 @@ public:
+     {
+         const int nstripes = getNumThreads();
+         Mat rois;
+-        PoolingInvoker::run(src, rois, dst, mask, kernel, stride, pad, avePoolPaddedArea, type, spatialScale, computeMaxIdx, nstripes);
++        PoolingInvoker::run(src, rois, dst, mask, kernel, stride, pad_l, pad_t, pad_r, pad_b,  avePoolPaddedArea, type, spatialScale, computeMaxIdx, nstripes);
+     }
+ 
+     void avePooling(Mat &src, Mat &dst)
+     {
+         const int nstripes = getNumThreads();
+         Mat rois, mask;
+-        PoolingInvoker::run(src, rois, dst, mask, kernel, stride, pad, avePoolPaddedArea, type, spatialScale, computeMaxIdx, nstripes);
++        PoolingInvoker::run(src, rois, dst, mask, kernel, stride, pad_l, pad_t, pad_r, pad_b, avePoolPaddedArea, type, spatialScale, computeMaxIdx, nstripes);
+     }
+ 
+     void roiPooling(const Mat &src, const Mat &rois, Mat &dst)
+     {
+         const int nstripes = getNumThreads();
+         Mat mask;
+-        PoolingInvoker::run(src, rois, dst, mask, kernel, stride, pad, avePoolPaddedArea, type, spatialScale, computeMaxIdx, nstripes);
++        PoolingInvoker::run(src, rois, dst, mask, kernel, stride, pad_l, pad_t, pad_r, pad_b, avePoolPaddedArea, type, spatialScale, computeMaxIdx, nstripes);
+     }
+ 
+     virtual Ptr<BackendNode> initMaxPoolingHalide(const std::vector<Ptr<BackendWrapper> > &inputs)
+@@ -723,10 +737,10 @@ public:
+         Halide::Func top = (name.empty() ? Halide::Func() : Halide::Func(name));
+         Halide::RDom r(0, kernel.width, 0, kernel.height);
+         Halide::Expr kx, ky;
+-        if (pad.width || pad.height)
++        if(pad_l || pad_t)
+         {
+-            kx = clamp(x * stride.width + r.x - pad.width, 0, inWidth - 1);
+-            ky = clamp(y * stride.height + r.y - pad.height, 0, inHeight - 1);
++            kx = clamp(x * stride.width + r.x - pad_l, 0, inWidth - 1);
++            ky = clamp(y * stride.height + r.y - pad_t, 0, inHeight - 1);
+         }
+         else
+         {
+@@ -739,11 +753,11 @@ public:
+ 
+         // Compute offset from argmax in range [0, kernel_size).
+         Halide::Expr max_index;
+-        if (pad.width || pad.height)
++        if(pad_l || pad_t)
+         {
+-            max_index = clamp(y * stride.height + res[1] - pad.height,
++            max_index = clamp(y * stride.height + res[1] - pad_t,
+                               0, inHeight - 1) * inWidth +
+-                        clamp(x * stride.width + res[0] - pad.width,
++                        clamp(x * stride.width + res[0] - pad_l,
+                               0, inWidth - 1);
+         }
+         else
+@@ -852,21 +866,21 @@ public:
+         }
+         else if (padMode.empty())
+         {
+-            float height = (float)(in.height + 2 * pad.height - kernel.height) / stride.height;
+-            float width = (float)(in.width + 2 * pad.width - kernel.width) / stride.width;
++            float height = (float)(in.height + pad_t + pad_b - kernel.height) / stride.height;
++            float width = (float)(in.width + pad_l + pad_r - kernel.width) / stride.width;
+             out.height = 1 + (ceilMode ? ceil(height) : floor(height));
+             out.width = 1 + (ceilMode ? ceil(width) : floor(width));
+ 
+-            if (pad.height || pad.width)
++            if (pad_r || pad_b)
+             {
+                 // If we have padding, ensure that the last pooling starts strictly
+                 // inside the image (instead of at the padding); otherwise clip the last.
+-                if ((out.height - 1) * stride.height >= in.height + pad.height)
++                if ((out.height - 1) * stride.height >= in.height + pad_b)
+                     --out.height;
+-                if ((out.width - 1) * stride.width >= in.width + pad.width)
++                if ((out.width - 1) * stride.width >= in.width + pad_r)
+                     --out.width;
+-                CV_Assert((out.height - 1) * stride.height < in.height + pad.height);
+-                CV_Assert((out.width - 1) * stride.width < in.width + pad.width);
++                CV_Assert((out.height - 1) * stride.height < in.height + pad_b);
++                CV_Assert((out.width - 1) * stride.width < in.width + pad_r);
+             }
+         }
+         else
+@@ -888,6 +902,7 @@ public:
+             dims[1] = psRoiOutChannels;
+         }
+         outputs.assign(type == MAX ? 2 : 1, shape(dims, 4));
++
+         return false;
+     }
+ 
+diff --git a/modules/dnn/src/ocl4dnn/include/ocl4dnn.hpp b/modules/dnn/src/ocl4dnn/include/ocl4dnn.hpp
+index e0ca5ca98c..eda2e837c0 100644
+--- a/modules/dnn/src/ocl4dnn/include/ocl4dnn.hpp
++++ b/modules/dnn/src/ocl4dnn/include/ocl4dnn.hpp
+@@ -345,7 +345,7 @@ struct OCL4DNNPoolConfig
+ {
+     OCL4DNNPoolConfig() :
+         kernel(1, 1),
+-        pad(0, 0),
++        pad_l(0), pad_t(0), pad_r(0), pad_b(0),
+         stride(1, 1),
+         dilation(1, 1),
+         channels(0),
+@@ -358,7 +358,7 @@ struct OCL4DNNPoolConfig
+     MatShape in_shape;
+     MatShape out_shape;
+     Size kernel;
+-    Size pad;
++    int pad_l, pad_t, pad_r, pad_b;
+     Size stride;
+     Size dilation;
+ 
+@@ -381,7 +381,6 @@ class OCL4DNNPool
+                      UMat& top_mask);
+     private:
+         // Pooling parameters
+-        std::vector<int32_t> pad_;
+         std::vector<int32_t> stride_;
+         std::vector<int32_t> kernel_shape_;
+         std::vector<int32_t> im_in_shape_;
+@@ -394,8 +393,10 @@ class OCL4DNNPool
+         int32_t kernel_w_;
+         int32_t stride_h_;
+         int32_t stride_w_;
+-        int32_t pad_h_;
+-        int32_t pad_w_;
++        int32_t pad_t_;
++        int32_t pad_l_;
++        int32_t pad_b_;
++        int32_t pad_r_;
+         int32_t height_;
+         int32_t width_;
+         int32_t pooled_height_;
+diff --git a/modules/dnn/src/ocl4dnn/src/ocl4dnn_pool.cpp b/modules/dnn/src/ocl4dnn/src/ocl4dnn_pool.cpp
+index 77cd3a6337..47b40cc6c2 100644
+--- a/modules/dnn/src/ocl4dnn/src/ocl4dnn_pool.cpp
++++ b/modules/dnn/src/ocl4dnn/src/ocl4dnn_pool.cpp
+@@ -62,7 +62,6 @@ OCL4DNNPool<Dtype>::OCL4DNNPool(OCL4DNNPoolConfig config)
+     for (int i = 0; i < spatial_dims; ++i)
+     {
+         kernel_shape_.push_back(i == 0 ? config.kernel.height : config.kernel.width);
+-        pad_.push_back(i == 0 ? config.pad.height : config.pad.width);
+         stride_.push_back(i == 0 ? config.stride.height : config.stride.width);
+         im_in_shape_.push_back(config.in_shape[dims - spatial_dims + i]);
+         im_out_shape_.push_back(config.out_shape[dims - spatial_dims + i]);
+@@ -72,8 +71,10 @@ OCL4DNNPool<Dtype>::OCL4DNNPool(OCL4DNNPoolConfig config)
+     kernel_w_ = kernel_shape_[1];
+     stride_h_ = stride_[0];
+     stride_w_ = stride_[1];
+-    pad_h_ = pad_[0];
+-    pad_w_ = pad_[1];
++    pad_t_ = config.pad_t;
++    pad_l_ = config.pad_l;
++    pad_r_ = config.pad_r;
++    pad_b_ = config.pad_b;
+     height_ = im_in_shape_[0];
+     width_ = im_in_shape_[1];
+     pooled_height_ = im_out_shape_[0];
+@@ -113,14 +114,13 @@ bool OCL4DNNPool<Dtype>::Forward(const UMat& bottom,
+                 ocl::dnn::ocl4dnn_pooling_oclsrc,
+                 format(" -D Dtype=%s -D KERNEL_MAX_POOL=1 -D KERNEL_W=%d -D KERNEL_H=%d"
+                        " -D STRIDE_W=%d -D STRIDE_H=%d"
+-                       " -D PAD_W=%d -D PAD_H=%d%s",
++                       " -D PAD_L=%d -D PAD_T=%d -D PAD_R=%d -D PAD_B=%d%s",
+                        (use_half) ? "half" : "float",
+                        kernel_w_, kernel_h_,
+                        stride_w_, stride_h_,
+-                       pad_w_, pad_h_,
++                       pad_l_, pad_t_, pad_r_, pad_b_,
+                        computeMaxIdx ? " -D HAVE_MASK=1" : ""
+                 ));
+-
+             if (oclk_max_pool_forward.empty())
+                 return false;
+ 
+@@ -150,11 +150,11 @@ bool OCL4DNNPool<Dtype>::Forward(const UMat& bottom,
+                 ocl::dnn::ocl4dnn_pooling_oclsrc,
+                 format(" -D Dtype=%s -D KERNEL_AVE_POOL=1 -D KERNEL_W=%d -D KERNEL_H=%d"
+                        " -D STRIDE_W=%d -D STRIDE_H=%d"
+-                       " -D PAD_W=%d -D PAD_H=%d%s",
++                       " -D PAD_L=%d -D PAD_T=%d -D PAD_R=%d -D PAD_B=%d%s",
+                        (use_half) ? "half" : "float",
+                        kernel_w_, kernel_h_,
+                        stride_w_, stride_h_,
+-                       pad_w_, pad_h_,
++                       pad_l_, pad_t_, pad_r_, pad_b_,
+                        avePoolPaddedArea ? " -D AVE_POOL_PADDING_AREA" : ""
+                 ));
+ 
+diff --git a/modules/dnn/src/onnx/onnx_importer.cpp b/modules/dnn/src/onnx/onnx_importer.cpp
+index bd10e1dedf..04b56f8df2 100644
+--- a/modules/dnn/src/onnx/onnx_importer.cpp
++++ b/modules/dnn/src/onnx/onnx_importer.cpp
+@@ -174,9 +174,8 @@ LayerParams ONNXImporter::getLayerParams(const opencv_onnx::NodeProto& node_prot
+         else if(attribute_name == "pads")
+         {
+             CV_Assert(attribute_proto.ints_size() == 4);
+-            lp.set("pad_h", saturate_cast<int32_t>(attribute_proto.ints(0)));
+-            lp.set("pad_w", saturate_cast<int32_t>(attribute_proto.ints(1)));
+-            // push pad_b and pad_r for compute ceil_mode
++            lp.set("pad_t", saturate_cast<int32_t>(attribute_proto.ints(0)));
++            lp.set("pad_l", saturate_cast<int32_t>(attribute_proto.ints(1)));
+             lp.set("pad_b", saturate_cast<int32_t>(attribute_proto.ints(2)));
+             lp.set("pad_r", saturate_cast<int32_t>(attribute_proto.ints(3)));
+         }
+@@ -306,6 +305,7 @@ void ONNXImporter::populateNet(Net dstNet)
+         std::string layer_type = node_proto.op_type();
+         layerParams.type = layer_type;
+ 
++
+         if (layer_type == "MaxPool")
+         {
+             layerParams.type = "Pooling";
+@@ -551,7 +551,6 @@ void ONNXImporter::populateNet(Net dstNet)
+ 
+          for (int j = 0; j < node_proto.input_size(); j++) {
+              layerId = layer_id.find(node_proto.input(j));
+-
+              if (layerId != layer_id.end()) {
+                  dstNet.connect(layerId->second.layerId, layerId->second.outputId, id, j);
+              }
+diff --git a/modules/dnn/src/opencl/ocl4dnn_pooling.cl b/modules/dnn/src/opencl/ocl4dnn_pooling.cl
+index 77d2e5ba33..53c61e4bd2 100644
+--- a/modules/dnn/src/opencl/ocl4dnn_pooling.cl
++++ b/modules/dnn/src/opencl/ocl4dnn_pooling.cl
+@@ -73,8 +73,8 @@ __kernel void
+   const int xx = index / pooled_width;
+   const int ph = xx % pooled_height;
+   const int ch = xx / pooled_height;
+-  int hstart = ph * STRIDE_H - PAD_H;
+-  int wstart = pw * STRIDE_W - PAD_W;
++  int hstart = ph * STRIDE_H - PAD_T;
++  int wstart = pw * STRIDE_W - PAD_L;
+   Dtype maxval = -FLT_MAX;
+   int maxidx = -1;
+   int in_offset = ch * height * width;
+@@ -117,10 +117,10 @@ __kernel void TEMPLATE(ave_pool_forward, Dtype)(
+   const int xx = index / pooled_width;
+   const int ph = xx % pooled_height;
+   const int ch = xx / pooled_height;
+-  int hstart = ph * STRIDE_H - PAD_H;
+-  int wstart = pw * STRIDE_W - PAD_W;
+-  int hend = min(hstart + KERNEL_H, height + PAD_H);
+-  int wend = min(wstart + KERNEL_W, width + PAD_W);
++  int hstart = ph * STRIDE_H - PAD_T;
++  int wstart = pw * STRIDE_W - PAD_L;
++  int hend = min(hstart + KERNEL_H, height + PAD_B);
++  int wend = min(wstart + KERNEL_W, width + PAD_R);
+   int pool_size;
+ #ifdef AVE_POOL_PADDING_AREA
+   pool_size = (hend - hstart) * (wend - wstart);
+diff --git a/modules/dnn/src/opencl/pooling.cl b/modules/dnn/src/opencl/pooling.cl
+index adfd59e6d9..2a92cb2f01 100644
+--- a/modules/dnn/src/opencl/pooling.cl
++++ b/modules/dnn/src/opencl/pooling.cl
+@@ -27,7 +27,7 @@
+ __kernel void MaxPoolForward(const int nthreads,
+     __global T* bottom_data, const int num, const int channels, const int height, const int width,
+     const int pooled_height, const int pooled_width, const int kernel_h, const int kernel_w,
+-    const int stride_h, const int stride_w, const int pad_h, const int pad_w,
++    const int stride_h, const int stride_w, const int pad_t, const int pad_l, const int pad_b, const int pad_r,
+     __global T* top_data
+ #ifdef MASK
+     , __global float* mask
+@@ -41,8 +41,8 @@ __kernel void MaxPoolForward(const int nthreads,
+     int ph = (index / pooled_width) % pooled_height;
+     int c = (index / pooled_width / pooled_height) % channels;
+     int n = index / pooled_width / pooled_height / channels;
+-    int hstart = ph * stride_h - pad_h;
+-    int wstart = pw * stride_w - pad_w;
++    int hstart = ph * stride_h - pad_t;
++    int wstart = pw * stride_w - pad_l;
+     const int hend = min(hstart + kernel_h, height);
+     const int wend = min(wstart + kernel_w, width);
+     hstart = max(hstart, 0);
+@@ -71,7 +71,7 @@ __kernel void MaxPoolForward(const int nthreads,
+ __kernel void AvePoolForward(const int nthreads,
+     __global T* bottom_data, const int num, const int channels, const int height, const int width,
+     const int pooled_height, const int pooled_width, const int kernel_h, const int kernel_w,
+-    const int stride_h, const int stride_w, const int pad_h, const int pad_w,
++    const int stride_h, const int stride_w, const int pad_t, const int pad_l, const int pad_b, const int pad_r,
+     __global T* top_data
+ #ifdef MASK
+     , __global float* mask // NOT USED
+@@ -84,9 +84,9 @@ __kernel void AvePoolForward(const int nthreads,
+     int pw = index % pooled_width;
+     int ph = (index / pooled_width) % pooled_height;
+     int c = (index / pooled_width / pooled_height) % channels;
+-    int n = index / pooled_width / pooled_height / channels; int hstart = ph * stride_h - pad_h; int wstart = pw * stride_w - pad_w;
+-    int hend = min(hstart + kernel_h, height + pad_h);
+-    int wend = min(wstart + kernel_w, width + pad_w);
++    int n = index / pooled_width / pooled_height / channels; int hstart = ph * stride_h - pad_t; int wstart = pw * stride_w - pad_l;
++    int hend = min(hstart + kernel_h, height + pad_b);
++    int wend = min(wstart + kernel_w, width + pad_r);
+     const int pool_size = (hend - hstart) * (wend - wstart);
+     hstart = max(hstart, 0);
+     wstart = max(wstart, 0);

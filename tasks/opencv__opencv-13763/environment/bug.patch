@@ -1,0 +1,1520 @@
+diff --git a/modules/core/src/ocl.cpp b/modules/core/src/ocl.cpp
+index 714237ae98..eb6fdc59f7 100644
+--- a/modules/core/src/ocl.cpp
++++ b/modules/core/src/ocl.cpp
+@@ -2993,11 +2993,7 @@ int Kernel::set(int i, const KernelArg& arg)
+     if( !p || !p->handle )
+         return -1;
+     if (i < 0)
+-    {
+-        CV_LOG_ERROR(NULL, cv::format("OpenCL: Kernel(%s)::set(arg_index=%d): negative arg_index",
+-                p->name.c_str(), (int)i));
+         return i;
+-    }
+     if( i == 0 )
+         p->cleanupUMats();
+     cl_int status = 0;
+@@ -3006,19 +3002,10 @@ int Kernel::set(int i, const KernelArg& arg)
+         AccessFlag accessFlags = ((arg.flags & KernelArg::READ_ONLY) ? ACCESS_READ : static_cast<AccessFlag>(0)) |
+                                  ((arg.flags & KernelArg::WRITE_ONLY) ? ACCESS_WRITE : static_cast<AccessFlag>(0));
+         bool ptronly = (arg.flags & KernelArg::PTR_ONLY) != 0;
+-        if (ptronly && arg.m->empty())
+-        {
+-            cl_mem h_null = (cl_mem)NULL;
+-            status = clSetKernelArg(p->handle, (cl_uint)i, sizeof(h_null), &h_null);
+-            CV_OCL_DBG_CHECK_RESULT(status, cv::format("clSetKernelArg('%s', arg_index=%d, cl_mem=NULL)", p->name.c_str(), (int)i).c_str());
+-            return i + 1;
+-        }
+         cl_mem h = (cl_mem)arg.m->handle(accessFlags);
+ 
+         if (!h)
+         {
+-            CV_LOG_ERROR(NULL, cv::format("OpenCL: Kernel(%s)::set(arg_index=%d, flags=%d): can't create cl_mem handle for passed UMat buffer (addr=%p)",
+-                    p->name.c_str(), (int)i, (int)arg.flags, arg.m));
+             p->release();
+             p = 0;
+             return -1;
+diff --git a/modules/dnn/src/layers/mvn_layer.cpp b/modules/dnn/src/layers/mvn_layer.cpp
+index ca7e7112c5..772902ca01 100644
+--- a/modules/dnn/src/layers/mvn_layer.cpp
++++ b/modules/dnn/src/layers/mvn_layer.cpp
+@@ -138,12 +138,9 @@ public:
+         UMat& bnorm_weight = umat_scale;
+         UMat& bnorm_bias = umat_shift;
+ 
+-        const unsigned LOCAL_SIZE = 128;
+         bool use_half = (inputs[0].depth() == CV_16S);
+-        String opts = format(" -DT=%s -DT4=%s -Dconvert_T=%s -DLOCAL_SIZE=%u", use_half ? "half" : "float",
+-                             use_half ? "half4" : "float4", use_half ? "convert_half4" : "convert_float4",
+-                             LOCAL_SIZE
+-        );
++        String opts = format(" -DT=%s -DT4=%s -Dconvert_T=%s", use_half ? "half" : "float",
++                             use_half ? "half4" : "float4", use_half ? "convert_half4" : "convert_float4");
+ 
+         int splitDim = (acrossChannels) ? 1 : 2;
+         for (size_t inpIdx = 0; inpIdx < inputs.size(); inpIdx++)
+@@ -158,8 +155,8 @@ public:
+             float alpha = 1.0f / s[1];
+ 
+             String buildopt = "-DNUM=4" + opts;
+-            ocl::Kernel k("mean_fuse4", ocl::dnn::mvn_oclsrc, buildopt + " -DKERNEL_MEAN_FUSE");
+-            size_t localsize[] = { LOCAL_SIZE };
++            ocl::Kernel k("mean_fuse4", ocl::dnn::mvn_oclsrc, buildopt);
++            size_t localsize[] = { 128 };
+             size_t globalsize[] = { (size_t)s[0] / 4 * localsize[0] };
+ 
+             int argId = 0;
+@@ -168,6 +165,7 @@ public:
+             k.set(argId++, alpha);
+             k.set(argId++, ocl::KernelArg::PtrWriteOnly(meanMat));
+             k.set(argId++, ocl::KernelArg::PtrWriteOnly(tmpMat));
++            k.set(argId++, NULL, localsize[0] * sizeof(cl_float4));
+             bool ret = k.run(1, globalsize, localsize, false);
+             if (!ret)
+                 return false;
+@@ -175,7 +173,7 @@ public:
+             buildopt += format(" %s %s", (fuse_batch_norm) ? "-DFUSE_BATCH_NORM" : "",
+                                (fuse_relu) ? "-DFUSE_RELU" : "");
+ 
+-            ocl::Kernel k1("mvn_fuse4", ocl::dnn::mvn_oclsrc, buildopt + " -DKERNEL_MVN_FUSE");
++            ocl::Kernel k1("mvn_fuse4", ocl::dnn::mvn_oclsrc, buildopt);
+             argId = 0;
+             k1.set(argId++, ocl::KernelArg::PtrReadOnly(tmpMat));
+             k1.set(argId++, ocl::KernelArg::PtrReadOnly(inpMat));
+@@ -187,6 +185,7 @@ public:
+             k1.set(argId++, ocl::KernelArg::PtrReadOnly(bnorm_weight));
+             k1.set(argId++, ocl::KernelArg::PtrReadOnly(bnorm_bias));
+             k1.set(argId++, ocl::KernelArg::PtrWriteOnly(outMat));
++            k1.set(argId++, NULL, localsize[0] * sizeof(cl_float4));
+             ret = k1.run(1, globalsize, localsize, false);
+             if (!ret)
+                 return false;
+@@ -244,7 +243,7 @@ public:
+             if (normVariance)
+             {
+                 String kname = format("calc_mean%d", number);
+-                ocl::Kernel kernel(kname.c_str(), ocl::dnn::mvn_oclsrc, buildopt + " -DKERNEL_MEAN");
++                ocl::Kernel kernel(kname.c_str(), ocl::dnn::mvn_oclsrc, buildopt);
+                 if (kernel.empty())
+                     return false;
+ 
+@@ -264,7 +263,7 @@ public:
+             }
+ 
+             String kname = format("mvn%d", number);
+-            buildopt += format("%s%s%s -DKERNEL_MVN", (normVariance) ? " -DNORM_VARIANCE" : "",
++            buildopt += format("%s%s%s", (normVariance) ? " -DNORM_VARIANCE" : "",
+                                (fuse_batch_norm) ? " -DFUSE_BATCH_NORM" : "",
+                                (fuse_relu) ? " -DFUSE_RELU" : "");
+             ocl::Kernel kernel1(kname.c_str(), ocl::dnn::mvn_oclsrc, buildopt);
+diff --git a/modules/dnn/src/opencl/mvn.cl b/modules/dnn/src/opencl/mvn.cl
+index 1bec5a0dde..ffc81a8704 100644
+--- a/modules/dnn/src/opencl/mvn.cl
++++ b/modules/dnn/src/opencl/mvn.cl
+@@ -74,8 +74,6 @@
+     #define MVN_FUSE mvn_fuse1
+ #endif
+ 
+-#ifdef KERNEL_MEAN
+-
+ __kernel void CALC_MEAN(__global const Dtype* src,
+                         const int rows,
+                         const int cols,
+@@ -96,8 +94,6 @@ __kernel void CALC_MEAN(__global const Dtype* src,
+     store(dst_vec, dst, index);
+ }
+ 
+-#elif defined KERNEL_MVN
+-
+ __kernel void MVN(__global const Dtype* src,
+                   const int rows,
+                   const int cols,
+@@ -144,13 +140,12 @@ __kernel void MVN(__global const Dtype* src,
+     store(dst_vec, dst, index);
+ }
+ 
+-#elif defined KERNEL_MEAN_FUSE
+-
+ __kernel void MEAN_FUSE(__global const T * A,
+                         unsigned int A_col_size,
+                         float alpha,
+                         __global T4 * mean,
+-                        __global Dtype * tmp)
++                        __global Dtype * tmp,
++                        __local Dtype4 * work)
+ {
+     unsigned int row_gid = get_group_id(0);
+     unsigned int lid = get_local_id(0);
+@@ -173,16 +168,15 @@ __kernel void MEAN_FUSE(__global const T * A,
+         dot2 += convert_float4(a2);
+         dot3 += convert_float4(a3);
+ 
+-        i += LOCAL_SIZE;
++        i += get_local_size(0);
+     }
+ 
+-    __local Dtype4 work[LOCAL_SIZE];
+     work[lid].s0 = dot(dot0, b0);
+     work[lid].s1 = dot(dot1, b0);
+     work[lid].s2 = dot(dot2, b0);
+     work[lid].s3 = dot(dot3, b0);
+ 
+-    for(unsigned int stride=LOCAL_SIZE/2 ; stride>0 ; stride>>=1)
++    for(unsigned int stride=get_local_size(0)/2 ; stride>0 ; stride>>=1)
+     {
+         barrier(CLK_LOCAL_MEM_FENCE);
+         if(lid < stride)
+@@ -218,12 +212,10 @@ __kernel void MEAN_FUSE(__global const T * A,
+         vstore4(dot2, i, dst0_read + 2 * A_col_size);
+         vstore4(dot3, i, dst0_read + 3 * A_col_size);
+ 
+-        i += LOCAL_SIZE;
++        i += get_local_size(0);
+     }
+ }
+ 
+-#elif defined KERNEL_MVN_FUSE
+-
+ __kernel void MVN_FUSE(__global const Dtype * tmp,
+                        __global const T * A,
+                        __global const T4 * mean,
+@@ -233,7 +225,8 @@ __kernel void MVN_FUSE(__global const Dtype * tmp,
+                        const float relu_slope,
+                        __global const Dtype4 * bnorm_weight,
+                        __global const Dtype4 * bnorm_bias,
+-                       __global T * B)
++                       __global T * B,
++                       __local Dtype4 * work)
+ {
+     unsigned int row_gid = get_group_id(0);
+     unsigned int lid = get_local_id(0);
+@@ -257,16 +250,15 @@ __kernel void MVN_FUSE(__global const Dtype * tmp,
+         dot2 += a2;
+         dot3 += a3;
+ 
+-        i += LOCAL_SIZE;
++        i += get_local_size(0);
+     }
+ 
+-    __local Dtype4 work[LOCAL_SIZE];
+     work[lid].s0 = dot(dot0, b0);
+     work[lid].s1 = dot(dot1, b0);
+     work[lid].s2 = dot(dot2, b0);
+     work[lid].s3 = dot(dot3, b0);
+ 
+-    for(unsigned int stride=LOCAL_SIZE/2 ; stride>0 ; stride>>=1)
++    for(unsigned int stride=get_local_size(0)/2 ; stride>0 ; stride>>=1)
+     {
+         barrier(CLK_LOCAL_MEM_FENCE);
+         if(lid < stride)
+@@ -322,10 +314,6 @@ __kernel void MVN_FUSE(__global const Dtype * tmp,
+         vstore4(convert_T(dot2), i, dst0_read + 2 * A_col_size);
+         vstore4(convert_T(dot3), i, dst0_read + 3 * A_col_size);
+ 
+-        i += LOCAL_SIZE;
++        i += get_local_size(0);
+     }
+ }
+-
+-#else
+-#error "Configuration error!"
+-#endif
+diff --git a/modules/imgproc/src/color_yuv.cpp b/modules/imgproc/src/color_yuv.cpp
+index 7d731378e2..c596e40a53 100644
+--- a/modules/imgproc/src/color_yuv.cpp
++++ b/modules/imgproc/src/color_yuv.cpp
+@@ -963,22 +963,22 @@ struct YCrCb2RGB_i<ushort>
+ 
+ ///////////////////////////////////// YUV420 -> RGB /////////////////////////////////////
+ 
+-static const int ITUR_BT_601_CY = 1220542;
+-static const int ITUR_BT_601_CUB = 2116026;
+-static const int ITUR_BT_601_CUG = -409993;
+-static const int ITUR_BT_601_CVG = -852492;
+-static const int ITUR_BT_601_CVR = 1673527;
+-static const int ITUR_BT_601_SHIFT = 20;
++const int ITUR_BT_601_CY = 1220542;
++const int ITUR_BT_601_CUB = 2116026;
++const int ITUR_BT_601_CUG = -409993;
++const int ITUR_BT_601_CVG = -852492;
++const int ITUR_BT_601_CVR = 1673527;
++const int ITUR_BT_601_SHIFT = 20;
+ 
+ // Coefficients for RGB to YUV420p conversion
+-static const int ITUR_BT_601_CRY =  269484;
+-static const int ITUR_BT_601_CGY =  528482;
+-static const int ITUR_BT_601_CBY =  102760;
+-static const int ITUR_BT_601_CRU = -155188;
+-static const int ITUR_BT_601_CGU = -305135;
+-static const int ITUR_BT_601_CBU =  460324;
+-static const int ITUR_BT_601_CGV = -385875;
+-static const int ITUR_BT_601_CBV = -74448;
++const int ITUR_BT_601_CRY =  269484;
++const int ITUR_BT_601_CGY =  528482;
++const int ITUR_BT_601_CBY =  102760;
++const int ITUR_BT_601_CRU = -155188;
++const int ITUR_BT_601_CGU = -305135;
++const int ITUR_BT_601_CBU =  460324;
++const int ITUR_BT_601_CGV = -385875;
++const int ITUR_BT_601_CBV = -74448;
+ 
+ //R = 1.164(Y - 16) + 1.596(V - 128)
+ //G = 1.164(Y - 16) - 0.813(V - 128) - 0.391(U - 128)
+@@ -988,146 +988,49 @@ static const int ITUR_BT_601_CBV = -74448;
+ //G = (1220542(Y - 16) - 852492(V - 128) - 409993(U - 128) + (1 << 19)) >> 20
+ //B = (1220542(Y - 16)                  + 2116026(U - 128) + (1 << 19)) >> 20
+ 
+-static inline void uvToRGBuv(const uchar u, const uchar v, int& ruv, int& guv, int& buv)
+-{
+-    int uu, vv;
+-    uu = int(u) - 128;
+-    vv = int(v) - 128;
+-
+-    ruv = (1 << (ITUR_BT_601_SHIFT - 1)) + ITUR_BT_601_CVR * vv;
+-    guv = (1 << (ITUR_BT_601_SHIFT - 1)) + ITUR_BT_601_CVG * vv + ITUR_BT_601_CUG * uu;
+-    buv = (1 << (ITUR_BT_601_SHIFT - 1)) + ITUR_BT_601_CUB * uu;
+-}
+-
+-static inline void uvToRGBuv(const v_uint8& u, const v_uint8& v,
+-                             v_int32 (&ruv)[4],
+-                             v_int32 (&guv)[4],
+-                             v_int32 (&buv)[4])
+-{
+-    v_uint8 v128 = vx_setall_u8(128);
+-    v_int8 su = v_reinterpret_as_s8(v_sub_wrap(u, v128));
+-    v_int8 sv = v_reinterpret_as_s8(v_sub_wrap(v, v128));
+-
+-    v_int16 uu0, uu1, vv0, vv1;
+-    v_expand(su, uu0, uu1);
+-    v_expand(sv, vv0, vv1);
+-    v_int32 uu[4], vv[4];
+-    v_expand(uu0, uu[0], uu[1]); v_expand(uu1, uu[2], uu[3]);
+-    v_expand(vv0, vv[0], vv[1]); v_expand(vv1, vv[2], vv[3]);
+-
+-    v_int32 vshift = vx_setall_s32(1 << (ITUR_BT_601_SHIFT - 1));
+-    v_int32 vr = vx_setall_s32(ITUR_BT_601_CVR);
+-    v_int32 vg = vx_setall_s32(ITUR_BT_601_CVG);
+-    v_int32 ug = vx_setall_s32(ITUR_BT_601_CUG);
+-    v_int32 ub = vx_setall_s32(ITUR_BT_601_CUB);
+-
+-    for (int k = 0; k < 4; k++)
+-    {
+-        ruv[k] = vshift + vr * vv[k];
+-        guv[k] = vshift + vg * vv[k] + ug * uu[k];
+-        buv[k] = vshift + ub * uu[k];
+-    }
+-}
+-
+-static inline void yRGBuvToRGBA(const uchar vy, const int ruv, const int guv, const int buv,
+-                                uchar& r, uchar& g, uchar& b, uchar& a)
+-{
+-    int yy = int(vy);
+-    int y = std::max(0, yy - 16) * ITUR_BT_601_CY;
+-    r = saturate_cast<uchar>((y + ruv) >> ITUR_BT_601_SHIFT);
+-    g = saturate_cast<uchar>((y + guv) >> ITUR_BT_601_SHIFT);
+-    b = saturate_cast<uchar>((y + buv) >> ITUR_BT_601_SHIFT);
+-    a = uchar(0xff);
+-}
+-
+-static inline void yRGBuvToRGBA(const v_uint8& vy,
+-                                const v_int32 (&ruv)[4],
+-                                const v_int32 (&guv)[4],
+-                                const v_int32 (&buv)[4],
+-                                v_uint8& rr, v_uint8& gg, v_uint8& bb)
+-{
+-    v_uint8 v16 = vx_setall_u8(16);
+-    v_uint8 posY = vy - v16;
+-    v_uint16 yy0, yy1;
+-    v_expand(posY, yy0, yy1);
+-    v_int32 yy[4];
+-    v_int32 yy00, yy01, yy10, yy11;
+-    v_expand(v_reinterpret_as_s16(yy0), yy[0], yy[1]);
+-    v_expand(v_reinterpret_as_s16(yy1), yy[2], yy[3]);
+-
+-    v_int32 vcy = vx_setall_s32(ITUR_BT_601_CY);
+-
+-    v_int32 y[4], r[4], g[4], b[4];
+-    for(int k = 0; k < 4; k++)
+-    {
+-        y[k] = yy[k]*vcy;
+-        r[k] = (y[k] + ruv[k]) >> ITUR_BT_601_SHIFT;
+-        g[k] = (y[k] + guv[k]) >> ITUR_BT_601_SHIFT;
+-        b[k] = (y[k] + buv[k]) >> ITUR_BT_601_SHIFT;
+-    }
+-
+-    v_int16 r0, r1, g0, g1, b0, b1;
+-    r0 = v_pack(r[0], r[1]);
+-    r1 = v_pack(r[2], r[3]);
+-    g0 = v_pack(g[0], g[1]);
+-    g1 = v_pack(g[2], g[3]);
+-    b0 = v_pack(b[0], b[1]);
+-    b1 = v_pack(b[2], b[3]);
+-
+-    rr = v_pack_u(r0, r1);
+-    gg = v_pack_u(g0, g1);
+-    bb = v_pack_u(b0, b1);
+-}
+-
+ template<int bIdx, int dcn, bool is420>
+-static inline void cvtYuv42xxp2RGB8(const uchar u, const uchar v,
+-                                    const uchar vy01, const uchar vy11, const uchar vy02, const uchar vy12,
++static inline void cvtYuv42xxp2RGB8(int u, int v, int vy01, int vy11, int vy02, int vy12,
+                                     uchar* row1, uchar* row2)
+ {
+-    int ruv, guv, buv;
+-    uvToRGBuv(u, v, ruv, guv, buv);
++    u = u - 128;
++    v = v - 128;
+ 
+-    uchar r00, g00, b00, a00;
+-    uchar r01, g01, b01, a01;
++    int ruv = (1 << (ITUR_BT_601_SHIFT - 1)) + ITUR_BT_601_CVR * v;
++    int guv = (1 << (ITUR_BT_601_SHIFT - 1)) + ITUR_BT_601_CVG * v + ITUR_BT_601_CUG * u;
++    int buv = (1 << (ITUR_BT_601_SHIFT - 1)) + ITUR_BT_601_CUB * u;
+ 
+-    yRGBuvToRGBA(vy01, ruv, guv, buv, r00, g00, b00, a00);
+-    yRGBuvToRGBA(vy11, ruv, guv, buv, r01, g01, b01, a01);
+-
+-    row1[2-bIdx] = r00;
+-    row1[1]      = g00;
+-    row1[bIdx]   = b00;
++    int y00 = std::max(0, vy01 - 16) * ITUR_BT_601_CY;
++    row1[2-bIdx] = saturate_cast<uchar>((y00 + ruv) >> ITUR_BT_601_SHIFT);
++    row1[1]      = saturate_cast<uchar>((y00 + guv) >> ITUR_BT_601_SHIFT);
++    row1[bIdx]   = saturate_cast<uchar>((y00 + buv) >> ITUR_BT_601_SHIFT);
+     if(dcn == 4)
+-        row1[3] = a00;
++        row1[3] = uchar(0xff);
+ 
+-    row1[dcn+2-bIdx] = r01;
+-    row1[dcn+1]      = g01;
+-    row1[dcn+0+bIdx] = b01;
++    int y01 = std::max(0, vy11 - 16) * ITUR_BT_601_CY;
++    row1[dcn+2-bIdx] = saturate_cast<uchar>((y01 + ruv) >> ITUR_BT_601_SHIFT);
++    row1[dcn+1]      = saturate_cast<uchar>((y01 + guv) >> ITUR_BT_601_SHIFT);
++    row1[dcn+0+bIdx] = saturate_cast<uchar>((y01 + buv) >> ITUR_BT_601_SHIFT);
+     if(dcn == 4)
+-        row1[7] = a01;
++        row1[7] = uchar(0xff);
+ 
+     if(is420)
+     {
+-        uchar r10, g10, b10, a10;
+-        uchar r11, g11, b11, a11;
+-
+-        yRGBuvToRGBA(vy02, ruv, guv, buv, r10, g10, b10, a10);
+-        yRGBuvToRGBA(vy12, ruv, guv, buv, r11, g11, b11, a11);
+-
+-        row2[2-bIdx] = r10;
+-        row2[1]      = g10;
+-        row2[bIdx]   = b10;
++        int y10 = std::max(0, vy02 - 16) * ITUR_BT_601_CY;
++        row2[2-bIdx] = saturate_cast<uchar>((y10 + ruv) >> ITUR_BT_601_SHIFT);
++        row2[1]      = saturate_cast<uchar>((y10 + guv) >> ITUR_BT_601_SHIFT);
++        row2[bIdx]   = saturate_cast<uchar>((y10 + buv) >> ITUR_BT_601_SHIFT);
+         if(dcn == 4)
+-            row2[3] = a10;
++            row2[3] = uchar(0xff);
+ 
+-        row2[dcn+2-bIdx] = r11;
+-        row2[dcn+1]      = g11;
+-        row2[dcn+0+bIdx] = b11;
++        int y11 = std::max(0, vy12 - 16) * ITUR_BT_601_CY;
++        row2[dcn+2-bIdx] = saturate_cast<uchar>((y11 + ruv) >> ITUR_BT_601_SHIFT);
++        row2[dcn+1]      = saturate_cast<uchar>((y11 + guv) >> ITUR_BT_601_SHIFT);
++        row2[dcn+0+bIdx] = saturate_cast<uchar>((y11 + buv) >> ITUR_BT_601_SHIFT);
+         if(dcn == 4)
+-            row2[7] = a11;
++            row2[7] = uchar(0xff);
+     }
+ }
+ 
+-// bIdx is 0 or 2, uIdx is 0 or 1, dcn is 3 or 4
+ template<int bIdx, int uIdx, int dcn>
+ struct YUV420sp2RGB8Invoker : ParallelLoopBody
+ {
+@@ -1153,80 +1056,15 @@ struct YUV420sp2RGB8Invoker : ParallelLoopBody
+             uchar* row2 = dst_data + dst_step * (j + 1);
+             const uchar* y2 = y1 + stride;
+ 
+-            int i = 0;
+-#if CV_SIMD
+-            const int vsize = v_uint8::nlanes;
+-            v_uint8 a = vx_setall_u8(uchar(0xff));
+-            for( ; i <= width - 2*vsize;
+-                 i += 2*vsize, row1 += vsize*dcn*2, row2 += vsize*dcn*2)
++            for (int i = 0; i < width; i += 2, row1 += dcn*2, row2 += dcn*2)
+             {
+-                v_uint8 u, v;
+-                v_load_deinterleave(uv + i, u, v);
+-
+-                if(uIdx)
+-                {
+-                    swap(u, v);
+-                }
+-
+-                v_uint8 vy[4];
+-                v_load_deinterleave(y1 + i, vy[0], vy[1]);
+-                v_load_deinterleave(y2 + i, vy[2], vy[3]);
+-
+-                v_int32 ruv[4], guv[4], buv[4];
+-                uvToRGBuv(u, v, ruv, guv, buv);
++                int u = int(uv[i + 0 + uIdx]);
++                int v = int(uv[i + 1 - uIdx]);
+ 
+-                v_uint8 r[4], g[4], b[4];
+-
+-                for(int k = 0; k < 4; k++)
+-                {
+-                    yRGBuvToRGBA(vy[k], ruv, guv, buv, r[k], g[k], b[k]);
+-                }
+-
+-                if(bIdx)
+-                {
+-                    for(int k = 0; k < 4; k++)
+-                        swap(r[k], b[k]);
+-                }
+-
+-                // [r0...], [r1...] => [r0, r1, r0, r1...], [r0, r1, r0, r1...]
+-                v_uint8 r0_0, r0_1, r1_0, r1_1;
+-                v_zip(r[0], r[1], r0_0, r0_1);
+-                v_zip(r[2], r[3], r1_0, r1_1);
+-                v_uint8 g0_0, g0_1, g1_0, g1_1;
+-                v_zip(g[0], g[1], g0_0, g0_1);
+-                v_zip(g[2], g[3], g1_0, g1_1);
+-                v_uint8 b0_0, b0_1, b1_0, b1_1;
+-                v_zip(b[0], b[1], b0_0, b0_1);
+-                v_zip(b[2], b[3], b1_0, b1_1);
+-
+-                if(dcn == 4)
+-                {
+-                    v_store_interleave(row1 + 0*vsize, b0_0, g0_0, r0_0, a);
+-                    v_store_interleave(row1 + 4*vsize, b0_1, g0_1, r0_1, a);
+-
+-                    v_store_interleave(row2 + 0*vsize, b1_0, g1_0, r1_0, a);
+-                    v_store_interleave(row2 + 4*vsize, b1_1, g1_1, r1_1, a);
+-                }
+-                else //dcn == 3
+-                {
+-                    v_store_interleave(row1 + 0*vsize, b0_0, g0_0, r0_0);
+-                    v_store_interleave(row1 + 3*vsize, b0_1, g0_1, r0_1);
+-
+-                    v_store_interleave(row2 + 0*vsize, b1_0, g1_0, r1_0);
+-                    v_store_interleave(row2 + 3*vsize, b1_1, g1_1, r1_1);
+-                }
+-            }
+-            vx_cleanup();
+-#endif
+-            for ( ; i < width; i += 2, row1 += dcn*2, row2 += dcn*2)
+-            {
+-                uchar u = uv[i + 0 + uIdx];
+-                uchar v = uv[i + 1 - uIdx];
+-
+-                uchar vy01 = y1[i];
+-                uchar vy11 = y1[i + 1];
+-                uchar vy02 = y2[i];
+-                uchar vy12 = y2[i + 1];
++                int vy01 = int(y1[i]);
++                int vy11 = int(y1[i + 1]);
++                int vy02 = int(y2[i]);
++                int vy12 = int(y2[i + 1]);
+ 
+                 cvtYuv42xxp2RGB8<bIdx, dcn, true>(u, v, vy01, vy11, vy02, vy12, row1, row2);
+             }
+@@ -1270,77 +1108,16 @@ struct YUV420p2RGB8Invoker : ParallelLoopBody
+             uchar* row1 = dst_data + dst_step * j;
+             uchar* row2 = dst_data + dst_step * (j + 1);
+             const uchar* y2 = y1 + stride;
+-            int i = 0;
+-
+-#if CV_SIMD
+-            const int vsize = v_uint8::nlanes;
+-            v_uint8 a = vx_setall_u8(uchar(0xff));
+-            for( ; i <= width/2 - vsize;
+-                 i += vsize, row1 += vsize*dcn*2, row2 += vsize*dcn*2)
+-            {
+-                v_uint8 u, v;
+-                u = vx_load(u1 + i);
+-                v = vx_load(v1 + i);
+-
+-                v_uint8 vy[4];
+-                v_load_deinterleave(y1 + 2*i, vy[0], vy[1]);
+-                v_load_deinterleave(y2 + 2*i, vy[2], vy[3]);
+-
+-                v_int32 ruv[4], guv[4], buv[4];
+-                uvToRGBuv(u, v, ruv, guv, buv);
+-
+-                v_uint8 r[4], g[4], b[4];
+-
+-                for(int k = 0; k < 4; k++)
+-                {
+-                    yRGBuvToRGBA(vy[k], ruv, guv, buv, r[k], g[k], b[k]);
+-                }
+-
+-                if(bIdx)
+-                {
+-                    for(int k = 0; k < 4; k++)
+-                        swap(r[k], b[k]);
+-                }
+-
+-                // [r0...], [r1...] => [r0, r1, r0, r1...], [r0, r1, r0, r1...]
+-                v_uint8 r0_0, r0_1, r1_0, r1_1;
+-                v_zip(r[0], r[1], r0_0, r0_1);
+-                v_zip(r[2], r[3], r1_0, r1_1);
+-                v_uint8 g0_0, g0_1, g1_0, g1_1;
+-                v_zip(g[0], g[1], g0_0, g0_1);
+-                v_zip(g[2], g[3], g1_0, g1_1);
+-                v_uint8 b0_0, b0_1, b1_0, b1_1;
+-                v_zip(b[0], b[1], b0_0, b0_1);
+-                v_zip(b[2], b[3], b1_0, b1_1);
+-
+-                if(dcn == 4)
+-                {
+-                    v_store_interleave(row1 + 0*vsize, b0_0, g0_0, r0_0, a);
+-                    v_store_interleave(row1 + 4*vsize, b0_1, g0_1, r0_1, a);
+-
+-                    v_store_interleave(row2 + 0*vsize, b1_0, g1_0, r1_0, a);
+-                    v_store_interleave(row2 + 4*vsize, b1_1, g1_1, r1_1, a);
+-                }
+-                else //dcn == 3
+-                {
+-                    v_store_interleave(row1 + 0*vsize, b0_0, g0_0, r0_0);
+-                    v_store_interleave(row1 + 3*vsize, b0_1, g0_1, r0_1);
+ 
+-                    v_store_interleave(row2 + 0*vsize, b1_0, g1_0, r1_0);
+-                    v_store_interleave(row2 + 3*vsize, b1_1, g1_1, r1_1);
+-                }
+-            }
+-            vx_cleanup();
+-#endif
+-            for (; i < width / 2; i += 1, row1 += dcn*2, row2 += dcn*2)
++            for (int i = 0; i < width / 2; i += 1, row1 += dcn*2, row2 += dcn*2)
+             {
+-                uchar u = u1[i];
+-                uchar v = v1[i];
++                int u = int(u1[i]);
++                int v = int(v1[i]);
+ 
+-                uchar vy01 = y1[2 * i];
+-                uchar vy11 = y1[2 * i + 1];
+-                uchar vy02 = y2[2 * i];
+-                uchar vy12 = y2[2 * i + 1];
++                int vy01 = int(y1[2 * i]);
++                int vy11 = int(y1[2 * i + 1]);
++                int vy02 = int(y2[2 * i]);
++                int vy12 = int(y2[2 * i + 1]);
+ 
+                 cvtYuv42xxp2RGB8<bIdx, dcn, true>(u, v, vy01, vy11, vy02, vy12, row1, row2);
+             }
+@@ -1373,258 +1150,106 @@ inline void cvtYUV420p2RGB(uchar * dst_data, size_t dst_step, int dst_width, int
+ 
+ ///////////////////////////////////// RGB -> YUV420p /////////////////////////////////////
+ 
+-static inline uchar rgbToY42x(uchar r, uchar g, uchar b)
+-{
+-    const int shifted16 = (16 << ITUR_BT_601_SHIFT);
+-    const int halfShift = (1 << (ITUR_BT_601_SHIFT - 1));
+-    int yy = ITUR_BT_601_CRY * r + ITUR_BT_601_CGY * g + ITUR_BT_601_CBY * b + halfShift + shifted16;
+-
+-    return saturate_cast<uchar>(yy >> ITUR_BT_601_SHIFT);
+-}
+-
+-static inline v_uint8 rgbToY42x(const v_uint8& r, const v_uint8& g, const v_uint8& b)
+-{
+-    const int shifted16 = (16 << ITUR_BT_601_SHIFT);
+-    const int halfShift = (1 << (ITUR_BT_601_SHIFT - 1));
+-    v_uint16 r0, r1, g0, g1, b0, b1;
+-    v_expand(r, r0, r1);
+-    v_expand(g, g0, g1);
+-    v_expand(b, b0, b1);
+-
+-    v_uint32 rq[4], gq[4], bq[4];
+-    v_expand(r0, rq[0], rq[1]); v_expand(r1, rq[2], rq[3]);
+-    v_expand(g0, gq[0], gq[1]); v_expand(g1, gq[2], gq[3]);
+-    v_expand(b0, bq[0], bq[1]); v_expand(b1, bq[2], bq[3]);
+-
+-    v_uint32 ry = vx_setall_u32(ITUR_BT_601_CRY), gy = vx_setall_u32(ITUR_BT_601_CGY);
+-    v_uint32 by = vx_setall_u32(ITUR_BT_601_CBY), shift = vx_setall_u32(halfShift + shifted16);
+-
+-    v_uint32 y[4];
+-    for(int k = 0; k < 4; k++)
+-    {
+-        y[k] = (rq[k]*ry + gq[k]*gy + bq[k]*by + shift) >> ITUR_BT_601_SHIFT;
+-    }
+-
+-    v_uint16 y0, y1;
+-    y0 = v_pack(y[0], y[1]);
+-    y1 = v_pack(y[2], y[3]);
+-
+-    return v_pack(y0, y1);
+-}
+-
+-static inline void rgbToUV42x(uchar r, uchar g, uchar b, uchar& u, uchar& v)
+-{
+-    const int halfShift = (1 << (ITUR_BT_601_SHIFT - 1));
+-    const int shifted128 = (128 << ITUR_BT_601_SHIFT);
+-    int uu = ITUR_BT_601_CRU * r + ITUR_BT_601_CGU * g + ITUR_BT_601_CBU * b + halfShift + shifted128;
+-    int vv = ITUR_BT_601_CBU * r + ITUR_BT_601_CGV * g + ITUR_BT_601_CBV * b + halfShift + shifted128;
+-
+-    u = saturate_cast<uchar>(uu >> ITUR_BT_601_SHIFT);
+-    v = saturate_cast<uchar>(vv >> ITUR_BT_601_SHIFT);
+-}
+-
+-static inline void rgbToUV42x(const v_uint8& r0, const v_uint8& r1, const v_uint8& g0, const v_uint8& g1,
+-                              const v_uint8& b0, const v_uint8& b1, v_uint8& u, v_uint8& v)
+-{
+-    // [r0, r1, r2, r3,..] => [r0, 0, r2, 0,..]
+-    v_int16 vlowByte = vx_setall_s16(0x00ff);
+-    v_int16 rd0, rd1, gd0, gd1, bd0, bd1;
+-    rd0 = v_reinterpret_as_s16(r0) & vlowByte;
+-    rd1 = v_reinterpret_as_s16(r1) & vlowByte;
+-    gd0 = v_reinterpret_as_s16(g0) & vlowByte;
+-    gd1 = v_reinterpret_as_s16(g1) & vlowByte;
+-    bd0 = v_reinterpret_as_s16(b0) & vlowByte;
+-    bd1 = v_reinterpret_as_s16(b1) & vlowByte;
+-
+-    v_int32 rq[4], gq[4], bq[4];
+-    v_expand(rd0, rq[0], rq[1]);
+-    v_expand(rd1, rq[2], rq[3]);
+-    v_expand(gd0, gq[0], gq[1]);
+-    v_expand(gd1, gq[2], gq[3]);
+-    v_expand(bd0, bq[0], bq[1]);
+-    v_expand(bd1, bq[2], bq[3]);
+-
+-    const int halfShift = (1 << (ITUR_BT_601_SHIFT - 1));
+-    const int shifted128 = (128 << ITUR_BT_601_SHIFT);
+-    v_int32 shift = vx_setall_s32(halfShift + shifted128);
+-    v_int32 ru, gu, bu, gv, bv;
+-    ru = vx_setall_s32(ITUR_BT_601_CRU);
+-    gu = vx_setall_s32(ITUR_BT_601_CGU);
+-    gv = vx_setall_s32(ITUR_BT_601_CGV);
+-    bu = vx_setall_s32(ITUR_BT_601_CBU);
+-    bv = vx_setall_s32(ITUR_BT_601_CBV);
+-
+-    v_int32 uq[4], vq[4];
+-    for(int k = 0; k < 4; k++)
+-    {
+-        uq[k] = (ru*rq[k] + gu*gq[k] + bu*bq[k] + shift) >> ITUR_BT_601_SHIFT;
+-        vq[k] = (bu*rq[k] + gv*gq[k] + bv*bq[k] + shift) >> ITUR_BT_601_SHIFT;
+-    }
+-
+-    v_int16 u0, u1, v0, v1;
+-    u0 = v_pack(uq[0], uq[1]);
+-    u1 = v_pack(uq[2], uq[3]);
+-    v0 = v_pack(vq[0], vq[1]);
+-    v1 = v_pack(vq[2], vq[3]);
+-
+-    u = v_pack_u(u0, u1);
+-    v = v_pack_u(v0, v1);
+-}
+-
+-
+ struct RGB8toYUV420pInvoker: public ParallelLoopBody
+ {
+-    RGB8toYUV420pInvoker(const uchar * _srcData, size_t _srcStep,
+-                           uchar * _yData, uchar * _uvData, size_t _dstStep,
+-                           int _srcWidth, int _srcHeight, int _scn, bool _swapBlue, bool _swapUV, bool _interleave)
+-        : srcData(_srcData), srcStep(_srcStep),
+-          yData(_yData), uvData(_uvData), dstStep(_dstStep),
+-          srcWidth(_srcWidth), srcHeight(_srcHeight),
+-          srcCn(_scn), swapBlue(_swapBlue), swapUV(_swapUV), interleave(_interleave) { }
++    RGB8toYUV420pInvoker(const uchar * _src_data, size_t _src_step,
++                           uchar * _y_data, uchar * _uv_data, size_t _dst_step,
++                           int _src_width, int _src_height, int _scn, bool swapBlue_, bool swapUV_, bool interleaved_)
++        : src_data(_src_data), src_step(_src_step),
++          y_data(_y_data), uv_data(_uv_data), dst_step(_dst_step),
++          src_width(_src_width), src_height(_src_height),
++          scn(_scn), swapBlue(swapBlue_), swapUV(swapUV_), interleaved(interleaved_) { }
+ 
+     void operator()(const Range& rowRange) const CV_OVERRIDE
+     {
+-        const int w = srcWidth;
+-        const int h = srcHeight;
+-        const int scn = srcCn;
+-        const uchar* srcRow = (uchar*)0;
+-        uchar* yRow = (uchar*)0, *uRow = (uchar*)0, *vRow = (uchar*)0, *uvRow = (uchar*)0;
+-        for( int sRow = rowRange.start*2; sRow < rowRange.end*2; sRow++)
++        const int w = src_width;
++        const int h = src_height;
++        const int cn = scn;
++        for( int i = rowRange.start; i < rowRange.end; i++ )
+         {
+-            srcRow = srcData + srcStep*sRow;
+-            yRow = yData + dstStep * sRow;
+-            bool evenRow = (sRow % 2) == 0;
+-            if(evenRow)
++            const uchar* brow0 = src_data + src_step * (2 * i);
++            const uchar* grow0 = brow0 + 1;
++            const uchar* rrow0 = brow0 + 2;
++            const uchar* brow1 = src_data + src_step * (2 * i + 1);
++            const uchar* grow1 = brow1 + 1;
++            const uchar* rrow1 = brow1 + 2;
++            if (swapBlue)
+             {
+-                if (interleave)
+-                {
+-                    uvRow = uvData + dstStep*(sRow/2);
+-                }
+-                else
+-                {
+-                    uRow = uvData + dstStep * (sRow/4) + ((sRow/2) % 2) * (w/2);
+-                    vRow = uvData + dstStep * ((sRow + h)/4) + (((sRow + h)/2) % 2) * (w/2);
+-                }
++                std::swap(brow0, rrow0);
++                std::swap(brow1, rrow1);
+             }
+-            int i = 0;
+-#if CV_SIMD
+-            const int vsize = v_uint8::nlanes;
+ 
+-            for( ; i <= w/2 - vsize;
+-                 i += vsize)
++            uchar* y = y_data + dst_step * (2*i);
++            uchar* u;
++            uchar* v;
++            if (interleaved)
+             {
+-                // processing (2*vsize) pixels at once
+-                v_uint8 b0, b1, g0, g1, r0, r1, a0, a1;
+-                if(scn == 4)
+-                {
+-                    v_load_deinterleave(srcRow + 2*4*i + 0*vsize, b0, g0, r0, a0);
+-                    v_load_deinterleave(srcRow + 2*4*i + 4*vsize, b1, g1, r1, a1);
+-                }
+-                else // scn == 3
+-                {
+-                    v_load_deinterleave(srcRow + 2*3*i + 0*vsize, b0, g0, r0);
+-                    v_load_deinterleave(srcRow + 2*3*i + 3*vsize, b1, g1, r1);
+-                }
+-
+-                if(swapBlue)
+-                {
+-                    swap(b0, r0); swap(b1, r1);
+-                }
+-
+-                v_uint8 y0, y1;
+-
+-                y0 = rgbToY42x(r0, g0, b0);
+-                y1 = rgbToY42x(r1, g1, b1);
+-
+-                v_store(yRow + 2*i + 0*vsize, y0);
+-                v_store(yRow + 2*i + 1*vsize, y1);
++                u = uv_data + dst_step * i;
++                v = uv_data + dst_step * i + 1;
++            }
++            else
++            {
++                u = uv_data + dst_step * (i/2) + (i % 2) * (w/2);
++                v = uv_data + dst_step * ((i + h/2)/2) + ((i + h/2) % 2) * (w/2);
++            }
+ 
+-                if(evenRow)
+-                {
+-                    v_uint8 u, v;
+-                    rgbToUV42x(r0, r1, g0, g1, b0, b1, u, v);
+-
+-                    if(swapUV)
+-                    {
+-                        swap(u, v);
+-                    }
+-
+-                    if(interleave)
+-                    {
+-                        v_store_interleave(uvRow + 2*i, u, v);
+-                    }
+-                    else
+-                    {
+-                        v_store(uRow + i, u);
+-                        v_store(vRow + i, v);
+-                    }
+-                }
++            if (swapUV)
++            {
++                std::swap(u, v);
+             }
+-            vx_cleanup();
+-#endif
+-            // processing two pixels at once
+-            for( ; i < w/2; i++)
++
++            for( int j = 0, k = 0; j < w * cn; j += 2 * cn, k++ )
+             {
+-                uchar b0, g0, r0;
+-                uchar b1, g1, r1;
+-                b0 = srcRow[(2*i+0)*scn + 0];
+-                g0 = srcRow[(2*i+0)*scn + 1];
+-                r0 = srcRow[(2*i+0)*scn + 2];
+-                b1 = srcRow[(2*i+1)*scn + 0];
+-                g1 = srcRow[(2*i+1)*scn + 1];
+-                r1 = srcRow[(2*i+1)*scn + 2];
+-
+-                if(swapBlue)
++                int r00 = rrow0[j];      int g00 = grow0[j];      int b00 = brow0[j];
++                int r01 = rrow0[cn + j]; int g01 = grow0[cn + j]; int b01 = brow0[cn + j];
++                int r10 = rrow1[j];      int g10 = grow1[j];      int b10 = brow1[j];
++                int r11 = rrow1[cn + j]; int g11 = grow1[cn + j]; int b11 = brow1[cn + j];
++
++                const int shifted16 = (16 << ITUR_BT_601_SHIFT);
++                const int halfShift = (1 << (ITUR_BT_601_SHIFT - 1));
++                int y00 = ITUR_BT_601_CRY * r00 + ITUR_BT_601_CGY * g00 + ITUR_BT_601_CBY * b00 + halfShift + shifted16;
++                int y01 = ITUR_BT_601_CRY * r01 + ITUR_BT_601_CGY * g01 + ITUR_BT_601_CBY * b01 + halfShift + shifted16;
++                int y10 = ITUR_BT_601_CRY * r10 + ITUR_BT_601_CGY * g10 + ITUR_BT_601_CBY * b10 + halfShift + shifted16;
++                int y11 = ITUR_BT_601_CRY * r11 + ITUR_BT_601_CGY * g11 + ITUR_BT_601_CBY * b11 + halfShift + shifted16;
++
++                y[2*k + 0]            = saturate_cast<uchar>(y00 >> ITUR_BT_601_SHIFT);
++                y[2*k + 1]            = saturate_cast<uchar>(y01 >> ITUR_BT_601_SHIFT);
++                y[2*k + dst_step + 0] = saturate_cast<uchar>(y10 >> ITUR_BT_601_SHIFT);
++                y[2*k + dst_step + 1] = saturate_cast<uchar>(y11 >> ITUR_BT_601_SHIFT);
++
++                const int shifted128 = (128 << ITUR_BT_601_SHIFT);
++                int u00 = ITUR_BT_601_CRU * r00 + ITUR_BT_601_CGU * g00 + ITUR_BT_601_CBU * b00 + halfShift + shifted128;
++                int v00 = ITUR_BT_601_CBU * r00 + ITUR_BT_601_CGV * g00 + ITUR_BT_601_CBV * b00 + halfShift + shifted128;
++
++                if (interleaved)
+                 {
+-                    swap(b0, r0); swap(b1, r1);
++                    u[k*2] = saturate_cast<uchar>(u00 >> ITUR_BT_601_SHIFT);
++                    v[k*2] = saturate_cast<uchar>(v00 >> ITUR_BT_601_SHIFT);
+                 }
+-
+-                uchar y0 = rgbToY42x(r0, g0, b0);
+-                uchar y1 = rgbToY42x(r1, g1, b1);
+-
+-                yRow[2*i+0] = y0;
+-                yRow[2*i+1] = y1;
+-
+-                if(evenRow)
++                else
+                 {
+-                    uchar uu, vv;
+-                    rgbToUV42x(r0, g0, b0, uu, vv);
+-                    if(swapUV)
+-                    {
+-                        swap(uu, vv);
+-                    }
+-
+-                    if(interleave)
+-                    {
+-                        uvRow[2*i+0] = uu;
+-                        uvRow[2*i+1] = vv;
+-                    }
+-                    else
+-                    {
+-                        uRow[i] = uu;
+-                        vRow[i] = vv;
+-                    }
++                    u[k] = saturate_cast<uchar>(u00 >> ITUR_BT_601_SHIFT);
++                    v[k] = saturate_cast<uchar>(v00 >> ITUR_BT_601_SHIFT);
+                 }
+             }
+         }
+     }
+ 
+-    const uchar * srcData;
+-    size_t srcStep;
+-    uchar *yData, *uvData;
+-    size_t dstStep;
+-    int srcWidth;
+-    int srcHeight;
+-    const int srcCn;
++    const uchar * src_data;
++    size_t src_step;
++    uchar *y_data, *uv_data;
++    size_t dst_step;
++    int src_width;
++    int src_height;
++    const int scn;
+     bool swapBlue;
+     bool swapUV;
+-    bool interleave;
++    bool interleaved;
+ };
+ 
+ 
+ ///////////////////////////////////// YUV422 -> RGB /////////////////////////////////////
+ 
+-// bIdx is 0 or 2; [uIdx, yIdx] is [0, 0], [0, 1], [1, 0]; dcn is 3 or 4
+ template<int bIdx, int uIdx, int yIdx, int dcn>
+ struct YUV422toRGB8Invoker : ParallelLoopBody
+ {
+@@ -1644,10 +1269,6 @@ struct YUV422toRGB8Invoker : ParallelLoopBody
+         int rangeBegin = range.start;
+         int rangeEnd = range.end;
+ 
+-        // [yIdx, uIdx] | [uidx, vidx]:
+-        //     0, 0     |     1, 3
+-        //     0, 1     |     3, 1
+-        //     1, 0     |     0, 2
+         const int uidx = 1 - yIdx + uIdx * 2;
+         const int vidx = (2 + uidx) % 4;
+         const uchar* yuv_src = src_data + rangeBegin * src_step;
+@@ -1655,69 +1276,14 @@ struct YUV422toRGB8Invoker : ParallelLoopBody
+         for (int j = rangeBegin; j < rangeEnd; j++, yuv_src += src_step)
+         {
+             uchar* row = dst_data + dst_step * j;
+-            int i = 0;
+-#if CV_SIMD
+-            const int vsize = v_uint8::nlanes;
+-            v_uint8 a = vx_setall_u8(uchar(0xff));
+-            for(; i <= 2*width - 4*vsize;
+-                i += 4*vsize, row += vsize*dcn*2)
+-            {
+-                v_uint8 u, v, vy[2];
+-                if(yIdx == 1) // UYVY
+-                {
+-                    v_load_deinterleave(yuv_src + i, u, vy[0], v, vy[1]);
+-                }
+-                else // YUYV or YVYU
+-                {
+-                    v_load_deinterleave(yuv_src + i, vy[0], u, vy[1], v);
+-                    if(uIdx == 1) // YVYU
+-                    {
+-                        swap(u, v);
+-                    }
+-                }
+-
+-                v_int32 ruv[4], guv[4], buv[4];
+-                uvToRGBuv(u, v, ruv, guv, buv);
+ 
+-                v_uint8 r[2], g[2], b[2];
+-
+-                yRGBuvToRGBA(vy[0], ruv, guv, buv, r[0], g[0], b[0]);
+-                yRGBuvToRGBA(vy[1], ruv, guv, buv, r[1], g[1], b[1]);
+-
+-                if(bIdx)
+-                {
+-                    swap(r[0], b[0]);
+-                    swap(r[1], b[1]);
+-                }
+-
+-                // [r0...], [r1...] => [r0, r1, r0, r1...], [r0, r1, r0, r1...]
+-                v_uint8 r0_0, r0_1;
+-                v_zip(r[0], r[1], r0_0, r0_1);
+-                v_uint8 g0_0, g0_1;
+-                v_zip(g[0], g[1], g0_0, g0_1);
+-                v_uint8 b0_0, b0_1;
+-                v_zip(b[0], b[1], b0_0, b0_1);
+-
+-                if(dcn == 4)
+-                {
+-                    v_store_interleave(row + 0*vsize, b0_0, g0_0, r0_0, a);
+-                    v_store_interleave(row + 4*vsize, b0_1, g0_1, r0_1, a);
+-                }
+-                else //dcn == 3
+-                {
+-                    v_store_interleave(row + 0*vsize, b0_0, g0_0, r0_0);
+-                    v_store_interleave(row + 3*vsize, b0_1, g0_1, r0_1);
+-                }
+-            }
+-            vx_cleanup();
+-#endif
+-            for (; i < 2 * width; i += 4, row += dcn*2)
++            for (int i = 0; i < 2 * width; i += 4, row += dcn*2)
+             {
+-                uchar u = yuv_src[i + uidx];
+-                uchar v = yuv_src[i + vidx];
++                int u = int(yuv_src[i + uidx]);
++                int v = int(yuv_src[i + vidx]);
+ 
+-                uchar vy0 = yuv_src[i + yIdx];
+-                uchar vy1 = yuv_src[i + yIdx + 2];
++                int vy0 = int(yuv_src[i + yIdx]);
++                int vy1 = int(yuv_src[i + yIdx + 2]);
+ 
+                 cvtYuv42xxp2RGB8<bIdx, dcn, false>(u, v, vy0, vy1, 0, 0, row, (uchar*)(0));
+             }
+diff --git a/modules/js/src/core_bindings.cpp b/modules/js/src/core_bindings.cpp
+index 5022473613..72efd6350a 100644
+--- a/modules/js/src/core_bindings.cpp
++++ b/modules/js/src/core_bindings.cpp
+@@ -289,16 +289,13 @@ namespace binding_utils
+         float radius;
+     };
+ 
+-#ifdef HAVE_OPENCV_IMGPROC
+     Circle minEnclosingCircle(const cv::Mat& points)
+     {
+         Circle circle;
+         cv::minEnclosingCircle(points, circle.center, circle.radius);
+         return circle;
+     }
+-#endif
+ 
+-#ifdef HAVE_OPENCV_VIDEO
+     emscripten::val CamShiftWrapper(const cv::Mat& arg1, Rect& arg2, TermCriteria arg3)
+     {
+         RotatedRect rotatedRect = cv::CamShift(arg1, arg2, arg3);
+@@ -316,7 +313,6 @@ namespace binding_utils
+         result.call<void>("push", arg2);
+         return result;
+     }
+-#endif  // HAVE_OPENCV_VIDEO
+ 
+     std::string getExceptionMsg(const cv::Exception& e) {
+         return e.msg;
+@@ -555,25 +551,19 @@ EMSCRIPTEN_BINDINGS(binding_utils)
+ 
+     function("exceptionFromPtr", &binding_utils::exceptionFromPtr, allow_raw_pointers());
+ 
+-#ifdef HAVE_OPENCV_IMGPROC
+     function("minEnclosingCircle", select_overload<binding_utils::Circle(const cv::Mat&)>(&binding_utils::minEnclosingCircle));
+-#endif
+ 
+     function("minMaxLoc", select_overload<binding_utils::MinMaxLoc(const cv::Mat&, const cv::Mat&)>(&binding_utils::minMaxLoc));
+ 
+     function("minMaxLoc", select_overload<binding_utils::MinMaxLoc(const cv::Mat&)>(&binding_utils::minMaxLoc_1));
+ 
+-#ifdef HAVE_OPENCV_IMGPROC
+     function("morphologyDefaultBorderValue", &cv::morphologyDefaultBorderValue);
+-#endif
+ 
+     function("CV_MAT_DEPTH", &binding_utils::cvMatDepth);
+ 
+-#ifdef HAVE_OPENCV_VIDEO
+     function("CamShift", select_overload<emscripten::val(const cv::Mat&, Rect&, TermCriteria)>(&binding_utils::CamShiftWrapper));
+ 
+     function("meanShift", select_overload<emscripten::val(const cv::Mat&, Rect&, TermCriteria)>(&binding_utils::meanShiftWrapper));
+-#endif
+ 
+     function("getBuildInformation", &binding_utils::getBuildInformation);
+ 
+diff --git a/modules/js/src/embindgen.py b/modules/js/src/embindgen.py
+index 03dc0a65ae..8e406e0388 100644
+--- a/modules/js/src/embindgen.py
++++ b/modules/js/src/embindgen.py
+@@ -140,7 +140,7 @@ features2d = {'Feature2D': ['detect', 'compute', 'detectAndCompute', 'descriptor
+               'AKAZE': ['create', 'setDescriptorType', 'getDescriptorType', 'setDescriptorSize', 'getDescriptorSize', 'setDescriptorChannels', 'getDescriptorChannels', 'setThreshold', 'getThreshold', 'setNOctaves', 'getNOctaves', 'setNOctaveLayers', 'getNOctaveLayers', 'setDiffusivity', 'getDiffusivity', 'getDefaultName'],
+               'DescriptorMatcher': ['add', 'clear', 'empty', 'isMaskSupported', 'train', 'match', 'knnMatch', 'radiusMatch', 'clone', 'create'],
+               'BFMatcher': ['isMaskSupported', 'create'],
+-              '': ['drawKeypoints', 'drawMatches']}
++              '': ['FAST', 'AGAST', 'drawKeypoints', 'drawMatches']}
+ 
+ photo = {'': ['createAlignMTB', 'createCalibrateDebevec', 'createCalibrateRobertson', \
+               'createMergeDebevec', 'createMergeMertens', 'createMergeRobertson', \
+diff --git a/modules/js/test/test_features2d.js b/modules/js/test/test_features2d.js
+deleted file mode 100644
+index 21982f65f8..0000000000
+--- a/modules/js/test/test_features2d.js
++++ /dev/null
+@@ -1,82 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-
+-if (typeof module !== 'undefined' && module.exports) {
+-    // The envrionment is Node.js
+-    var cv = require('./opencv.js'); // eslint-disable-line no-var
+-}
+-
+-function generateTestFrame(width, height) {
+-  let w = width || 200;
+-  let h = height || 200;
+-  let img = new cv.Mat(h, w, cv.CV_8UC1, new cv.Scalar(0, 0, 0, 0));
+-  let s = new cv.Scalar(255, 255, 255, 255);
+-  let s128 = new cv.Scalar(128, 128, 128, 128);
+-  let rect = new cv.Rect(w / 4, h / 4, w / 2, h / 2);
+-  img.roi(rect).setTo(s);
+-  img.roi(new cv.Rect(w / 2 - w / 8, h / 2 - h / 8, w / 4, h / 4)).setTo(s128);
+-  cv.rectangle(img, new cv.Point(w / 8, h / 8), new cv.Point(w - w / 8, h - h / 8), s, 5);
+-  cv.rectangle(img, new cv.Point(w / 5, h / 5), new cv.Point(w - w / 5, h - h / 5), s128, 3);
+-  cv.line(img, new cv.Point(-w, 0), new cv.Point(w / 2, h / 2), s128, 5);
+-  cv.line(img, new cv.Point(2*w, 0), new cv.Point(w / 2, h / 2), s, 5);
+-  return img;
+-}
+-
+-QUnit.module('Features2D', {});
+-QUnit.test('Detectors', function(assert) {
+-  let image = generateTestFrame();
+-
+-  let kp = new cv.KeyPointVector();
+-
+-  let orb = new cv.ORB();
+-  orb.detect(image, kp);
+-  assert.equal(kp.size(), 67, 'ORB');
+-
+-  let mser = new cv.MSER();
+-  mser.detect(image, kp);
+-  assert.equal(kp.size(), 7, 'MSER');
+-
+-  let brisk = new cv.BRISK();
+-  brisk.detect(image, kp);
+-  assert.equal(kp.size(), 191, 'BRISK');
+-
+-  let ffd = new cv.FastFeatureDetector();
+-  ffd.detect(image, kp);
+-  assert.equal(kp.size(), 12, 'FastFeatureDetector');
+-
+-  let afd = new cv.AgastFeatureDetector();
+-  afd.detect(image, kp);
+-  assert.equal(kp.size(), 67, 'AgastFeatureDetector');
+-
+-  let gftt = new cv.GFTTDetector();
+-  gftt.detect(image, kp);
+-  assert.equal(kp.size(), 168, 'GFTTDetector');
+-
+-  let kaze = new cv.KAZE();
+-  kaze.detect(image, kp);
+-  assert.equal(kp.size(), 159, 'KAZE');
+-
+-  let akaze = new cv.AKAZE();
+-  akaze.detect(image, kp);
+-  assert.equal(kp.size(), 52, 'AKAZE');
+-});
+-
+-QUnit.test('BFMatcher', function(assert) {
+-  // Generate key points.
+-  let image = generateTestFrame();
+-
+-  let kp = new cv.KeyPointVector();
+-  let descriptors = new cv.Mat();
+-  let orb = new cv.ORB();
+-  orb.detectAndCompute(image, new cv.Mat(), kp, descriptors);
+-
+-  assert.equal(kp.size(), 67);
+-
+-  // Run a matcher.
+-  let dm = new cv.DMatchVector();
+-  let matcher = new cv.BFMatcher();
+-  matcher.match(descriptors, descriptors, dm);
+-
+-  assert.equal(dm.size(), 67);
+-});
+diff --git a/modules/js/test/tests.html b/modules/js/test/tests.html
+index 305220c1f2..8f65ce7f66 100644
+--- a/modules/js/test/tests.html
++++ b/modules/js/test/tests.html
+@@ -29,7 +29,6 @@
+         <script type="application/javascript" src="test_objdetect.js"></script>
+         <script type="application/javascript" src="test_video.js"></script>
+         <script type="application/javascript" src="test_photo.js"></script>
+-        <script type="application/javascript" src="test_features2d.js"></script>
+         <script  type='text/javascript'>
+             QUnit.config.autostart = false;
+ 
+@@ -70,5 +69,11 @@
+             };
+           };
+         </script>
++
++<!--
++    TODO
++    <script type="application/javascript" src="test_features2d.js"></script>
++-->
++
+     </body>
+ </html>
+diff --git a/modules/js/test/tests.js b/modules/js/test/tests.js
+index 0acfa9eabb..2977032b4c 100644
+--- a/modules/js/test/tests.js
++++ b/modules/js/test/tests.js
+@@ -45,8 +45,7 @@ testrunner.run(
+     {
+         code: 'opencv.js',
+         tests: ['test_mat.js', 'test_utils.js', 'test_imgproc.js',
+-                'test_objdetect.js', 'test_video.js', 'test_features2d.js',
+-                'test_photo.js'],
++                'test_objdetect.js', 'test_video.js', 'test_photo.js'],
+     },
+     function(err, report) {
+         console.log(report.failed + ' failed, ' + report.passed + ' passed');
+diff --git a/modules/video/src/optflowgf.cpp b/modules/video/src/optflowgf.cpp
+index 83ad47fc0e..e06dbbf379 100644
+--- a/modules/video/src/optflowgf.cpp
++++ b/modules/video/src/optflowgf.cpp
+@@ -42,7 +42,6 @@
+ 
+ #include "precomp.hpp"
+ #include "opencl_kernels_video.hpp"
+-#include "opencv2/core/hal/intrin.hpp"
+ 
+ #if defined __APPLE__ || defined __ANDROID__
+ #define SMALL_LOCALSIZE
+@@ -434,11 +433,13 @@ FarnebackUpdateFlow_GaussianBlur( const Mat& _R0, const Mat& _R1,
+     for( i = 0; i <= m; i++ )
+         kernel[i] = (float)(kernel[i]*s);
+ 
+-#if CV_SIMD128
++#if CV_SSE2
+     float* simd_kernel = alignPtr(kernel + m+1, 16);
++    volatile bool useSIMD = checkHardwareSupport(CV_CPU_SSE);
++    if( useSIMD )
+     {
+         for( i = 0; i <= m; i++ )
+-            v_store(simd_kernel + i*4, v_setall_f32(kernel[i]));
++            _mm_store_ps(simd_kernel + i*4, _mm_set1_ps(kernel[i]));
+     }
+ #endif
+ 
+@@ -456,53 +457,54 @@ FarnebackUpdateFlow_GaussianBlur( const Mat& _R0, const Mat& _R1,
+         }
+ 
+         x = 0;
+-#if CV_SIMD128
++#if CV_SSE2
++        if( useSIMD )
+         {
+             for( ; x <= width*5 - 16; x += 16 )
+             {
+                 const float *sptr0 = srow[m], *sptr1;
+-                v_float32x4 g4 = v_load(simd_kernel);
+-                v_float32x4 s0, s1, s2, s3;
+-                s0 = v_load(sptr0 + x) * g4;
+-                s1 = v_load(sptr0 + x + 4) * g4;
+-                s2 = v_load(sptr0 + x + 8) * g4;
+-                s3 = v_load(sptr0 + x + 12) * g4;
++                __m128 g4 = _mm_load_ps(simd_kernel);
++                __m128 s0, s1, s2, s3;
++                s0 = _mm_mul_ps(_mm_loadu_ps(sptr0 + x), g4);
++                s1 = _mm_mul_ps(_mm_loadu_ps(sptr0 + x + 4), g4);
++                s2 = _mm_mul_ps(_mm_loadu_ps(sptr0 + x + 8), g4);
++                s3 = _mm_mul_ps(_mm_loadu_ps(sptr0 + x + 12), g4);
+ 
+                 for( i = 1; i <= m; i++ )
+                 {
+-                    v_float32x4 x0, x1;
++                    __m128 x0, x1;
+                     sptr0 = srow[m+i], sptr1 = srow[m-i];
+-                    g4 = v_load(simd_kernel + i*4);
+-                    x0 = v_load(sptr0 + x) + v_load(sptr1 + x);
+-                    x1 = v_load(sptr0 + x + 4) + v_load(sptr1 + x + 4);
+-                    s0 = v_muladd(x0, g4, s0);
+-                    s1 = v_muladd(x1, g4, s1);
+-                    x0 = v_load(sptr0 + x + 8) + v_load(sptr1 + x + 8);
+-                    x1 = v_load(sptr0 + x + 12) + v_load(sptr1 + x + 12);
+-                    s2 = v_muladd(x0, g4, s2);
+-                    s3 = v_muladd(x1, g4, s3);
++                    g4 = _mm_load_ps(simd_kernel + i*4);
++                    x0 = _mm_add_ps(_mm_loadu_ps(sptr0 + x), _mm_loadu_ps(sptr1 + x));
++                    x1 = _mm_add_ps(_mm_loadu_ps(sptr0 + x + 4), _mm_loadu_ps(sptr1 + x + 4));
++                    s0 = _mm_add_ps(s0, _mm_mul_ps(x0, g4));
++                    s1 = _mm_add_ps(s1, _mm_mul_ps(x1, g4));
++                    x0 = _mm_add_ps(_mm_loadu_ps(sptr0 + x + 8), _mm_loadu_ps(sptr1 + x + 8));
++                    x1 = _mm_add_ps(_mm_loadu_ps(sptr0 + x + 12), _mm_loadu_ps(sptr1 + x + 12));
++                    s2 = _mm_add_ps(s2, _mm_mul_ps(x0, g4));
++                    s3 = _mm_add_ps(s3, _mm_mul_ps(x1, g4));
+                 }
+ 
+-                v_store(vsum + x, s0);
+-                v_store(vsum + x + 4, s1);
+-                v_store(vsum + x + 8, s2);
+-                v_store(vsum + x + 12, s3);
++                _mm_store_ps(vsum + x, s0);
++                _mm_store_ps(vsum + x + 4, s1);
++                _mm_store_ps(vsum + x + 8, s2);
++                _mm_store_ps(vsum + x + 12, s3);
+             }
+ 
+             for( ; x <= width*5 - 4; x += 4 )
+             {
+                 const float *sptr0 = srow[m], *sptr1;
+-                v_float32x4 g4 = v_load(simd_kernel);
+-                v_float32x4 s0 = v_load(sptr0 + x) * g4;
++                __m128 g4 = _mm_load_ps(simd_kernel);
++                __m128 s0 = _mm_mul_ps(_mm_loadu_ps(sptr0 + x), g4);
+ 
+                 for( i = 1; i <= m; i++ )
+                 {
+                     sptr0 = srow[m+i], sptr1 = srow[m-i];
+-                    g4 = v_load(simd_kernel + i*4);
+-                    v_float32x4 x0 = v_load(sptr0 + x) + v_load(sptr1 + x);
+-                    s0 = v_muladd(x0, g4, s0);
++                    g4 = _mm_load_ps(simd_kernel + i*4);
++                    __m128 x0 = _mm_add_ps(_mm_loadu_ps(sptr0 + x), _mm_loadu_ps(sptr1 + x));
++                    s0 = _mm_add_ps(s0, _mm_mul_ps(x0, g4));
+                 }
+-                v_store(vsum + x, s0);
++                _mm_store_ps(vsum + x, s0);
+             }
+         }
+ #endif
+@@ -523,25 +525,28 @@ FarnebackUpdateFlow_GaussianBlur( const Mat& _R0, const Mat& _R1,
+ 
+         // horizontal blur
+         x = 0;
+-#if CV_SIMD128
++#if CV_SSE2
++        if( useSIMD )
+         {
+             for( ; x <= width*5 - 8; x += 8 )
+             {
+-                v_float32x4 g4 = v_load(simd_kernel);
+-                v_float32x4 s0 = v_load(vsum + x) * g4;
+-                v_float32x4 s1 = v_load(vsum + x + 4) * g4;
++                __m128 g4 = _mm_load_ps(simd_kernel);
++                __m128 s0 = _mm_mul_ps(_mm_loadu_ps(vsum + x), g4);
++                __m128 s1 = _mm_mul_ps(_mm_loadu_ps(vsum + x + 4), g4);
+ 
+                 for( i = 1; i <= m; i++ )
+                 {
+-                    g4 = v_load(simd_kernel + i*4);
+-                    v_float32x4 x0 = v_load(vsum + x - i*5) + v_load(vsum + x+ i*5);
+-                    v_float32x4 x1 = v_load(vsum + x - i*5 + 4) + v_load(vsum + x+ i*5 + 4);
+-                    s0 = v_muladd(x0, g4, s0);
+-                    s1 = v_muladd(x1, g4, s1);
++                    g4 = _mm_load_ps(simd_kernel + i*4);
++                    __m128 x0 = _mm_add_ps(_mm_loadu_ps(vsum + x - i*5),
++                                           _mm_loadu_ps(vsum + x + i*5));
++                    __m128 x1 = _mm_add_ps(_mm_loadu_ps(vsum + x - i*5 + 4),
++                                           _mm_loadu_ps(vsum + x + i*5 + 4));
++                    s0 = _mm_add_ps(s0, _mm_mul_ps(x0, g4));
++                    s1 = _mm_add_ps(s1, _mm_mul_ps(x1, g4));
+                 }
+ 
+-                v_store(hsum + x, s0);
+-                v_store(hsum + x + 4, s1);
++                _mm_store_ps(hsum + x, s0);
++                _mm_store_ps(hsum + x + 4, s1);
+             }
+         }
+ #endif
+diff --git a/platforms/js/build_js.py b/platforms/js/build_js.py
+index fb98b76238..fd0cffa53d 100644
+--- a/platforms/js/build_js.py
++++ b/platforms/js/build_js.py
+@@ -113,7 +113,6 @@ class Builder:
+                "-DWITH_GPHOTO2=OFF",
+                "-DWITH_LAPACK=OFF",
+                "-DWITH_ITT=OFF",
+-               "-DWITH_QUIRC=OFF",
+                "-DBUILD_ZLIB=ON",
+                "-DBUILD_opencv_apps=OFF",
+                "-DBUILD_opencv_calib3d=ON",  # No bindings provided. This module is used as a dependency for other modules.
+@@ -131,11 +130,9 @@ class Builder:
+                "-DBUILD_opencv_superres=OFF",
+                "-DBUILD_opencv_stitching=OFF",
+                "-DBUILD_opencv_java=OFF",
+-               "-DBUILD_opencv_java_bindings_generator=OFF",
+                "-DBUILD_opencv_js=ON",
+                "-DBUILD_opencv_python2=OFF",
+                "-DBUILD_opencv_python3=OFF",
+-               "-DBUILD_opencv_python_bindings_generator=OFF",
+                "-DBUILD_EXAMPLES=OFF",
+                "-DBUILD_PACKAGE=OFF",
+                "-DBUILD_TESTS=OFF",
+diff --git a/samples/dnn/object_detection.cpp b/samples/dnn/object_detection.cpp
+index c30e2179af..94a6666393 100644
+--- a/samples/dnn/object_detection.cpp
++++ b/samples/dnn/object_detection.cpp
+@@ -153,39 +153,51 @@ void postprocess(Mat& frame, const std::vector<Mat>& outs, Net& net)
+     std::vector<int> classIds;
+     std::vector<float> confidences;
+     std::vector<Rect> boxes;
+-    if (outLayerType == "DetectionOutput")
++    if (net.getLayer(0)->outputNameToIndex("im_info") != -1)  // Faster-RCNN or R-FCN
+     {
+         // Network produces output blob with a shape 1x1xNx7 where N is a number of
+         // detections and an every detection is a vector of values
+         // [batchId, classId, confidence, left, top, right, bottom]
+-        CV_Assert(outs.size() > 0);
+-        for (size_t k = 0; k < outs.size(); k++)
++        CV_Assert(outs.size() == 1);
++        float* data = (float*)outs[0].data;
++        for (size_t i = 0; i < outs[0].total(); i += 7)
+         {
+-            float* data = (float*)outs[k].data;
+-            for (size_t i = 0; i < outs[k].total(); i += 7)
++            float confidence = data[i + 2];
++            if (confidence > confThreshold)
+             {
+-                float confidence = data[i + 2];
+-                if (confidence > confThreshold)
+-                {
+-                    int left   = (int)data[i + 3];
+-                    int top    = (int)data[i + 4];
+-                    int right  = (int)data[i + 5];
+-                    int bottom = (int)data[i + 6];
+-                    int width  = right - left + 1;
+-                    int height = bottom - top + 1;
+-                    if (width * height <= 1)
+-                    {
+-                        left   = (int)(data[i + 3] * frame.cols);
+-                        top    = (int)(data[i + 4] * frame.rows);
+-                        right  = (int)(data[i + 5] * frame.cols);
+-                        bottom = (int)(data[i + 6] * frame.rows);
+-                        width  = right - left + 1;
+-                        height = bottom - top + 1;
+-                    }
+-                    classIds.push_back((int)(data[i + 1]) - 1);  // Skip 0th background class id.
+-                    boxes.push_back(Rect(left, top, width, height));
+-                    confidences.push_back(confidence);
+-                }
++                int left = (int)data[i + 3];
++                int top = (int)data[i + 4];
++                int right = (int)data[i + 5];
++                int bottom = (int)data[i + 6];
++                int width = right - left + 1;
++                int height = bottom - top + 1;
++                classIds.push_back((int)(data[i + 1]) - 1);  // Skip 0th background class id.
++                boxes.push_back(Rect(left, top, width, height));
++                confidences.push_back(confidence);
++            }
++        }
++    }
++    else if (outLayerType == "DetectionOutput")
++    {
++        // Network produces output blob with a shape 1x1xNx7 where N is a number of
++        // detections and an every detection is a vector of values
++        // [batchId, classId, confidence, left, top, right, bottom]
++        CV_Assert(outs.size() == 1);
++        float* data = (float*)outs[0].data;
++        for (size_t i = 0; i < outs[0].total(); i += 7)
++        {
++            float confidence = data[i + 2];
++            if (confidence > confThreshold)
++            {
++                int left = (int)(data[i + 3] * frame.cols);
++                int top = (int)(data[i + 4] * frame.rows);
++                int right = (int)(data[i + 5] * frame.cols);
++                int bottom = (int)(data[i + 6] * frame.rows);
++                int width = right - left + 1;
++                int height = bottom - top + 1;
++                classIds.push_back((int)(data[i + 1]) - 1);  // Skip 0th background class id.
++                boxes.push_back(Rect(left, top, width, height));
++                confidences.push_back(confidence);
+             }
+         }
+     }
+diff --git a/samples/dnn/object_detection.py b/samples/dnn/object_detection.py
+index 3f7b0e23d7..bf1c2e4236 100644
+--- a/samples/dnn/object_detection.py
++++ b/samples/dnn/object_detection.py
+@@ -102,7 +102,7 @@ def postprocess(frame, outs):
+     classIds = []
+     confidences = []
+     boxes = []
+-    if lastLayer.type == 'DetectionOutput':
++    if net.getLayer(0).outputNameToIndex('im_info') != -1:  # Faster-RCNN or R-FCN
+         # Network produces output blob with a shape 1x1xNx7 where N is a number of
+         # detections and an every detection is a vector of values
+         # [batchId, classId, confidence, left, top, right, bottom]
+@@ -116,13 +116,23 @@ def postprocess(frame, outs):
+                     bottom = int(detection[6])
+                     width = right - left + 1
+                     height = bottom - top + 1
+-                    if width * height <= 1:
+-                        left = int(detection[3] * frameWidth)
+-                        top = int(detection[4] * frameHeight)
+-                        right = int(detection[5] * frameWidth)
+-                        bottom = int(detection[6] * frameHeight)
+-                        width = right - left + 1
+-                        height = bottom - top + 1
++                    classIds.append(int(detection[1]) - 1)  # Skip background label
++                    confidences.append(float(confidence))
++                    boxes.append([left, top, width, height])
++    elif lastLayer.type == 'DetectionOutput':
++        # Network produces output blob with a shape 1x1xNx7 where N is a number of
++        # detections and an every detection is a vector of values
++        # [batchId, classId, confidence, left, top, right, bottom]
++        for out in outs:
++            for detection in out[0, 0]:
++                confidence = detection[2]
++                if confidence > confThreshold:
++                    left = int(detection[3] * frameWidth)
++                    top = int(detection[4] * frameHeight)
++                    right = int(detection[5] * frameWidth)
++                    bottom = int(detection[6] * frameHeight)
++                    width = right - left + 1
++                    height = bottom - top + 1
+                     classIds.append(int(detection[1]) - 1)  # Skip background label
+                     confidences.append(float(confidence))
+                     boxes.append([left, top, width, height])

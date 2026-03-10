@@ -1,0 +1,238 @@
+diff --git a/modules/dnn/src/layers/mvn_layer.cpp b/modules/dnn/src/layers/mvn_layer.cpp
+index 93dd5f05f6..a32cbecee9 100644
+--- a/modules/dnn/src/layers/mvn_layer.cpp
++++ b/modules/dnn/src/layers/mvn_layer.cpp
+@@ -116,15 +116,9 @@ public:
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+-#ifdef HAVE_INF_ENGINE
+         if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-#if INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2018R5)
+-            return !zeroDev && eps <= 1e-7f;
+-#else
+             return !zeroDev && (preferableTarget == DNN_TARGET_CPU || eps <= 1e-7f);
+-#endif
+         else
+-#endif  // HAVE_INF_ENGINE
+             return backendId == DNN_BACKEND_OPENCV;
+     }
+ 
+diff --git a/modules/dnn/src/onnx/onnx_importer.cpp b/modules/dnn/src/onnx/onnx_importer.cpp
+index 218775b39f..18e26f1b86 100644
+--- a/modules/dnn/src/onnx/onnx_importer.cpp
++++ b/modules/dnn/src/onnx/onnx_importer.cpp
+@@ -420,30 +420,31 @@ void ONNXImporter::populateNet(Net dstNet)
+         }
+         else if (layer_type == "Sub")
+         {
+-            Mat blob = getBlob(node_proto, constBlobs, 1);
++            Mat blob = (-1.0f) * getBlob(node_proto, constBlobs, 1);
++            blob = blob.reshape(1, 1);
+             if (blob.total() == 1) {
+                 layerParams.type = "Power";
+-                layerParams.set("shift", -blob.at<float>(0));
++                layerParams.set("shift", blob.at<float>(0));
+             }
+             else {
+                 layerParams.type = "Scale";
+                 layerParams.set("has_bias", true);
+-                layerParams.blobs.push_back(-1.0f * blob.reshape(1, 1));
++                layerParams.blobs.push_back(blob);
+             }
+         }
+         else if (layer_type == "Div")
+         {
+             Mat blob = getBlob(node_proto, constBlobs, 1);
+             CV_Assert_N(blob.type() == CV_32F, blob.total());
++            divide(1.0, blob, blob);
+             if (blob.total() == 1)
+             {
+-                layerParams.set("scale", 1.0f / blob.at<float>(0));
++                layerParams.set("scale", blob.at<float>(0));
+                 layerParams.type = "Power";
+             }
+             else
+             {
+                 layerParams.type = "Scale";
+-                divide(1.0, blob, blob);
+                 layerParams.blobs.push_back(blob);
+                 layerParams.set("bias_term", false);
+             }
+diff --git a/modules/dnn/test/test_backends.cpp b/modules/dnn/test/test_backends.cpp
+index 75591e14e6..a1216a5c45 100644
+--- a/modules/dnn/test/test_backends.cpp
++++ b/modules/dnn/test/test_backends.cpp
+@@ -226,9 +226,9 @@ TEST_P(DNNTestNetwork, OpenPose_pose_mpi_faster_4_stages)
+ TEST_P(DNNTestNetwork, OpenFace)
+ {
+ #if defined(INF_ENGINE_RELEASE)
+-#if (INF_ENGINE_RELEASE < 2018030000 || INF_ENGINE_RELEASE == 2018050000)
++#if INF_ENGINE_RELEASE < 2018030000
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+-        throw SkipTestException("");
++        throw SkipTestException("Test is enabled starts from OpenVINO 2018R3");
+ #elif INF_ENGINE_RELEASE < 2018040000
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16)
+         throw SkipTestException("Test is enabled starts from OpenVINO 2018R4");
+diff --git a/modules/dnn/test/test_ie_models.cpp b/modules/dnn/test/test_ie_models.cpp
+index 0d9e508f84..db718eb2c5 100644
+--- a/modules/dnn/test/test_ie_models.cpp
++++ b/modules/dnn/test/test_ie_models.cpp
+@@ -190,14 +190,6 @@ TEST_P(DNNTestOpenVINO, models)
+                                          modelName == "landmarks-regression-retail-0009" ||
+                                           modelName == "semantic-segmentation-adas-0001")))
+         throw SkipTestException("");
+-#elif INF_ENGINE_RELEASE == 2018050000
+-    if (modelName == "single-image-super-resolution-0063" ||
+-        modelName == "single-image-super-resolution-1011" ||
+-        modelName == "single-image-super-resolution-1021" ||
+-        (target == DNN_TARGET_OPENCL_FP16 && modelName == "face-reidentification-retail-0095") ||
+-        (target == DNN_TARGET_MYRIAD && (modelName == "license-plate-recognition-barrier-0001" ||
+-                                         modelName == "semantic-segmentation-adas-0001")))
+-        throw SkipTestException("");
+ #endif
+ #endif
+ 
+diff --git a/modules/dnn/test/test_layers.cpp b/modules/dnn/test/test_layers.cpp
+index 4ccefd28a9..62e625f03c 100644
+--- a/modules/dnn/test/test_layers.cpp
++++ b/modules/dnn/test/test_layers.cpp
+@@ -295,10 +295,6 @@ TEST_P(Test_Caffe_layers, Eltwise)
+ {
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+         throw SkipTestException("");
+-#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE == 2018050000
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL)
+-        throw SkipTestException("Test is disabled for OpenVINO 2018R5");
+-#endif
+     testLayerUsingCaffeModels("layer_eltwise");
+ }
+ 
+diff --git a/modules/dnn/test/test_onnx_importer.cpp b/modules/dnn/test/test_onnx_importer.cpp
+index deccbfb0eb..36e7450892 100644
+--- a/modules/dnn/test/test_onnx_importer.cpp
++++ b/modules/dnn/test/test_onnx_importer.cpp
+@@ -164,8 +164,6 @@ TEST_P(Test_ONNX_layers, MultyInputs)
+ 
+ TEST_P(Test_ONNX_layers, DynamicReshape)
+ {
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && (target == DNN_TARGET_OPENCL || target == DNN_TARGET_OPENCL_FP16))
+-        throw SkipTestException("");
+     testONNXModels("dynamic_reshape");
+ }
+ 
+@@ -251,10 +249,6 @@ TEST_P(Test_ONNX_nets, VGG16)
+     else if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL) {
+         lInf = 1.2e-4;
+     }
+-#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE >= 2018050000
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16)
+-        l1 = 0.131;
+-#endif
+     testONNXModels("vgg16", pb, l1, lInf);
+ }
+ 
+@@ -333,7 +327,7 @@ TEST_P(Test_ONNX_nets, CNN_MNIST)
+ TEST_P(Test_ONNX_nets, MobileNet_v2)
+ {
+     // output range: [-166; 317]
+-    const double l1 = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.4 : 7e-5;
++    const double l1 = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.38 : 7e-5;
+     const double lInf = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 2.87 : 5e-4;
+     testONNXModels("mobilenetv2", pb, l1, lInf);
+ }
+@@ -356,17 +350,7 @@ TEST_P(Test_ONNX_nets, LResNet100E_IR)
+ 
+ TEST_P(Test_ONNX_nets, Emotion_ferplus)
+ {
+-    double l1 = default_l1;
+-    double lInf = default_lInf;
+-    // Output values are in range [-2.01109, 2.11111]
+-    if (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16)
+-        l1 = 0.007;
+-    else if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16)
+-    {
+-        l1 = 0.021;
+-        lInf = 0.034;
+-    }
+-    testONNXModels("emotion_ferplus", pb, l1, lInf);
++    testONNXModels("emotion_ferplus", pb);
+ }
+ 
+ TEST_P(Test_ONNX_nets, Inception_v2)
+@@ -387,10 +371,6 @@ TEST_P(Test_ONNX_nets, DenseNet121)
+ 
+ TEST_P(Test_ONNX_nets, Inception_v1)
+ {
+-#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE == 2018050000
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+-        throw SkipTestException("");
+-#endif
+     testONNXModels("inception_v1", pb);
+ }
+ 
+diff --git a/modules/dnn/test/test_tf_importer.cpp b/modules/dnn/test/test_tf_importer.cpp
+index ce4997cd4e..7c53f8a93f 100644
+--- a/modules/dnn/test/test_tf_importer.cpp
++++ b/modules/dnn/test/test_tf_importer.cpp
+@@ -241,10 +241,6 @@ TEST_P(Test_TensorFlow_layers, unfused_flatten)
+ 
+ TEST_P(Test_TensorFlow_layers, leaky_relu)
+ {
+-#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE == 2018050000
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL)
+-        throw SkipTestException("");
+-#endif
+     runTensorFlowNet("leaky_relu_order1");
+     runTensorFlowNet("leaky_relu_order2");
+     runTensorFlowNet("leaky_relu_order3");
+@@ -387,10 +383,6 @@ TEST_P(Test_TensorFlow_nets, Faster_RCNN)
+ 
+ TEST_P(Test_TensorFlow_nets, MobileNet_v1_SSD_PPN)
+ {
+-#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE == 2018050000
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && (target == DNN_TARGET_OPENCL || target == DNN_TARGET_OPENCL_FP16))
+-        throw SkipTestException("Unstable test case");
+-#endif
+     checkBackend();
+     std::string proto = findDataFile("dnn/ssd_mobilenet_v1_ppn_coco.pbtxt", false);
+     std::string model = findDataFile("dnn/ssd_mobilenet_v1_ppn_coco.pb", false);
+@@ -568,10 +560,6 @@ TEST_P(Test_TensorFlow_layers, slice)
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE &&
+         (target == DNN_TARGET_OPENCL || target == DNN_TARGET_OPENCL_FP16))
+         throw SkipTestException("");
+-#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE == 2018050000
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+-        throw SkipTestException("");
+-#endif
+     runTensorFlowNet("slice_4d");
+ }
+ 
+diff --git a/modules/dnn/test/test_torch_importer.cpp b/modules/dnn/test/test_torch_importer.cpp
+index 4277e920f2..7fa0dc47ef 100644
+--- a/modules/dnn/test/test_torch_importer.cpp
++++ b/modules/dnn/test/test_torch_importer.cpp
+@@ -266,9 +266,9 @@ class Test_Torch_nets : public DNNTestLayer {};
+ 
+ TEST_P(Test_Torch_nets, OpenFace_accuracy)
+ {
+-#if defined(INF_ENGINE_RELEASE) && (INF_ENGINE_RELEASE < 2018030000 || INF_ENGINE_RELEASE == 2018050000)
++#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE < 2018030000
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+-        throw SkipTestException("");
++        throw SkipTestException("Test is enabled starts from OpenVINO 2018R3");
+ #endif
+     checkBackend();
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16)
+@@ -389,10 +389,6 @@ TEST_P(Test_Torch_nets, ENet_accuracy)
+ //   -model models/instance_norm/feathers.t7
+ TEST_P(Test_Torch_nets, FastNeuralStyle_accuracy)
+ {
+-#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE == 2018050000
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+-        throw SkipTestException("");
+-#endif
+     checkBackend();
+     std::string models[] = {"dnn/fast_neural_style_eccv16_starry_night.t7",
+                             "dnn/fast_neural_style_instance_norm_feathers.t7"};

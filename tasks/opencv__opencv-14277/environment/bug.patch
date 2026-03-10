@@ -1,0 +1,372 @@
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 58ad936378..cdb62b6830 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1160,6 +1160,12 @@ struct Net::Impl
+                 continue;
+ 
+             currLayer->unsetAttached();
++
++            Ptr<PoolingLayer> poolingLayer = currLayer.dynamicCast<PoolingLayer>();
++            if( !poolingLayer.empty() )
++            {
++                poolingLayer->computeMaxIdx = true;
++            }
+         }
+ 
+         layersTimings.clear();
+@@ -2076,11 +2082,30 @@ struct Net::Impl
+                     }
+                 }
+             }
++            // the optimization #2. if there is no layer that takes max pooling layer's computed
++            // max indices (and only some semantical segmentation networks might need this;
++            // many others only take the maximum values), then we switch the max pooling
++            // layer to the faster operating mode.
++            Ptr<PoolingLayer> poolingLayer = ld.layerInstance.dynamicCast<PoolingLayer>();
++            if( !poolingLayer.empty() && !ld.consumers.empty() )
++            {
++                size_t i = 0, nconsumers = ld.consumers.size();
++                for( ; i < nconsumers; i++ )
++                    if( ld.consumers[i].oid > 0 )
++                        break;
++                // if there is no layer that takes the second output pin of the pooling layer
++                // on input then we don't need to compute the indices
++                if( i >= nconsumers )
++                {
++                    poolingLayer->computeMaxIdx = false;
++                    printf_(("\tsimplified pooling layer %s\n", poolingLayer->name.c_str()));
++                }
++            }
+ 
+             if (preferableBackend != DNN_BACKEND_OPENCV)
+                 continue;  // Go to the next layer.
+ 
+-            // the optimization #2. if there is concat layer that concatenates channels
++            // the optimization #3. if there is concat layer that concatenates channels
+             // from the inputs together (i.e. axis == 1) then we make the inputs of
+             // the concat layer to write to the concatenation output buffer
+             // (and so we eliminate the concatenation layer, because the channels
+diff --git a/modules/dnn/src/layers/elementwise_layers.cpp b/modules/dnn/src/layers/elementwise_layers.cpp
+index 86ac26f3cc..a18cce6fa9 100644
+--- a/modules/dnn/src/layers/elementwise_layers.cpp
++++ b/modules/dnn/src/layers/elementwise_layers.cpp
+@@ -256,11 +256,8 @@ struct ReLUFunctor
+ 
+     bool supportBackend(int backendId, int)
+     {
+-#ifdef HAVE_INF_ENGINE
+-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-            return slope >= 0 || !INF_ENGINE_VER_MAJOR_EQ(INF_ENGINE_RELEASE_2019R1);
+-#endif
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
++        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE ||
++               backendId == DNN_BACKEND_INFERENCE_ENGINE;
+     }
+ 
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+@@ -744,11 +741,8 @@ struct AbsValFunctor
+ 
+     bool supportBackend(int backendId, int)
+     {
+-#ifdef HAVE_INF_ENGINE
+-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-            return !INF_ENGINE_VER_MAJOR_EQ(INF_ENGINE_RELEASE_2019R1);
+-#endif
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
++        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE ||
++               backendId == DNN_BACKEND_INFERENCE_ENGINE;
+     }
+ 
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+diff --git a/modules/dnn/src/layers/flatten_layer.cpp b/modules/dnn/src/layers/flatten_layer.cpp
+index aa264a749b..3a704dca81 100644
+--- a/modules/dnn/src/layers/flatten_layer.cpp
++++ b/modules/dnn/src/layers/flatten_layer.cpp
+@@ -159,8 +159,8 @@ public:
+         InferenceEngine::Builder::Layer ieLayer(name);
+         ieLayer.setName(name);
+         ieLayer.setType("Flatten");
+-        ieLayer.getParameters()["axis"] = (size_t)_startAxis;
+-        ieLayer.getParameters()["end_axis"] = _endAxis;  // Do not cast to size_t because it might be negative.
++        ieLayer.getParameters()["axis"] = _startAxis;
++        ieLayer.getParameters()["end_axis"] = _endAxis;
+         ieLayer.setInputPorts(std::vector<InferenceEngine::Port>(1));
+         ieLayer.setOutputPorts(std::vector<InferenceEngine::Port>(1));
+         return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+diff --git a/modules/dnn/src/layers/padding_layer.cpp b/modules/dnn/src/layers/padding_layer.cpp
+index 89a05e6a4d..30f04e029a 100644
+--- a/modules/dnn/src/layers/padding_layer.cpp
++++ b/modules/dnn/src/layers/padding_layer.cpp
+@@ -12,7 +12,6 @@ Implementation of padding layer, which adds paddings to input blob.
+ #include "../precomp.hpp"
+ #include "layers_common.hpp"
+ #include "../op_halide.hpp"
+-#include "../op_inf_engine.hpp"
+ #include <vector>
+ 
+ namespace cv
+@@ -69,36 +68,28 @@ public:
+ 
+         // Compute dstRanges.
+         const MatSize& inpShape = inputs[0].size;
++        dstRanges.resize(paddings.size());
+ 
++        int offset = 0;
+         if (inputDims != -1 && inputs[0].dims != inputDims)
+         {
+-            paddings.insert(paddings.begin(), std::make_pair(0, 0));
++            dstRanges.insert(dstRanges.begin(), Range::all());
++            offset = 1;
+         }
+ 
+-        dstRanges.resize(paddings.size());
+         for (int i = 0; i < paddings.size(); ++i)
+         {
+-            dstRanges[i].start = paddings[i].first;
+-            dstRanges[i].end = paddings[i].first + inpShape[i];
++            dstRanges[offset + i].start = paddings[i].first;
++            dstRanges[offset + i].end = paddings[i].first + inpShape[offset + i];
+         }
+ 
+         // Add the rest of dimensions.
+         for (int i = dstRanges.size(); i < inputs[0].dims; ++i)
+-        {
+             dstRanges.push_back(Range::all());
+-            paddings.push_back(std::make_pair(0, 0));
+-        }
+-        inputDims = -1;  // Next time paddings are filled for all the dimensions.
+     }
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+-#ifdef HAVE_INF_ENGINE
+-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-            return INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2019R1) &&
+-                   (preferableTarget != DNN_TARGET_MYRIAD ||
+-                    (dstRanges.size() == 4 && paddings[0].first == 0 && paddings[0].second == 0));
+-#endif
+         return backendId == DNN_BACKEND_OPENCV ||
+                (backendId == DNN_BACKEND_HALIDE && haveHalide() && dstRanges.size() == 4);
+     }
+@@ -118,7 +109,7 @@ public:
+             {
+                 std::vector<float> paddingValue_fp32(1, paddingValue);
+                 std::vector<int16_t> paddingValue_fp16(1);
+-                cv::convertFp16(paddingValue_fp32, paddingValue_fp16);
++                convertFp16(paddingValue_fp32, paddingValue_fp16);
+                 outputs[0].setTo(paddingValue_fp16[0]);
+             }
+             else
+@@ -182,32 +173,6 @@ public:
+         return Ptr<BackendNode>();
+     }
+ 
+-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
+-    {
+-#ifdef HAVE_INF_ENGINE
+-        InferenceEngine::Builder::Layer ieLayer(name);
+-        ieLayer.setName(name);
+-        ieLayer.setType("Pad");
+-
+-        std::vector<int> begins(paddings.size(), 0), ends(paddings.size(), 0);
+-        for (int i = 0; i < paddings.size(); ++i)
+-        {
+-            begins[i] = paddings[i].first;
+-            ends[i] = paddings[i].second;
+-        }
+-        ieLayer.getParameters()["pads_begin"] = begins;
+-        ieLayer.getParameters()["pads_end"] = ends;
+-        ieLayer.getParameters()["pad_mode"] = paddingType;
+-        if (paddingType == "constant")
+-            ieLayer.getParameters()["pad_value"] = paddingValue;
+-
+-        ieLayer.setInputPorts(std::vector<InferenceEngine::Port>(1));
+-        ieLayer.setOutputPorts(std::vector<InferenceEngine::Port>(1));
+-        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+-#endif
+-        return Ptr<BackendNode>();
+-    }
+-
+ private:
+     std::vector<std::pair<int, int> > paddings;  // Pairs pad before, pad after.
+     std::vector<Range> dstRanges;
+diff --git a/modules/dnn/src/layers/pooling_layer.cpp b/modules/dnn/src/layers/pooling_layer.cpp
+index 28945c7440..92d171a538 100644
+--- a/modules/dnn/src/layers/pooling_layer.cpp
++++ b/modules/dnn/src/layers/pooling_layer.cpp
+@@ -140,7 +140,7 @@ public:
+ #ifdef HAVE_OPENCL
+         poolOp.release();
+ #endif
+-        computeMaxIdx = type == MAX && outputs.size() == 2;
++        computeMaxIdx = type == MAX;
+     }
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+diff --git a/modules/dnn/test/test_backends.cpp b/modules/dnn/test/test_backends.cpp
+index 061b07a314..24c0c8ce94 100644
+--- a/modules/dnn/test/test_backends.cpp
++++ b/modules/dnn/test/test_backends.cpp
+@@ -289,7 +289,12 @@ TEST_P(DNNTestNetwork, OpenFace)
+ #if INF_ENGINE_VER_MAJOR_EQ(2018050000)
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+         throw SkipTestException("Test is disabled for Myriad targets");
+-#elif INF_ENGINE_VER_MAJOR_EQ(2018030000)
++#elif INF_ENGINE_VER_MAJOR_GE(2019010000)
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD
++            && getInferenceEngineVPUType() == CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_X
++    )
++        throw SkipTestException("Test is disabled for MyriadX target");
++#else
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16)
+         throw SkipTestException("Test has been fixed in OpenVINO 2018R4");
+ #endif
+diff --git a/modules/dnn/test/test_halide_layers.cpp b/modules/dnn/test/test_halide_layers.cpp
+index 62915b8f3f..4c378c78fc 100644
+--- a/modules/dnn/test/test_halide_layers.cpp
++++ b/modules/dnn/test/test_halide_layers.cpp
+@@ -561,6 +561,12 @@ TEST_P(ReLU, Accuracy)
+     float negativeSlope = get<0>(GetParam());
+     Backend backendId = get<0>(get<1>(GetParam()));
+     Target targetId = get<1>(get<1>(GetParam()));
++#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_VER_MAJOR_GE(2019010000)
++    if (backendId == DNN_BACKEND_INFERENCE_ENGINE
++            && negativeSlope < 0
++    )
++        throw SkipTestException("Test is disabled");
++#endif
+ 
+     LayerParams lp;
+     lp.set("negative_slope", negativeSlope);
+@@ -583,6 +589,13 @@ TEST_P(NoParamActivation, Accuracy)
+     LayerParams lp;
+     lp.type = get<0>(GetParam());
+     lp.name = "testLayer";
++#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_VER_MAJOR_GE(2019010000)
++    if (backendId == DNN_BACKEND_INFERENCE_ENGINE
++            && lp.type == "AbsVal"
++    )
++        throw SkipTestException("Test is disabled");
++#endif
++
+     testInPlaceActivation(lp, backendId, targetId);
+ }
+ INSTANTIATE_TEST_CASE_P(Layer_Test_Halide, NoParamActivation, Combine(
+diff --git a/modules/dnn/test/test_onnx_importer.cpp b/modules/dnn/test/test_onnx_importer.cpp
+index 6ec4fd99f0..0a9ce6141a 100644
+--- a/modules/dnn/test/test_onnx_importer.cpp
++++ b/modules/dnn/test/test_onnx_importer.cpp
+@@ -379,7 +379,7 @@ TEST_P(Test_ONNX_nets, LResNet100E_IR)
+         lInf = 0.035;
+     }
+     else if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_CPU) {
+-        l1 = 4.6e-5;
++        l1 = 4.5e-5;
+         lInf = 1.9e-4;
+     }
+     testONNXModels("LResNet100E_IR", pb, l1, lInf);
+diff --git a/modules/dnn/test/test_tf_importer.cpp b/modules/dnn/test/test_tf_importer.cpp
+index e6ac0e7245..05f82725e9 100644
+--- a/modules/dnn/test/test_tf_importer.cpp
++++ b/modules/dnn/test/test_tf_importer.cpp
+@@ -140,6 +140,10 @@ TEST_P(Test_TensorFlow_layers, padding)
+ 
+ TEST_P(Test_TensorFlow_layers, padding_same)
+ {
++#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_VER_MAJOR_GE(2019010000)
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE)
++        throw SkipTestException("Test is disabled for DLIE");
++#endif
+ #if defined(INF_ENGINE_RELEASE)
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD
+             && getInferenceEngineVPUType() == CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_X
+@@ -247,6 +251,10 @@ TEST_P(Test_TensorFlow_layers, reshape)
+ 
+ TEST_P(Test_TensorFlow_layers, flatten)
+ {
++#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_VER_MAJOR_GE(2019010000)
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE)
++        throw SkipTestException("Test is disabled for DLIE");
++#endif
+ #if defined(INF_ENGINE_RELEASE)
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD
+             && getInferenceEngineVPUType() == CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_2
+@@ -259,6 +267,11 @@ TEST_P(Test_TensorFlow_layers, flatten)
+ 
+ TEST_P(Test_TensorFlow_layers, unfused_flatten)
+ {
++#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_VER_MAJOR_GE(2019010000)
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE)
++        throw SkipTestException("Test is disabled for DLIE");
++#endif
++
+     runTensorFlowNet("unfused_flatten");
+     runTensorFlowNet("unfused_flatten_unknown_batch");
+ }
+@@ -307,14 +320,11 @@ class Test_TensorFlow_nets : public DNNTestLayer {};
+ 
+ TEST_P(Test_TensorFlow_nets, MobileNet_SSD)
+ {
+-#if defined(INF_ENGINE_RELEASE)
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD
+-            && getInferenceEngineVPUType() == CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_X
+-    )
+-        throw SkipTestException("Test is disabled for MyriadX");
+-#endif
+-
+     checkBackend();
++    if ((backend == DNN_BACKEND_INFERENCE_ENGINE && target != DNN_TARGET_CPU) ||
++        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
++        throw SkipTestException("");
++
+     std::string netPath = findDataFile("dnn/ssd_mobilenet_v1_coco.pb", false);
+     std::string netConfig = findDataFile("dnn/ssd_mobilenet_v1_coco.pbtxt", false);
+     std::string imgPath = findDataFile("dnn/street.png", false);
+@@ -323,18 +333,30 @@ TEST_P(Test_TensorFlow_nets, MobileNet_SSD)
+     resize(imread(imgPath), inp, Size(300, 300));
+     inp = blobFromImage(inp, 1.0f / 127.5, Size(), Scalar(127.5, 127.5, 127.5), true);
+ 
+-    Mat ref = blobFromNPY(findDataFile("dnn/tensorflow/ssd_mobilenet_v1_coco.detection_out.npy", false));
++    std::vector<String> outNames(3);
++    outNames[0] = "concat";
++    outNames[1] = "concat_1";
++    outNames[2] = "detection_out";
++
++    std::vector<Mat> refs(outNames.size());
++    for (int i = 0; i < outNames.size(); ++i)
++    {
++        std::string path = findDataFile("dnn/tensorflow/ssd_mobilenet_v1_coco." + outNames[i] + ".npy", false);
++        refs[i] = blobFromNPY(path);
++    }
+ 
+     Net net = readNetFromTensorflow(netPath, netConfig);
+     net.setPreferableBackend(backend);
+     net.setPreferableTarget(target);
+ 
+     net.setInput(inp);
+-    Mat out = net.forward();
+ 
+-    double scoreDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.0043 : default_l1;
+-    double iouDiff = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.037 : default_lInf;
+-    normAssertDetections(ref, out, "", 0.2, scoreDiff, iouDiff);
++    std::vector<Mat> output;
++    net.forward(output, outNames);
++
++    normAssert(refs[0].reshape(1, 1), output[0].reshape(1, 1), "", 1e-5, 1.5e-4);
++    normAssert(refs[1].reshape(1, 1), output[1].reshape(1, 1), "", 1e-5, 3e-4);
++    normAssertDetections(refs[2], output[2], "", 0.2);
+ }
+ 
+ TEST_P(Test_TensorFlow_nets, Inception_v2_SSD)
+@@ -575,6 +597,10 @@ TEST_P(Test_TensorFlow_layers, fp16_weights)
+ 
+ TEST_P(Test_TensorFlow_layers, fp16_padding_same)
+ {
++#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_VER_MAJOR_GE(2019010000)
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE)
++        throw SkipTestException("Test is disabled for DLIE");
++#endif
+ #if defined(INF_ENGINE_RELEASE)
+     if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD
+             && getInferenceEngineVPUType() == CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_X

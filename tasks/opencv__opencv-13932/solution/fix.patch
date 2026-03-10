@@ -1,0 +1,349 @@
+diff --git a/modules/dnn/CMakeLists.txt b/modules/dnn/CMakeLists.txt
+index 00554b2b69..d97829f81a 100644
+--- a/modules/dnn/CMakeLists.txt
++++ b/modules/dnn/CMakeLists.txt
+@@ -89,7 +89,15 @@ ocv_glob_module_sources(${sources_options} SOURCES ${fw_srcs})
+ ocv_create_module(${libs} ${INF_ENGINE_TARGET})
+ ocv_add_samples()
+ ocv_add_accuracy_tests(${INF_ENGINE_TARGET})
+-ocv_add_perf_tests(${INF_ENGINE_TARGET})
++
++set(perf_path "${CMAKE_CURRENT_LIST_DIR}/perf")
++file(GLOB_RECURSE perf_srcs "${perf_path}/*.cpp")
++file(GLOB_RECURSE perf_hdrs "${perf_path}/*.hpp" "${perf_path}/*.h")
++ocv_add_perf_tests(${INF_ENGINE_TARGET}
++    FILES test_common "${CMAKE_CURRENT_LIST_DIR}/test/test_common.cpp"
++    FILES Src ${perf_srcs}
++    FILES Include ${perf_hdrs}
++)
+ 
+ ocv_option(${the_module}_PERF_CAFFE "Add performance tests of Caffe framework" OFF)
+ ocv_option(${the_module}_PERF_CLCAFFE "Add performance tests of clCaffe framework" OFF)
+diff --git a/modules/dnn/include/opencv2/dnn/dnn.hpp b/modules/dnn/include/opencv2/dnn/dnn.hpp
+index c0e84b82fa..144fc11fa7 100644
+--- a/modules/dnn/include/opencv2/dnn/dnn.hpp
++++ b/modules/dnn/include/opencv2/dnn/dnn.hpp
+@@ -959,13 +959,6 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+                              CV_OUT std::vector<int>& indices,
+                              const float eta = 1.f, const int top_k = 0);
+ 
+-    /** @brief Release a Myriad device is binded by OpenCV.
+-     *
+-     * Single Myriad device cannot be shared across multiple processes which uses
+-     * Inference Engine's Myriad plugin.
+-     */
+-    CV_EXPORTS_W void resetMyriadDevice();
+-
+ //! @}
+ CV__DNN_EXPERIMENTAL_NS_END
+ }
+@@ -974,4 +967,7 @@ CV__DNN_EXPERIMENTAL_NS_END
+ #include <opencv2/dnn/layer.hpp>
+ #include <opencv2/dnn/dnn.inl.hpp>
+ 
++/// @deprecated Include this header directly from application. Automatic inclusion will be removed
++#include <opencv2/dnn/utils/inference_engine.hpp>
++
+ #endif  /* OPENCV_DNN_DNN_HPP */
+diff --git a/modules/dnn/include/opencv2/dnn/utils/inference_engine.hpp b/modules/dnn/include/opencv2/dnn/utils/inference_engine.hpp
+new file mode 100644
+index 0000000000..0211096ae5
+--- /dev/null
++++ b/modules/dnn/include/opencv2/dnn/utils/inference_engine.hpp
+@@ -0,0 +1,43 @@
++// This file is part of OpenCV project.
++// It is subject to the license terms in the LICENSE file found in the top-level directory
++// of this distribution and at http://opencv.org/license.html.
++//
++// Copyright (C) 2018-2019, Intel Corporation, all rights reserved.
++// Third party copyrights are property of their respective owners.
++
++#ifndef OPENCV_DNN_UTILS_INF_ENGINE_HPP
++#define OPENCV_DNN_UTILS_INF_ENGINE_HPP
++
++#include "../dnn.hpp"
++
++namespace cv { namespace dnn {
++CV__DNN_EXPERIMENTAL_NS_BEGIN
++
++
++/** @brief Release a Myriad device (binded by OpenCV).
++ *
++ * Single Myriad device cannot be shared across multiple processes which uses
++ * Inference Engine's Myriad plugin.
++ */
++CV_EXPORTS_W void resetMyriadDevice();
++
++
++/* Values for 'OPENCV_DNN_IE_VPU_TYPE' parameter */
++#define CV_DNN_INFERENCE_ENGINE_VPU_TYPE_UNSPECIFIED ""
++/// Intel(R) Movidius(TM) Neural Compute Stick, NCS (USB 03e7:2150), Myriad2 (https://software.intel.com/en-us/movidius-ncs)
++#define CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_2 "Myriad2"
++/// Intel(R) Neural Compute Stick 2, NCS2 (USB 03e7:2485), MyriadX (https://software.intel.com/ru-ru/neural-compute-stick)
++#define CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_X "MyriadX"
++
++
++/** @brief Returns Inference Engine VPU type.
++ *
++ * See values of `CV_DNN_INFERENCE_ENGINE_VPU_TYPE_*` macros.
++ */
++CV_EXPORTS_W cv::String getInferenceEngineVPUType();
++
++
++CV__DNN_EXPERIMENTAL_NS_END
++}} // namespace
++
++#endif // OPENCV_DNN_UTILS_INF_ENGINE_HPP
+diff --git a/modules/dnn/perf/perf_net.cpp b/modules/dnn/perf/perf_net.cpp
+index 52b4ce51c6..a48a1f29e2 100644
+--- a/modules/dnn/perf/perf_net.cpp
++++ b/modules/dnn/perf/perf_net.cpp
+@@ -185,6 +185,11 @@ PERF_TEST_P_(DNNTestNetwork, Inception_v2_SSD_TensorFlow)
+ {
+     if (backend == DNN_BACKEND_HALIDE)
+         throw SkipTestException("");
++#if defined(INF_ENGINE_RELEASE)
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD
++            && getInferenceEngineVPUType() == CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_X)
++        throw SkipTestException("Test is disabled for MyriadX");
++#endif
+     processNet("dnn/ssd_inception_v2_coco_2017_11_17.pb", "ssd_inception_v2_coco_2017_11_17.pbtxt", "",
+             Mat(cv::Size(300, 300), CV_32FC3));
+ }
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 5b65a6c50a..2246c6dc44 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -2083,10 +2083,6 @@ struct Net::Impl
+                     }
+                 }
+             }
+-
+-            if (preferableBackend != DNN_BACKEND_OPENCV)
+-                continue;  // Go to the next layer.
+-
+             // the optimization #2. if there is no layer that takes max pooling layer's computed
+             // max indices (and only some semantical segmentation networks might need this;
+             // many others only take the maximum values), then we switch the max pooling
+@@ -2107,6 +2103,9 @@ struct Net::Impl
+                 }
+             }
+ 
++            if (preferableBackend != DNN_BACKEND_OPENCV)
++                continue;  // Go to the next layer.
++
+             // the optimization #3. if there is concat layer that concatenates channels
+             // from the inputs together (i.e. axis == 1) then we make the inputs of
+             // the concat layer to write to the concatenation output buffer
+diff --git a/modules/dnn/src/layers/pooling_layer.cpp b/modules/dnn/src/layers/pooling_layer.cpp
+index 404d0d0f58..92d171a538 100644
+--- a/modules/dnn/src/layers/pooling_layer.cpp
++++ b/modules/dnn/src/layers/pooling_layer.cpp
+@@ -147,10 +147,18 @@ public:
+     {
+         if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+         {
+-            if (preferableTarget == DNN_TARGET_MYRIAD)
++#ifdef HAVE_INF_ENGINE
++            if (preferableTarget == DNN_TARGET_MYRIAD) {
++                if (type == MAX && (pad_l == 1 && pad_t == 1) && stride == Size(2, 2) ) {
++                    return !isMyriadX();
++                }
+                 return type == MAX || type == AVE;
++            }
+             else
+                 return type != STOCHASTIC;
++#else
++            return false;
++#endif
+         }
+         else
+             return backendId == DNN_BACKEND_OPENCV ||
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index 5dae7beaef..7f6a73436c 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -2,7 +2,7 @@
+ // It is subject to the license terms in the LICENSE file found in the top-level directory
+ // of this distribution and at http://opencv.org/license.html.
+ //
+-// Copyright (C) 2018, Intel Corporation, all rights reserved.
++// Copyright (C) 2018-2019, Intel Corporation, all rights reserved.
+ // Third party copyrights are property of their respective owners.
+ 
+ #include "precomp.hpp"
+@@ -12,8 +12,14 @@
+ #ifdef HAVE_INF_ENGINE
+ #include <ie_extension.h>
+ #include <ie_plugin_dispatcher.hpp>
++#if INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2018R5)
++#include <vpu/vpu_plugin_config.hpp>
++#endif
+ #endif  // HAVE_INF_ENGINE
+ 
++#include <opencv2/core/utils/configuration.private.hpp>
++#include <opencv2/core/utils/logger.hpp>
++
+ namespace cv { namespace dnn {
+ 
+ #ifdef HAVE_INF_ENGINE
+@@ -683,6 +689,64 @@ static std::map<InferenceEngine::TargetDevice, InferenceEngine::InferenceEngineP
+     return sharedPlugins;
+ }
+ 
++
++#if INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2018R5) && !defined(OPENCV_DNN_IE_VPU_TYPE_DEFAULT)
++static bool detectMyriadX_()
++{
++    InferenceEngine::Builder::Network builder("");
++    InferenceEngine::idx_t inpId = builder.addLayer(
++                                   InferenceEngine::Builder::InputLayer().setPort(InferenceEngine::Port({1})));
++
++#if INF_ENGINE_RELEASE <= 2018050000
++    InferenceEngine::idx_t clampId;
++    {
++        InferenceEngine::Builder::Layer l = InferenceEngine::Builder::ClampLayer();
++        auto& blobs = l.getConstantData();
++        auto blob = InferenceEngine::make_shared_blob<int16_t>(
++                        InferenceEngine::Precision::FP16,
++                        InferenceEngine::Layout::C, {1});
++        blob->allocate();
++        blobs[""] = blob;
++        clampId = builder.addLayer({inpId}, l);
++    }
++    builder.addLayer({InferenceEngine::PortInfo(clampId)}, InferenceEngine::Builder::OutputLayer());
++#else
++    InferenceEngine::idx_t clampId = builder.addLayer({inpId}, InferenceEngine::Builder::ClampLayer());
++    builder.addLayer({InferenceEngine::PortInfo(clampId)},
++                      InferenceEngine::Builder::OutputLayer().setPort(InferenceEngine::Port({},
++                      InferenceEngine::Precision::FP16)));
++#endif
++
++    InferenceEngine::CNNNetwork cnn = InferenceEngine::CNNNetwork(
++                                      InferenceEngine::Builder::convertToICNNNetwork(builder.build()));
++
++    InferenceEngine::TargetDevice device = InferenceEngine::TargetDevice::eMYRIAD;
++    InferenceEngine::InferenceEnginePluginPtr enginePtr;
++    {
++        AutoLock lock(getInitializationMutex());
++        auto& sharedPlugins = getSharedPlugins();
++        auto pluginIt = sharedPlugins.find(device);
++        if (pluginIt != sharedPlugins.end()) {
++            enginePtr = pluginIt->second;
++        } else {
++            auto dispatcher = InferenceEngine::PluginDispatcher({""});
++            enginePtr = dispatcher.getSuitablePlugin(device);
++            sharedPlugins[device] = enginePtr;
++        }
++    }
++    auto plugin = InferenceEngine::InferencePlugin(enginePtr);
++    try
++    {
++        auto netExec = plugin.LoadNetwork(cnn, {{InferenceEngine::VPUConfigParams::KEY_VPU_PLATFORM,
++                                                 InferenceEngine::VPUConfigParams::VPU_2480}});
++        auto infRequest = netExec.CreateInferRequest();
++    } catch(...) {
++        return false;
++    }
++    return true;
++}
++#endif // >= 2018R5
++
+ void InfEngineBackendNet::initPlugin(InferenceEngine::ICNNNetwork& net)
+ {
+     CV_Assert(!isInitialized());
+@@ -875,5 +939,59 @@ void resetMyriadDevice()
+ #endif  // HAVE_INF_ENGINE
+ }
+ 
++#ifdef HAVE_INF_ENGINE
++bool isMyriadX()
++{
++     static bool myriadX = getInferenceEngineVPUType() == CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_X;
++     return myriadX;
++}
++
++static std::string getInferenceEngineVPUType_()
++{
++    static std::string param_vpu_type = utils::getConfigurationParameterString("OPENCV_DNN_IE_VPU_TYPE", "");
++    if (param_vpu_type == "")
++    {
++#if defined(OPENCV_DNN_IE_VPU_TYPE_DEFAULT)
++        param_vpu_type = OPENCV_DNN_IE_VPU_TYPE_DEFAULT;
++#elif INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2018R5)
++        CV_LOG_INFO(NULL, "OpenCV-DNN: running Inference Engine VPU autodetection: Myriad2/X. In case of other accelerator types specify 'OPENCV_DNN_IE_VPU_TYPE' parameter");
++        try {
++            bool isMyriadX_ = detectMyriadX_();
++            if (isMyriadX_)
++            {
++                param_vpu_type = CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_X;
++            }
++            else
++            {
++                param_vpu_type = CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_2;
++            }
++        }
++        catch (...)
++        {
++            CV_LOG_WARNING(NULL, "OpenCV-DNN: Failed Inference Engine VPU autodetection. Specify 'OPENCV_DNN_IE_VPU_TYPE' parameter.");
++            param_vpu_type.clear();
++        }
++#else
++        CV_LOG_WARNING(NULL, "OpenCV-DNN: VPU auto-detection is not implemented. Consider specifying VPU type via 'OPENCV_DNN_IE_VPU_TYPE' parameter");
++        param_vpu_type = CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_2;
++#endif
++    }
++    CV_LOG_INFO(NULL, "OpenCV-DNN: Inference Engine VPU type='" << param_vpu_type << "'");
++    return param_vpu_type;
++}
++
++cv::String getInferenceEngineVPUType()
++{
++    static cv::String vpu_type = getInferenceEngineVPUType_();
++    return vpu_type;
++}
++#else  // HAVE_INF_ENGINE
++cv::String getInferenceEngineVPUType()
++{
++    CV_Error(Error::StsNotImplemented, "This OpenCV build doesn't include InferenceEngine support");
++}
++#endif  // HAVE_INF_ENGINE
++
++
+ CV__DNN_EXPERIMENTAL_NS_END
+ }}  // namespace dnn, namespace cv
+diff --git a/modules/dnn/src/op_inf_engine.hpp b/modules/dnn/src/op_inf_engine.hpp
+index 7ad49c1976..a994e7c482 100644
+--- a/modules/dnn/src/op_inf_engine.hpp
++++ b/modules/dnn/src/op_inf_engine.hpp
+@@ -2,7 +2,7 @@
+ // It is subject to the license terms in the LICENSE file found in the top-level directory
+ // of this distribution and at http://opencv.org/license.html.
+ //
+-// Copyright (C) 2018, Intel Corporation, all rights reserved.
++// Copyright (C) 2018-2019, Intel Corporation, all rights reserved.
+ // Third party copyrights are property of their respective owners.
+ 
+ #ifndef __OPENCV_DNN_OP_INF_ENGINE_HPP__
+@@ -12,6 +12,8 @@
+ #include "opencv2/core/cvstd.hpp"
+ #include "opencv2/dnn.hpp"
+ 
++#include "opencv2/dnn/utils/inference_engine.hpp"
++
+ #ifdef HAVE_INF_ENGINE
+ #if defined(__GNUC__) && __GNUC__ >= 5
+ //#pragma GCC diagnostic push
+@@ -279,6 +281,12 @@ private:
+     InferenceEngine::CNNNetwork t_net;
+ };
+ 
++CV__DNN_EXPERIMENTAL_NS_BEGIN
++
++bool isMyriadX();
++
++CV__DNN_EXPERIMENTAL_NS_END
++
+ #endif  // HAVE_INF_ENGINE
+ 
+ bool haveInfEngine();

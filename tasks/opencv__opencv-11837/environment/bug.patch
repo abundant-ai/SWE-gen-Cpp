@@ -1,0 +1,205 @@
+diff --git a/modules/core/include/opencv2/core.hpp b/modules/core/include/opencv2/core.hpp
+index 11f993103b..a560ffc1d1 100644
+--- a/modules/core/include/opencv2/core.hpp
++++ b/modules/core/include/opencv2/core.hpp
+@@ -599,7 +599,7 @@ or
+     // access pixel coordinates
+     Point pnt = locations[i];
+ @endcode
+-@param src single-channel array
++@param src single-channel array (type CV_8UC1)
+ @param idx the output array, type of cv::Mat or std::vector<Point>, corresponding to non-zero indices in the input
+ */
+ CV_EXPORTS_W void findNonZero( InputArray src, OutputArray idx );
+@@ -699,8 +699,7 @@ CV_EXPORTS double norm( const SparseMat& src, int normType );
+ 
+ /** @brief Computes the Peak Signal-to-Noise Ratio (PSNR) image quality metric.
+ 
+-This function calculates the Peak Signal-to-Noise Ratio (PSNR) image quality metric in decibels (dB),
+-between two input arrays src1 and src2. The arrays must have the same type.
++This function calculates the Peak Signal-to-Noise Ratio (PSNR) image quality metric in decibels (dB), between two input arrays src1 and src2. Arrays must have depth CV_8U.
+ 
+ The PSNR is calculated as follows:
+ 
+@@ -708,15 +707,13 @@ The PSNR is calculated as follows:
+ \texttt{PSNR} = 10 \cdot \log_{10}{\left( \frac{R^2}{MSE} \right) }
+ \f]
+ 
+-where R is the maximum integer value of depth (e.g. 255 in the case of CV_8U data)
+-and MSE is the mean squared error between the two arrays.
++where R is the maximum integer value of depth CV_8U (255) and MSE is the mean squared error between the two arrays.
+ 
+ @param src1 first input array.
+ @param src2 second input array of the same size as src1.
+-@param R the maximum pixel value (255 by default)
+ 
+   */
+-CV_EXPORTS_W double PSNR(InputArray src1, InputArray src2, double R=255.);
++CV_EXPORTS_W double PSNR(InputArray src1, InputArray src2);
+ 
+ /** @brief naive nearest neighbor finder
+ 
+diff --git a/modules/core/src/count_non_zero.cpp b/modules/core/src/count_non_zero.cpp
+index 4f3b0fb792..368dcfc3a6 100644
+--- a/modules/core/src/count_non_zero.cpp
++++ b/modules/core/src/count_non_zero.cpp
+@@ -393,60 +393,25 @@ void cv::findNonZero( InputArray _src, OutputArray _idx )
+     CV_INSTRUMENT_REGION()
+ 
+     Mat src = _src.getMat();
+-    CV_Assert( src.channels() == 1 && src.dims == 2 );
+-
+-    int depth = src.depth();
+-    std::vector<Point> idxvec;
+-    int rows = src.rows, cols = src.cols;
+-    AutoBuffer<int> buf_(cols + 1);
+-    int* buf = buf_;
+-
+-    for( int i = 0; i < rows; i++ )
++    CV_Assert( src.type() == CV_8UC1 );
++    int n = countNonZero(src);
++    if( n == 0 )
+     {
+-        int j, k = 0;
+-        const uchar* ptr8 = src.ptr(i);
+-        if( depth == CV_8U || depth == CV_8S )
+-        {
+-            for( j = 0; j < cols; j++ )
+-                if( ptr8[j] != 0 ) buf[k++] = j;
+-        }
+-        else if( depth == CV_16U || depth == CV_16S )
+-        {
+-            const ushort* ptr16 = (const ushort*)ptr8;
+-            for( j = 0; j < cols; j++ )
+-                if( ptr16[j] != 0 ) buf[k++] = j;
+-        }
+-        else if( depth == CV_32S )
+-        {
+-            const int* ptr32s = (const int*)ptr8;
+-            for( j = 0; j < cols; j++ )
+-                if( ptr32s[j] != 0 ) buf[k++] = j;
+-        }
+-        else if( depth == CV_32F )
+-        {
+-            const float* ptr32f = (const float*)ptr8;
+-            for( j = 0; j < cols; j++ )
+-                if( ptr32f[j] != 0 ) buf[k++] = j;
+-        }
+-        else
+-        {
+-            const double* ptr64f = (const double*)ptr8;
+-            for( j = 0; j < cols; j++ )
+-                if( ptr64f[j] != 0 ) buf[k++] = j;
+-        }
+-
+-        if( k > 0 )
+-        {
+-            size_t sz = idxvec.size();
+-            idxvec.resize(sz + k);
+-            for( j = 0; j < k; j++ )
+-                idxvec[sz + j] = Point(buf[j], i);
+-        }
++        _idx.release();
++        return;
+     }
+-
+-    if( idxvec.empty() || (_idx.kind() == _InputArray::MAT && !_idx.getMatRef().isContinuous()) )
++    if( _idx.kind() == _InputArray::MAT && !_idx.getMatRef().isContinuous() )
+         _idx.release();
++    _idx.create(n, 1, CV_32SC2);
++    Mat idx = _idx.getMat();
++    CV_Assert(idx.isContinuous());
++    Point* idx_ptr = idx.ptr<Point>();
+ 
+-    if( !idxvec.empty() )
+-        Mat(idxvec).copyTo(_idx);
++    for( int i = 0; i < src.rows; i++ )
++    {
++        const uchar* bin_ptr = src.ptr(i);
++        for( int j = 0; j < src.cols; j++ )
++            if( bin_ptr[j] )
++                *idx_ptr++ = Point(j, i);
++    }
+ }
+diff --git a/modules/core/src/norm.cpp b/modules/core/src/norm.cpp
+index 6b95238af9..d12dfc742d 100644
+--- a/modules/core/src/norm.cpp
++++ b/modules/core/src/norm.cpp
+@@ -1251,13 +1251,13 @@ cv::Hamming::ResultType cv::Hamming::operator()( const unsigned char* a, const u
+     return cv::hal::normHamming(a, b, size);
+ }
+ 
+-double cv::PSNR(InputArray _src1, InputArray _src2, double R)
++double cv::PSNR(InputArray _src1, InputArray _src2)
+ {
+     CV_INSTRUMENT_REGION()
+ 
+     //Input arrays must have depth CV_8U
+-    CV_Assert( _src1.type() == _src2.type() );
++    CV_Assert( _src1.depth() == CV_8U && _src2.depth() == CV_8U );
+ 
+     double diff = std::sqrt(norm(_src1, _src2, NORM_L2SQR)/(_src1.total()*_src1.channels()));
+-    return 20*log10(R/(diff+DBL_EPSILON));
++    return 20*log10(255./(diff+DBL_EPSILON));
+ }
+diff --git a/modules/core/test/test_arithm.cpp b/modules/core/test/test_arithm.cpp
+index f74db063b2..dd2ed9a86e 100644
+--- a/modules/core/test/test_arithm.cpp
++++ b/modules/core/test/test_arithm.cpp
+@@ -1847,54 +1847,13 @@ INSTANTIATE_TEST_CASE_P(Arithm, SubtractOutputMatNotEmpty, testing::Combine(
+     testing::Values(-1, CV_16S, CV_32S, CV_32F),
+     testing::Bool()));
+ 
+-TEST(Core_FindNonZero, regression)
++TEST(Core_FindNonZero, singular)
+ {
+     Mat img(10, 10, CV_8U, Scalar::all(0));
+-    vector<Point> pts, pts2(5);
++    vector<Point> pts, pts2(10);
+     findNonZero(img, pts);
+     findNonZero(img, pts2);
+     ASSERT_TRUE(pts.empty() && pts2.empty());
+-
+-    RNG rng((uint64)-1);
+-    size_t nz = 0;
+-    for( int i = 0; i < 10; i++ )
+-    {
+-        int idx = rng.uniform(0, img.rows*img.cols);
+-        if( !img.data[idx] ) nz++;
+-        img.data[idx] = (uchar)rng.uniform(1, 256);
+-    }
+-    findNonZero(img, pts);
+-    ASSERT_TRUE(pts.size() == nz);
+-
+-    img.convertTo( img, CV_8S );
+-    pts.clear();
+-    findNonZero(img, pts);
+-    ASSERT_TRUE(pts.size() == nz);
+-
+-    img.convertTo( img, CV_16U );
+-    pts.resize(pts.size()*2);
+-    findNonZero(img, pts);
+-    ASSERT_TRUE(pts.size() == nz);
+-
+-    img.convertTo( img, CV_16S );
+-    pts.resize(pts.size()*3);
+-    findNonZero(img, pts);
+-    ASSERT_TRUE(pts.size() == nz);
+-
+-    img.convertTo( img, CV_32S );
+-    pts.resize(pts.size()*4);
+-    findNonZero(img, pts);
+-    ASSERT_TRUE(pts.size() == nz);
+-
+-    img.convertTo( img, CV_32F );
+-    pts.resize(pts.size()*5);
+-    findNonZero(img, pts);
+-    ASSERT_TRUE(pts.size() == nz);
+-
+-    img.convertTo( img, CV_64F );
+-    pts.clear();
+-    findNonZero(img, pts);
+-    ASSERT_TRUE(pts.size() == nz);
+ }
+ 
+ TEST(Core_BoolVector, support)

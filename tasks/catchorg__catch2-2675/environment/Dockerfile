@@ -17,10 +17,6 @@ RUN apt-get update && apt-get install -y \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Use Clang as the C++ compiler (required for unreachable-code warnings)
-ENV CC=clang
-ENV CXX=clang++
-
 WORKDIR /app
 
 # Clone repo at HEAD commit (with fix applied)
@@ -32,17 +28,22 @@ RUN git clone https://github.com/catchorg/Catch2.git src && \
 
 WORKDIR /app/src
 
+# Use Clang as the C++ compiler
+ENV CC=clang
+ENV CXX=clang++
+ENV CXXFLAGS="-Wno-error=deprecated-literal-operator"
+
 # Configure and build Catch2 with CMake
-# Enable development build which treats warnings as errors
-# Suppress unrelated literal operator warning for Clang 18 compatibility
 RUN cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
-    -DCATCH_DEVELOPMENT_BUILD=ON \
-    -DCATCH_BUILD_TESTING=ON \
     -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
     -G Ninja
 
-# Build will fail if there are unreachable-code warnings (development build treats warnings as errors)
+# Fix MINSIGSTKSZ constexpr issue with newer glibc - hardcode a safe value
+RUN find . \( -name "*.cpp" -o -name "*.hpp" \) -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
+    xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' || true
+
+# Build Catch2
 RUN cmake --build build
 
 # Reset tracked files so bug.patch applies cleanly
@@ -51,6 +52,10 @@ RUN git reset --hard
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
+
+# Fix MINSIGSTKSZ constexpr issue again (undone by git reset)
+RUN find . \( -name "*.cpp" -o -name "*.hpp" \) -type f -exec grep -l "sigStackSize.*MINSIGSTKSZ" {} \; | \
+    xargs sed -i 's/static constexpr std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 131072;/g' || true
 
 # Rebuild after applying bug.patch (C++ is a compiled language)
 RUN cmake --build build

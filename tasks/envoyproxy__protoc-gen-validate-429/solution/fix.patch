@@ -41,6 +41,41 @@ index 48953e6..12505fc 100644
          } catch (Throwable ex) {
              writeResult(Harness.TestResult.newBuilder().setValid(false).setError(true).setReason(Throwables.getStackTraceAsString(ex)).build());
          }
+diff --git a/validate/validator.py b/validate/validator.py
+index 3217d29..225507b 100644
+--- a/validate/validator.py
++++ b/validate/validator.py
+@@ -976,17 +976,12 @@ def rule_type(field):
+ 
+ def file_template(proto_message):
+     file_tmp = """
+-{%- set ns = namespace(ignored=false) -%}
+-{%- for option_descriptor, option_value in p.DESCRIPTOR.GetOptions().ListFields() -%}
+-    {%- if option_descriptor.full_name == "validate.ignored" and option_value -%}
+-        {%- set ns.found = true -%}
+-    {%- endif -%}
+-{%- endfor -%}
+-{%- if not ns.ignored -%}
+ # Validates {{ p.DESCRIPTOR.name }}
+ def generate_validate(p):
+     {%- for option_descriptor, option_value in p.DESCRIPTOR.GetOptions().ListFields() %}
+         {%- if option_descriptor.full_name == "validate.disabled" and option_value %}
++    return None
++        {%- elif option_descriptor.full_name == "validate.ignored" and option_value %}
+     return None
+         {%- endif -%}
+     {%- endfor -%}
+@@ -1009,9 +1004,7 @@ def generate_validate(p):
+     {{ rule_type(field) -}}
+         {%- endif %}
+     {%- endfor %}
+-    return None
+-{%- endif -%}
+-"""
++    return None"""
+     return Template(file_tmp).render(rule_type = rule_type, p = proto_message)
+ 
+ class UnimplementedException(Exception):
 diff --git a/tests/harness/executor/harness.go b/tests/harness/executor/harness.go
 index 987a0ea..33f10d7 100644
 --- a/tests/harness/executor/harness.go
@@ -73,7 +108,7 @@ index 987a0ea..33f10d7 100644
 @@ -42,7 +42,7 @@ type Harness struct {
  	Exec func(context.Context, io.Reader) (*harness.TestResult, error)
  }
-
+ 
 -func InitHarness(cmd string, args ...string) Harness {
 +func InitHarness(cmd string, name string, args ...string) Harness {
  	if runtime.GOOS == "windows" {
@@ -81,7 +116,7 @@ index 987a0ea..33f10d7 100644
  		// so we have to use the manifest instead. If the manifest
 @@ -66,7 +66,7 @@ func InitHarness(cmd string, args ...string) Harness {
  	}
-
+ 
  	return Harness{
 -		Name: cmd,
 +		Name: name,
@@ -101,7 +136,7 @@ index b9d76c4..db48a52 100644
  	"sync"
  	"time"
 @@ -15,23 +14,24 @@ import (
-
+ 
  func Work(wg *sync.WaitGroup, in <-chan TestCase, out chan<- TestResult, harnesses []Harness) {
  	for tc := range in {
 -		ok, skip := execTestCase(tc, harnesses)
@@ -110,7 +145,7 @@ index b9d76c4..db48a52 100644
  	}
  	wg.Done()
  }
-
+ 
 -func execTestCase(tc TestCase, harnesses []Harness) (ok, skip bool) {
 +func execTestCase(tc TestCase, harnesses []Harness, out chan<- TestResult) {
  	any, err := ptypes.MarshalAny(tc.Message)
@@ -120,7 +155,7 @@ index b9d76c4..db48a52 100644
 +		out <- TestResult{false, false}
 +		return
  	}
-
+ 
  	b, err := proto.Marshal(&harness.TestCase{Message: any})
  	if err != nil {
  		log.Printf("unable to marshal test case %q - %v", tc.Name, err)
@@ -128,19 +163,19 @@ index b9d76c4..db48a52 100644
 +		out <- TestResult{false, false}
 +		return
  	}
-
+ 
  	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 @@ -40,8 +40,6 @@ func execTestCase(tc TestCase, harnesses []Harness) (ok, skip bool) {
  	wg := new(sync.WaitGroup)
  	wg.Add(len(harnesses))
-
+ 
 -	errs := make(chan error, len(harnesses))
 -	skips := make(chan string, len(harnesses))
-
+ 
  	for _, h := range harnesses {
  		h := h
 @@ -50,38 +48,31 @@ func execTestCase(tc TestCase, harnesses []Harness) (ok, skip bool) {
-
+ 
  			res, err := h.Exec(ctx, bytes.NewReader(b))
  			if err != nil {
 -				errs <- err
@@ -148,7 +183,7 @@ index b9d76c4..db48a52 100644
 +				out <- TestResult{false, false}
  				return
  			}
-
+ 
  			if res.Error {
 -				errs <- fmt.Errorf("%s: internal harness error: %s", h.Name, res.Reason)
 +				log.Printf("[%s] (%s harness) internal harness error: %s", tc.Name, h.Name, res.Reason)
@@ -172,7 +207,7 @@ index b9d76c4..db48a52 100644
  			}
  		}()
  	}
-
+ 
  	wg.Wait()
 -	close(errs)
 -	close(skips)
@@ -190,38 +225,3 @@ index b9d76c4..db48a52 100644
 -
  	return
  }
-diff --git a/validate/validator.py b/validate/validator.py
-index 3217d29..225507b 100644
---- a/validate/validator.py
-+++ b/validate/validator.py
-@@ -976,17 +976,12 @@ def rule_type(field):
-
- def file_template(proto_message):
-     file_tmp = """
--{%- set ns = namespace(ignored=false) -%}
--{%- for option_descriptor, option_value in p.DESCRIPTOR.GetOptions().ListFields() -%}
--    {%- if option_descriptor.full_name == "validate.ignored" and option_value -%}
--        {%- set ns.found = true -%}
--    {%- endif -%}
--{%- endfor -%}
--{%- if not ns.ignored -%}
- # Validates {{ p.DESCRIPTOR.name }}
- def generate_validate(p):
-     {%- for option_descriptor, option_value in p.DESCRIPTOR.GetOptions().ListFields() %}
-         {%- if option_descriptor.full_name == "validate.disabled" and option_value %}
-+    return None
-+        {%- elif option_descriptor.full_name == "validate.ignored" and option_value %}
-     return None
-         {%- endif -%}
-     {%- endfor -%}
-@@ -1009,9 +1004,7 @@ def generate_validate(p):
-     {{ rule_type(field) -}}
-         {%- endif %}
-     {%- endfor %}
--    return None
--{%- endif -%}
--"""
-+    return None"""
-     return Template(file_tmp).render(rule_type = rule_type, p = proto_message)
-
- class UnimplementedException(Exception):

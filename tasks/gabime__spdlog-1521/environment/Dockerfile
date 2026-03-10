@@ -9,10 +9,9 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CMake (required for building spdlog)
+# Install CMake (required for building spdlog tests)
 RUN apt-get update && apt-get install -y \
     cmake \
-    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -26,13 +25,15 @@ RUN git clone https://github.com/gabime/spdlog.git src && \
 
 WORKDIR /app/src
 
-# Fix Catch2 v2.8.0 compatibility with glibc 2.34+ (Ubuntu 24.04)
-# This fixes the MINSIGSTKSZ compilation error in catch.hpp by using a fixed size
-RUN sed -i 's/constexpr static std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;/static constexpr std::size_t sigStackSize = 32768;/' tests/catch.hpp
+RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 --no-backup-if-mismatch --reject-file=- < /tmp/bug.patch || [ $? -eq 1 ] && rm /tmp/bug.patch
+
+# Fix MINSIGSTKSZ compilation issue with Catch 2.8.0 on modern GCC
+RUN sed -i '9041s/.*/    static constexpr std::size_t sigStackSize = 32768;/' tests/catch.hpp && \
+    sed -i '9100s/.*/    char FatalConditionHandler::altStackMem[32768] = {};/' tests/catch.hpp
 
 RUN rm -rf /app/src/.git
 

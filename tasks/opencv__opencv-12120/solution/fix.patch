@@ -1,0 +1,187 @@
+diff --git a/cmake/OpenCVCompilerOptimizations.cmake b/cmake/OpenCVCompilerOptimizations.cmake
+index 8beabefe41..377eb98a65 100644
+--- a/cmake/OpenCVCompilerOptimizations.cmake
++++ b/cmake/OpenCVCompilerOptimizations.cmake
+@@ -761,24 +761,24 @@ macro(ocv_compiler_optimization_fill_cpu_config)
+   endif()
+ endmacro()
+ 
+-macro(ocv_add_dispatched_file filename)
++macro(__ocv_add_dispatched_file filename target_src_var src_directory dst_directory precomp_hpp optimizations_var)
+   if(NOT OPENCV_INITIAL_PASS)
+     set(__codestr "
+-#include \"${CMAKE_CURRENT_LIST_DIR}/src/precomp.hpp\"
+-#include \"${CMAKE_CURRENT_LIST_DIR}/src/${filename}.simd.hpp\"
++#include \"${src_directory}/${precomp_hpp}\"
++#include \"${src_directory}/${filename}.simd.hpp\"
+ ")
+ 
+-    set(__declarations_str "#define CV_CPU_SIMD_FILENAME \"${CMAKE_CURRENT_LIST_DIR}/src/${filename}.simd.hpp\"")
++    set(__declarations_str "#define CV_CPU_SIMD_FILENAME \"${src_directory}/${filename}.simd.hpp\"")
+     set(__dispatch_modes "BASELINE")
+ 
+-    set(__optimizations "${ARGN}")
++    set(__optimizations "${${optimizations_var}}")
+     if(CV_DISABLE_OPTIMIZATION OR NOT CV_ENABLE_INTRINSICS)
+       set(__optimizations "")
+     endif()
+ 
+     foreach(OPT ${__optimizations})
+       string(TOLOWER "${OPT}" OPT_LOWER)
+-      set(__file "${CMAKE_CURRENT_BINARY_DIR}/${filename}.${OPT_LOWER}.cpp")
++      set(__file "${CMAKE_CURRENT_BINARY_DIR}/${dst_directory}${filename}.${OPT_LOWER}.cpp")
+       if(EXISTS "${__file}")
+         file(READ "${__file}" __content)
+       else()
+@@ -791,7 +791,11 @@ macro(ocv_add_dispatched_file filename)
+       endif()
+ 
+       if(";${CPU_DISPATCH};" MATCHES "${OPT}" OR __CPU_DISPATCH_INCLUDE_ALL)
+-        list(APPEND OPENCV_MODULE_${the_module}_SOURCES_DISPATCHED "${__file}")
++        if(EXISTS "${src_directory}/${filename}.${OPT_LOWER}.cpp")
++          message(STATUS "Using overrided ${OPT} source: ${src_directory}/${filename}.${OPT_LOWER}.cpp")
++        else()
++          list(APPEND ${target_src_var} "${__file}")
++        endif()
+       endif()
+ 
+       set(__declarations_str "${__declarations_str}
+@@ -803,9 +807,11 @@ macro(ocv_add_dispatched_file filename)
+ 
+     set(__declarations_str "${__declarations_str}
+ #define CV_CPU_DISPATCH_MODES_ALL ${__dispatch_modes}
++
++#undef CV_CPU_SIMD_FILENAME
+ ")
+ 
+-    set(__file "${CMAKE_CURRENT_BINARY_DIR}/${filename}.simd_declarations.hpp")
++    set(__file "${CMAKE_CURRENT_BINARY_DIR}/${dst_directory}${filename}.simd_declarations.hpp")
+     if(EXISTS "${__file}")
+       file(READ "${__file}" __content)
+     endif()
+@@ -817,6 +823,17 @@ macro(ocv_add_dispatched_file filename)
+   endif()
+ endmacro()
+ 
++macro(ocv_add_dispatched_file filename)
++  set(__optimizations "${ARGN}")
++  if(" ${ARGV1}" STREQUAL " TEST")
++    list(REMOVE_AT __optimizations 0)
++    __ocv_add_dispatched_file("${filename}" "OPENCV_MODULE_${the_module}_TEST_SOURCES_DISPATCHED" "${CMAKE_CURRENT_LIST_DIR}/test" "test/" "test_precomp.hpp" __optimizations)
++  else()
++    __ocv_add_dispatched_file("${filename}" "OPENCV_MODULE_${the_module}_SOURCES_DISPATCHED" "${CMAKE_CURRENT_LIST_DIR}/src" "" "precomp.hpp" __optimizations)
++  endif()
++endmacro()
++
++
+ # Workaround to support code which always require all code paths
+ macro(ocv_add_dispatched_file_force_all)
+   set(__CPU_DISPATCH_INCLUDE_ALL 1)
+diff --git a/cmake/OpenCVModule.cmake b/cmake/OpenCVModule.cmake
+index 00d15dc6d9..54f100d3cf 100644
+--- a/cmake/OpenCVModule.cmake
++++ b/cmake/OpenCVModule.cmake
+@@ -1202,6 +1202,9 @@ function(ocv_add_accuracy_tests)
+         set(OPENCV_TEST_${the_module}_SOURCES ${test_srcs} ${test_hdrs})
+       endif()
+ 
++      if(OPENCV_MODULE_${the_module}_TEST_SOURCES_DISPATCHED)
++        list(APPEND OPENCV_TEST_${the_module}_SOURCES ${OPENCV_MODULE_${the_module}_TEST_SOURCES_DISPATCHED})
++      endif()
+       ocv_compiler_optimization_process_sources(OPENCV_TEST_${the_module}_SOURCES OPENCV_TEST_${the_module}_DEPS ${the_target})
+ 
+       if(NOT BUILD_opencv_world)
+@@ -1211,6 +1214,9 @@ function(ocv_add_accuracy_tests)
+       source_group("Src" FILES "${${the_target}_pch}")
+       ocv_add_executable(${the_target} ${OPENCV_TEST_${the_module}_SOURCES} ${${the_target}_pch})
+       ocv_target_include_modules(${the_target} ${test_deps} "${test_path}")
++      if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/test")
++        ocv_target_include_directories(${the_target} "${CMAKE_CURRENT_BINARY_DIR}/test")
++      endif()
+       ocv_target_link_libraries(${the_target} LINK_PRIVATE ${test_deps} ${OPENCV_MODULE_${the_module}_DEPS} ${OPENCV_LINKER_LIBS} ${OPENCV_TEST_${the_module}_DEPS})
+       add_dependencies(opencv_tests ${the_target})
+ 
+diff --git a/modules/core/CMakeLists.txt b/modules/core/CMakeLists.txt
+index 1997c906bc..455afaf593 100644
+--- a/modules/core/CMakeLists.txt
++++ b/modules/core/CMakeLists.txt
+@@ -3,6 +3,10 @@ set(the_description "The Core Functionality")
+ ocv_add_dispatched_file(mathfuncs_core SSE2 AVX AVX2)
+ ocv_add_dispatched_file(stat SSE4_2 AVX2)
+ 
++# dispatching for accuracy tests
++ocv_add_dispatched_file_force_all(test_intrin128 TEST SSE2 SSE3 SSSE3 SSE4_1 SSE4_2 AVX FP16 AVX2)
++ocv_add_dispatched_file_force_all(test_intrin256 TEST AVX2)
++
+ ocv_add_module(core
+                OPTIONAL opencv_cudev
+                WRAP java python js)
+diff --git a/modules/core/include/opencv2/core/hal/intrin.hpp b/modules/core/include/opencv2/core/hal/intrin.hpp
+index 263659d302..31504a6291 100644
+--- a/modules/core/include/opencv2/core/hal/intrin.hpp
++++ b/modules/core/include/opencv2/core/hal/intrin.hpp
+@@ -204,20 +204,6 @@ CV_CPU_OPTIMIZATION_HAL_NAMESPACE_BEGIN
+ #define CV_SIMD512_64F 0
+ #endif
+ 
+-#if CV_SIMD512
+-    #define CV_SIMD 1
+-    #define CV_SIMD_64F CV_SIMD512_64F
+-    #define CV_SIMD_WIDTH 64
+-#elif CV_SIMD256
+-    #define CV_SIMD 1
+-    #define CV_SIMD_64F CV_SIMD256_64F
+-    #define CV_SIMD_WIDTH 32
+-#else
+-    #define CV_SIMD CV_SIMD128
+-    #define CV_SIMD_64F CV_SIMD128_64F
+-    #define CV_SIMD_WIDTH 16
+-#endif
+-
+ //==================================================================================================
+ 
+ #define CV_INTRIN_DEFINE_WIDE_INTRIN(typ, vtyp, short_typ, prefix, loadsfx) \
+@@ -309,7 +295,15 @@ template<typename _Tp> struct V_RegTraits
+ #endif
+ #endif
+ 
+-#if CV_SIMD256
++#if CV_SIMD512 && (!defined(CV__SIMD_FORCE_WIDTH) || CV__SIMD_FORCE_WIDTH == 512)
++    #define CV_SIMD 1
++    #define CV_SIMD_64F CV_SIMD512_64F
++    #define CV_SIMD_WIDTH 64
++    // TODO typedef v_uint8 / v_int32 / etc types here
++#elif CV_SIMD256 && (!defined(CV__SIMD_FORCE_WIDTH) || CV__SIMD_FORCE_WIDTH == 256)
++    #define CV_SIMD 1
++    #define CV_SIMD_64F CV_SIMD256_64F
++    #define CV_SIMD_WIDTH 32
+     typedef v_uint8x32   v_uint8;
+     typedef v_int8x32    v_int8;
+     typedef v_uint16x16  v_uint16;
+@@ -329,7 +323,10 @@ template<typename _Tp> struct V_RegTraits
+     CV_INTRIN_DEFINE_WIDE_INTRIN_ALL_TYPES(v256)
+     CV_INTRIN_DEFINE_WIDE_INTRIN(double, v_float64, f64, v256, load)
+     inline void vx_cleanup() { v256_cleanup(); }
+-#elif CV_SIMD128 || CV_SIMD128_CPP
++#elif (CV_SIMD128 || CV_SIMD128_CPP) && (!defined(CV__SIMD_FORCE_WIDTH) || CV__SIMD_FORCE_WIDTH == 128)
++    #define CV_SIMD CV_SIMD128
++    #define CV_SIMD_64F CV_SIMD128_64F
++    #define CV_SIMD_WIDTH 16
+     typedef v_uint8x16  v_uint8;
+     typedef v_int8x16   v_int8;
+     typedef v_uint16x8  v_uint16;
+@@ -380,6 +377,14 @@ inline unsigned int trailingZeros32(unsigned int value) {
+ CV_CPU_OPTIMIZATION_HAL_NAMESPACE_END
+ #endif
+ 
++#ifndef CV_SIMD_64F
++#define CV_SIMD_64F 0
++#endif
++
++#ifndef CV_SIMD
++#define CV_SIMD 0
++#endif
++
+ } // cv::
+ 
+ //! @endcond

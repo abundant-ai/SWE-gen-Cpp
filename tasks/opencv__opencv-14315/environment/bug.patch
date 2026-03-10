@@ -1,0 +1,168 @@
+diff --git a/modules/dnn/src/layers/flatten_layer.cpp b/modules/dnn/src/layers/flatten_layer.cpp
+index 8672ea3e4f..3a704dca81 100644
+--- a/modules/dnn/src/layers/flatten_layer.cpp
++++ b/modules/dnn/src/layers/flatten_layer.cpp
+@@ -105,16 +105,6 @@ public:
+         return true;
+     }
+ 
+-    void finalize(InputArrayOfArrays inputs_arr, OutputArrayOfArrays) CV_OVERRIDE
+-    {
+-        std::vector<Mat> inputs;
+-        inputs_arr.getMatVector(inputs);
+-
+-        int numAxes = inputs[0].dims;
+-        _startAxis = clamp(_startAxis, numAxes);
+-        _endAxis = clamp(_endAxis, numAxes);
+-    }
+-
+ #ifdef HAVE_OPENCL
+     bool forward_ocl(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr)
+     {
+diff --git a/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp b/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp
+index 7f1001888a..37e57505da 100644
+--- a/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp
++++ b/modules/dnn/src/tensorflow/tf_graph_simplifier.cpp
+@@ -646,30 +646,6 @@ public:
+     }
+ };
+ 
+-class SoftMaxSlimV2Subgraph : public Subgraph
+-{
+-public:
+-    SoftMaxSlimV2Subgraph()
+-    {
+-        int input = addNodeToMatch("");
+-        int shape = addNodeToMatch("Shape", input);
+-        int shape_2 = addNodeToMatch("Shape", input);
+-        int rank = addNodeToMatch("Const");
+-        int y = addNodeToMatch("Const");
+-        int sub = addNodeToMatch("Sub", rank, y);
+-        int begin = addNodeToMatch("Pack", sub);
+-        int size = addNodeToMatch("Const");
+-        int slice = addNodeToMatch("Slice", shape, begin, size);
+-        int values = addNodeToMatch("Const");
+-        int axis = addNodeToMatch("Const");
+-        int concat = addNodeToMatch("ConcatV2", values, slice, axis);
+-        int reshape = addNodeToMatch("Reshape", input, concat);
+-        int softmax = addNodeToMatch("Softmax", reshape);
+-        addNodeToMatch("Reshape", softmax, shape_2);
+-        setFusedNode("Softmax", input);
+-    }
+-};
+-
+ void simplifySubgraphs(tensorflow::GraphDef& net)
+ {
+     std::vector<Ptr<Subgraph> > subgraphs;
+@@ -687,7 +663,6 @@ void simplifySubgraphs(tensorflow::GraphDef& net)
+     subgraphs.push_back(Ptr<Subgraph>(new UpsamplingKerasSubgraph()));
+     subgraphs.push_back(Ptr<Subgraph>(new ReshapeAsShapeSubgraph()));
+     subgraphs.push_back(Ptr<Subgraph>(new SoftMaxSlimSubgraph()));
+-    subgraphs.push_back(Ptr<Subgraph>(new SoftMaxSlimV2Subgraph()));
+ 
+     int numNodes = net.node_size();
+     std::vector<int> matchedNodesIds;
+diff --git a/modules/dnn/src/tensorflow/tf_importer.cpp b/modules/dnn/src/tensorflow/tf_importer.cpp
+index 15aecba095..a1628104f7 100644
+--- a/modules/dnn/src/tensorflow/tf_importer.cpp
++++ b/modules/dnn/src/tensorflow/tf_importer.cpp
+@@ -1125,25 +1125,18 @@ void TFImporter::populateNet(Net dstNet)
+             {
+                 CV_Assert(hasLayerAttr(layer, "squeeze_dims"));
+                 const tensorflow::AttrValue& dims = getLayerAttr(layer, "squeeze_dims");
+-                std::vector<int> dimsVector(dims.list().i_size());
+-                for (int i = 0; i < dimsVector.size(); ++i)
+-                    dimsVector[i] = dims.list().i(i);
+-
+-                // Flatten layer can squeeze dimensions range into one.
+-                std::sort(dimsVector.begin(), dimsVector.end());
+-                for (int i = 1; i < dimsVector.size(); ++i)
++                if (inpLayout == DATA_LAYOUT_NHWC)
+                 {
+-                    if (dimsVector[i] != dimsVector[i - 1] + 1)
++                    if (dims.list().i_size() != 2 || dims.list().i(0) != 1 || dims.list().i(1) != 2)
+                         CV_Error(Error::StsNotImplemented, "Unsupported squeeze configuration");
+                 }
+-                int start = dimsVector.front() - 1, end = dimsVector.back();
+-                if (start == -1 && end == 0)  // squeeze 0th dimension
++                else if (inpLayout == DATA_LAYOUT_NCHW)
+                 {
+-                    start = 0;
+-                    end = 1;
++                    if (dims.list().i_size() != 2 || dims.list().i(0) != 2 || dims.list().i(1) != 3)
++                        CV_Error(Error::StsNotImplemented, "Unsupported squeeze configuration");
+                 }
+-                layerParams.set("axis", start);
+-                layerParams.set("end_axis", end);
++                else
++                    CV_Error(Error::StsNotImplemented, "Unsupported squeeze configuration");
+             }
+             if (inpLayout == DATA_LAYOUT_NHWC)
+             {
+diff --git a/modules/dnn/test/test_tf_importer.cpp b/modules/dnn/test/test_tf_importer.cpp
+index 1c4b96a6ec..05f82725e9 100644
+--- a/modules/dnn/test/test_tf_importer.cpp
++++ b/modules/dnn/test/test_tf_importer.cpp
+@@ -658,17 +658,6 @@ TEST_P(Test_TensorFlow_layers, softmax)
+     runTensorFlowNet("slim_softmax");
+ }
+ 
+-TEST_P(Test_TensorFlow_layers, slim_softmax_v2)
+-{
+-#if defined(INF_ENGINE_RELEASE)
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD &&
+-        getInferenceEngineVPUType() == CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_2
+-    )
+-        throw SkipTestException("Test is disabled for Myriad2");
+-#endif
+-    runTensorFlowNet("slim_softmax_v2");
+-}
+-
+ TEST_P(Test_TensorFlow_layers, relu6)
+ {
+     runTensorFlowNet("keras_relu6");
+@@ -686,44 +675,6 @@ TEST_P(Test_TensorFlow_layers, resize_bilinear)
+     runTensorFlowNet("resize_bilinear_factor");
+ }
+ 
+-TEST_P(Test_TensorFlow_layers, squeeze)
+-{
+-#if defined(INF_ENGINE_RELEASE)
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD
+-            && getInferenceEngineVPUType() == CV_DNN_INFERENCE_ENGINE_VPU_TYPE_MYRIAD_2
+-    )
+-        throw SkipTestException("Test is disabled for Myriad2");
+-#endif
+-    int inpShapes[][4] = {{1, 3, 4, 2}, {1, 3, 1, 2}, {1, 3, 4, 1}, {1, 3, 4, 1}};  // TensorFlow's shape (NHWC)
+-    int outShapes[][3] = {{3, 4, 2}, {1, 3, 2}, {1, 3, 4}, {1, 3, 4}};
+-    int squeeze_dims[] = {0, 2, 3, -1};
+-    for (int i = 0; i < 4; ++i)
+-    {
+-        SCOPED_TRACE(format("i=%d", i));
+-        std::string pbtxt =
+-            "node { name: \"input\" op: \"Placeholder\""
+-            "attr { key: \"data_format\" value { s: \"NHWC\" } } }"
+-            "node { name: \"squeeze\" op: \"Squeeze\" input: \"input\""
+-              "attr { key: \"squeeze_dims\" value { list { i:" + format("%d", squeeze_dims[i]) + "}}}}";
+-        Net net = readNetFromTensorflow(0, 0, pbtxt.c_str(), pbtxt.size());
+-        net.setPreferableBackend(backend);
+-        net.setPreferableTarget(target);
+-        Mat tfInp(4, &inpShapes[i][0], CV_32F);
+-        randu(tfInp, -1, 1);
+-
+-        // NHWC to NCHW
+-        CV_Assert(inpShapes[i][0] == 1);
+-        std::swap(inpShapes[i][2], inpShapes[i][3]);
+-        std::swap(inpShapes[i][1], inpShapes[i][2]);
+-        Mat cvInp = tfInp.reshape(1, tfInp.total() / inpShapes[i][1]).t();
+-        cvInp = cvInp.reshape(1, 4, &inpShapes[i][0]);
+-
+-        net.setInput(cvInp);
+-        Mat out = net.forward();
+-        normAssert(tfInp.reshape(1, 3, &outShapes[i][0]), out, "", default_l1, default_lInf);
+-    }
+-}
+-
+ INSTANTIATE_TEST_CASE_P(/**/, Test_TensorFlow_layers, dnnBackendsAndTargets());
+ 
+ TEST(Test_TensorFlow, two_inputs)

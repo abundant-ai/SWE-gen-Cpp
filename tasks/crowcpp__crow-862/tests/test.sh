@@ -6,19 +6,15 @@ cd /app/src
 mkdir -p "tests"
 cp "/tests/unittest.cpp" "tests/unittest.cpp"
 
-# Rebuild the unittest executable from the updated test file
-cd build
-cmake --build . --target unittest
-build_status=$?
-
-# If build fails, tests fail
-if [ $build_status -ne 0 ]; then
+# Rebuild with the updated test file
+if ! cmake --build build --target unittest 2>&1; then
+  echo "Build failed"
   echo 0 > /logs/verifier/reward.txt
-  exit $build_status
+  exit 1
 fi
 
-# Run the compiled unittest binary
-timeout 30 ./tests/unittest
+# Run all tests (this PR touches general unittest.cpp changes)
+./build/tests/unittest 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

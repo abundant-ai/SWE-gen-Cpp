@@ -1,0 +1,1050 @@
+diff --git a/modules/core/include/opencv2/core/cvstd.hpp b/modules/core/include/opencv2/core/cvstd.hpp
+index 038ccaa7e2..69846f7ab6 100644
+--- a/modules/core/include/opencv2/core/cvstd.hpp
++++ b/modules/core/include/opencv2/core/cvstd.hpp
+@@ -78,8 +78,6 @@ namespace cv
+     using std::log;
+ }
+ 
+-#include "cvstd_wrapper.hpp"
+-
+ namespace cv {
+ 
+ //! @addtogroup core_utils
+@@ -140,11 +138,314 @@ public:
+ 
+ //! @} core_utils
+ 
++//! @cond IGNORED
++
++namespace detail
++{
++
++// Metafunction to avoid taking a reference to void.
++template<typename T>
++struct RefOrVoid { typedef T& type; };
++
++template<>
++struct RefOrVoid<void>{ typedef void type; };
++
++template<>
++struct RefOrVoid<const void>{ typedef const void type; };
++
++template<>
++struct RefOrVoid<volatile void>{ typedef volatile void type; };
++
++template<>
++struct RefOrVoid<const volatile void>{ typedef const volatile void type; };
++
++// This class would be private to Ptr, if it didn't have to be a non-template.
++struct PtrOwner;
++
++}
++
++template<typename Y>
++struct DefaultDeleter
++{
++    void operator () (Y* p) const;
++};
++
+ //! @endcond
+ 
+ //! @addtogroup core_basic
+ //! @{
+ 
++/** @brief Template class for smart pointers with shared ownership
++
++A Ptr\<T\> pretends to be a pointer to an object of type T. Unlike an ordinary pointer, however, the
++object will be automatically cleaned up once all Ptr instances pointing to it are destroyed.
++
++Ptr is similar to boost::shared_ptr that is part of the Boost library
++(<http://www.boost.org/doc/libs/release/libs/smart_ptr/shared_ptr.htm>) and std::shared_ptr from
++the [C++11](http://en.wikipedia.org/wiki/C++11) standard.
++
++This class provides the following advantages:
++-   Default constructor, copy constructor, and assignment operator for an arbitrary C++ class or C
++    structure. For some objects, like files, windows, mutexes, sockets, and others, a copy
++    constructor or an assignment operator are difficult to define. For some other objects, like
++    complex classifiers in OpenCV, copy constructors are absent and not easy to implement. Finally,
++    some of complex OpenCV and your own data structures may be written in C. However, copy
++    constructors and default constructors can simplify programming a lot. Besides, they are often
++    required (for example, by STL containers). By using a Ptr to such an object instead of the
++    object itself, you automatically get all of the necessary constructors and the assignment
++    operator.
++-   *O(1)* complexity of the above-mentioned operations. While some structures, like std::vector,
++    provide a copy constructor and an assignment operator, the operations may take a considerable
++    amount of time if the data structures are large. But if the structures are put into a Ptr, the
++    overhead is small and independent of the data size.
++-   Automatic and customizable cleanup, even for C structures. See the example below with FILE\*.
++-   Heterogeneous collections of objects. The standard STL and most other C++ and OpenCV containers
++    can store only objects of the same type and the same size. The classical solution to store
++    objects of different types in the same container is to store pointers to the base class (Base\*)
++    instead but then you lose the automatic memory management. Again, by using Ptr\<Base\> instead
++    of raw pointers, you can solve the problem.
++
++A Ptr is said to *own* a pointer - that is, for each Ptr there is a pointer that will be deleted
++once all Ptr instances that own it are destroyed. The owned pointer may be null, in which case
++nothing is deleted. Each Ptr also *stores* a pointer. The stored pointer is the pointer the Ptr
++pretends to be; that is, the one you get when you use Ptr::get or the conversion to T\*. It's
++usually the same as the owned pointer, but if you use casts or the general shared-ownership
++constructor, the two may diverge: the Ptr will still own the original pointer, but will itself point
++to something else.
++
++The owned pointer is treated as a black box. The only thing Ptr needs to know about it is how to
++delete it. This knowledge is encapsulated in the *deleter* - an auxiliary object that is associated
++with the owned pointer and shared between all Ptr instances that own it. The default deleter is an
++instance of DefaultDeleter, which uses the standard C++ delete operator; as such it will work with
++any pointer allocated with the standard new operator.
++
++However, if the pointer must be deleted in a different way, you must specify a custom deleter upon
++Ptr construction. A deleter is simply a callable object that accepts the pointer as its sole
++argument. For example, if you want to wrap FILE, you may do so as follows:
++@code
++    Ptr<FILE> f(fopen("myfile.txt", "w"), fclose);
++    if(!f) throw ...;
++    fprintf(f, ....);
++    ...
++    // the file will be closed automatically by f's destructor.
++@endcode
++Alternatively, if you want all pointers of a particular type to be deleted the same way, you can
++specialize DefaultDeleter<T>::operator() for that type, like this:
++@code
++    namespace cv {
++    template<> void DefaultDeleter<FILE>::operator ()(FILE * obj) const
++    {
++        fclose(obj);
++    }
++    }
++@endcode
++For convenience, the following types from the OpenCV C API already have such a specialization that
++calls the appropriate release function:
++-   CvCapture
++-   CvFileStorage
++-   CvHaarClassifierCascade
++-   CvMat
++-   CvMatND
++-   CvMemStorage
++-   CvSparseMat
++-   CvVideoWriter
++-   IplImage
++@note The shared ownership mechanism is implemented with reference counting. As such, cyclic
++ownership (e.g. when object a contains a Ptr to object b, which contains a Ptr to object a) will
++lead to all involved objects never being cleaned up. Avoid such situations.
++@note It is safe to concurrently read (but not write) a Ptr instance from multiple threads and
++therefore it is normally safe to use it in multi-threaded applications. The same is true for Mat and
++other C++ OpenCV classes that use internal reference counts.
++*/
++template<typename T>
++struct Ptr
++{
++    /** Generic programming support. */
++    typedef T element_type;
++
++    /** The default constructor creates a null Ptr - one that owns and stores a null pointer.
++    */
++    Ptr();
++
++    /**
++    If p is null, these are equivalent to the default constructor.
++    Otherwise, these constructors assume ownership of p - that is, the created Ptr owns and stores p
++    and assumes it is the sole owner of it. Don't use them if p is already owned by another Ptr, or
++    else p will get deleted twice.
++    With the first constructor, DefaultDeleter\<Y\>() becomes the associated deleter (so p will
++    eventually be deleted with the standard delete operator). Y must be a complete type at the point
++    of invocation.
++    With the second constructor, d becomes the associated deleter.
++    Y\* must be convertible to T\*.
++    @param p Pointer to own.
++    @note It is often easier to use makePtr instead.
++     */
++    template<typename Y>
++    explicit Ptr(Y* p);
++
++    /** @overload
++    @param d Deleter to use for the owned pointer.
++    @param p Pointer to own.
++    */
++    template<typename Y, typename D>
++    Ptr(Y* p, D d);
++
++    /**
++    These constructors create a Ptr that shares ownership with another Ptr - that is, own the same
++    pointer as o.
++    With the first two, the same pointer is stored, as well; for the second, Y\* must be convertible
++    to T\*.
++    With the third, p is stored, and Y may be any type. This constructor allows to have completely
++    unrelated owned and stored pointers, and should be used with care to avoid confusion. A relatively
++    benign use is to create a non-owning Ptr, like this:
++    @code
++        ptr = Ptr<T>(Ptr<T>(), dont_delete_me); // owns nothing; will not delete the pointer.
++    @endcode
++    @param o Ptr to share ownership with.
++    */
++    Ptr(const Ptr& o);
++
++    /** @overload
++    @param o Ptr to share ownership with.
++    */
++    template<typename Y>
++    Ptr(const Ptr<Y>& o);
++
++    /** @overload
++    @param o Ptr to share ownership with.
++    @param p Pointer to store.
++    */
++    template<typename Y>
++    Ptr(const Ptr<Y>& o, T* p);
++
++    /** The destructor is equivalent to calling Ptr::release. */
++    ~Ptr();
++
++    /**
++    Assignment replaces the current Ptr instance with one that owns and stores same pointers as o and
++    then destroys the old instance.
++    @param o Ptr to share ownership with.
++     */
++    Ptr& operator = (const Ptr& o);
++
++    /** @overload */
++    template<typename Y>
++    Ptr& operator = (const Ptr<Y>& o);
++
++    /** If no other Ptr instance owns the owned pointer, deletes it with the associated deleter. Then sets
++    both the owned and the stored pointers to NULL.
++    */
++    void release();
++
++    /**
++    `ptr.reset(...)` is equivalent to `ptr = Ptr<T>(...)`.
++    @param p Pointer to own.
++    */
++    template<typename Y>
++    void reset(Y* p);
++
++    /** @overload
++    @param d Deleter to use for the owned pointer.
++    @param p Pointer to own.
++    */
++    template<typename Y, typename D>
++    void reset(Y* p, D d);
++
++    /**
++    Swaps the owned and stored pointers (and deleters, if any) of this and o.
++    @param o Ptr to swap with.
++    */
++    void swap(Ptr& o);
++
++    /** Returns the stored pointer. */
++    T* get() const;
++
++    /** Ordinary pointer emulation. */
++    typename detail::RefOrVoid<T>::type operator * () const;
++
++    /** Ordinary pointer emulation. */
++    T* operator -> () const;
++
++    /** Equivalent to get(). */
++    operator T* () const;
++
++    /** ptr.empty() is equivalent to `!ptr.get()`. */
++    bool empty() const;
++
++    /** Returns a Ptr that owns the same pointer as this, and stores the same
++       pointer as this, except converted via static_cast to Y*.
++    */
++    template<typename Y>
++    Ptr<Y> staticCast() const;
++
++    /** Ditto for const_cast. */
++    template<typename Y>
++    Ptr<Y> constCast() const;
++
++    /** Ditto for dynamic_cast. */
++    template<typename Y>
++    Ptr<Y> dynamicCast() const;
++
++    Ptr(Ptr&& o);
++    Ptr& operator = (Ptr&& o);
++
++private:
++    detail::PtrOwner* owner;
++    T* stored;
++
++    template<typename Y>
++    friend struct Ptr; // have to do this for the cross-type copy constructor
++};
++
++/** Equivalent to ptr1.swap(ptr2). Provided to help write generic algorithms. */
++template<typename T>
++void swap(Ptr<T>& ptr1, Ptr<T>& ptr2);
++
++/** Return whether ptr1.get() and ptr2.get() are equal and not equal, respectively. */
++template<typename T>
++bool operator == (const Ptr<T>& ptr1, const Ptr<T>& ptr2);
++template<typename T>
++bool operator != (const Ptr<T>& ptr1, const Ptr<T>& ptr2);
++
++/** `makePtr<T>(...)` is equivalent to `Ptr<T>(new T(...))`. It is shorter than the latter, and it's
++marginally safer than using a constructor or Ptr::reset, since it ensures that the owned pointer
++is new and thus not owned by any other Ptr instance.
++Unfortunately, perfect forwarding is impossible to implement in C++03, and so makePtr is limited
++to constructors of T that have up to 10 arguments, none of which are non-const references.
++ */
++template<typename T>
++Ptr<T> makePtr();
++/** @overload */
++template<typename T, typename A1>
++Ptr<T> makePtr(const A1& a1);
++/** @overload */
++template<typename T, typename A1, typename A2>
++Ptr<T> makePtr(const A1& a1, const A2& a2);
++/** @overload */
++template<typename T, typename A1, typename A2, typename A3>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3);
++/** @overload */
++template<typename T, typename A1, typename A2, typename A3, typename A4>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4);
++/** @overload */
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5);
++/** @overload */
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6);
++/** @overload */
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6, typename A7>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6, const A7& a7);
++/** @overload */
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6, typename A7, typename A8>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6, const A7& a7, const A8& a8);
++/** @overload */
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6, typename A7, typename A8, typename A9>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6, const A7& a7, const A8& a8, const A9& a9);
++/** @overload */
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6, typename A7, typename A8, typename A9, typename A10>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6, const A7& a7, const A8& a8, const A9& a9, const A10& a10);
++
+ //////////////////////////////// string class ////////////////////////////////
+ 
+ class CV_EXPORTS FileNode; //for string constructor from FileNode
+@@ -187,4 +488,6 @@ static inline std::string toUpperCase(const std::string& str)
+ //! @} core_basic
+ } // cv
+ 
++#include "opencv2/core/ptr.inl.hpp"
++
+ #endif //OPENCV_CORE_CVSTD_HPP
+diff --git a/modules/core/include/opencv2/core/cvstd_wrapper.hpp b/modules/core/include/opencv2/core/cvstd_wrapper.hpp
+deleted file mode 100644
+index 358a47eb4b..0000000000
+--- a/modules/core/include/opencv2/core/cvstd_wrapper.hpp
++++ /dev/null
+@@ -1,147 +0,0 @@
+-// This file is part of OpenCV project.
+-// It is subject to the license terms in the LICENSE file found in the top-level directory
+-// of this distribution and at http://opencv.org/license.html.
+-
+-#ifndef OPENCV_CORE_CVSTD_WRAPPER_HPP
+-#define OPENCV_CORE_CVSTD_WRAPPER_HPP
+-
+-#include "opencv2/core/cvdef.h"
+-
+-#include <string>
+-#include <memory>  // std::shared_ptr
+-#include <type_traits>  // std::enable_if
+-
+-namespace cv {
+-
+-using std::nullptr_t;
+-
+-//! @addtogroup core_basic
+-//! @{
+-
+-#ifdef CV_DOXYGEN
+-
+-template <typename _Tp> using Ptr = std::shared_ptr<_Tp>;  // In ideal world it should look like this, but we need some compatibility workarounds below
+-
+-template<typename _Tp, typename ... A1> static inline
+-Ptr<_Tp> makePtr(const A1&... a1) { return std::make_shared<_Tp>(a1...); }
+-
+-#else  // cv::Ptr with compatibility workarounds
+-
+-template<typename Y>
+-struct DefaultDeleter
+-{
+-#ifndef _MSC_VER
+-    void operator()(Y* p) const = delete;  // not available by default; enabled for specializations only
+-#else
+-    void operator()(Y* p) const { delete p; }
+-#endif
+-};
+-
+-namespace sfinae {
+-template<typename C, typename Ret, typename... Args>
+-struct has_parenthesis_operator
+-{
+-private:
+-    template<typename T>
+-    static constexpr std::true_type check(typename std::is_same<typename std::decay<decltype(std::declval<T>().operator()(std::declval<Args>()...))>::type, Ret>::type*);
+-
+-    template<typename> static constexpr std::false_type check(...);
+-
+-    typedef decltype(check<C>(0)) type;
+-
+-public:
+-    static constexpr bool value = type::value;
+-};
+-} // namespace sfinae
+-
+-template <typename Y> using has_custom_delete = sfinae::has_parenthesis_operator<DefaultDeleter<Y>, void, Y*>;
+-
+-template<typename T>
+-struct Ptr : public std::shared_ptr<T>
+-{
+-#if 0
+-    using std::shared_ptr<T>::shared_ptr;  // GCC 5.x can't handle this
+-#else
+-    inline Ptr() noexcept : std::shared_ptr<T>() {}
+-    inline Ptr(nullptr_t) noexcept : std::shared_ptr<T>(nullptr) {}
+-    template<typename Y, typename D> inline Ptr(Y* p, D d) : std::shared_ptr<T>(p, d) {}
+-    template<typename D> inline Ptr(nullptr_t, D d) : std::shared_ptr<T>(nullptr, d) {}
+-
+-    template<typename Y> inline Ptr(const Ptr<Y>& r, T* ptr) noexcept : std::shared_ptr<T>(r, ptr) {}
+-
+-    inline Ptr(const Ptr<T>& o) noexcept : std::shared_ptr<T>(o) {}
+-    inline Ptr(Ptr<T>&& o) noexcept : std::shared_ptr<T>(std::move(o)) {}
+-
+-    template<typename Y> inline Ptr(const Ptr<Y>& o) noexcept : std::shared_ptr<T>(o) {}
+-    template<typename Y> inline Ptr(Ptr<Y>&& o) noexcept : std::shared_ptr<T>(std::move(o)) {}
+-#endif
+-    inline Ptr(const std::shared_ptr<T>& o) noexcept : std::shared_ptr<T>(o) {}
+-    inline Ptr(std::shared_ptr<T>&& o) noexcept : std::shared_ptr<T>(std::move(o)) {}
+-
+-#ifndef _MSC_VER
+-    // Overload with custom DefaultDeleter: Ptr<IplImage>(...)
+-    template<typename Y = T, class = typename std::enable_if< has_custom_delete<Y>::value >::type>
+-    inline Ptr(Y* ptr) : std::shared_ptr<T>(ptr, DefaultDeleter<Y>()) {}
+-
+-    // Overload without custom deleter: Ptr<std::string>(...);
+-    template<typename Y = T, int = sizeof(typename std::enable_if< !has_custom_delete<Y>::value, int >::type) >
+-    inline Ptr(Y* ptr) : std::shared_ptr<T>(ptr) {}
+-
+-    // Overload with custom DefaultDeleter: Ptr<IplImage>(...)
+-    template<typename Y, class = typename std::enable_if< has_custom_delete<Y>::value >::type>
+-    inline void reset(Y* ptr) { std::shared_ptr<T>::reset(ptr, DefaultDeleter<Y>()); }
+-
+-    // Overload without custom deleter: Ptr<std::string>(...);
+-    template<typename Y, int = sizeof(typename std::enable_if< !has_custom_delete<Y>::value, int >::type) >
+-    inline void reset(Y* ptr) { std::shared_ptr<T>::reset(ptr); }
+-#else
+-    template<typename Y>
+-    inline Ptr(Y* ptr) : std::shared_ptr<T>(ptr, DefaultDeleter<Y>()) {}
+-
+-    template<typename Y>
+-    inline void reset(Y* ptr) { std::shared_ptr<T>::reset(ptr, DefaultDeleter<Y>()); }
+-#endif
+-
+-    template<class Y, class Deleter>
+-    void reset(Y* ptr, Deleter d) { std::shared_ptr<T>::reset(ptr, d); }
+-
+-    void reset() noexcept { std::shared_ptr<T>::reset(); }
+-
+-    Ptr& operator=(const Ptr& o) { std::shared_ptr<T>::operator =(o); return *this; }
+-    template<typename Y> inline Ptr& operator=(const Ptr<Y>& o) { std::shared_ptr<T>::operator =(o); return *this; }
+-
+-    T* operator->() const noexcept { return std::shared_ptr<T>::get();}
+-    typename std::add_lvalue_reference<T>::type operator*() const noexcept { return *std::shared_ptr<T>::get(); }
+-
+-    // OpenCV 3.x methods (not a part of standart C++ library)
+-    inline void release() { std::shared_ptr<T>::reset(); }
+-    inline operator T* () const { return std::shared_ptr<T>::get(); }
+-    inline bool empty() const { return std::shared_ptr<T>::get() == NULL; }
+-
+-    template<typename Y> inline
+-    Ptr<Y> staticCast() const noexcept { return std::static_pointer_cast<Y>(*this); }
+-
+-    template<typename Y> inline
+-    Ptr<Y> constCast() const noexcept { return std::const_pointer_cast<Y>(*this); }
+-
+-    template<typename Y> inline
+-    Ptr<Y> dynamicCast() const noexcept { return std::dynamic_pointer_cast<Y>(*this); }
+-};
+-
+-template<typename _Tp, typename ... A1> static inline
+-Ptr<_Tp> makePtr(const A1&... a1)
+-{
+-#ifndef _MSC_VER
+-    static_assert( !has_custom_delete<_Tp>::value, "Can't use this makePtr with custom DefaultDeleter");
+-    return (Ptr<_Tp>)std::make_shared<_Tp>(a1...);
+-#else
+-    return Ptr<_Tp>(new _Tp(a1...), DefaultDeleter<_Tp>());
+-#endif
+-}
+-
+-#endif // CV_DOXYGEN
+-
+-//! @} core_basic
+-} // cv
+-
+-#endif //OPENCV_CORE_CVSTD_WRAPPER_HPP
+diff --git a/modules/core/include/opencv2/core/ptr.inl.hpp b/modules/core/include/opencv2/core/ptr.inl.hpp
+new file mode 100644
+index 0000000000..9165de0993
+--- /dev/null
++++ b/modules/core/include/opencv2/core/ptr.inl.hpp
+@@ -0,0 +1,375 @@
++/*M///////////////////////////////////////////////////////////////////////////////////////
++//
++//  IMPORTANT: READ BEFORE DOWNLOADING, COPYING, INSTALLING OR USING.
++//
++//  By downloading, copying, installing or using the software you agree to this license.
++//  If you do not agree to this license, do not download, install,
++//  copy or use the software.
++//
++//
++//                           License Agreement
++//                For Open Source Computer Vision Library
++//
++// Copyright (C) 2013, NVIDIA Corporation, all rights reserved.
++// Third party copyrights are property of their respective owners.
++//
++// Redistribution and use in source and binary forms, with or without modification,
++// are permitted provided that the following conditions are met:
++//
++//   * Redistribution's of source code must retain the above copyright notice,
++//     this list of conditions and the following disclaimer.
++//
++//   * Redistribution's in binary form must reproduce the above copyright notice,
++//     this list of conditions and the following disclaimer in the documentation
++//     and/or other materials provided with the distribution.
++//
++//   * The name of the copyright holders may not be used to endorse or promote products
++//     derived from this software without specific prior written permission.
++//
++// This software is provided by the copyright holders and contributors "as is" and
++// any express or implied warranties, including, but not limited to, the implied
++// warranties of merchantability and fitness for a particular purpose are disclaimed.
++// In no event shall the copyright holders or contributors be liable for any direct,
++// indirect, incidental, special, exemplary, or consequential damages
++// (including, but not limited to, procurement of substitute goods or services;
++// loss of use, data, or profits; or business interruption) however caused
++// and on any theory of liability, whether in contract, strict liability,
++// or tort (including negligence or otherwise) arising in any way out of
++// the use of this software, even if advised of the possibility of such damage.
++//
++//M*/
++
++#ifndef OPENCV_CORE_PTR_INL_HPP
++#define OPENCV_CORE_PTR_INL_HPP
++
++#include <algorithm>
++
++//! @cond IGNORED
++
++namespace cv {
++
++template<typename Y>
++void DefaultDeleter<Y>::operator () (Y* p) const
++{
++    delete p;
++}
++
++namespace detail
++{
++
++struct PtrOwner
++{
++    PtrOwner() : refCount(1)
++    {}
++
++    void incRef()
++    {
++        CV_XADD(&refCount, 1);
++    }
++
++    void decRef()
++    {
++        if (CV_XADD(&refCount, -1) == 1) deleteSelf();
++    }
++
++protected:
++    /* This doesn't really need to be virtual, since PtrOwner is never deleted
++       directly, but it doesn't hurt and it helps avoid warnings. */
++    virtual ~PtrOwner()
++    {}
++
++    virtual void deleteSelf() = 0;
++
++private:
++    unsigned int refCount;
++
++    // noncopyable
++    PtrOwner(const PtrOwner&);
++    PtrOwner& operator = (const PtrOwner&);
++};
++
++template<typename Y, typename D>
++struct PtrOwnerImpl CV_FINAL : PtrOwner
++{
++    PtrOwnerImpl(Y* p, D d) : owned(p), deleter(d)
++    {}
++
++    void deleteSelf() CV_OVERRIDE
++    {
++        deleter(owned);
++        delete this;
++    }
++
++private:
++    Y* owned;
++    D deleter;
++};
++
++
++}
++
++template<typename T>
++Ptr<T>::Ptr() : owner(NULL), stored(NULL)
++{}
++
++template<typename T>
++template<typename Y>
++Ptr<T>::Ptr(Y* p)
++  : owner(p
++      ? new detail::PtrOwnerImpl<Y, DefaultDeleter<Y> >(p, DefaultDeleter<Y>())
++      : NULL),
++    stored(p)
++{}
++
++template<typename T>
++template<typename Y, typename D>
++Ptr<T>::Ptr(Y* p, D d)
++  : owner(p
++      ? new detail::PtrOwnerImpl<Y, D>(p, d)
++      : NULL),
++    stored(p)
++{}
++
++template<typename T>
++Ptr<T>::Ptr(const Ptr& o) : owner(o.owner), stored(o.stored)
++{
++    if (owner) owner->incRef();
++}
++
++template<typename T>
++template<typename Y>
++Ptr<T>::Ptr(const Ptr<Y>& o) : owner(o.owner), stored(o.stored)
++{
++    if (owner) owner->incRef();
++}
++
++template<typename T>
++template<typename Y>
++Ptr<T>::Ptr(const Ptr<Y>& o, T* p) : owner(o.owner), stored(p)
++{
++    if (owner) owner->incRef();
++}
++
++template<typename T>
++Ptr<T>::~Ptr()
++{
++    release();
++}
++
++template<typename T>
++Ptr<T>& Ptr<T>::operator = (const Ptr<T>& o)
++{
++    Ptr(o).swap(*this);
++    return *this;
++}
++
++template<typename T>
++template<typename Y>
++Ptr<T>& Ptr<T>::operator = (const Ptr<Y>& o)
++{
++    Ptr(o).swap(*this);
++    return *this;
++}
++
++template<typename T>
++void Ptr<T>::release()
++{
++    if (owner) owner->decRef();
++    owner = NULL;
++    stored = NULL;
++}
++
++template<typename T>
++template<typename Y>
++void Ptr<T>::reset(Y* p)
++{
++    Ptr(p).swap(*this);
++}
++
++template<typename T>
++template<typename Y, typename D>
++void Ptr<T>::reset(Y* p, D d)
++{
++    Ptr(p, d).swap(*this);
++}
++
++template<typename T>
++void Ptr<T>::swap(Ptr<T>& o)
++{
++    std::swap(owner, o.owner);
++    std::swap(stored, o.stored);
++}
++
++template<typename T>
++T* Ptr<T>::get() const
++{
++    return stored;
++}
++
++template<typename T>
++typename detail::RefOrVoid<T>::type Ptr<T>::operator * () const
++{
++    return *stored;
++}
++
++template<typename T>
++T* Ptr<T>::operator -> () const
++{
++    return stored;
++}
++
++template<typename T>
++Ptr<T>::operator T* () const
++{
++    return stored;
++}
++
++
++template<typename T>
++bool Ptr<T>::empty() const
++{
++    return !stored;
++}
++
++template<typename T>
++template<typename Y>
++Ptr<Y> Ptr<T>::staticCast() const
++{
++    return Ptr<Y>(*this, static_cast<Y*>(stored));
++}
++
++template<typename T>
++template<typename Y>
++Ptr<Y> Ptr<T>::constCast() const
++{
++    return Ptr<Y>(*this, const_cast<Y*>(stored));
++}
++
++template<typename T>
++template<typename Y>
++Ptr<Y> Ptr<T>::dynamicCast() const
++{
++    return Ptr<Y>(*this, dynamic_cast<Y*>(stored));
++}
++
++template<typename T>
++Ptr<T>::Ptr(Ptr&& o) : owner(o.owner), stored(o.stored)
++{
++    o.owner = NULL;
++    o.stored = NULL;
++}
++
++template<typename T>
++Ptr<T>& Ptr<T>::operator = (Ptr<T>&& o)
++{
++    if (this == &o)
++        return *this;
++
++    release();
++    owner = o.owner;
++    stored = o.stored;
++    o.owner = NULL;
++    o.stored = NULL;
++    return *this;
++}
++
++
++template<typename T>
++void swap(Ptr<T>& ptr1, Ptr<T>& ptr2){
++    ptr1.swap(ptr2);
++}
++
++template<typename T>
++bool operator == (const Ptr<T>& ptr1, const Ptr<T>& ptr2)
++{
++    return ptr1.get() == ptr2.get();
++}
++
++template<typename T>
++bool operator != (const Ptr<T>& ptr1, const Ptr<T>& ptr2)
++{
++    return ptr1.get() != ptr2.get();
++}
++
++template<typename T>
++Ptr<T> makePtr()
++{
++    return Ptr<T>(new T());
++}
++
++template<typename T, typename A1>
++Ptr<T> makePtr(const A1& a1)
++{
++    return Ptr<T>(new T(a1));
++}
++
++template<typename T, typename A1, typename A2>
++Ptr<T> makePtr(const A1& a1, const A2& a2)
++{
++    return Ptr<T>(new T(a1, a2));
++}
++
++template<typename T, typename A1, typename A2, typename A3>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3)
++{
++    return Ptr<T>(new T(a1, a2, a3));
++}
++
++template<typename T, typename A1, typename A2, typename A3, typename A4>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4)
++{
++    return Ptr<T>(new T(a1, a2, a3, a4));
++}
++
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5)
++{
++    return Ptr<T>(new T(a1, a2, a3, a4, a5));
++}
++
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6)
++{
++    return Ptr<T>(new T(a1, a2, a3, a4, a5, a6));
++}
++
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6, typename A7>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6, const A7& a7)
++{
++    return Ptr<T>(new T(a1, a2, a3, a4, a5, a6, a7));
++}
++
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6, typename A7, typename A8>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6, const A7& a7, const A8& a8)
++{
++    return Ptr<T>(new T(a1, a2, a3, a4, a5, a6, a7, a8));
++}
++
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6, typename A7, typename A8, typename A9>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6, const A7& a7, const A8& a8, const A9& a9)
++{
++    return Ptr<T>(new T(a1, a2, a3, a4, a5, a6, a7, a8, a9));
++}
++
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6, typename A7, typename A8, typename A9, typename A10>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6, const A7& a7, const A8& a8, const A9& a9, const A10& a10)
++{
++    return Ptr<T>(new T(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10));
++}
++
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6, typename A7, typename A8, typename A9, typename A10, typename A11>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6, const A7& a7, const A8& a8, const A9& a9, const A10& a10, const A11& a11)
++{
++    return Ptr<T>(new T(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11));
++}
++
++template<typename T, typename A1, typename A2, typename A3, typename A4, typename A5, typename A6, typename A7, typename A8, typename A9, typename A10, typename A11, typename A12>
++Ptr<T> makePtr(const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5, const A6& a6, const A7& a7, const A8& a8, const A9& a9, const A10& a10, const A11& a11, const A12& a12)
++{
++    return Ptr<T>(new T(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12));
++}
++} // namespace cv
++
++//! @endcond
++
++#endif // OPENCV_CORE_PTR_INL_HPP
+diff --git a/modules/core/src/lut.cpp b/modules/core/src/lut.cpp
+index 8f3381be4d..3e91bd9fcb 100644
+--- a/modules/core/src/lut.cpp
++++ b/modules/core/src/lut.cpp
+@@ -384,14 +384,21 @@ void cv::LUT( InputArray _src, InputArray _lut, OutputArray _dst )
+     if (_src.dims() <= 2)
+     {
+         bool ok = false;
+-        LUTParallelBody body(src, lut, dst, &ok);
+-        if (ok)
++        Ptr<ParallelLoopBody> body;
++
++        if (body == NULL || ok == false)
++        {
++            ok = false;
++            ParallelLoopBody* p = new LUTParallelBody(src, lut, dst, &ok);
++            body.reset(p);
++        }
++        if (body != NULL && ok)
+         {
+             Range all(0, dst.rows);
+-            if (dst.total() >= (size_t)(1<<18))
+-                parallel_for_(all, body, (double)std::max((size_t)1, dst.total()>>16));
++            if (dst.total()>>18)
++                parallel_for_(all, *body, (double)std::max((size_t)1, dst.total()>>16));
+             else
+-                body(all);
++                (*body)(all);
+             if (ok)
+                 return;
+         }
+diff --git a/modules/core/src/persistence_cpp.cpp b/modules/core/src/persistence_cpp.cpp
+index bcdee94f60..7e4ae71946 100644
+--- a/modules/core/src/persistence_cpp.cpp
++++ b/modules/core/src/persistence_cpp.cpp
+@@ -537,7 +537,7 @@ void read( const FileNode& node, SparseMat& mat, const SparseMat& default_mat )
+         return;
+     }
+     Ptr<CvSparseMat> m((CvSparseMat*)cvRead((CvFileStorage*)node.fs, (CvFileNode*)*node));
+-    CV_Assert(CV_IS_SPARSE_MAT(m.get()));
++    CV_Assert(CV_IS_SPARSE_MAT(m));
+     m->copyToSparseMat(mat);
+ }
+ 
+diff --git a/modules/core/test/test_io.cpp b/modules/core/test/test_io.cpp
+index 33583b4d1b..c7473b9ded 100644
+--- a/modules/core/test/test_io.cpp
++++ b/modules/core/test/test_io.cpp
+@@ -288,9 +288,9 @@ protected:
+             fs["test_sparse_mat"] >> m_s2;
+             Ptr<CvSparseMat> _m_s2(cvCreateSparseMat(m_s2));
+ 
+-            if( !m_s || !CV_IS_SPARSE_MAT(m_s.get()) ||
+-               !cvTsCheckSparse(m_s.get(), _test_sparse.get(), 0) ||
+-               !cvTsCheckSparse(_m_s2.get(), _test_sparse.get(), 0))
++            if( !m_s || !CV_IS_SPARSE_MAT(m_s) ||
++               !cvTsCheckSparse(m_s, _test_sparse, 0) ||
++               !cvTsCheckSparse(_m_s2, _test_sparse, 0))
+             {
+                 ts->printf( cvtest::TS::LOG, "the read sparse matrix is not correct\n" );
+                 ts->set_failed_test_info( cvtest::TS::FAIL_INVALID_OUTPUT );
+diff --git a/modules/core/test/test_ptr.cpp b/modules/core/test/test_ptr.cpp
+index 24d947c36d..2a099846a8 100644
+--- a/modules/core/test/test_ptr.cpp
++++ b/modules/core/test/test_ptr.cpp
+@@ -98,25 +98,22 @@ TEST(Core_Ptr, owning_ctor)
+         Ptr<void> p(r);
+         EXPECT_EQ(r, p.get());
+     }
++
+     EXPECT_TRUE(deleted);
+ 
+     {
+         Ptr<int> p(&dummyObject, ReportingDeleter(&deleted));
+         EXPECT_EQ(&dummyObject, p.get());
+     }
++
+     EXPECT_TRUE(deleted);
+ 
+     {
+         Ptr<void> p((void*)0, ReportingDeleter(&deleted));
+         EXPECT_NULL(p.get());
+     }
+-    EXPECT_TRUE(deleted);  // Differ from OpenCV 3.4 (but conformant to std::shared_ptr, see below)
+ 
+-    {
+-        std::shared_ptr<void> p((void*)0, ReportingDeleter(&deleted));
+-        EXPECT_NULL(p.get());
+-    }
+-    EXPECT_TRUE(deleted);
++    EXPECT_FALSE(deleted);
+ }
+ 
+ TEST(Core_Ptr, sharing_ctor)
+@@ -340,7 +337,7 @@ TEST(Core_Ptr, casts)
+         Ptr<SubReporter> p2 = p1.dynamicCast<SubReporter>();
+         EXPECT_NULL(p2.get());
+         p1.release();
+-        EXPECT_TRUE(deleted);
++        EXPECT_FALSE(deleted);
+     }
+ 
+     EXPECT_TRUE(deleted);
+@@ -403,16 +400,4 @@ TEST(Core_Ptr, specialized_deleter)
+     ASSERT_TRUE(sd.deleted);
+ }
+ 
+-TEST(Core_Ptr, specialized_deleter_via_reset)
+-{
+-    SpeciallyDeletable sd;
+-
+-    {
+-        Ptr<SpeciallyDeletable> p;
+-        p.reset(&sd);
+-    }
+-
+-    ASSERT_TRUE(sd.deleted);
+-}
+-
+ }} // namespace
+diff --git a/modules/dnn/src/ocl4dnn/src/ocl4dnn_conv_spatial.cpp b/modules/dnn/src/ocl4dnn/src/ocl4dnn_conv_spatial.cpp
+index 68e89d5694..a3a0936bd4 100644
+--- a/modules/dnn/src/ocl4dnn/src/ocl4dnn_conv_spatial.cpp
++++ b/modules/dnn/src/ocl4dnn/src/ocl4dnn_conv_spatial.cpp
+@@ -1820,7 +1820,7 @@ void OCL4DNNConvSpatial<Dtype>::prepareKernel(const UMat &bottom, UMat &top,
+     std::string previous_key = key_;
+ 
+     generateKey();
+-    if (key_.compare(previous_key) == 0 && bestKernelConfig)
++    if (key_.compare(previous_key) == 0 && bestKernelConfig != NULL)
+         return;
+ 
+     if (bestKernelConfig)
+diff --git a/modules/ml/test/test_mltests2.cpp b/modules/ml/test/test_mltests2.cpp
+index 44d5aeb992..1b1c21cfeb 100644
+--- a/modules/ml/test/test_mltests2.cpp
++++ b/modules/ml/test/test_mltests2.cpp
+@@ -237,7 +237,7 @@ TEST(ML_ANN, ActivationFunction)
+         x->save(dataname + activationName[i] + ".yml");
+ #else
+         Ptr<ml::ANN_MLP> y = Algorithm::load<ANN_MLP>(dataname + activationName[i] + ".yml");
+-        ASSERT_TRUE(y) << "Could not load   " << dataname + activationName[i] + ".yml";
++        ASSERT_TRUE(y != NULL) << "Could not load   " << dataname + activationName[i] + ".yml";
+         Mat testSamples = tdata->getTestSamples();
+         Mat rx, ry, dst;
+         x->predict(testSamples, rx);
+@@ -330,7 +330,7 @@ TEST_P(ML_ANN_METHOD, Test)
+ #endif
+         ASSERT_FALSE(r_gold.empty());
+         Ptr<ml::ANN_MLP> y = Algorithm::load<ANN_MLP>(filename);
+-        ASSERT_TRUE(y) << "Could not load   " << filename;
++        ASSERT_TRUE(y != NULL) << "Could not load   " << filename;
+         Mat rx, ry;
+         for (int j = 0; j < 4; j++)
+         {
+diff --git a/samples/cpp/detect_blob.cpp b/samples/cpp/detect_blob.cpp
+index db86a07ee2..3acb8fa1fb 100644
+--- a/samples/cpp/detect_blob.cpp
++++ b/samples/cpp/detect_blob.cpp
+@@ -178,7 +178,7 @@ int main(int argc, char *argv[])
+             vector<Rect>  zone;
+             vector<vector <Point> >  region;
+             Mat     desc, result(img.rows, img.cols, CV_8UC3);
+-            if (b.dynamicCast<SimpleBlobDetector>().get())
++            if (b.dynamicCast<SimpleBlobDetector>() != NULL)
+             {
+                 Ptr<SimpleBlobDetector> sbd = b.dynamicCast<SimpleBlobDetector>();
+                 sbd->detect(img, keyImg, Mat());
+diff --git a/samples/cpp/detect_mser.cpp b/samples/cpp/detect_mser.cpp
+index 7c2833fea4..8d62b2b7e4 100644
+--- a/samples/cpp/detect_mser.cpp
++++ b/samples/cpp/detect_mser.cpp
+@@ -500,7 +500,7 @@ int main(int argc, char *argv[])
+             vector<vector <Point> > region;
+             Mat desc;
+ 
+-            if (b.dynamicCast<MSER>().get())
++            if (b.dynamicCast<MSER>() != NULL)
+             {
+                 Ptr<MSER> sbd = b.dynamicCast<MSER>();
+                 sbd->detectRegions(img, region, zone);

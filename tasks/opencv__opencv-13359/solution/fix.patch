@@ -1,0 +1,147 @@
+diff --git a/modules/dnn/include/opencv2/dnn/all_layers.hpp b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+index 5642423084..c6fe6d05bc 100644
+--- a/modules/dnn/include/opencv2/dnn/all_layers.hpp
++++ b/modules/dnn/include/opencv2/dnn/all_layers.hpp
+@@ -77,6 +77,15 @@ CV__DNN_EXPERIMENTAL_NS_BEGIN
+         static Ptr<Layer> create(const LayerParams &params);
+     };
+ 
++    /**
++     * Constant layer produces the same data blob at an every forward pass.
++     */
++    class CV_EXPORTS ConstLayer : public Layer
++    {
++    public:
++        static Ptr<Layer> create(const LayerParams &params);
++    };
++
+     //! LSTM recurrent layer
+     class CV_EXPORTS LSTMLayer : public Layer
+     {
+diff --git a/modules/dnn/src/init.cpp b/modules/dnn/src/init.cpp
+index d8b6334826..7f6c831f70 100644
+--- a/modules/dnn/src/init.cpp
++++ b/modules/dnn/src/init.cpp
+@@ -112,6 +112,7 @@ void initializeLayerFactory()
+     CV_DNN_REGISTER_LAYER_CLASS(Dropout,        BlankLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Identity,       BlankLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Silence,        BlankLayer);
++    CV_DNN_REGISTER_LAYER_CLASS(Const,          ConstLayer);
+ 
+     CV_DNN_REGISTER_LAYER_CLASS(Crop,           CropLayer);
+     CV_DNN_REGISTER_LAYER_CLASS(Eltwise,        EltwiseLayer);
+diff --git a/modules/dnn/src/layers/const_layer.cpp b/modules/dnn/src/layers/const_layer.cpp
+new file mode 100644
+index 0000000000..339f2ec255
+--- /dev/null
++++ b/modules/dnn/src/layers/const_layer.cpp
+@@ -0,0 +1,68 @@
++// This file is part of OpenCV project.
++// It is subject to the license terms in the LICENSE file found in the top-level directory
++// of this distribution and at http://opencv.org/license.html.
++
++// Copyright (C) 2018, Intel Corporation, all rights reserved.
++// Third party copyrights are property of their respective owners.
++
++#include "../precomp.hpp"
++#include "layers_common.hpp"
++
++#ifdef HAVE_OPENCL
++#include "opencl_kernels_dnn.hpp"
++#endif
++
++namespace cv { namespace dnn {
++
++class ConstLayerImpl CV_FINAL : public ConstLayer
++{
++public:
++    ConstLayerImpl(const LayerParams& params)
++    {
++        setParamsFrom(params);
++        CV_Assert(blobs.size() == 1);
++    }
++
++    virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
++                                 const int requiredOutputs,
++                                 std::vector<MatShape> &outputs,
++                                 std::vector<MatShape> &internals) const CV_OVERRIDE
++    {
++        CV_Assert(inputs.empty());
++        outputs.assign(1, shape(blobs[0]));
++        return false;
++    }
++
++#ifdef HAVE_OPENCL
++    bool forward_ocl(InputArrayOfArrays inps, OutputArrayOfArrays outs, OutputArrayOfArrays internals)
++    {
++        std::vector<UMat> outputs;
++        outs.getUMatVector(outputs);
++        if (outs.depth() == CV_16S)
++            convertFp16(blobs[0], outputs[0]);
++        else
++            blobs[0].copyTo(outputs[0]);
++        return true;
++    }
++#endif
++
++    void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
++    {
++        CV_TRACE_FUNCTION();
++        CV_TRACE_ARG_VALUE(name, "name", name.c_str());
++
++        CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
++                   forward_ocl(inputs_arr, outputs_arr, internals_arr))
++
++        std::vector<Mat> outputs;
++        outputs_arr.getMatVector(outputs);
++        blobs[0].copyTo(outputs[0]);
++    }
++};
++
++Ptr<Layer> ConstLayer::create(const LayerParams& params)
++{
++    return Ptr<Layer>(new ConstLayerImpl(params));
++}
++
++}}  // namespace cv::dnn
+diff --git a/modules/dnn/src/tensorflow/tf_importer.cpp b/modules/dnn/src/tensorflow/tf_importer.cpp
+index 4f38c02772..a465b7d363 100644
+--- a/modules/dnn/src/tensorflow/tf_importer.cpp
++++ b/modules/dnn/src/tensorflow/tf_importer.cpp
+@@ -1266,14 +1266,31 @@ void TFImporter::populateNet(Net dstNet)
+                 axis = toNCHW(axis);
+             layerParams.set("axis", axis);
+ 
+-            int id = dstNet.addLayer(name, "Concat", layerParams);
+-            layer_id[name] = id;
+-
+-
++            // input(0) or input(n-1) is concat_dim
+             int from = (type == "Concat" ? 1 : 0);
+             int to = (type == "Concat" ? layer.input_size() : layer.input_size() - 1);
+ 
+-            // input(0) or input(n-1) is concat_dim
++            for (int ii = from; ii < to; ii++)
++            {
++                Pin inp = parsePin(layer.input(ii));
++                if (layer_id.find(inp.name) == layer_id.end())
++                {
++                    // There are constant inputs.
++                    LayerParams lp;
++                    lp.name = inp.name;
++                    lp.type = "Const";
++                    lp.blobs.resize(1);
++                    blobFromTensor(getConstBlob(layer, value_id, ii), lp.blobs.back());
++                    CV_Assert_N(!lp.blobs[0].empty(), lp.blobs[0].type() == CV_32F);
++
++                    int constInpId = dstNet.addLayer(lp.name, lp.type, lp);
++                    layer_id[lp.name] = constInpId;
++                }
++            }
++
++            int id = dstNet.addLayer(name, "Concat", layerParams);
++            layer_id[name] = id;
++
+             for (int ii = from; ii < to; ii++)
+             {
+                 Pin inp = parsePin(layer.input(ii));

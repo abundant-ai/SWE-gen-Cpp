@@ -1,0 +1,152 @@
+diff --git a/modules/calib3d/include/opencv2/calib3d.hpp b/modules/calib3d/include/opencv2/calib3d.hpp
+index c3139572b8..ac41213c41 100644
+--- a/modules/calib3d/include/opencv2/calib3d.hpp
++++ b/modules/calib3d/include/opencv2/calib3d.hpp
+@@ -516,7 +516,7 @@ vector\<Point3f\> ), where N is the number of points in the view.
+ @param distCoeffs Input vector of distortion coefficients
+ \f$(k_1, k_2, p_1, p_2[, k_3[, k_4, k_5, k_6 [, s_1, s_2, s_3, s_4[, \tau_x, \tau_y]]]])\f$ of
+ 4, 5, 8, 12 or 14 elements. If the vector is empty, the zero distortion coefficients are assumed.
+-@param imagePoints Output array of image points, 2xN/Nx2 1-channel or 1xN/Nx1 2-channel, or
++@param imagePoints Output array of image points, 1xN/Nx1 2-channel, or
+ vector\<Point2f\> .
+ @param jacobian Optional output 2Nx(10+\<numDistCoeffs\>) jacobian matrix of derivatives of image
+ points with respect to components of the rotation vector, translation vector, focal lengths,
+diff --git a/modules/calib3d/perf/perf_pnp.cpp b/modules/calib3d/perf/perf_pnp.cpp
+index 7c7254a0df..997fba4e06 100644
+--- a/modules/calib3d/perf/perf_pnp.cpp
++++ b/modules/calib3d/perf/perf_pnp.cpp
+@@ -12,8 +12,8 @@ typedef perf::TestBaseWithParam<PointsNum_Algo_t> PointsNum_Algo;
+ typedef perf::TestBaseWithParam<int> PointsNum;
+ 
+ PERF_TEST_P(PointsNum_Algo, solvePnP,
+-            testing::Combine(
+-                testing::Values(5, 3*9, 7*13), //TODO: find why results on 4 points are too unstable
++            testing::Combine( //When non planar, DLT needs at least 6 points for SOLVEPNP_ITERATIVE flag
++                testing::Values(6, 3*9, 7*13), //TODO: find why results on 4 points are too unstable
+                 testing::Values((int)SOLVEPNP_ITERATIVE, (int)SOLVEPNP_EPNP, (int)SOLVEPNP_UPNP, (int)SOLVEPNP_DLS)
+                 )
+             )
+diff --git a/modules/calib3d/src/calibration.cpp b/modules/calib3d/src/calibration.cpp
+index 9fa1af88cc..9bc48661e3 100644
+--- a/modules/calib3d/src/calibration.cpp
++++ b/modules/calib3d/src/calibration.cpp
+@@ -1094,6 +1094,7 @@ CV_IMPL void cvFindExtrinsicCameraParams2( const CvMat* objectPoints,
+         else
+         {
+             // non-planar structure. Use DLT method
++            CV_CheckGE(count, 6, "DLT algorithm needs at least 6 points for pose estimation from 3D-2D point correspondences.");
+             double* L;
+             double LL[12*12], LW[12], LV[12*12], sc;
+             CvMat _LL = cvMat( 12, 12, CV_64F, LL );
+@@ -3314,8 +3315,14 @@ void cv::projectPoints( InputArray _opoints,
+ {
+     Mat opoints = _opoints.getMat();
+     int npoints = opoints.checkVector(3), depth = opoints.depth();
++    if (npoints < 0)
++        opoints = opoints.t();
++    npoints = opoints.checkVector(3);
+     CV_Assert(npoints >= 0 && (depth == CV_32F || depth == CV_64F));
+ 
++    if (opoints.cols == 3)
++        opoints = opoints.reshape(3);
++
+     CvMat dpdrot, dpdt, dpdf, dpdc, dpddist;
+     CvMat *pdpdrot=0, *pdpdt=0, *pdpdf=0, *pdpdc=0, *pdpddist=0;
+ 
+diff --git a/modules/calib3d/src/solvepnp.cpp b/modules/calib3d/src/solvepnp.cpp
+index 0fdca0d510..c7735a73a8 100644
+--- a/modules/calib3d/src/solvepnp.cpp
++++ b/modules/calib3d/src/solvepnp.cpp
+@@ -245,6 +245,9 @@ bool solvePnPRansac(InputArray _opoints, InputArray _ipoints,
+ 
+     if( model_points == npoints )
+     {
++        opoints = opoints.reshape(3);
++        ipoints = ipoints.reshape(2);
++
+         bool result = solvePnP(opoints, ipoints, cameraMatrix, distCoeffs, _rvec, _tvec, useExtrinsicGuess, ransac_kernel_method);
+ 
+         if(!result)
+@@ -350,6 +353,11 @@ int solveP3P( InputArray _opoints, InputArray _ipoints,
+     CV_Assert( npoints == 3 || npoints == 4 );
+     CV_Assert( flags == SOLVEPNP_P3P || flags == SOLVEPNP_AP3P );
+ 
++    if (opoints.cols == 3)
++        opoints = opoints.reshape(3);
++    if (ipoints.cols == 2)
++        ipoints = ipoints.reshape(2);
++
+     Mat cameraMatrix0 = _cameraMatrix.getMat();
+     Mat distCoeffs0 = _distCoeffs.getMat();
+     Mat cameraMatrix = Mat_<double>(cameraMatrix0);
+@@ -745,6 +753,11 @@ int solvePnPGeneric( InputArray _opoints, InputArray _ipoints,
+     CV_Assert( ( (npoints >= 4) || (npoints == 3 && flags == SOLVEPNP_ITERATIVE && useExtrinsicGuess) )
+                && npoints == std::max(ipoints.checkVector(2, CV_32F), ipoints.checkVector(2, CV_64F)) );
+ 
++    if (opoints.cols == 3)
++        opoints = opoints.reshape(3);
++    if (ipoints.cols == 2)
++        ipoints = ipoints.reshape(2);
++
+     if( flags != SOLVEPNP_ITERATIVE )
+         useExtrinsicGuess = false;
+ 
+diff --git a/modules/imgproc/include/opencv2/imgproc.hpp b/modules/imgproc/include/opencv2/imgproc.hpp
+index ada11ac073..5d2b5f8ff7 100644
+--- a/modules/imgproc/include/opencv2/imgproc.hpp
++++ b/modules/imgproc/include/opencv2/imgproc.hpp
+@@ -3116,9 +3116,9 @@ point coordinates out of the normalized distorted point coordinates ("normalized
+ coordinates do not depend on the camera matrix).
+ 
+ The function can be used for both a stereo camera head or a monocular camera (when R is empty).
+-
+-@param src Observed point coordinates, 1xN or Nx1 2-channel (CV_32FC2 or CV_64FC2).
+-@param dst Output ideal point coordinates after undistortion and reverse perspective
++@param src Observed point coordinates, 2xN/Nx2 1-channel or 1xN/Nx1 2-channel (CV_32FC2 or CV_64FC2) (or
++vector\<Point2f\> ).
++@param dst Output ideal point coordinates (1xN/Nx1 2-channel or vector\<Point2f\> ) after undistortion and reverse perspective
+ transformation. If matrix P is identity or omitted, dst will contain normalized point coordinates.
+ @param cameraMatrix Camera matrix \f$\vecthreethree{f_x}{0}{c_x}{0}{f_y}{c_y}{0}{0}{1}\f$ .
+ @param distCoeffs Input vector of distortion coefficients
+@@ -3131,14 +3131,14 @@ of 4, 5, 8, 12 or 14 elements. If the vector is NULL/empty, the zero distortion
+  */
+ CV_EXPORTS_W void undistortPoints( InputArray src, OutputArray dst,
+                                    InputArray cameraMatrix, InputArray distCoeffs,
+-                                   InputArray R = noArray(), InputArray P = noArray());
++                                   InputArray R = noArray(), InputArray P = noArray() );
+ /** @overload
+     @note Default version of #undistortPoints does 5 iterations to compute undistorted points.
+ 
+  */
+ CV_EXPORTS_AS(undistortPointsIter) void undistortPoints( InputArray src, OutputArray dst,
+-                                   InputArray cameraMatrix, InputArray distCoeffs,
+-                                   InputArray R, InputArray P, TermCriteria criteria);
++                                                         InputArray cameraMatrix, InputArray distCoeffs,
++                                                         InputArray R, InputArray P, TermCriteria criteria );
+ 
+ //! @} imgproc_transform
+ 
+diff --git a/modules/imgproc/src/undistort.cpp b/modules/imgproc/src/undistort.cpp
+index 14e5d37d13..418313df8e 100644
+--- a/modules/imgproc/src/undistort.cpp
++++ b/modules/imgproc/src/undistort.cpp
+@@ -561,10 +561,16 @@ void cv::undistortPoints( InputArray _src, OutputArray _dst,
+     Mat src = _src.getMat(), cameraMatrix = _cameraMatrix.getMat();
+     Mat distCoeffs = _distCoeffs.getMat(), R = _Rmat.getMat(), P = _Pmat.getMat();
+ 
+-    CV_Assert( src.isContinuous() && (src.depth() == CV_32F || src.depth() == CV_64F) &&
+-              ((src.rows == 1 && src.channels() == 2) || src.cols*src.channels() == 2));
++    int npoints = src.checkVector(2), depth = src.depth();
++    if (npoints < 0)
++        src = src.t();
++    npoints = src.checkVector(2);
++    CV_Assert(npoints >= 0 && src.isContinuous() && (depth == CV_32F || depth == CV_64F));
+ 
+-    _dst.create(src.size(), src.type(), -1, true);
++    if (src.cols == 2)
++        src = src.reshape(2);
++
++    _dst.create(npoints, 1, CV_MAKETYPE(depth, 2), -1, true);
+     Mat dst = _dst.getMat();
+ 
+     CvMat _csrc = cvMat(src), _cdst = cvMat(dst), _ccameraMatrix = cvMat(cameraMatrix);

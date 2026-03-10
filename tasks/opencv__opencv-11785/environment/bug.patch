@@ -1,0 +1,467 @@
+diff --git a/doc/py_tutorials/py_imgproc/py_thresholding/py_thresholding.markdown b/doc/py_tutorials/py_imgproc/py_thresholding/py_thresholding.markdown
+index 896b5f7d0c..1326bc5126 100644
+--- a/doc/py_tutorials/py_imgproc/py_thresholding/py_thresholding.markdown
++++ b/doc/py_tutorials/py_imgproc/py_thresholding/py_thresholding.markdown
+@@ -183,7 +183,7 @@ minimizes the **weighted within-class variance** given by the relation :
+ 
+ where
+ 
+-\f[q_1(t) = \sum_{i=1}^{t} P(i) \quad \& \quad q_2(t) = \sum_{i=t+1}^{I} P(i)\f]\f[\mu_1(t) = \sum_{i=1}^{t} \frac{iP(i)}{q_1(t)} \quad \& \quad \mu_2(t) = \sum_{i=t+1}^{I} \frac{iP(i)}{q_2(t)}\f]\f[\sigma_1^2(t) = \sum_{i=1}^{t} [i-\mu_1(t)]^2 \frac{P(i)}{q_1(t)} \quad \& \quad \sigma_2^2(t) = \sum_{i=t+1}^{I} [i-\mu_2(t)]^2 \frac{P(i)}{q_2(t)}\f]
++\f[q_1(t) = \sum_{i=1}^{t} P(i) \quad \& \quad q_1(t) = \sum_{i=t+1}^{I} P(i)\f]\f[\mu_1(t) = \sum_{i=1}^{t} \frac{iP(i)}{q_1(t)} \quad \& \quad \mu_2(t) = \sum_{i=t+1}^{I} \frac{iP(i)}{q_2(t)}\f]\f[\sigma_1^2(t) = \sum_{i=1}^{t} [i-\mu_1(t)]^2 \frac{P(i)}{q_1(t)} \quad \& \quad \sigma_2^2(t) = \sum_{i=t+1}^{I} [i-\mu_1(t)]^2 \frac{P(i)}{q_2(t)}\f]
+ 
+ It actually finds a value of t which lies in between two peaks such that variances to both classes
+ are minimum. It can be simply implemented in Python as follows:
+diff --git a/modules/dnn/src/darknet/darknet_io.cpp b/modules/dnn/src/darknet/darknet_io.cpp
+index 03805dd364..91ebb0fa8b 100644
+--- a/modules/dnn/src/darknet/darknet_io.cpp
++++ b/modules/dnn/src/darknet/darknet_io.cpp
+@@ -212,44 +212,6 @@ namespace cv {
+                     fused_layer_names.push_back(last_layer);
+                 }
+ 
+-                void setAvgpool()
+-                {
+-                    cv::dnn::LayerParams avgpool_param;
+-                    avgpool_param.set<cv::String>("pool", "ave");
+-                    avgpool_param.set<bool>("global_pooling", true);
+-                    avgpool_param.name = "Pooling-name";
+-                    avgpool_param.type = "Pooling";
+-                    darknet::LayerParameter lp;
+-
+-                    std::string layer_name = cv::format("avgpool_%d", layer_id);
+-                    lp.layer_name = layer_name;
+-                    lp.layer_type = avgpool_param.type;
+-                    lp.layerParams = avgpool_param;
+-                    lp.bottom_indexes.push_back(last_layer);
+-                    last_layer = layer_name;
+-                    net->layers.push_back(lp);
+-                    layer_id++;
+-                    fused_layer_names.push_back(last_layer);
+-                }
+-
+-                void setSoftmax()
+-                {
+-                    cv::dnn::LayerParams softmax_param;
+-                    softmax_param.name = "Softmax-name";
+-                    softmax_param.type = "Softmax";
+-                    darknet::LayerParameter lp;
+-
+-                    std::string layer_name = cv::format("softmax_%d", layer_id);
+-                    lp.layer_name = layer_name;
+-                    lp.layer_type = softmax_param.type;
+-                    lp.layerParams = softmax_param;
+-                    lp.bottom_indexes.push_back(last_layer);
+-                    last_layer = layer_name;
+-                    net->layers.push_back(lp);
+-                    layer_id++;
+-                    fused_layer_names.push_back(last_layer);
+-                }
+-
+                 void setConcat(int number_of_inputs, int *input_indexes)
+                 {
+                     cv::dnn::LayerParams concat_param;
+@@ -579,17 +541,6 @@ namespace cv {
+                         int pad = getParam<int>(layer_params, "pad", 0);
+                         setParams.setMaxpool(kernel_size, pad, stride);
+                     }
+-                    else if (layer_type == "avgpool")
+-                    {
+-                        setParams.setAvgpool();
+-                    }
+-                    else if (layer_type == "softmax")
+-                    {
+-                        int groups = getParam<int>(layer_params, "groups", 1);
+-                        if (groups != 1)
+-                            CV_Error(Error::StsNotImplemented, "Softmax from Darknet with groups != 1");
+-                        setParams.setSoftmax();
+-                    }
+                     else if (layer_type == "route")
+                     {
+                         std::string bottom_layers = getParam<std::string>(layer_params, "layers", "");
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 84967ced96..98d6fdc186 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -66,15 +66,6 @@ static bool DNN_DISABLE_MEMORY_OPTIMIZATIONS = utils::getConfigurationParameterB
+ static bool DNN_OPENCL_ALLOW_ALL_DEVICES = utils::getConfigurationParameterBool("OPENCV_DNN_OPENCL_ALLOW_ALL_DEVICES", false);
+ #endif
+ 
+-static int PARAM_DNN_BACKEND_DEFAULT = (int)utils::getConfigurationParameterSizeT("OPENCV_DNN_BACKEND_DEFAULT",
+-#ifdef HAVE_INF_ENGINE
+-    (size_t)DNN_BACKEND_INFERENCE_ENGINE
+-#else
+-    (size_t)DNN_BACKEND_OPENCV
+-#endif
+-);
+-
+-
+ using std::vector;
+ using std::map;
+ using std::make_pair;
+@@ -860,8 +851,11 @@ struct Net::Impl
+         CV_TRACE_FUNCTION();
+ 
+         if (preferableBackend == DNN_BACKEND_DEFAULT)
+-            preferableBackend = (Backend)PARAM_DNN_BACKEND_DEFAULT;
+-
++#ifdef HAVE_INF_ENGINE
++            preferableBackend = DNN_BACKEND_INFERENCE_ENGINE;
++#else
++            preferableBackend = DNN_BACKEND_OPENCV;
++#endif
+         CV_Assert(preferableBackend != DNN_BACKEND_OPENCV ||
+                   preferableTarget == DNN_TARGET_CPU ||
+                   preferableTarget == DNN_TARGET_OPENCL ||
+diff --git a/modules/dnn/src/tensorflow/tf_importer.cpp b/modules/dnn/src/tensorflow/tf_importer.cpp
+index 9140368522..4bff84175d 100644
+--- a/modules/dnn/src/tensorflow/tf_importer.cpp
++++ b/modules/dnn/src/tensorflow/tf_importer.cpp
+@@ -1641,27 +1641,6 @@ void TFImporter::populateNet(Net dstNet)
+                 connect(layer_id, dstNet, Pin(name), flattenId, 0);
+             }
+         }
+-        else if (type == "ClipByValue")
+-        {
+-            // op: "ClipByValue"
+-            // input: "input"
+-            // input: "mix"
+-            // input: "max"
+-            CV_Assert(layer.input_size() == 3);
+-
+-            Mat minValue = getTensorContent(getConstBlob(layer, value_id, 1));
+-            Mat maxValue = getTensorContent(getConstBlob(layer, value_id, 2));
+-            CV_Assert(minValue.total() == 1, minValue.type() == CV_32F,
+-                      maxValue.total() == 1, maxValue.type() == CV_32F);
+-
+-            layerParams.set("min_value", minValue.at<float>(0));
+-            layerParams.set("max_value", maxValue.at<float>(0));
+-
+-            int id = dstNet.addLayer(name, "ReLU6", layerParams);
+-            layer_id[name] = id;
+-
+-            connect(layer_id, dstNet, parsePin(layer.input(0)), id, 0);
+-        }
+         else if (type == "Abs" || type == "Tanh" || type == "Sigmoid" ||
+                  type == "Relu" || type == "Elu" ||
+                  type == "Identity" || type == "Relu6")
+diff --git a/modules/dnn/test/test_darknet_importer.cpp b/modules/dnn/test/test_darknet_importer.cpp
+index e28d9dc11e..aaa7ef5c11 100644
+--- a/modules/dnn/test/test_darknet_importer.cpp
++++ b/modules/dnn/test/test_darknet_importer.cpp
+@@ -228,9 +228,4 @@ TEST(Test_Darknet, upsample)
+     testDarknetLayer("upsample");
+ }
+ 
+-TEST(Test_Darknet, avgpool_softmax)
+-{
+-    testDarknetLayer("avgpool_softmax");
+-}
+-
+ }} // namespace
+diff --git a/modules/dnn/test/test_tf_importer.cpp b/modules/dnn/test/test_tf_importer.cpp
+index 5ac8890e50..4f024114ef 100644
+--- a/modules/dnn/test/test_tf_importer.cpp
++++ b/modules/dnn/test/test_tf_importer.cpp
+@@ -415,7 +415,6 @@ TEST(Test_TensorFlow, softmax)
+ TEST(Test_TensorFlow, relu6)
+ {
+     runTensorFlowNet("keras_relu6");
+-    runTensorFlowNet("keras_relu6", DNN_TARGET_CPU, /*hasText*/ true);
+ }
+ 
+ TEST(Test_TensorFlow, keras_mobilenet_head)
+diff --git a/modules/photo/src/seamless_cloning.cpp b/modules/photo/src/seamless_cloning.cpp
+index 16376def62..9865d62ab3 100644
+--- a/modules/photo/src/seamless_cloning.cpp
++++ b/modules/photo/src/seamless_cloning.cpp
+@@ -88,6 +88,10 @@ void cv::seamlessClone(InputArray _src, InputArray _dst, InputArray _mask, Point
+ 
+     int minxd = p.x - lenx/2;
+     int minyd = p.y - leny/2;
++    int maxxd = minxd + lenx;
++    int maxyd = minyd + leny;
++
++    CV_Assert(minxd >= 0 && minyd >= 0 && maxxd <= dest.rows && maxyd <= dest.cols);
+ 
+     Rect roi_d(minxd,minyd,lenx,leny);
+     Rect roi_s(minx,miny,lenx,leny);
+diff --git a/modules/videoio/src/cap_dshow.cpp b/modules/videoio/src/cap_dshow.cpp
+index 3a92a81d49..f29eb98cc3 100644
+--- a/modules/videoio/src/cap_dshow.cpp
++++ b/modules/videoio/src/cap_dshow.cpp
+@@ -3220,11 +3220,6 @@ double VideoCapture_DShow::getProperty(int propIdx) const
+         return g_VI.getFourcc(m_index);
+     case CV_CAP_PROP_FPS:
+         return g_VI.getFPS(m_index);
+-    case CV_CAP_PROP_AUTOFOCUS:
+-      // Flags indicate whether or not autofocus is enabled
+-      if (g_VI.getVideoSettingCamera(m_index, CameraControl_Focus, min_value, max_value, stepping_delta, current_value, flags, defaultValue))
+-        return (double)flags;
+-      return -1;
+ 
+     // video filter properties
+     case CV_CAP_PROP_BRIGHTNESS:
+@@ -3289,7 +3284,6 @@ bool VideoCapture_DShow::setProperty(int propIdx, double propVal)
+         break;
+ 
+     case CV_CAP_PROP_FPS:
+-    {
+         int fps = cvRound(propVal);
+         if (fps != g_VI.getFPS(m_index))
+         {
+@@ -3303,19 +3297,6 @@ bool VideoCapture_DShow::setProperty(int propIdx, double propVal)
+         return g_VI.isDeviceSetup(m_index);
+     }
+ 
+-    case CV_CAP_PROP_AUTOFOCUS:
+-    {
+-        // Flags are required to toggle autofocus or not, but the setProperty interface does not support multiple parameters
+-        bool enabled = cvRound(propVal) == 1;
+-        long minFocus, maxFocus, delta, currentFocus, flags, defaultValue;
+-        if (!g_VI.getVideoSettingCamera(m_index, CameraControl_Focus, minFocus, maxFocus, delta, currentFocus, flags, defaultValue))
+-        {
+-            return false;
+-        }
+-        return g_VI.setVideoSettingCamera(m_index, CameraControl_Focus, currentFocus, enabled ? CameraControl_Flags_Auto | CameraControl_Flags_Manual : CameraControl_Flags_Manual, enabled ? true : false);
+-    }
+-    }
+-
+     if (handled)
+     {
+         // a stream setting
+diff --git a/modules/videoio/src/cap_msmf.cpp b/modules/videoio/src/cap_msmf.cpp
+index 501a0172c5..d57062eeb2 100644
+--- a/modules/videoio/src/cap_msmf.cpp
++++ b/modules/videoio/src/cap_msmf.cpp
+@@ -122,36 +122,89 @@ public:
+ 
+     T** operator&()
+     {
+-        CV_Assert(p == NULL);
++        assert(p == NULL);
+         return p.operator&();
+     }
+     T* operator->() const
+     {
+-        CV_Assert(p != NULL);
++        assert(p != NULL);
+         return p.operator->();
+     }
++    bool operator!() const
++    {
++        return p.operator==(NULL);
++    }
++    bool operator==(_In_opt_ T* pT) const
++    {
++        return p.operator==(pT);
++    }
++    bool operator!=(_In_opt_ T* pT) const
++    {
++        return p.operator!=(pT);
++    }
+     operator bool()
+     {
+         return p.operator!=(NULL);
+     }
+ 
++    T* const* GetAddressOf() const
++    {
++        return &p;
++    }
++
++    T** GetAddressOf()
++    {
++        return &p;
++    }
++
++    T** ReleaseAndGetAddressOf()
++    {
++        p.Release();
++        return &p;
++    }
++
+     T* Get() const
+     {
+         return p;
+     }
+ 
+-    void Release()
++    // Attach to an existing interface (does not AddRef)
++    void Attach(_In_opt_ T* p2)
++    {
++        p.Attach(p2);
++    }
++    // Detach the interface (does not Release)
++    T* Detach()
+     {
+-        if (p)
+-            p.Release();
++        return p.Detach();
++    }
++    _Check_return_ HRESULT CopyTo(_Deref_out_opt_ T** ppT)
++    {
++        assert(ppT != NULL);
++        if (ppT == NULL)
++            return E_POINTER;
++        *ppT = p;
++        if (p != NULL)
++            p->AddRef();
++        return S_OK;
+     }
+ 
++    void Reset()
++    {
++        p.Release();
++    }
++
++    // query for U interface
++    template<typename U>
++    HRESULT As(_Inout_ U** lp) const
++    {
++        return p->QueryInterface(__uuidof(U), reinterpret_cast<void**>(lp));
++    }
+     // query for U interface
+     template<typename U>
+-    HRESULT As(_Out_ ComPtr<U>& lp) const
++    HRESULT As(_Out_ ComPtr<U>* lp) const
+     {
+-        lp.Release();
+-        return p->QueryInterface(__uuidof(U), reinterpret_cast<void**>((T**)&lp));
++        return p->QueryInterface(__uuidof(U), reinterpret_cast<void**>(lp->ReleaseAndGetAddressOf()));
+     }
+ private:
+     _COM_SMARTPTR_TYPEDEF(T, __uuidof(T));
+@@ -681,10 +734,12 @@ void CvCapture_MSMF::close()
+     if (isOpen)
+     {
+         isOpen = false;
+-        videoSample.Release();
+-        videoFileSource.Release();
++        if (videoSample)
++            videoSample.Reset();
++        if (videoFileSource)
++            videoFileSource.Reset();
+         camid = -1;
+-        filename.clear();
++        filename = "";
+     }
+ }
+ 
+@@ -704,7 +759,7 @@ bool CvCapture_MSMF::configureHW(bool enable)
+             D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0,
+             D3D_FEATURE_LEVEL_9_3,  D3D_FEATURE_LEVEL_9_2, D3D_FEATURE_LEVEL_9_1 };
+         if (SUCCEEDED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+-            levels, sizeof(levels) / sizeof(*levels), D3D11_SDK_VERSION, &D3DDev, NULL, NULL)))
++            levels, sizeof(levels) / sizeof(*levels), D3D11_SDK_VERSION, D3DDev.GetAddressOf(), NULL, NULL)))
+         {
+             // NOTE: Getting ready for multi-threaded operation
+             _ComPtr<ID3D11Multithread> D3DDevMT;
+@@ -712,29 +767,29 @@ bool CvCapture_MSMF::configureHW(bool enable)
+             if (SUCCEEDED(D3DDev->QueryInterface(IID_PPV_ARGS(&D3DDevMT))))
+             {
+                 D3DDevMT->SetMultithreadProtected(TRUE);
+-                D3DDevMT.Release();
+-                if (SUCCEEDED(MFCreateDXGIDeviceManager(&mgrRToken, &D3DMgr)))
++                D3DDevMT.Reset();
++                if (SUCCEEDED(MFCreateDXGIDeviceManager(&mgrRToken, D3DMgr.GetAddressOf())))
+                 {
+                     if (SUCCEEDED(D3DMgr->ResetDevice(D3DDev.Get(), mgrRToken)))
+                     {
+                         captureMode = MODE_HW;
+-                        return reopen ? (prevcam >= 0 ? open(prevcam) : open(prevfile.c_str())) : true;
++                        return reopen ? camid >= 0 ? open(prevcam) : open(prevfile.c_str()) : true;
+                     }
+-                    D3DMgr.Release();
++                    D3DMgr.Reset();
+                 }
+             }
+-            D3DDev.Release();
++            D3DDev.Reset();
+         }
+         return false;
+     }
+     else
+     {
+         if (D3DMgr)
+-            D3DMgr.Release();
++            D3DMgr.Reset();
+         if (D3DDev)
+-            D3DDev.Release();
++            D3DDev.Reset();
+         captureMode = MODE_SW;
+-        return reopen ? (prevcam >= 0 ? open(prevcam) : open(prevfile.c_str())) : true;
++        return reopen ? camid >= 0 ? open(prevcam) : open(prevfile.c_str()) : true;
+     }
+ #else
+     return !enable;
+@@ -856,7 +911,7 @@ bool CvCapture_MSMF::open(int _index)
+     close();
+ 
+     _ComPtr<IMFAttributes> msAttr = NULL;
+-    if (SUCCEEDED(MFCreateAttributes(&msAttr, 1)) &&
++    if (SUCCEEDED(MFCreateAttributes(msAttr.GetAddressOf(), 1)) &&
+         SUCCEEDED(msAttr->SetGUID(
+             MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+             MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID
+@@ -878,10 +933,10 @@ bool CvCapture_MSMF::open(int _index)
+                         _ComPtr<IMFAttributes> srAttr;
+                         if (SUCCEEDED(ppDevices[ind]->ActivateObject(__uuidof(IMFMediaSource), (void**)&mSrc)) && mSrc &&
+                             SUCCEEDED(MFCreateAttributes(&srAttr, 10)) &&
+-                            SUCCEEDED(srAttr->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE)) &&
+-                            SUCCEEDED(srAttr->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, FALSE)) &&
+-                            SUCCEEDED(srAttr->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE)) &&
+-                            SUCCEEDED(srAttr->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE)))
++                            SUCCEEDED(srAttr->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, true)) &&
++                            SUCCEEDED(srAttr->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, false)) &&
++                            SUCCEEDED(srAttr->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, false)) &&
++                            SUCCEEDED(srAttr->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, true)))
+                         {
+ #ifdef HAVE_DXVA
+                             if (D3DMgr)
+@@ -964,7 +1019,8 @@ bool CvCapture_MSMF::grabFrame()
+     if (isOpen)
+     {
+         DWORD streamIndex, flags;
+-        videoSample.Release();
++        if (videoSample)
++            videoSample.Reset();
+         HRESULT hr;
+         for(;;)
+         {
+@@ -1067,7 +1123,7 @@ bool CvCapture_MSMF::retrieveFrame(int, cv::OutputArray frame)
+         _ComPtr<IMF2DBuffer> buffer2d;
+         if (convertFormat)
+         {
+-            if (SUCCEEDED(buf.As<IMF2DBuffer>(buffer2d)))
++            if (SUCCEEDED(buf.As<IMF2DBuffer>(&buffer2d)))
+             {
+                 CV_TRACE_REGION_NEXT("lock2d");
+                 if (SUCCEEDED(buffer2d->Lock2D(&ptr, &pitch)))
+@@ -1148,7 +1204,8 @@ bool CvCapture_MSMF::setTime(double time, bool rough)
+     if (SUCCEEDED(videoFileSource->GetPresentationAttribute((DWORD)MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READER_MEDIASOURCE_CHARACTERISTICS, &var)) &&
+         var.vt == VT_UI4 && var.ulVal & MFMEDIASOURCE_CAN_SEEK)
+     {
+-        videoSample.Release();
++        if (videoSample)
++            videoSample.Reset();
+         bool useGrabbing = time > 0 && !rough && !(var.ulVal & MFMEDIASOURCE_HAS_SLOW_SEEK);
+         PropVariantClear(&var);
+         sampleTime = (useGrabbing && time >= frameStep) ? (LONGLONG)floor(time + 0.5) - frameStep : (LONGLONG)floor(time + 0.5);
+@@ -1159,7 +1216,7 @@ bool CvCapture_MSMF::setTime(double time, bool rough)
+         if (resOK && useGrabbing)
+         {
+             LONGLONG timeborder = (LONGLONG)floor(time + 0.5) - frameStep / 2;
+-            do { resOK = grabFrame(); videoSample.Release(); } while (resOK && sampleTime < timeborder);
++            do { resOK = grabFrame(); videoSample.Reset(); } while (resOK && sampleTime < timeborder);
+         }
+         return resOK;
+     }
+@@ -1901,7 +1958,7 @@ void CvVideoWriter_MSMF::close()
+     {
+         initiated = false;
+         sinkWriter->Finalize();
+-        sinkWriter.Release();
++        sinkWriter.Reset();
+     }
+ }
+ 

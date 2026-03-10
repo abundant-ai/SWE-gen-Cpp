@@ -6,39 +6,25 @@ cd /app/src
 mkdir -p "tests"
 cp "/tests/test_misc.cpp" "tests/test_misc.cpp"
 
-# Rebuild to incorporate the new test file
-rm -rf build
+# Build and run tests using CMake
 mkdir -p build
 cd build
-
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=20 \
-    -DSPDLOG_BUILD_TESTS=ON \
-    -DSPDLOG_BUILD_TESTS_HO=OFF \
-    -DSPDLOG_BUILD_EXAMPLE=OFF \
-    -DSPDLOG_USE_STD_FORMAT=ON || {
+cmake -DSPDLOG_BUILD_TESTS=ON .. 2>&1 || {
     echo "CMake configuration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-make -j2 || {
+# Build the test executable
+cmake --build . --target spdlog-utests 2>&1 || {
     echo "Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-# Check if test binary was built successfully
-if [ ! -f tests/spdlog-utests ]; then
-    echo "Build failed"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-cd ..
-# Run only the os test (the specific test for this PR)
-./build/tests/spdlog-utests "[os]"
+# Run tests from test_misc.cpp
+# Catch2 allows filtering tests - we run all tests from the test file using their tags
+./tests/spdlog-utests "[basic_logging],[log_levels],[convert_to_string_view],[convert_to_short_c_str],[convert_to_level_enum],[periodic_flush],[clone],[default logger],[windows utf],[os]" 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

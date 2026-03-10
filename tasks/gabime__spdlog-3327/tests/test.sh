@@ -6,38 +6,25 @@ cd /app/src
 mkdir -p "tests"
 cp "/tests/test_cfg.cpp" "tests/test_cfg.cpp"
 
-# Rebuild to incorporate the new test file
-rm -rf build
+# Build and run tests using CMake
 mkdir -p build
 cd build
-
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=11 \
-    -DSPDLOG_BUILD_TESTS=ON \
-    -DSPDLOG_BUILD_TESTS_HO=OFF \
-    -DSPDLOG_BUILD_EXAMPLE=OFF || {
+cmake -DSPDLOG_BUILD_TESTS=ON .. 2>&1 || {
     echo "CMake configuration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-make -j2 || {
+# Build the test executable
+cmake --build . --target spdlog-utests 2>&1 || {
     echo "Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-# Check if test binary was built successfully
-if [ ! -f tests/spdlog-utests ]; then
-    echo "Build failed"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-cd ..
-# Run the cfg tests
-./build/tests/spdlog-utests "[cfg]"
+# Run tests from test_cfg.cpp
+# Catch2 allows filtering tests - we run all tests from the cfg test file
+./tests/spdlog-utests "[cfg]" 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

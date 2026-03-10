@@ -1,0 +1,115 @@
+diff --git a/Makefile b/Makefile
+index 9585457..aad3789 100644
+--- a/Makefile
++++ b/Makefile
+@@ -38,7 +38,7 @@ gazelle: ## runs gazelle against the codebase to generate Bazel BUILD files
+ 
+ .PHONY: lint
+ lint: bin/golint bin/shadow ## lints the package for common code smells
+-	test -z "$(gofmt -d -s ./*.go)" || (gofmt -d -s ./*.go && exit 1)
++	test -z "$(shell gofmt -d -s ./*.go)" || (gofmt -d -s ./*.go && exit 1)
+ 	# golint -set_exit_status
+ 	# check for variable shadowing
+ 	go vet -vettool=$(shell pwd)/bin/shadow ./...
+diff --git a/templates/cc/register.go b/templates/cc/register.go
+index 615932c..7792e77 100644
+--- a/templates/cc/register.go
++++ b/templates/cc/register.go
+@@ -318,7 +318,8 @@ func (fns CCFuncs) cType(t pgs.FieldType) string {
+ 		return fns.cTypeOfString(fns.Type(t.Field()).Element().String())
+ 	}
+ 
+-	return fns.cTypeOfString(fns.Type(t.Field()).String())
++	// Use Value() to strip any potential pointer type.
++	return fns.cTypeOfString(fns.Type(t.Field()).Value().String())
+ }
+ 
+ func (fns CCFuncs) cTypeOfString(s string) string {
+diff --git a/templates/go/file.go b/templates/go/file.go
+index fdb359a..8e382a3 100644
+--- a/templates/go/file.go
++++ b/templates/go/file.go
+@@ -41,7 +41,7 @@ var (
+ 	_ = sort.Sort
+ 
+ 	{{ range $pkg, $path := enumPackages (externalEnums .) }}
+-		_ = {{ $pkg }}.{{ (index (externalEnums $) 0).Parent.Name }}_{{ (index (externalEnums $) 0).Name }}(0)
++	_ = {{ $pkg }}.{{ enumName (index (externalEnums $) 0) }}(0)
+ 	{{ end }}
+ )
+ 
+diff --git a/templates/goshared/register.go b/templates/goshared/register.go
+index a6a039f..8eacfcc 100644
+--- a/templates/goshared/register.go
++++ b/templates/goshared/register.go
+@@ -48,6 +48,7 @@ func Register(tpl *template.Template, params pgs.Parameters) {
+ 		"typ":           fns.Type,
+ 		"unwrap":        fns.unwrap,
+ 		"externalEnums": fns.externalEnums,
++		"enumName":      fns.enumName,
+ 		"enumPackages":  fns.enumPackages,
+ 	})
+ 
+@@ -228,7 +229,8 @@ func (fns goSharedFuncs) inType(f pgs.Field, x interface{}) string {
+ 			return fns.Type(f).String()
+ 		}
+ 	default:
+-		return fns.Type(f).String()
++		// Use Value() to strip any potential pointer type.
++		return fns.Type(f).Value().String()
+ 	}
+ }
+ 
+@@ -326,6 +328,20 @@ func (fns goSharedFuncs) externalEnums(file pgs.File) []pgs.Enum {
+ 	return out
+ }
+ 
++func (fns goSharedFuncs) enumName(enum pgs.Enum) string {
++	out := string(enum.Name())
++	parent := enum.Parent()
++	for {
++		message, ok := parent.(pgs.Message)
++		if ok {
++			out = string(message.Name()) + "_" + out
++			parent = message.Parent()
++		} else {
++			return out
++		}
++	}
++}
++
+ func (fns goSharedFuncs) enumPackages(enums []pgs.Enum) map[pgs.Name]pgs.FilePath {
+ 	out := make(map[pgs.Name]pgs.FilePath, len(enums))
+ 
+diff --git a/tools.go b/tools.go
+index 361c303..a35b07b 100644
+--- a/tools.go
++++ b/tools.go
+@@ -1,10 +1,11 @@
++//go:build tools
+ // +build tools
+ 
+ package main
+ 
+ import (
+-	_ "google.golang.org/protobuf/cmd/protoc-gen-go"
+ 	_ "golang.org/x/lint/golint"
+-	_ "golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow"
+ 	_ "golang.org/x/net/context"
++	_ "golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow"
++	_ "google.golang.org/protobuf/cmd/protoc-gen-go"
+ )
+diff --git a/validate/validate.h b/validate/validate.h
+index 15e2c4b..8ad4c8b 100644
+--- a/validate/validate.h
++++ b/validate/validate.h
+@@ -59,7 +59,8 @@ public:
+ 
+   static bool CheckMessage(const T& m, ValidationMsg* err)
+   {
+-    auto val = static_cast<Validator<T>*>(validators()[std::type_index(typeid(T))]);
++    // Run typeid() on the variable vs. the type to allow polymorphic lookup of the validator.
++    auto val = static_cast<Validator<T>*>(validators()[std::type_index(typeid(m))]);
+     if (val) {
+       return val->check_(m, err);
+     }

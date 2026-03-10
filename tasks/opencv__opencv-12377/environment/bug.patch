@@ -1,0 +1,312 @@
+diff --git a/modules/core/CMakeLists.txt b/modules/core/CMakeLists.txt
+index db13a0027b..fa72e71658 100644
+--- a/modules/core/CMakeLists.txt
++++ b/modules/core/CMakeLists.txt
+@@ -77,6 +77,10 @@ ocv_target_link_libraries(${the_module} LINK_PRIVATE
+     "${OPENCV_HAL_LINKER_LIBS}"
+ )
+ 
++if(HAVE_CUDA)
++  ocv_target_compile_definitions(${the_module} PUBLIC OPENCV_TRAITS_ENABLE_DEPRECATED)
++endif()
++
+ ocv_add_accuracy_tests()
+ ocv_add_perf_tests()
+ 
+diff --git a/modules/core/include/opencv2/core/mat.hpp b/modules/core/include/opencv2/core/mat.hpp
+index c0893b398d..a7d3021857 100644
+--- a/modules/core/include/opencv2/core/mat.hpp
++++ b/modules/core/include/opencv2/core/mat.hpp
+@@ -148,12 +148,6 @@ synonym is needed to generate Python/Java etc. wrappers properly. At the functio
+ level their use is similar, but _InputArray::getMat(idx) should be used to get header for the
+ idx-th component of the outer vector and _InputArray::size().area() should be used to find the
+ number of components (vectors/matrices) of the outer vector.
+-
+-In general, type support is limited to cv::Mat types. Other types are forbidden.
+-But in some cases we need to support passing of custom non-general Mat types, like arrays of cv::KeyPoint, cv::DMatch, etc.
+-This data is not intented to be interpreted as an image data, or processed somehow like regular cv::Mat.
+-To pass such custom type use rawIn() / rawOut() / rawInOut() wrappers.
+-Custom type is wrapped as Mat-compatible `CV_8UC<N>` values (N = sizeof(T), N <= CV_CN_MAX).
+  */
+ class CV_EXPORTS _InputArray
+ {
+@@ -209,11 +203,6 @@ public:
+     template<std::size_t _Nm> _InputArray(const std::array<Mat, _Nm>& arr);
+ #endif
+ 
+-    template<typename _Tp> static _InputArray rawIn(const std::vector<_Tp>& vec);
+-#ifdef CV_CXX_STD_ARRAY
+-    template<typename _Tp, std::size_t _Nm> static _InputArray rawIn(const std::array<_Tp, _Nm>& arr);
+-#endif
+-
+     Mat getMat(int idx=-1) const;
+     Mat getMat_(int idx=-1) const;
+     UMat getUMat(int idx=-1) const;
+@@ -350,11 +339,6 @@ public:
+     template<std::size_t _Nm> _OutputArray(const std::array<Mat, _Nm>& arr);
+ #endif
+ 
+-    template<typename _Tp> static _OutputArray rawOut(std::vector<_Tp>& vec);
+-#ifdef CV_CXX_STD_ARRAY
+-    template<typename _Tp, std::size_t _Nm> static _OutputArray rawOut(std::array<_Tp, _Nm>& arr);
+-#endif
+-
+     bool fixedSize() const;
+     bool fixedType() const;
+     bool needed() const;
+@@ -424,20 +408,8 @@ public:
+     template<std::size_t _Nm> _InputOutputArray(const std::array<Mat, _Nm>& arr);
+ #endif
+ 
+-    template<typename _Tp> static _InputOutputArray rawInOut(std::vector<_Tp>& vec);
+-#ifdef CV_CXX_STD_ARRAY
+-    template<typename _Tp, std::size_t _Nm> _InputOutputArray rawInOut(std::array<_Tp, _Nm>& arr);
+-#endif
+-
+ };
+ 
+-/** Helper to wrap custom types. @see InputArray */
+-template<typename _Tp> static inline _InputArray rawIn(_Tp& v);
+-/** Helper to wrap custom types. @see InputArray */
+-template<typename _Tp> static inline _OutputArray rawOut(_Tp& v);
+-/** Helper to wrap custom types. @see InputArray */
+-template<typename _Tp> static inline _InputOutputArray rawInOut(_Tp& v);
+-
+ CV__DEBUG_NS_END
+ 
+ typedef const _InputArray& InputArray;
+diff --git a/modules/core/include/opencv2/core/mat.inl.hpp b/modules/core/include/opencv2/core/mat.inl.hpp
+index b729be051a..2e9b57ecce 100644
+--- a/modules/core/include/opencv2/core/mat.inl.hpp
++++ b/modules/core/include/opencv2/core/mat.inl.hpp
+@@ -61,16 +61,6 @@ CV__DEBUG_NS_BEGIN
+ 
+ //! @cond IGNORED
+ 
+-////////////////////////// Custom (raw) type wrapper //////////////////////////
+-
+-template<typename _Tp> static inline
+-int rawType()
+-{
+-    CV_StaticAssert(sizeof(_Tp) <= CV_CN_MAX, "sizeof(_Tp) is too large");
+-    const int elemSize = sizeof(_Tp);
+-    return (int)CV_MAKETYPE(CV_8U, elemSize);
+-}
+-
+ //////////////////////// Input/Output Arrays ////////////////////////
+ 
+ inline void _InputArray::init(int _flags, const void* _obj)
+@@ -150,27 +140,6 @@ inline _InputArray::_InputArray(const ogl::Buffer& buf)
+ inline _InputArray::_InputArray(const cuda::HostMem& cuda_mem)
+ { init(CUDA_HOST_MEM + ACCESS_READ, &cuda_mem); }
+ 
+-template<typename _Tp> inline
+-_InputArray _InputArray::rawIn(const std::vector<_Tp>& vec)
+-{
+-    _InputArray v;
+-    v.flags = _InputArray::FIXED_TYPE + _InputArray::STD_VECTOR + rawType<_Tp>() + ACCESS_READ;
+-    v.obj = (void*)&vec;
+-    return v;
+-}
+-
+-#ifdef CV_CXX_STD_ARRAY
+-template<typename _Tp, std::size_t _Nm> inline
+-_InputArray _InputArray::rawIn(const std::array<_Tp, _Nm>& arr)
+-{
+-    _InputArray v;
+-    v.flags = FIXED_TYPE + FIXED_SIZE + STD_ARRAY + traits::Type<_Tp>::value + ACCESS_READ;
+-    v.obj = (void*)arr.data();
+-    v.sz = Size(1, _Nm);
+-    return v;
+-}
+-#endif
+-
+ inline _InputArray::~_InputArray() {}
+ 
+ inline Mat _InputArray::getMat(int i) const
+@@ -310,27 +279,6 @@ inline _OutputArray::_OutputArray(const ogl::Buffer& buf)
+ inline _OutputArray::_OutputArray(const cuda::HostMem& cuda_mem)
+ { init(FIXED_TYPE + FIXED_SIZE + CUDA_HOST_MEM + ACCESS_WRITE, &cuda_mem); }
+ 
+-template<typename _Tp> inline
+-_OutputArray _OutputArray::rawOut(std::vector<_Tp>& vec)
+-{
+-    _OutputArray v;
+-    v.flags = _InputArray::FIXED_TYPE + _InputArray::STD_VECTOR + rawType<_Tp>() + ACCESS_WRITE;
+-    v.obj = (void*)&vec;
+-    return v;
+-}
+-
+-#ifdef CV_CXX_STD_ARRAY
+-template<typename _Tp, std::size_t _Nm> inline
+-_OutputArray _OutputArray::rawOut(std::array<_Tp, _Nm>& arr)
+-{
+-    _OutputArray v;
+-    v.flags = FIXED_TYPE + FIXED_SIZE + STD_ARRAY + traits::Type<_Tp>::value + ACCESS_WRITE;
+-    v.obj = (void*)arr.data();
+-    v.sz = Size(1, _Nm);
+-    return v;
+-}
+-#endif
+-
+ ///////////////////////////////////////////////////////////////////////////////////////////
+ 
+ inline _InputOutputArray::_InputOutputArray() { init(ACCESS_RW, 0); }
+@@ -447,32 +395,6 @@ inline _InputOutputArray::_InputOutputArray(const ogl::Buffer& buf)
+ inline _InputOutputArray::_InputOutputArray(const cuda::HostMem& cuda_mem)
+ { init(FIXED_TYPE + FIXED_SIZE + CUDA_HOST_MEM + ACCESS_RW, &cuda_mem); }
+ 
+-template<typename _Tp> inline
+-_InputOutputArray _InputOutputArray::rawInOut(std::vector<_Tp>& vec)
+-{
+-    _InputOutputArray v;
+-    v.flags = _InputArray::FIXED_TYPE + _InputArray::STD_VECTOR + rawType<_Tp>() + ACCESS_RW;
+-    v.obj = (void*)&vec;
+-    return v;
+-}
+-
+-#ifdef CV_CXX_STD_ARRAY
+-template<typename _Tp, std::size_t _Nm> inline
+-_InputOutputArray _InputOutputArray::rawInOut(std::array<_Tp, _Nm>& arr)
+-{
+-    _InputOutputArray v;
+-    v.flags = FIXED_TYPE + FIXED_SIZE + STD_ARRAY + traits::Type<_Tp>::value + ACCESS_RW;
+-    v.obj = (void*)arr.data();
+-    v.sz = Size(1, _Nm);
+-    return v;
+-}
+-#endif
+-
+-
+-template<typename _Tp> static inline _InputArray rawIn(_Tp& v) { return _InputArray::rawIn(v); }
+-template<typename _Tp> static inline _OutputArray rawOut(_Tp& v) { return _OutputArray::rawOut(v); }
+-template<typename _Tp> static inline _InputOutputArray rawInOut(_Tp& v) { return _InputOutputArray::rawInOut(v); }
+-
+ CV__DEBUG_NS_END
+ 
+ //////////////////////////////////////////// Mat //////////////////////////////////////////
+diff --git a/modules/core/src/matrix_wrap.cpp b/modules/core/src/matrix_wrap.cpp
+index f52f301151..bea5c670b6 100644
+--- a/modules/core/src/matrix_wrap.cpp
++++ b/modules/core/src/matrix_wrap.cpp
+@@ -1413,39 +1413,18 @@ void _OutputArray::create(int d, const int* sizes, int mtype, int i,
+         case 16:
+             ((std::vector<Vec4i>*)v)->resize(len);
+             break;
+-        case 20:
+-            ((std::vector<Vec<int, 5> >*)v)->resize(len);
+-            break;
+         case 24:
+             ((std::vector<Vec6i>*)v)->resize(len);
+             break;
+-        case 28:
+-            ((std::vector<Vec<int, 7> >*)v)->resize(len);
+-            break;
+         case 32:
+             ((std::vector<Vec8i>*)v)->resize(len);
+             break;
+         case 36:
+             ((std::vector<Vec<int, 9> >*)v)->resize(len);
+             break;
+-        case 40:
+-            ((std::vector<Vec<int, 10> >*)v)->resize(len);
+-            break;
+-        case 44:
+-            ((std::vector<Vec<int, 11> >*)v)->resize(len);
+-            break;
+         case 48:
+             ((std::vector<Vec<int, 12> >*)v)->resize(len);
+             break;
+-        case 52:
+-            ((std::vector<Vec<int, 13> >*)v)->resize(len);
+-            break;
+-        case 56:
+-            ((std::vector<Vec<int, 14> >*)v)->resize(len);
+-            break;
+-        case 60:
+-            ((std::vector<Vec<int, 15> >*)v)->resize(len);
+-            break;
+         case 64:
+             ((std::vector<Vec<int, 16> >*)v)->resize(len);
+             break;
+diff --git a/modules/core/test/test_mat.cpp b/modules/core/test/test_mat.cpp
+index 0ef0d3fc2a..9622fa47d4 100644
+--- a/modules/core/test/test_mat.cpp
++++ b/modules/core/test/test_mat.cpp
+@@ -1882,63 +1882,4 @@ TEST(Core_Split, crash_12171)
+     EXPECT_EQ(2, dst2.ptr<uchar>(1)[1]);
+ }
+ 
+-struct CustomType  // like cv::Keypoint
+-{
+-    Point2f pt;
+-    float size;
+-    float angle;
+-    float response;
+-    int octave;
+-    int class_id;
+-};
+-
+-static void test_CustomType(InputArray src_, OutputArray dst_)
+-{
+-    Mat src = src_.getMat();
+-    ASSERT_EQ(sizeof(CustomType), src.elemSize());
+-    CV_CheckTypeEQ(src.type(), CV_MAKETYPE(CV_8U, sizeof(CustomType)), "");
+-
+-    CustomType* kpt = NULL;
+-    {
+-        Mat dst = dst_.getMat();
+-        for (size_t i = 0; i < dst.total(); i++)
+-        {
+-            kpt = dst.ptr<CustomType>(0) + i;
+-            kpt->octave = (int)i;
+-        }
+-    }
+-    const int N = (int)src.total();
+-    dst_.create(1, N * 2, rawType<CustomType>());
+-    Mat dst = dst_.getMat();
+-    for (size_t i = N; i < dst.total(); i++)
+-    {
+-        kpt = dst.ptr<CustomType>(0) + i;
+-        kpt->octave = -(int)i;
+-    }
+-#if 0 // Compilation error
+-    CustomType& kpt = dst.at<CustomType>(0, 5);
+-#endif
+-}
+-
+-TEST(Core_InputArray, support_CustomType)
+-{
+-    std::vector<CustomType> kp1(5);
+-    std::vector<CustomType> kp2(3);
+-    test_CustomType(rawIn(kp1), rawOut(kp2));
+-    ASSERT_EQ((size_t)10, kp2.size());
+-    for (int i = 0; i < 3; i++)
+-    {
+-        EXPECT_EQ(i, kp2[i].octave);
+-    }
+-    for (int i = 3; i < 5; i++)
+-    {
+-        EXPECT_EQ(0, kp2[i].octave);
+-    }
+-    for (int i = 5; i < 10; i++)
+-    {
+-        EXPECT_EQ(-i, kp2[i].octave);
+-    }
+-}
+-
+-
+ }} // namespace
+diff --git a/modules/cudafeatures2d/test/test_features2d.cpp b/modules/cudafeatures2d/test/test_features2d.cpp
+index 787b4fb345..6ab23beaff 100644
+--- a/modules/cudafeatures2d/test/test_features2d.cpp
++++ b/modules/cudafeatures2d/test/test_features2d.cpp
+@@ -222,7 +222,7 @@ CUDA_TEST_P(ORB, Accuracy)
+         {
+             std::vector<cv::KeyPoint> keypoints;
+             cv::cuda::GpuMat descriptors;
+-            orb->detectAndComputeAsync(loadMat(image), loadMat(mask), rawOut(keypoints), descriptors);
++            orb->detectAndComputeAsync(loadMat(image), loadMat(mask), keypoints, descriptors);
+         }
+         catch (const cv::Exception& e)
+         {

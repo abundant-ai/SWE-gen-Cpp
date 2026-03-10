@@ -1,0 +1,246 @@
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 0afa8d5a27..a67e9c0feb 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -1794,44 +1794,46 @@ struct Net::Impl
+                 }
+ 
+                 // fuse convolution layer followed by eltwise + relu
+-                if ( IS_DNN_OPENCL_TARGET(preferableTarget) )
++                if ( IS_DNN_OPENCL_TARGET(preferableTarget) && ld.layerInstance->type == "Convolution" )
+                 {
+                     Ptr<EltwiseLayer> nextEltwiseLayer;
+                     if( nextData )
+                         nextEltwiseLayer = nextData->layerInstance.dynamicCast<EltwiseLayer>();
+ 
+-                    if( !nextEltwiseLayer.empty() && pinsToKeep.count(lpNext) == 0 )
++                    if( !nextEltwiseLayer.empty() && pinsToKeep.count(lpNext) == 0 &&
++                        nextData->inputBlobsId.size() == 2 )
+                     {
+                         LayerData *eltwiseData = nextData;
+-                        // go down from the second input and find the first non-skipped layer.
+-                        LayerData *downLayerData = &layers[eltwiseData->inputBlobsId[1].lid];
+-                        CV_Assert(downLayerData);
+-                        while (downLayerData->skip)
+-                        {
+-                            downLayerData = &layers[downLayerData->inputBlobsId[0].lid];
+-                        }
+-                        CV_Assert(downLayerData);
+ 
+-                        // second input layer is current layer.
+-                        if ( ld.id == downLayerData->id )
++                        // Eltwise layer has two inputs. We need to determine which
++                        // is a base convolution layer and which could be used as it's bias.
++                        LayerData* biasLayerData = 0;
++                        for (int i = 0; i < 2; ++i)
+                         {
+-                            // go down from the first input and find the first non-skipped layer
+-                            downLayerData = &layers[eltwiseData->inputBlobsId[0].lid];
++                            LayerData *downLayerData = &layers[eltwiseData->inputBlobsId[i].lid];
++                            CV_Assert(downLayerData);
+                             while (downLayerData->skip)
+                             {
+-                                if ( !downLayerData->type.compare("Eltwise") )
+-                                    downLayerData = &layers[downLayerData->inputBlobsId[1].lid];
+-                                else
++                                if (downLayerData->inputBlobsId.size() == 1)
+                                     downLayerData = &layers[downLayerData->inputBlobsId[0].lid];
++                                else
++                                {
++                                    downLayerData = 0;
++                                    break;
++                                }
+                             }
+-
+-                            Ptr<ConvolutionLayer> convLayer = downLayerData->layerInstance.dynamicCast<ConvolutionLayer>();
+-
+-                            //  first input layer is convolution layer
+-                            if( !convLayer.empty() && eltwiseData->consumers.size() == 1 )
++                            if (downLayerData && ld.id == downLayerData->id)
++                            {
++                                biasLayerData = &layers[eltwiseData->inputBlobsId[1 - i].lid];
++                                break;
++                            }
++                        }
++                        CV_Assert(biasLayerData);
++                        {
++                            if( eltwiseData->consumers.size() == 1 )
+                             {
+                                 // fuse eltwise + activation layer
+-                                LayerData *firstConvLayerData = downLayerData;
++                                if (biasLayerData->id < ld.id)
+                                 {
+                                     nextData = &layers[eltwiseData->consumers[0].lid];
+                                     lpNext = LayerPin(eltwiseData->consumers[0].lid, 0);
+@@ -1845,8 +1847,8 @@ struct Net::Impl
+                                              !nextData->type.compare("Power")) &&
+                                             currLayer->setActivation(nextActivLayer) )
+                                     {
+-                                        CV_Assert(firstConvLayerData->outputBlobsWrappers.size() == 1 && ld.inputBlobsWrappers.size() == 1);
+-                                        ld.inputBlobsWrappers.push_back(firstConvLayerData->outputBlobsWrappers[0]);
++                                        CV_Assert_N(biasLayerData->outputBlobsWrappers.size() == 1, ld.inputBlobsWrappers.size() == 1);
++                                        ld.inputBlobsWrappers.push_back(biasLayerData->outputBlobsWrappers[0]);
+                                         printf_(("\tfused with %s\n", nextEltwiseLayer->name.c_str()));
+                                         printf_(("\tfused with %s\n", nextActivLayer->name.c_str()));
+                                         eltwiseData->skip = true;
+@@ -1897,9 +1899,6 @@ struct Net::Impl
+                 }
+             }
+ 
+-            if (preferableBackend != DNN_BACKEND_OPENCV)
+-                continue;  // Go to the next layer.
+-
+             // the optimization #2. if there is no layer that takes max pooling layer's computed
+             // max indices (and only some semantical segmentation networks might need this;
+             // many others only take the maximum values), then we switch the max pooling
+diff --git a/modules/dnn/src/layers/pooling_layer.cpp b/modules/dnn/src/layers/pooling_layer.cpp
+index bb8483975f..94c4c757b3 100644
+--- a/modules/dnn/src/layers/pooling_layer.cpp
++++ b/modules/dnn/src/layers/pooling_layer.cpp
+@@ -95,7 +95,6 @@ public:
+         else if (params.has("pooled_w") || params.has("pooled_h"))
+         {
+             type = ROI;
+-            computeMaxIdx = false;
+             pooledSize.width = params.get<uint32_t>("pooled_w", 1);
+             pooledSize.height = params.get<uint32_t>("pooled_h", 1);
+         }
+@@ -141,6 +140,7 @@ public:
+ #ifdef HAVE_OPENCL
+         poolOp.release();
+ #endif
++        computeMaxIdx = type == MAX;
+     }
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+@@ -190,19 +190,14 @@ public:
+             poolOp = Ptr<OCL4DNNPool<float> >(new OCL4DNNPool<float>(config));
+         }
+ 
+-        for (size_t ii = 0; ii < inputs.size(); ii++)
+-        {
+-            UMat& inpMat = inputs[ii];
+-            int out_index = (type == MAX) ? 2 : 1;
+-            UMat& outMat = outputs[out_index * ii];
+-            UMat maskMat = (type == MAX) ? outputs[2 * ii + 1] : UMat();
++        CV_Assert_N(inputs.size() == 1, !outputs.empty(), !computeMaxIdx || outputs.size() == 2);
++        UMat& inpMat = inputs[0];
++        UMat& outMat = outputs[0];
++        UMat maskMat = computeMaxIdx ? outputs[1] : UMat();
+ 
+-            CV_Assert(inpMat.offset == 0 && outMat.offset == 0);
++        CV_Assert(inpMat.offset == 0 && outMat.offset == 0);
+ 
+-            if (!poolOp->Forward(inpMat, outMat, maskMat))
+-                return false;
+-        }
+-        return true;
++        return poolOp->Forward(inpMat, outMat, maskMat);
+     }
+ #endif
+ 
+@@ -229,9 +224,12 @@ public:
+         switch (type)
+         {
+             case MAX:
+-                CV_Assert_N(inputs.size() == 1, outputs.size() == 2);
+-                maxPooling(inputs[0], outputs[0], outputs[1]);
++            {
++                CV_Assert_N(inputs.size() == 1, !computeMaxIdx || outputs.size() == 2);
++                Mat mask = computeMaxIdx ? outputs[1] : Mat();
++                maxPooling(inputs[0], outputs[0], mask);
+                 break;
++            }
+             case AVE:
+                 CV_Assert_N(inputs.size() == 1, outputs.size() == 1);
+                 avePooling(inputs[0], outputs[0]);
+@@ -912,7 +910,10 @@ public:
+             dims[0] = inputs[1][0];  // Number of proposals;
+             dims[1] = psRoiOutChannels;
+         }
+-        outputs.assign(type == MAX ? 2 : 1, shape(dims, 4));
++
++        int numOutputs = requiredOutputs ? requiredOutputs : (type == MAX ? 2 : 1);
++        CV_Assert(numOutputs == 1 || (numOutputs == 2 && type == MAX));
++        outputs.assign(numOutputs, shape(dims, 4));
+ 
+         return false;
+     }
+diff --git a/samples/dnn/tf_text_graph_faster_rcnn.py b/samples/dnn/tf_text_graph_faster_rcnn.py
+index a6db8dcd4a..13a9c29ec0 100644
+--- a/samples/dnn/tf_text_graph_faster_rcnn.py
++++ b/samples/dnn/tf_text_graph_faster_rcnn.py
+@@ -32,6 +32,8 @@ def createFasterRCNNGraph(modelPath, configPath, outputPath):
+     width_stride = float(grid_anchor_generator['width_stride'][0])
+     height_stride = float(grid_anchor_generator['height_stride'][0])
+     features_stride = float(config['feature_extractor'][0]['first_stage_features_stride'][0])
++    first_stage_nms_iou_threshold = float(config['first_stage_nms_iou_threshold'][0])
++    first_stage_max_proposals = int(config['first_stage_max_proposals'][0])
+ 
+     print('Number of classes: %d' % num_classes)
+     print('Scales:            %s' % str(scales))
+@@ -47,7 +49,8 @@ def createFasterRCNNGraph(modelPath, configPath, outputPath):
+     removeIdentity(graph_def)
+ 
+     def to_remove(name, op):
+-        return name.startswith(scopesToIgnore) or not name.startswith(scopesToKeep)
++        return name.startswith(scopesToIgnore) or not name.startswith(scopesToKeep) or \
++               (name.startswith('CropAndResize') and op != 'CropAndResize')
+ 
+     removeUnusedNodesAndAttrs(to_remove, graph_def)
+ 
+@@ -114,10 +117,10 @@ def createFasterRCNNGraph(modelPath, configPath, outputPath):
+     detectionOut.addAttr('num_classes', 2)
+     detectionOut.addAttr('share_location', True)
+     detectionOut.addAttr('background_label_id', 0)
+-    detectionOut.addAttr('nms_threshold', 0.7)
++    detectionOut.addAttr('nms_threshold', first_stage_nms_iou_threshold)
+     detectionOut.addAttr('top_k', 6000)
+     detectionOut.addAttr('code_type', "CENTER_SIZE")
+-    detectionOut.addAttr('keep_top_k', 100)
++    detectionOut.addAttr('keep_top_k', first_stage_max_proposals)
+     detectionOut.addAttr('clip', False)
+ 
+     graph_def.node.extend([detectionOut])
+@@ -147,9 +150,11 @@ def createFasterRCNNGraph(modelPath, configPath, outputPath):
+               'SecondStageBoxPredictor/Reshape_1/Reshape', [1, -1], graph_def)
+ 
+     # Replace Flatten subgraph onto a single node.
++    cropAndResizeNodeName = ''
+     for i in reversed(range(len(graph_def.node))):
+         if graph_def.node[i].op == 'CropAndResize':
+             graph_def.node[i].input.insert(1, 'detection_out/clip_by_value')
++            cropAndResizeNodeName = graph_def.node[i].name
+ 
+         if graph_def.node[i].name == 'SecondStageBoxPredictor/Reshape':
+             addConstNode('SecondStageBoxPredictor/Reshape/shape2', [1, -1, 4], graph_def)
+@@ -159,11 +164,15 @@ def createFasterRCNNGraph(modelPath, configPath, outputPath):
+ 
+         if graph_def.node[i].name in ['SecondStageBoxPredictor/Flatten/flatten/Shape',
+                                       'SecondStageBoxPredictor/Flatten/flatten/strided_slice',
+-                                      'SecondStageBoxPredictor/Flatten/flatten/Reshape/shape']:
++                                      'SecondStageBoxPredictor/Flatten/flatten/Reshape/shape',
++                                      'SecondStageBoxPredictor/Flatten_1/flatten/Shape',
++                                      'SecondStageBoxPredictor/Flatten_1/flatten/strided_slice',
++                                      'SecondStageBoxPredictor/Flatten_1/flatten/Reshape/shape']:
+             del graph_def.node[i]
+ 
+     for node in graph_def.node:
+-        if node.name == 'SecondStageBoxPredictor/Flatten/flatten/Reshape':
++        if node.name == 'SecondStageBoxPredictor/Flatten/flatten/Reshape' or \
++           node.name == 'SecondStageBoxPredictor/Flatten_1/flatten/Reshape':
+             node.op = 'Flatten'
+             node.input.pop()
+ 
+@@ -171,6 +180,11 @@ def createFasterRCNNGraph(modelPath, configPath, outputPath):
+                          'SecondStageBoxPredictor/BoxEncodingPredictor/MatMul']:
+             node.addAttr('loc_pred_transposed', True)
+ 
++        if node.name.startswith('MaxPool2D'):
++            assert(node.op == 'MaxPool')
++            assert(cropAndResizeNodeName)
++            node.input = [cropAndResizeNodeName]
++
+     ################################################################################
+     ### Postprocessing
+     ################################################################################

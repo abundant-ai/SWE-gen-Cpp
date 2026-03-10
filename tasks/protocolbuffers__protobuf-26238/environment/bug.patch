@@ -1,0 +1,392 @@
+diff --git a/src/google/protobuf/BUILD.bazel b/src/google/protobuf/BUILD.bazel
+index ea163528c..1b560e40e 100644
+--- a/src/google/protobuf/BUILD.bazel
++++ b/src/google/protobuf/BUILD.bazel
+@@ -983,7 +983,6 @@ cc_test(
+         ":repeated_field_proxy",
+         ":test_textproto",
+         "//src/google/protobuf/test_protos:test_cc_protos",
+-        "@abseil-cpp//absl/algorithm:container",
+         "@abseil-cpp//absl/meta:type_traits",
+         "@abseil-cpp//absl/strings:cord",
+         "@abseil-cpp//absl/strings:string_view",
+diff --git a/src/google/protobuf/repeated_field.h b/src/google/protobuf/repeated_field.h
+index bb1cda3fe..6531f504b 100644
+--- a/src/google/protobuf/repeated_field.h
++++ b/src/google/protobuf/repeated_field.h
+@@ -553,11 +553,6 @@ class ABSL_ATTRIBUTE_WARN_UNUSED PROTOBUF_DECLSPEC_EMPTY_BASES
+   template <typename Iter>
+   void AddWithArena(Arena* arena, Iter begin, Iter end);
+ 
+-  // Private-only API for in-place construction of elements in the repeated
+-  // field.
+-  template <typename... Args>
+-  pointer EmplaceWithArena(Arena* arena, Args&&... args);
+-
+   void SwapFallbackWithTemp(Arena* arena, RepeatedField& other,
+                             Arena* other_arena, RepeatedField<Element>& temp);
+ 
+@@ -1134,14 +1129,6 @@ inline void RepeatedField<Element>::AddWithArena(Arena* arena, Iter begin,
+   }
+ }
+ 
+-template <typename Element>
+-template <typename... Args>
+-typename RepeatedField<Element>::pointer
+-RepeatedField<Element>::EmplaceWithArena(Arena* arena, Args&&... args) {
+-  return ::new (AddUninitializedWithArena(arena))
+-      Element(std::forward<Args>(args)...);
+-}
+-
+ template <typename Element>
+ inline void RepeatedField<Element>::RemoveLast() {
+   const bool is_soo = this->is_soo();
+diff --git a/src/google/protobuf/repeated_field_proxy.h b/src/google/protobuf/repeated_field_proxy.h
+index 0d7500c48..bf5fef0f8 100644
+--- a/src/google/protobuf/repeated_field_proxy.h
++++ b/src/google/protobuf/repeated_field_proxy.h
+@@ -67,7 +67,7 @@ inline void CopyToString(StringType& element, T&& value) {
+   // strings, otherwise this would be a subtle place we'd be leaking the
+   // `std::string` backing of `string_view` repeated fields. I.e. whatever new
+   // backing we use for `string_view` fields would have to support all
+-  // `operator=` overloads that `std::string` has.
++  // `operator=` that `std::string` has.
+   //
+   // With an explicit list, we no longer have this dependency.
+   if constexpr (std::is_convertible_v<T, absl::string_view>) {
+@@ -329,53 +329,6 @@ class RepeatedFieldProxyWithPushBack<
+   }
+ };
+ 
+-// Defines `emplace_back()` for all types except `absl::string_view`. Simply
+-// takes any arguments that can be passed to the constructor of `ElementType`
+-// and in-place constructs the element at the end of the repeated field.
+-template <typename ElementType, typename Enable = void>
+-class RepeatedFieldProxyWithEmplaceBack {
+- public:
+-  // In-place constructs an element at the end of the repeated field, returning
+-  // a reference to the newly constructed element.
+-  template <typename... Args>
+-  auto& emplace_back(Args&&... args) const {
+-    return ToProxyType(this).Emplace(std::forward<Args>(args)...);
+-  }
+-};
+-
+-// Defines `emplace_back()` for `absl::string_view` element types. We explicitly
+-// list all constructors we want to support for repeated `string_views` to not
+-// leak the `std::string` backing of repeated `string_views`.
+-template <typename ElementType>
+-class RepeatedFieldProxyWithEmplaceBack<
+-    ElementType,
+-    std::enable_if_t<std::is_same_v<ElementType, absl::string_view>>> {
+- public:
+-  // In-place constructs an element at the end of the repeated field, returning
+-  // a string_view of the newly constructed element.
+-  absl::string_view emplace_back(absl::string_view value) const {
+-    return ToProxyType(this).Emplace(value);
+-  }
+-
+-  // In-place constructs an element at the end of the repeated field, returning
+-  // a string_view of the newly constructed element.
+-  absl::string_view emplace_back(std::string&& value) const {
+-    return ToProxyType(this).Emplace(std::move(value));
+-  }
+-
+-  // In-place constructs an element at the end of the repeated field, returning
+-  // a string_view of the newly constructed element.
+-  absl::string_view emplace_back(const std::string& value) const {
+-    return ToProxyType(this).Emplace(value);
+-  }
+-
+-  // In-place constructs an element at the end of the repeated field, returning
+-  // a string_view of the newly constructed element.
+-  absl::string_view emplace_back(const char* value) const {
+-    return ToProxyType(this).Emplace(value);
+-  }
+-};
+-
+ }  // namespace internal
+ 
+ // A proxy for a repeated field of type `ElementType` in a Protobuf message.
+@@ -393,8 +346,7 @@ template <typename ElementType>
+ class PROTOBUF_DECLSPEC_EMPTY_BASES RepeatedFieldProxy final
+     : public internal::RepeatedFieldProxyBase<ElementType>,
+       public internal::RepeatedFieldProxyWithSet<ElementType>,
+-      public internal::RepeatedFieldProxyWithPushBack<ElementType>,
+-      public internal::RepeatedFieldProxyWithEmplaceBack<ElementType> {
++      public internal::RepeatedFieldProxyWithPushBack<ElementType> {
+   static_assert(!std::is_const_v<ElementType>);
+ 
+  protected:
+@@ -425,7 +377,6 @@ class PROTOBUF_DECLSPEC_EMPTY_BASES RepeatedFieldProxy final
+ 
+   friend internal::RepeatedFieldProxyWithSet<ElementType, void>;
+   friend internal::RepeatedFieldProxyWithPushBack<ElementType, void>;
+-  friend internal::RepeatedFieldProxyWithEmplaceBack<ElementType, void>;
+ 
+   template <typename T, typename... Args>
+   friend RepeatedFieldProxy<T> internal::ConstructRepeatedFieldProxy(
+@@ -446,10 +397,6 @@ class PROTOBUF_DECLSPEC_EMPTY_BASES RepeatedFieldProxy final
+   auto& Add(const ElementType& value) const {
+     return *field().AddWithArena(arena(), value);
+   }
+-  template <typename... Args>
+-  auto& Emplace(Args&&... args) const {
+-    return *field().EmplaceWithArena(arena(), std::forward<Args>(args)...);
+-  }
+ 
+   Arena* arena() const { return arena_; }
+ 
+diff --git a/src/google/protobuf/repeated_field_proxy_test.cc b/src/google/protobuf/repeated_field_proxy_test.cc
+index 7e009fd02..f72d4d488 100644
+--- a/src/google/protobuf/repeated_field_proxy_test.cc
++++ b/src/google/protobuf/repeated_field_proxy_test.cc
+@@ -2,7 +2,6 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
+-#include <cstring>
+ #include <functional>
+ #include <string>
+ #include <type_traits>
+@@ -10,7 +9,6 @@
+ 
+ #include <gmock/gmock.h>
+ #include <gtest/gtest.h>
+-#include "absl/algorithm/container.h"
+ #include "absl/meta/type_traits.h"
+ #include "absl/strings/cord.h"
+ #include "absl/strings/string_view.h"
+@@ -144,8 +142,6 @@ TEST_P(RepeatedFieldProxyTest, Empty) {
+   RepeatedFieldProxy<RepeatedFieldProxyTestSimpleMessage> proxy =
+       field.MakeProxy();
+   EXPECT_TRUE(proxy.empty());
+-  proxy.emplace_back();
+-  EXPECT_FALSE(proxy.empty());
+ }
+ 
+ TEST_P(RepeatedFieldProxyTest, ConstEmpty) {
+@@ -172,13 +168,6 @@ TEST_P(RepeatedFieldProxyTest, Size) {
+   RepeatedFieldProxy<RepeatedFieldProxyTestSimpleMessage> proxy =
+       field.MakeProxy();
+   EXPECT_EQ(proxy.size(), 0);
+-
+-  proxy.emplace_back();
+-  EXPECT_EQ(proxy.size(), 1);
+-
+-  proxy.emplace_back();
+-  proxy.emplace_back();
+-  EXPECT_EQ(proxy.size(), 3);
+ }
+ 
+ TEST_P(RepeatedFieldProxyTest, ConstSize) {
+@@ -514,131 +503,6 @@ TEST_P(RepeatedFieldProxyTest, PushBackCord) {
+   TestPushBackString<absl::Cord>(field.MakeProxy());
+ }
+ 
+-TEST_P(RepeatedFieldProxyTest, EmplaceBackInt) {
+-  auto field = MakeRepeatedFieldContainer<int32_t>();
+-  auto proxy = field.MakeProxy();
+-  proxy.emplace_back(1);
+-  proxy.emplace_back(2);
+-  proxy.emplace_back(3);
+-
+-  EXPECT_THAT(*field, ElementsAre(1, 2, 3));
+-}
+-
+-TEST_P(RepeatedFieldProxyTest, EmplaceBackMessageLvalueCopies) {
+-  auto field =
+-      MakeRepeatedFieldContainer<RepeatedFieldProxyTestSimpleMessage>();
+-  auto proxy = field.MakeProxy();
+-  auto* msg1 = Arena::Create<RepeatedFieldProxyTestSimpleMessage>(arena());
+-  auto* nested = msg1->mutable_nested();
+-  proxy.emplace_back(*msg1);
+-  EXPECT_NE(proxy[0].mutable_nested(), nested);
+-
+-  EXPECT_THAT(*field, ElementsAre(EqualsProto(R"pb(nested: {})pb")));
+-
+-  if (!UseArena()) {
+-    delete msg1;
+-  }
+-}
+-
+-TEST_P(RepeatedFieldProxyTest, EmplaceBackMessageRvalueDoesNotCopy) {
+-  auto field =
+-      MakeRepeatedFieldContainer<RepeatedFieldProxyTestSimpleMessage>();
+-  auto proxy = field.MakeProxy();
+-  auto* msg1 = Arena::Create<RepeatedFieldProxyTestSimpleMessage>(arena());
+-  auto* nested = msg1->mutable_nested();
+-  proxy.emplace_back(std::move(*msg1));
+-  EXPECT_EQ(proxy[0].mutable_nested(), nested);
+-
+-  EXPECT_THAT(*field, ElementsAre(EqualsProto(R"pb(nested: {})pb")));
+-
+-  if (!UseArena()) {
+-    delete msg1;
+-  }
+-}
+-
+-template <typename StringType>
+-void TestEmplaceBackVanillaString(
+-    const TestOnlyRepeatedFieldContainer<StringType>& field,
+-    google::protobuf::RepeatedFieldProxy<StringType> proxy) {
+-  // Test that `emplace_back` returns a reference to the inserted element.
+-  EXPECT_EQ(proxy.emplace_back("1"), "1");
+-
+-  // Test reflexive insertions.
+-  proxy.emplace_back(proxy[0]);
+-
+-  proxy.emplace_back(StrAs<std::string>("2"));
+-  proxy.emplace_back(StrAs<absl::string_view>("3"));
+-  const char* c_str = "4";
+-  proxy.emplace_back(c_str);
+-
+-  auto moved_string = std::string(kLongString);
+-  const char* moved_string_ptr = moved_string.data();
+-  proxy.emplace_back(std::move(moved_string));
+-  EXPECT_EQ(proxy[5].data(), moved_string_ptr);
+-
+-  auto copied_string = std::string(kLongString);
+-  const char* copied_string_ptr = copied_string.data();
+-  proxy.emplace_back(copied_string);
+-  EXPECT_NE(proxy[6].data(), copied_string_ptr);
+-  EXPECT_EQ(copied_string, kLongString);
+-
+-  if constexpr (std::is_same_v<StringType, std::string>) {
+-    proxy.emplace_back(10, 'a');
+-
+-    const char* c_str_with_len = "5";
+-    proxy.emplace_back(c_str_with_len, std::strlen(c_str_with_len));
+-    const char* c_str_with_len2 = "60";
+-    proxy.emplace_back(c_str_with_len2, 2);
+-
+-    std::string string_to_copy_from = "123456789";
+-    auto start_it = absl::c_find(string_to_copy_from, '3');
+-    auto end_it = absl::c_find(string_to_copy_from, '7');
+-    proxy.emplace_back(start_it, end_it);
+-    proxy.emplace_back(absl::c_find(string_to_copy_from, '1'),
+-                       absl::c_find(string_to_copy_from, '4'));
+-  }
+-
+-  if constexpr (std::is_same_v<StringType, std::string>) {
+-    EXPECT_THAT(*field,
+-                ElementsAre("1", "1", "2", "3", "4", kLongString, kLongString,
+-                            "aaaaaaaaaa", "5", "60", "3456", "123"));
+-  } else {
+-    EXPECT_THAT(*field,
+-                ElementsAre("1", "1", "2", "3", "4", kLongString, kLongString));
+-  }
+-}
+-
+-TEST_P(RepeatedFieldProxyTest, EmplaceBackStdString) {
+-  auto field = MakeRepeatedFieldContainer<std::string>();
+-  TestEmplaceBackVanillaString<std::string>(field, field.MakeProxy());
+-}
+-
+-TEST_P(RepeatedFieldProxyTest, EmplaceBackStringView) {
+-  // Check that we don't leak an `std::string` through the `emplace_back` API.
+-  static_assert(std::is_same_v<
+-                decltype(std::declval<RepeatedFieldProxy<absl::string_view>>()
+-                             .emplace_back("1")),
+-                absl::string_view>);
+-
+-  auto field = MakeRepeatedFieldContainer<absl::string_view>();
+-  TestEmplaceBackVanillaString<absl::string_view>(field, field.MakeProxy());
+-}
+-
+-TEST_P(RepeatedFieldProxyTest, EmplaceBackCord) {
+-  auto field = MakeRepeatedFieldContainer<absl::Cord>();
+-  auto proxy = field.MakeProxy();
+-  proxy.emplace_back("1");
+-  proxy.emplace_back(StrAs<absl::string_view>("2"));
+-
+-  absl::Cord cord3 = absl::Cord(kLongString);
+-  proxy.emplace_back(std::move(cord3));
+-
+-  absl::Cord cord4 = absl::Cord(kLongString);
+-  proxy.emplace_back(cord4);
+-
+-  EXPECT_THAT(*field, ElementsAre("1", "2", kLongString, kLongString));
+-}
+-
+ INSTANTIATE_TEST_SUITE_P(RepeatedFieldProxyTest, RepeatedFieldProxyTest,
+                          testing::Bool(),
+                          [](const testing::TestParamInfo<bool>& info) {
+diff --git a/src/google/protobuf/repeated_ptr_field.h b/src/google/protobuf/repeated_ptr_field.h
+index d772d994d..f1ace0810 100644
+--- a/src/google/protobuf/repeated_ptr_field.h
++++ b/src/google/protobuf/repeated_ptr_field.h
+@@ -280,21 +280,6 @@ class PROTOBUF_EXPORT RepeatedPtrFieldBase {
+     }
+   }
+ 
+-  template <typename TypeHandler, typename... Args>
+-  Value<TypeHandler>* Emplace(Arena* arena, Args&&... args) {
+-    if (ClearedCount() > 0) {
+-      auto* result =
+-          cast<TypeHandler>(element_at(ExchangeCurrentSize(current_size_ + 1)));
+-      // NOLINTNEXTLINE(google3-readability-redundant-string-conversions)
+-      *result = Value<TypeHandler>(std::forward<Args>(args)...);
+-      return result;
+-    } else {
+-      return cast<TypeHandler>(AddInternal(
+-          arena,
+-          TypeHandler::GetNewWithEmplaceFunc(std::forward<Args>(args)...)));
+-    }
+-  }
+-
+   // Must be called from destructor.
+   //
+   // Pre-condition: NeedsDestroy() returns true.
+@@ -1067,12 +1052,6 @@ class GenericTypeHandler {
+       ptr = Arena::Create<Type>(arena, from);
+     };
+   }
+-  template <typename... Args>
+-  static constexpr auto GetNewWithEmplaceFunc(Args&&... args) {
+-    return [&args...](Arena* arena, void*& ptr) {
+-      ptr = Arena::Create<Type>(arena, std::forward<Args>(args)...);
+-    };
+-  }
+   static constexpr auto GetNewFromPrototypeFunc(
+       const Type* prototype ABSL_ATTRIBUTE_LIFETIME_BOUND) {
+     ABSL_DCHECK(prototype != nullptr);
+@@ -1147,12 +1126,6 @@ class GenericTypeHandler<std::string> {
+       ptr = Arena::Create<Type>(arena, from);
+     };
+   }
+-  template <typename... Args>
+-  static constexpr auto GetNewWithEmplaceFunc(Args&&... args) {
+-    return [&args...](Arena* arena, void*& ptr) {
+-      ptr = Arena::Create<Type>(arena, std::forward<Args>(args)...);
+-    };
+-  }
+   static constexpr auto GetNewFromPrototypeFunc(const Type* /*prototype*/) {
+     return GetNewFunc();
+   }
+@@ -1594,10 +1567,6 @@ class ABSL_ATTRIBUTE_WARN_UNUSED RepeatedPtrField final
+   template <typename Iter>
+   void AddWithArena(Arena* arena, Iter begin, Iter end);
+ 
+-  // Private-only. Constructs an element in-place from `args`.
+-  template <typename... Args>
+-  pointer EmplaceWithArena(Arena* arena, Args&&... args);
+-
+   void AddAllocatedWithArena(Arena* arena, Element* value);
+ 
+   PROTOBUF_FUTURE_ADD_NODISCARD Element* ReleaseLastWithArena(Arena* arena);
+@@ -1795,14 +1764,6 @@ RepeatedPtrField<Element>::AddWithArena(Arena* arena, const Element& value) {
+   return RepeatedPtrFieldBase::Add<TypeHandler>(arena, value);
+ }
+ 
+-template <typename Element>
+-template <typename... Args>
+-PROTOBUF_NDEBUG_INLINE typename RepeatedPtrField<Element>::pointer
+-RepeatedPtrField<Element>::EmplaceWithArena(Arena* arena, Args&&... args) {
+-  return RepeatedPtrFieldBase::Emplace<TypeHandler>(
+-      arena, std::forward<Args>(args)...);
+-}
+-
+ template <typename Element>
+ template <typename Iter>
+ PROTOBUF_NDEBUG_INLINE void RepeatedPtrField<Element>::Add(Iter begin,

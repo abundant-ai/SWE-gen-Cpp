@@ -7,53 +7,58 @@ cd /app/src
 mkdir -p "tests/SelfTest/UsageTests"
 cp "/tests/SelfTest/UsageTests/Generators.tests.cpp" "tests/SelfTest/UsageTests/Generators.tests.cpp"
 
-# Verify that the fix is applied - check for proper defined() guards
-# BUGGY state: #if __cpp_lib_byte > 0
-# FIXED state: #if defined(__cpp_lib_byte) && (__cpp_lib_byte > 0)
+# The bug is compatibility-related: the buggy source code (lacking proper feature detection)
+# combined with simplified test syntax will fail to compile on older toolchains.
+# On modern compilers, both versions work, so we verify the fix by checking if the
+# compatibility guards are present in the source files.
 
-if ! grep -q 'defined(__cpp_lib_byte)' src/catch2/internal/catch_compiler_capabilities.hpp; then
-    echo "FAIL: Missing defined() check for __cpp_lib_byte - fix not applied"
+# Check if the compatibility fixes are present in catch_compiler_capabilities.hpp
+if ! grep -q "defined(__cpp_lib_byte) && (__cpp_lib_byte > 0)" src/catch2/internal/catch_compiler_capabilities.hpp; then
+    echo "FAIL: Missing compatibility fix for __cpp_lib_byte in catch_compiler_capabilities.hpp"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# BUGGY state: #ifdef CATCH_CPP17_OR_GREATER (for conjunction)
-# FIXED state: #if defined(__cpp_lib_logical_traits) && __cpp_lib_logical_traits >= 201510
-
-if ! grep -q 'defined.*__cpp_lib_logical_traits.*&&.*__cpp_lib_logical_traits.*>=.*201510' src/catch2/matchers/catch_matchers_templated.hpp; then
-    echo "FAIL: Missing proper feature detection for __cpp_lib_logical_traits - fix not applied"
+# Check if the compatibility fixes are present in catch_matchers_templated.hpp
+if ! grep -q "defined( __cpp_lib_logical_traits ) && __cpp_lib_logical_traits >= 201510" src/catch2/matchers/catch_matchers_templated.hpp; then
+    echo "FAIL: Missing compatibility fix for __cpp_lib_logical_traits in catch_matchers_templated.hpp"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Reconfigure CMake to pick up any changes
+# Reconfigure CMake with testing enabled
 if ! cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
     -DCATCH_BUILD_TESTING=ON \
-    -DCATCH_BUILD_EXTRA_TESTS=ON \
-    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
+    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator -Wno-error=unused-but-set-variable" \
     -G Ninja 2>&1; then
     echo "FAIL: CMake reconfiguration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Rebuild to pick up changes
+# Rebuild to incorporate the updated test files
 if ! cmake --build build 2>&1; then
     echo "FAIL: Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Run the Generators tests to verify they work correctly
-if ! cd build && ctest -R "Generators" --output-on-failure 2>&1; then
-    echo "FAIL: Generators tests failed"
+# Run the specific tests that use the generator table functionality
+if ! ./build/tests/SelfTest "strlen2" --reporter console --success 2>&1; then
+    echo "FAIL: strlen2 test failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-echo "SUCCESS: Fix properly applied - feature detection guards present and tests pass"
+if ! ./build/tests/SelfTest "Eating cucumbers" --reporter console --success 2>&1; then
+    echo "FAIL: Eating cucumbers test failed"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+echo "SUCCESS: All tests passed and compatibility fixes are present"
 test_status=0
 
 if [ $test_status -eq 0 ]; then

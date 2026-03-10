@@ -1,0 +1,310 @@
+diff --git a/modules/dnn/perf/perf_net.cpp b/modules/dnn/perf/perf_net.cpp
+index 16138cb99f..e8569dcf10 100644
+--- a/modules/dnn/perf/perf_net.cpp
++++ b/modules/dnn/perf/perf_net.cpp
+@@ -144,8 +144,7 @@ PERF_TEST_P_(DNNTestNetwork, SSD)
+ PERF_TEST_P_(DNNTestNetwork, OpenFace)
+ {
+     if (backend == DNN_BACKEND_HALIDE ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16) ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD))
++        backend == DNN_BACKEND_INFERENCE_ENGINE && target != DNN_TARGET_CPU)
+         throw SkipTestException("");
+     processNet("dnn/openface_nn4.small2.v1.t7", "", "",
+             Mat(cv::Size(96, 96), CV_32FC3));
+@@ -249,15 +248,6 @@ PERF_TEST_P_(DNNTestNetwork, EAST_text_detection)
+     processNet("dnn/frozen_east_text_detection.pb", "", "", Mat(cv::Size(320, 320), CV_32FC3));
+ }
+ 
+-PERF_TEST_P_(DNNTestNetwork, FastNeuralStyle_eccv16)
+-{
+-    if (backend == DNN_BACKEND_HALIDE ||
+-        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16) ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD))
+-        throw SkipTestException("");
+-    processNet("dnn/fast_neural_style_eccv16_starry_night.t7", "", "", Mat(cv::Size(320, 240), CV_32FC3));
+-}
+-
+ const tuple<DNNBackend, DNNTarget> testCases[] = {
+ #ifdef HAVE_HALIDE
+     tuple<DNNBackend, DNNTarget>(DNN_BACKEND_HALIDE, DNN_TARGET_CPU),
+diff --git a/modules/dnn/src/layers/convolution_layer.cpp b/modules/dnn/src/layers/convolution_layer.cpp
+index 27818e5e7c..5eac3e90f3 100644
+--- a/modules/dnn/src/layers/convolution_layer.cpp
++++ b/modules/dnn/src/layers/convolution_layer.cpp
+@@ -81,10 +81,9 @@ public:
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-            return preferableTarget != DNN_TARGET_MYRIAD || type != "Deconvolution" || adjustPad == Size();
+-        else
+-            return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
++        return backendId == DNN_BACKEND_OPENCV ||
++               backendId == DNN_BACKEND_HALIDE && haveHalide() ||
++               backendId == DNN_BACKEND_INFERENCE_ENGINE && haveInfEngine();
+     }
+ 
+     void finalize(const std::vector<Mat*> &inputs, std::vector<Mat> &outputs) CV_OVERRIDE
+diff --git a/modules/dnn/src/layers/elementwise_layers.cpp b/modules/dnn/src/layers/elementwise_layers.cpp
+index c95bdcd509..801916d9c4 100644
+--- a/modules/dnn/src/layers/elementwise_layers.cpp
++++ b/modules/dnn/src/layers/elementwise_layers.cpp
+@@ -115,7 +115,9 @@ public:
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+-        return func.supportBackend(backendId, this->preferableTarget);
++        return backendId == DNN_BACKEND_OPENCV ||
++               backendId == DNN_BACKEND_HALIDE && haveHalide() ||
++               backendId == DNN_BACKEND_INFERENCE_ENGINE && haveInfEngine();
+     }
+ 
+     virtual Ptr<BackendNode> tryAttach(const Ptr<BackendNode>& node) CV_OVERRIDE
+@@ -236,12 +238,6 @@ struct ReLUFunctor
+ 
+     explicit ReLUFunctor(float slope_=1.f) : slope(slope_) {}
+ 
+-    bool supportBackend(int backendId, int)
+-    {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE;
+-    }
+-
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+     {
+         float s = slope;
+@@ -357,12 +353,6 @@ struct ReLU6Functor
+         CV_Assert(minValue <= maxValue);
+     }
+ 
+-    bool supportBackend(int backendId, int)
+-    {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE;
+-    }
+-
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+     {
+         for( int cn = cn0; cn < cn1; cn++, srcptr += planeSize, dstptr += planeSize )
+@@ -455,12 +445,6 @@ struct TanHFunctor
+ {
+     typedef TanHLayer Layer;
+ 
+-    bool supportBackend(int backendId, int)
+-    {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE;
+-    }
+-
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+     {
+         for( int cn = cn0; cn < cn1; cn++, srcptr += planeSize, dstptr += planeSize )
+@@ -525,12 +509,6 @@ struct SigmoidFunctor
+ {
+     typedef SigmoidLayer Layer;
+ 
+-    bool supportBackend(int backendId, int)
+-    {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE;
+-    }
+-
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+     {
+         for( int cn = cn0; cn < cn1; cn++, srcptr += planeSize, dstptr += planeSize )
+@@ -597,11 +575,6 @@ struct ELUFunctor
+ 
+     explicit ELUFunctor() {}
+ 
+-    bool supportBackend(int backendId, int)
+-    {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+-    }
+-
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+     {
+         for( int cn = cn0; cn < cn1; cn++, srcptr += planeSize, dstptr += planeSize )
+@@ -665,11 +638,6 @@ struct AbsValFunctor
+ {
+     typedef AbsLayer Layer;
+ 
+-    bool supportBackend(int backendId, int)
+-    {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+-    }
+-
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+     {
+         for( int cn = cn0; cn < cn1; cn++, srcptr += planeSize, dstptr += planeSize )
+@@ -733,11 +701,6 @@ struct BNLLFunctor
+ {
+     typedef BNLLLayer Layer;
+ 
+-    bool supportBackend(int backendId, int)
+-    {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+-    }
+-
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+     {
+         for( int cn = cn0; cn < cn1; cn++, srcptr += planeSize, dstptr += planeSize )
+@@ -788,14 +751,6 @@ struct PowerFunctor
+     explicit PowerFunctor(float power_ = 1.f, float scale_ = 1.f, float shift_ = 0.f)
+         : power(power_), scale(scale_), shift(shift_) {}
+ 
+-    bool supportBackend(int backendId, int targetId)
+-    {
+-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-            return (targetId != DNN_TARGET_OPENCL && targetId != DNN_TARGET_OPENCL_FP16) || power == 1.0;
+-        else
+-            return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+-    }
+-
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+     {
+         float a = scale, b = shift, p = power;
+@@ -898,11 +853,6 @@ struct ChannelsPReLUFunctor
+         scale_umat = scale.getUMat(ACCESS_READ);
+     }
+ 
+-    bool supportBackend(int backendId, int)
+-    {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+-    }
+-
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+     {
+         CV_Assert(scale.isContinuous() && scale.type() == CV_32F);
+diff --git a/modules/dnn/src/layers/resize_layer.cpp b/modules/dnn/src/layers/resize_layer.cpp
+index 26aa311c25..82bc6542be 100644
+--- a/modules/dnn/src/layers/resize_layer.cpp
++++ b/modules/dnn/src/layers/resize_layer.cpp
+@@ -53,10 +53,8 @@ public:
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+-        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-            return interpolation == "nearest" && preferableTarget != DNN_TARGET_MYRIAD;
+-        else
+-            return backendId == DNN_BACKEND_OPENCV;
++        return backendId == DNN_BACKEND_OPENCV ||
++               backendId == DNN_BACKEND_INFERENCE_ENGINE && haveInfEngine() && interpolation == "nearest";
+     }
+ 
+     virtual void finalize(const std::vector<Mat*>& inputs, std::vector<Mat> &outputs) CV_OVERRIDE
+diff --git a/modules/dnn/src/layers/slice_layer.cpp b/modules/dnn/src/layers/slice_layer.cpp
+index f6f4109c61..4b3a975b2a 100644
+--- a/modules/dnn/src/layers/slice_layer.cpp
++++ b/modules/dnn/src/layers/slice_layer.cpp
+@@ -41,7 +41,6 @@
+ //M*/
+ 
+ #include "../precomp.hpp"
+-#include "../op_inf_engine.hpp"
+ #include "layers_common.hpp"
+ #include <opencv2/dnn/shape_utils.hpp>
+ 
+@@ -108,12 +107,6 @@ public:
+         }
+     }
+ 
+-    virtual bool supportBackend(int backendId) CV_OVERRIDE
+-    {
+-        return backendId == DNN_BACKEND_OPENCV ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE && sliceRanges.size() == 1;
+-    }
+-
+     bool getMemoryShapes(const std::vector<MatShape> &inputs,
+                             const int requiredOutputs,
+                             std::vector<MatShape> &outputs,
+@@ -254,29 +247,6 @@ public:
+             inpMat(sliceRanges[i]).copyTo(outputs[i]);
+         }
+     }
+-
+-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >& inputs) CV_OVERRIDE
+-    {
+-#ifdef HAVE_INF_ENGINE
+-        InferenceEngine::DataPtr input = infEngineDataNode(inputs[0]);
+-        InferenceEngine::LayerParams lp;
+-        lp.name = name;
+-        lp.type = "Crop";
+-        lp.precision = InferenceEngine::Precision::FP32;
+-        std::shared_ptr<InferenceEngine::CropLayer> ieLayer(new InferenceEngine::CropLayer(lp));
+-
+-        CV_Assert(sliceRanges.size() == 1);
+-        for (int i = sliceRanges[0].size() - 1; i >= 0; --i)
+-        {
+-            ieLayer->axis.push_back(i);
+-            ieLayer->offset.push_back(sliceRanges[0][i].start);
+-            ieLayer->dim.push_back(sliceRanges[0][i].end - sliceRanges[0][i].start);
+-        }
+-        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+-
+-#endif  // HAVE_INF_ENGINE
+-        return Ptr<BackendNode>();
+-    }
+ };
+ 
+ Ptr<SliceLayer> SliceLayer::create(const LayerParams& params)
+diff --git a/modules/dnn/test/test_backends.cpp b/modules/dnn/test/test_backends.cpp
+index 2549d7d352..f6563cb3cb 100644
+--- a/modules/dnn/test/test_backends.cpp
++++ b/modules/dnn/test/test_backends.cpp
+@@ -256,8 +256,7 @@ TEST_P(DNNTestNetwork, OpenPose_pose_mpi_faster_4_stages)
+ TEST_P(DNNTestNetwork, OpenFace)
+ {
+     if (backend == DNN_BACKEND_HALIDE ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16) ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD))
++        backend == DNN_BACKEND_INFERENCE_ENGINE && target != DNN_TARGET_CPU)
+         throw SkipTestException("");
+     processNet("dnn/openface_nn4.small2.v1.t7", "", Size(96, 96), "");
+ }
+@@ -297,20 +296,6 @@ TEST_P(DNNTestNetwork, DenseNet_121)
+     processNet("dnn/DenseNet_121.caffemodel", "dnn/DenseNet_121.prototxt", Size(224, 224), "", "caffe");
+ }
+ 
+-TEST_P(DNNTestNetwork, FastNeuralStyle_eccv16)
+-{
+-    if (backend == DNN_BACKEND_HALIDE ||
+-        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16) ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD))
+-        throw SkipTestException("");
+-    Mat img = imread(findDataFile("dnn/googlenet_1.png", false));
+-    Mat inp = blobFromImage(img, 1.0, Size(320, 240), Scalar(103.939, 116.779, 123.68), false, false);
+-    // Output image has values in range [-143.526, 148.539].
+-    float l1 = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.3 : 4e-5;
+-    float lInf = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 7.0 : 2e-3;
+-    processNet("dnn/fast_neural_style_eccv16_starry_night.t7", "", inp, "", "", l1, lInf);
+-}
+-
+ const tuple<DNNBackend, DNNTarget> testCases[] = {
+ #ifdef HAVE_HALIDE
+     tuple<DNNBackend, DNNTarget>(DNN_BACKEND_HALIDE, DNN_TARGET_CPU),
+diff --git a/modules/dnn/test/test_darknet_importer.cpp b/modules/dnn/test/test_darknet_importer.cpp
+index aaa7ef5c11..3b6ca2a9b8 100644
+--- a/modules/dnn/test/test_darknet_importer.cpp
++++ b/modules/dnn/test/test_darknet_importer.cpp
+@@ -135,6 +135,8 @@ TEST_P(Test_Darknet_nets, YoloVoc)
+ {
+     int backendId = get<0>(GetParam());
+     int targetId = get<1>(GetParam());
++    if (backendId == DNN_BACKEND_INFERENCE_ENGINE && targetId == DNN_TARGET_MYRIAD)
++        throw SkipTestException("");
+     std::vector<cv::String> outNames(1, "detection_out");
+ 
+     std::vector<int> classIds(3);
+diff --git a/modules/dnn/test/test_torch_importer.cpp b/modules/dnn/test/test_torch_importer.cpp
+index a8c1d15503..cbff3cae37 100644
+--- a/modules/dnn/test/test_torch_importer.cpp
++++ b/modules/dnn/test/test_torch_importer.cpp
+@@ -296,7 +296,6 @@ TEST_P(Test_Torch_nets, FastNeuralStyle_accuracy)
+         Mat inputBlob = blobFromImage(img, 1.0, Size(), Scalar(103.939, 116.779, 123.68), false);
+ 
+         net.setInput(inputBlob);
+-        net.setPreferableBackend(DNN_BACKEND_OPENCV);
+         Mat out = net.forward();
+ 
+         // Deprocessing.

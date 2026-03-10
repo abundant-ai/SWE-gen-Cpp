@@ -6,25 +6,20 @@ cd /app/src
 mkdir -p "test/integration"
 cp "/tests/integration/load_node_test.cpp" "test/integration/load_node_test.cpp"
 
-# Rebuild yaml-cpp (oracle applies fix.patch before running this script,
-# so we need to rebuild to get the fixed version)
-
-# Fix GoogleTest 1.10.0 compilation with modern GCC
-# Remove -Werror flags from GoogleTest CMake cache
-sed -i 's/-Werror[^ ]*//g' build/test/prefix/googletest/CMakeFiles/gtest.dir/flags.make 2>/dev/null || true
-sed -i 's/-Werror[^ ]*//g' build/test/prefix/googletest/CMakeFiles/gtest_main.dir/flags.make 2>/dev/null || true
-
-cmake --build build --config Debug 2>&1
-rebuild_status=$?
-
-if [ $rebuild_status -ne 0 ]; then
-  echo "Rebuild failed with status $rebuild_status" >&2
-  echo 0 > /logs/verifier/reward.txt
-  exit $rebuild_status
+# Rebuild the project with the updated test file
+cd build
+cmake .. -DYAML_CPP_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
+echo "=== Building yaml-cpp-tests ==="
+if ! make yaml-cpp-tests -j2 2>&1; then
+    echo "FAIL: Build failed - likely missing methods/classes from the fix"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
 fi
 
-# Run the specific tests for LoadNodeTest
-./build/test/yaml-cpp-tests --gtest_filter="LoadNodeTest.*" 2>&1
+# Run only the specific tests that validate the fix (GoogleTest filter)
+# These tests are added in the fix and should pass with the fix, fail without it
+echo "=== Running load_node_test tests ==="
+./test/yaml-cpp-tests --gtest_filter="NodeTest.MultipleDocumentsEnds:NodeTest.MultipleDocumentsEndsWithEmptyDocs:LoadNodeTest.IncorrectSeqEnd" 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

@@ -5,46 +5,35 @@ cd /app/src
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test/cmake"
 cp "/tests/cmake/CMakeLists.txt" "test/cmake/CMakeLists.txt"
-mkdir -p "test/cmake"
 cp "/tests/cmake/main.cpp" "test/cmake/main.cpp"
 
-# Rebuild yaml-cpp with the fix applied (oracle applies fix.patch before running this script)
-cmake --build build --config Debug 2>&1
-rebuild_status=$?
-
-if [ $rebuild_status -ne 0 ]; then
-  echo "Rebuild failed with status $rebuild_status" >&2
-  echo 0 > /logs/verifier/reward.txt
-  exit $rebuild_status
+# Install yaml-cpp to a test prefix so CMake can find it
+cd build
+echo "=== Installing yaml-cpp to test prefix ==="
+cmake .. -DCMAKE_INSTALL_PREFIX=/tmp/yaml-cpp-install
+if ! make install 2>&1; then
+    echo "FAIL: Install failed"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
 fi
 
-# Install yaml-cpp to a prefix so it can be found by the test
-CMAKE_INSTALL_PREFIX="/tmp/yaml-cpp-install"
-cmake --install build --prefix "${CMAKE_INSTALL_PREFIX}" --config Debug 2>&1
-install_status=$?
-
-if [ $install_status -ne 0 ]; then
-  echo "Install failed with status $install_status" >&2
-  echo 0 > /logs/verifier/reward.txt
-  exit $install_status
+# Build the CMake consumer test to verify package config exports correct variables
+cd /app/src/test/cmake
+mkdir -p build
+cd build
+echo "=== Building CMake consumer test ==="
+if ! cmake .. -DCMAKE_PREFIX_PATH=/tmp/yaml-cpp-install 2>&1; then
+    echo "FAIL: CMake configuration failed - likely missing YAML_CPP_SHARED_LIBS_BUILT variable"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
 fi
 
-# Configure the CMake package test
-cmake \
-  -S test/cmake \
-  -B consumer-build \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_PREFIX_PATH="${CMAKE_INSTALL_PREFIX}" 2>&1
-configure_status=$?
-
-if [ $configure_status -ne 0 ]; then
-  echo "CMake configuration failed with status $configure_status" >&2
-  echo 0 > /logs/verifier/reward.txt
-  exit $configure_status
+if ! make 2>&1; then
+    echo "FAIL: Build failed"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
 fi
 
-# Build the CMake package test
-cmake --build consumer-build --config Debug 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

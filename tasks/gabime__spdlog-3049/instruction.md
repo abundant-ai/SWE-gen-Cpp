@@ -1,9 +1,0 @@
-Calling spdlog::async_logger::flush() currently behaves like an asynchronous enqueue: it may return before the queued log messages are actually written to sinks, and before sink flushes have completed. This makes async_logger::flush() inconsistent with the synchronous contract of logger::flush(), and can lead to situations where code calls flush() and then immediately destroys the logger/thread pool (or exits), yet not all messages are guaranteed to be processed and flushed.
-
-Change async_logger::flush() to be a synchronous operation: when flush() returns, all log messages submitted before the flush call must have been processed by the async worker and sink flushing must have completed exactly once for that flush request. In other words, flush() should block until the flush command has been executed by the background thread.
-
-If the asynchronous flush operation fails (e.g., an exception occurs while processing the flush request), flush() must ensure the logger’s error handler is invoked with an exception message describing the failure. The caller should not observe a successful return while the flush actually failed.
-
-This should work with a user-provided spdlog::details::thread_pool as well as loggers created via the async factory helpers. After logging N messages to an async_logger and calling logger->flush(), the associated sink(s) must have received all N messages and have their flush action performed for that flush request before flush() returns.
-
-Additionally, the codebase should compile with a minimum C++14 standard (to allow use of utilities such as std::make_unique where needed as part of this change).

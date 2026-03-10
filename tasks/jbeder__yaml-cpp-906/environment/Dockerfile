@@ -1,22 +1,23 @@
 FROM ubuntu:24.04
 
-# Base system packages (common to all languages)
 RUN apt-get update && apt-get install -y \
     git \
     curl \
     ca-certificates \
     patch \
     build-essential \
+    cmake \
+    libgtest-dev \
+    libgmock-dev \
+    locales \
     && rm -rf /var/lib/apt/lists/*
 
-# Install additional system packages needed for yaml-cpp
-RUN apt-get update && apt-get install -y \
-    cmake \
-    && rm -rf /var/lib/apt/lists/*
+RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && \
+    sed -i '/de_DE.UTF-8/s/^# //g' /etc/locale.gen && \
+    locale-gen
 
 WORKDIR /app
 
-# Clone repo at HEAD commit (with fix applied)
 RUN git clone https://github.com/jbeder/yaml-cpp.git src && \
     cd src && \
     (git fetch --depth 1 origin 6cd1e51d1ea07e49da7267bd412af225ff9e60dc || git fetch --depth 1 origin "+refs/pull/906/head:refs/remotes/origin/pr/906") && \
@@ -25,28 +26,22 @@ RUN git clone https://github.com/jbeder/yaml-cpp.git src && \
 
 WORKDIR /app/src
 
-# Configure the build
-RUN cmake -B build \
+RUN mkdir -p build && cd build && \
+    cmake .. \
+    -DYAML_CPP_BUILD_TESTS=ON \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_CXX_STANDARD=17 \
-    -DYAML_CPP_BUILD_TESTS=ON \
-    -DYAML_BUILD_SHARED_LIBS=OFF \
-    -DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized"
+    -DCMAKE_CXX_FLAGS="-Wno-error=maybe-uninitialized" && \
+    make -j2
 
-# Build the project initially
-RUN cmake --build build --config Debug
-
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
-# Apply bug.patch to revert to buggy state (BASE)
-# Remove .swp file first as it's a binary file that may differ
-RUN rm -f src/.emitterstate.h.swp
 COPY bug.patch /tmp/bug.patch
-RUN patch -p1 --force < /tmp/bug.patch && rm /tmp/bug.patch
+RUN rm -f src/.emitterstate.h.swp && \
+    patch -p1 --force < /tmp/bug.patch && \
+    rm /tmp/bug.patch
 
-# Rebuild after applying bug.patch
-RUN cmake --build build --config Debug
+RUN cd build && make -j2
 
 RUN rm -rf /app/src/.git
 

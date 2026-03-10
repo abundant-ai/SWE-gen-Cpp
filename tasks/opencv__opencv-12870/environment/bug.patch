@@ -1,0 +1,1015 @@
+diff --git a/modules/gapi/src/backends/fluid/gfluidbackend.cpp b/modules/gapi/src/backends/fluid/gfluidbackend.cpp
+index 39aba08c43..00ee8af882 100644
+--- a/modules/gapi/src/backends/fluid/gfluidbackend.cpp
++++ b/modules/gapi/src/backends/fluid/gfluidbackend.cpp
+@@ -76,23 +76,8 @@ namespace
+                              const cv::GCompileArgs &args,
+                              const std::vector<ade::NodeHandle> &nodes) const override
+         {
+-            using namespace cv::gimpl;
+-            GModel::ConstGraph g(graph);
+-            auto isl_graph = g.metadata().get<IslandModel>().model;
+-            GIslandModel::Graph gim(*isl_graph);
+-
+-            const auto num_islands = std::count_if
+-                (gim.nodes().begin(), gim.nodes().end(),
+-                 [&](const ade::NodeHandle &nh) {
+-                    return gim.metadata(nh).get<NodeKind>().k == NodeKind::ISLAND;
+-                });
+-
+-            const auto out_rois = cv::gimpl::getCompileArg<cv::GFluidOutputRois>(args);
+-            if (num_islands > 1 && out_rois.has_value())
+-                cv::util::throw_error(std::logic_error("GFluidOutputRois feature supports only one-island graphs"));
+-
+-            auto rois = out_rois.value_or(cv::GFluidOutputRois());
+-            return EPtr{new cv::gimpl::GFluidExecutable(graph, nodes, std::move(rois.rois))};
++            const auto out_rois = cv::gimpl::getCompileArg<cv::GFluidOutputRois>(args).value_or(cv::GFluidOutputRois());
++            return EPtr{new cv::gimpl::GFluidExecutable(graph, nodes, out_rois.rois)};
+         }
+ 
+         virtual void addBackendPasses(ade::ExecutionEngineSetupContext &ectx) override;
+@@ -447,17 +432,111 @@ void cv::gimpl::FluidAgent::debug(std::ostream &os)
+ }
+ 
+ // GCPUExcecutable implementation //////////////////////////////////////////////
+-
+-void cv::gimpl::GFluidExecutable::initBufferRois(std::vector<int>& readStarts, std::vector<cv::gapi::own::Rect>& rois)
++cv::gimpl::GFluidExecutable::GFluidExecutable(const ade::Graph &g,
++                                              const std::vector<ade::NodeHandle> &nodes,
++                                              const std::vector<cv::gapi::own::Rect> &outputRois)
++    : m_g(g), m_gm(m_g), m_outputRois(outputRois)
+ {
+     GConstFluidModel fg(m_g);
++
++    // Initialize vector of data buffers, build list of operations
++    // FIXME: There _must_ be a better way to [query] count number of DATA nodes
++    std::size_t mat_count = 0;
++    std::size_t last_agent = 0;
++    std::map<std::size_t, ade::NodeHandle> all_gmat_ids;
++
++    auto grab_mat_nh = [&](ade::NodeHandle nh) {
++        auto rc = m_gm.metadata(nh).get<Data>().rc;
++        if (m_id_map.count(rc) == 0)
++        {
++            all_gmat_ids[mat_count] = nh;
++            m_id_map[rc] = mat_count++;
++        }
++    };
++
++    for (const auto &nh : nodes)
++    {
++        switch (m_gm.metadata(nh).get<NodeType>().t)
++        {
++        case NodeType::DATA:
++            if (m_gm.metadata(nh).get<Data>().shape == GShape::GMAT)
++                grab_mat_nh(nh);
++            break;
++
++        case NodeType::OP:
++        {
++            const auto& fu = fg.metadata(nh).get<FluidUnit>();
++            switch (fu.k.m_kind)
++            {
++            case GFluidKernel::Kind::Filter: m_agents.emplace_back(new FluidFilterAgent(m_g, nh)); break;
++            case GFluidKernel::Kind::Resize:
++            {
++                if (fu.ratio >= 1.0)
++                {
++                    m_agents.emplace_back(new FluidResizeAgent(m_g, nh));
++                }
++                else
++                {
++                    m_agents.emplace_back(new FluidUpscaleAgent(m_g, nh));
++                }
++            } break;
++            default: GAPI_Assert(false);
++            }
++            // NB.: in_buffer_ids size is equal to Arguments size, not Edges size!!!
++            m_agents.back()->in_buffer_ids.resize(m_gm.metadata(nh).get<Op>().args.size(), -1);
++            for (auto eh : nh->inEdges())
++            {
++                // FIXME Only GMats are currently supported (which can be represented
++                // as fluid buffers
++                if (m_gm.metadata(eh->srcNode()).get<Data>().shape == GShape::GMAT)
++                {
++                    const auto in_port = m_gm.metadata(eh).get<Input>().port;
++                    const auto in_buf  = m_gm.metadata(eh->srcNode()).get<Data>().rc;
++
++                    m_agents.back()->in_buffer_ids[in_port] = in_buf;
++                    grab_mat_nh(eh->srcNode());
++                }
++            }
++            // FIXME: Assumption that all operation outputs MUST be connected
++            m_agents.back()->out_buffer_ids.resize(nh->outEdges().size(), -1);
++            for (auto eh : nh->outEdges())
++            {
++                const auto& data = m_gm.metadata(eh->dstNode()).get<Data>();
++                const auto out_port = m_gm.metadata(eh).get<Output>().port;
++                const auto out_buf  = data.rc;
++
++                m_agents.back()->out_buffer_ids[out_port] = out_buf;
++                if (data.shape == GShape::GMAT) grab_mat_nh(eh->dstNode());
++            }
++            if (fu.k.m_scratch)
++                m_scratch_users.push_back(last_agent);
++            last_agent++;
++            break;
++        }
++        default: GAPI_Assert(false);
++        }
++    }
++
++    // Check that IDs form a continiuos set (important for further indexing)
++    GAPI_Assert(m_id_map.size() >  0u);
++    GAPI_Assert(m_id_map.size() == mat_count);
++
++    // Actually initialize Fluid buffers
++    GAPI_LOG_INFO(NULL, "Initializing " << mat_count << " fluid buffer(s)" << std::endl);
++    m_num_int_buffers = mat_count;
++    const std::size_t num_scratch = m_scratch_users.size();
++
++    // Calculate rois for each fluid buffer
++
+     auto proto = m_gm.metadata().get<Protocol>();
++    std::vector<int> readStarts(mat_count);
++    std::vector<cv::gapi::own::Rect> rois(mat_count);
+     std::stack<ade::NodeHandle> nodesToVisit;
+ 
+     if (proto.outputs.size() != m_outputRois.size())
+     {
+         GAPI_Assert(m_outputRois.size() == 0);
+-        return;
++        m_outputRois.resize(proto.outputs.size());
+     }
+ 
+     // First, initialize rois for output nodes, add them to traversal stack
+@@ -506,7 +585,6 @@ void cv::gimpl::GFluidExecutable::initBufferRois(std::vector<int>& readStarts, s
+         {
+             GAPI_Assert(startNode->inNodes().size() == 1);
+             const auto& oh = startNode->inNodes().front();
+-
+             const auto& data = m_gm.metadata(startNode).get<Data>();
+             // only GMats participate in the process so it's valid to obtain GMatDesc
+             const auto& meta = util::get<GMatDesc>(data.meta);
+@@ -515,7 +593,7 @@ void cv::gimpl::GFluidExecutable::initBufferRois(std::vector<int>& readStarts, s
+             {
+                 const auto& in_data = m_gm.metadata(inNode).get<Data>();
+ 
+-                if (in_data.shape == GShape::GMAT && fg.metadata(inNode).contains<FluidData>())
++                if (in_data.shape == GShape::GMAT)
+                 {
+                     const auto& in_meta = util::get<GMatDesc>(in_data.meta);
+                     const auto& fd = fg.metadata(inNode).get<FluidData>();
+@@ -574,8 +652,7 @@ void cv::gimpl::GFluidExecutable::initBufferRois(std::vector<int>& readStarts, s
+                     {
+                         readStarts[in_id] = readStart;
+                         rois[in_id] = roi;
+-                        // Continue traverse on internal (w.r.t Island) data nodes only.
+-                        if (fd.internal) nodesToVisit.push(inNode);
++                        nodesToVisit.push(inNode);
+                     }
+                     else
+                     {
+@@ -586,106 +663,6 @@ void cv::gimpl::GFluidExecutable::initBufferRois(std::vector<int>& readStarts, s
+             } // for (const auto& inNode : oh->inNodes())
+         } // if (!startNode->inNodes().empty())
+     } // while (!nodesToVisit.empty())
+-}
+-
+-cv::gimpl::GFluidExecutable::GFluidExecutable(const ade::Graph &g,
+-                                              const std::vector<ade::NodeHandle> &nodes,
+-                                              const std::vector<cv::gapi::own::Rect> &outputRois)
+-    : m_g(g), m_gm(m_g), m_nodes(nodes), m_outputRois(outputRois)
+-{
+-    GConstFluidModel fg(m_g);
+-
+-    // Initialize vector of data buffers, build list of operations
+-    // FIXME: There _must_ be a better way to [query] count number of DATA nodes
+-    std::size_t mat_count = 0;
+-    std::size_t last_agent = 0;
+-    std::map<std::size_t, ade::NodeHandle> all_gmat_ids;
+-
+-    auto grab_mat_nh = [&](ade::NodeHandle nh) {
+-        auto rc = m_gm.metadata(nh).get<Data>().rc;
+-        if (m_id_map.count(rc) == 0)
+-        {
+-            all_gmat_ids[mat_count] = nh;
+-            m_id_map[rc] = mat_count++;
+-        }
+-    };
+-
+-    for (const auto &nh : m_nodes)
+-    {
+-        switch (m_gm.metadata(nh).get<NodeType>().t)
+-        {
+-        case NodeType::DATA:
+-            if (m_gm.metadata(nh).get<Data>().shape == GShape::GMAT)
+-                grab_mat_nh(nh);
+-            break;
+-
+-        case NodeType::OP:
+-        {
+-            const auto& fu = fg.metadata(nh).get<FluidUnit>();
+-            switch (fu.k.m_kind)
+-            {
+-            case GFluidKernel::Kind::Filter: m_agents.emplace_back(new FluidFilterAgent(m_g, nh)); break;
+-            case GFluidKernel::Kind::Resize:
+-            {
+-                if (fu.ratio >= 1.0)
+-                {
+-                    m_agents.emplace_back(new FluidResizeAgent(m_g, nh));
+-                }
+-                else
+-                {
+-                    m_agents.emplace_back(new FluidUpscaleAgent(m_g, nh));
+-                }
+-            } break;
+-            default: GAPI_Assert(false);
+-            }
+-            // NB.: in_buffer_ids size is equal to Arguments size, not Edges size!!!
+-            m_agents.back()->in_buffer_ids.resize(m_gm.metadata(nh).get<Op>().args.size(), -1);
+-            for (auto eh : nh->inEdges())
+-            {
+-                // FIXME Only GMats are currently supported (which can be represented
+-                // as fluid buffers
+-                if (m_gm.metadata(eh->srcNode()).get<Data>().shape == GShape::GMAT)
+-                {
+-                    const auto in_port = m_gm.metadata(eh).get<Input>().port;
+-                    const int  in_buf  = m_gm.metadata(eh->srcNode()).get<Data>().rc;
+-
+-                    m_agents.back()->in_buffer_ids[in_port] = in_buf;
+-                    grab_mat_nh(eh->srcNode());
+-                }
+-            }
+-            // FIXME: Assumption that all operation outputs MUST be connected
+-            m_agents.back()->out_buffer_ids.resize(nh->outEdges().size(), -1);
+-            for (auto eh : nh->outEdges())
+-            {
+-                const auto& data = m_gm.metadata(eh->dstNode()).get<Data>();
+-                const auto out_port = m_gm.metadata(eh).get<Output>().port;
+-                const int  out_buf  = data.rc;
+-
+-                m_agents.back()->out_buffer_ids[out_port] = out_buf;
+-                if (data.shape == GShape::GMAT) grab_mat_nh(eh->dstNode());
+-            }
+-            if (fu.k.m_scratch)
+-                m_scratch_users.push_back(last_agent);
+-            last_agent++;
+-            break;
+-        }
+-        default: GAPI_Assert(false);
+-        }
+-    }
+-
+-    // Check that IDs form a continiuos set (important for further indexing)
+-    GAPI_Assert(m_id_map.size() >  0);
+-    GAPI_Assert(m_id_map.size() == static_cast<size_t>(mat_count));
+-
+-    // Actually initialize Fluid buffers
+-    GAPI_LOG_INFO(NULL, "Initializing " << mat_count << " fluid buffer(s)" << std::endl);
+-    m_num_int_buffers = mat_count;
+-    const std::size_t num_scratch = m_scratch_users.size();
+-
+-    std::vector<int> readStarts(mat_count);
+-    std::vector<cv::gapi::own::Rect> rois(mat_count);
+-
+-    initBufferRois(readStarts, rois);
+ 
+     // NB: Allocate ALL buffer object at once, and avoid any further reallocations
+     // (since raw pointers-to-elements are taken)
+@@ -698,13 +675,12 @@ cv::gimpl::GFluidExecutable::GFluidExecutable(const ade::Graph &g,
+         const auto &fd  = fg.metadata(nh).get<FluidData>();
+         const auto meta = cv::util::get<GMatDesc>(d.meta);
+ 
+-        m_buffers[id].priv().init(meta, fd.lpi_write, readStarts[id], rois[id]);
++        // FIXME: Only continuous set...
++        m_buffers[id].priv().init(meta, fd.max_consumption, fd.border_size, fd.skew, fd.lpi_write, readStarts[id], rois[id]);
+ 
+-        // TODO:
+-        // Introduce Storage::INTERNAL_GRAPH and Storage::INTERNAL_ISLAND?
+-        if (fd.internal == true)
++        if (d.storage == Data::Storage::INTERNAL)
+         {
+-            m_buffers[id].priv().allocate(fd.border, fd.border_size, fd.max_consumption, fd.skew);
++            m_buffers[id].priv().allocate(fd.border);
+             std::stringstream stream;
+             m_buffers[id].debug(stream);
+             GAPI_LOG_INFO(NULL, stream.str());
+@@ -770,7 +746,7 @@ cv::gimpl::GFluidExecutable::GFluidExecutable(const ade::Graph &g,
+     if (num_scratch)
+     {
+         GAPI_LOG_INFO(NULL, "Initializing " << num_scratch << " scratch buffer(s)" << std::endl);
+-        std::size_t last_scratch_id = 0;
++        unsigned last_scratch_id = 0;
+ 
+         for (auto i : m_scratch_users)
+         {
+@@ -798,14 +774,14 @@ cv::gimpl::GFluidExecutable::GFluidExecutable(const ade::Graph &g,
+         }
+     }
+ 
+-    std::size_t total_size = 0;
++    int total_size = 0;
+     for (const auto &i : ade::util::indexed(m_buffers))
+     {
+         // Check that all internal and scratch buffers are allocated
+-        const auto idx = ade::util::index(i);
+-        const auto b   = ade::util::value(i);
++        auto idx = ade::util::index(i);
++        auto b   = ade::util::value(i);
+         if (idx >= m_num_int_buffers ||
+-            fg.metadata(all_gmat_ids[idx]).get<FluidData>().internal == true)
++            m_gm.metadata(all_gmat_ids[idx]).get<Data>().storage == Data::Storage::INTERNAL)
+         {
+             GAPI_Assert(b.priv().size() > 0);
+         }
+@@ -935,7 +911,7 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+     // limited), and only then continue with all other passes.
+     //
+     // The passes/stages API must be streamlined!
+-    ectx.addPass("exec", "init_fluid_data", [](ade::passes::PassContext &ctx)
++    ectx.addPass("exec", "fluid_sanity_check", [](ade::passes::PassContext &ctx)
+     {
+         GModel::Graph g(ctx.graph);
+         if (!GModel::isActive(g, cv::gapi::fluid::backend()))  // FIXME: Rearchitect this!
+@@ -944,46 +920,32 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+         auto isl_graph = g.metadata().get<IslandModel>().model;
+         GIslandModel::Graph gim(*isl_graph);
+ 
+-        GFluidModel fg(ctx.graph);
+-
+-        const auto setFluidData = [&](ade::NodeHandle nh, bool internal) {
+-            FluidData fd;
+-            fd.internal = internal;
+-            fg.metadata(nh).set(fd);
+-        };
++        const auto num_non_fluid_islands = std::count_if
++            (gim.nodes().begin(),
++             gim.nodes().end(),
++             [&](const ade::NodeHandle &nh) {
++                return gim.metadata(nh).get<NodeKind>().k == NodeKind::ISLAND &&
++                       gim.metadata(nh).get<FusedIsland>().object->backend() != cv::gapi::fluid::backend();
++            });
++
++        // FIXME: Break this limitation!
++        if (num_non_fluid_islands > 0)
++            cv::util::throw_error(std::logic_error("Fluid doesn't support heterogeneous execution"));
++    });
++    ectx.addPass("exec", "init_fluid_data", [](ade::passes::PassContext &ctx)
++    {
++        GModel::Graph g(ctx.graph);
++        if (!GModel::isActive(g, cv::gapi::fluid::backend()))  // FIXME: Rearchitect this!
++            return;
+ 
+-        for (const auto& nh : gim.nodes())
++        GFluidModel fg(ctx.graph);
++        for (const auto node : g.nodes())
+         {
+-            if (gim.metadata(nh).get<NodeKind>().k == NodeKind::ISLAND)
++            if (g.metadata(node).get<NodeType>().t == NodeType::DATA)
+             {
+-                const auto isl = gim.metadata(nh).get<FusedIsland>().object;
+-                if (isl->backend() == cv::gapi::fluid::backend())
+-                {
+-                    // add FluidData to all data nodes inside island
+-                    for (const auto node : isl->contents())
+-                    {
+-                        if (g.metadata(node).get<NodeType>().t == NodeType::DATA)
+-                            setFluidData(node, true);
+-                    }
+-
+-                    // add FluidData to slot if it's read/written by fluid
+-                    std::vector<ade::NodeHandle> io_handles;
+-                    for (const auto &in_op : isl->in_ops())
+-                    {
+-                        ade::util::copy(in_op->inNodes(), std::back_inserter(io_handles));
+-                    }
+-                    for (const auto &out_op : isl->out_ops())
+-                    {
+-                        ade::util::copy(out_op->outNodes(), std::back_inserter(io_handles));
+-                    }
+-                    for (const auto &io_node : io_handles)
+-                    {
+-                        if (!fg.metadata(io_node).contains<FluidData>())
+-                            setFluidData(io_node, false);
+-                    }
+-                } // if (fluid backend)
+-            } // if (ISLAND)
+-        } // for (gim.nodes())
++                fg.metadata(node).set(FluidData());
++            }
++        }
+     });
+     // FIXME:
+     // move to unpackKernel method
+@@ -999,7 +961,7 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+         auto sorted = g.metadata().get<ade::passes::TopologicalSortData>().nodes();
+         for (auto node : sorted)
+         {
+-            if (fg.metadata(node).contains<FluidUnit>())
++            if (g.metadata(node).get<NodeType>().t == NodeType::OP)
+             {
+                 // FIXME: check that op has only one data node on input
+                 auto &fu = fg.metadata(node).get<FluidUnit>();
+@@ -1021,7 +983,7 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+         auto sorted = g.metadata().get<ade::passes::TopologicalSortData>().nodes();
+         for (auto node : sorted)
+         {
+-            if (fg.metadata(node).contains<FluidUnit>())
++            if (g.metadata(node).get<NodeType>().t == NodeType::OP)
+             {
+                 std::set<int> in_hs, out_ws, out_hs;
+ 
+@@ -1074,7 +1036,7 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+         GFluidModel fg(ctx.graph);
+         for (const auto node : g.nodes())
+         {
+-            if (fg.metadata(node).contains<FluidUnit>())
++            if (g.metadata(node).get<NodeType>().t == NodeType::OP)
+             {
+                 const auto &fu = fg.metadata(node).get<FluidUnit>();
+ 
+@@ -1105,7 +1067,7 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+         auto sorted = g.metadata().get<ade::passes::TopologicalSortData>().nodes();
+         for (auto node : sorted)
+         {
+-            if (fg.metadata(node).contains<FluidUnit>())
++            if (g.metadata(node).get<NodeType>().t == NodeType::OP)
+             {
+                 const auto &fu = fg.metadata(node).get<FluidUnit>();
+ 
+@@ -1143,7 +1105,7 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+         auto sorted = g.metadata().get<ade::passes::TopologicalSortData>().nodes();
+         for (auto node : sorted)
+         {
+-            if (fg.metadata(node).contains<FluidUnit>())
++            if (g.metadata(node).get<NodeType>().t == NodeType::OP)
+             {
+                 int max_latency = 0;
+                 for (auto in_data_node : node->inNodes())
+@@ -1165,7 +1127,6 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+             }
+         }
+     });
+-
+     ectx.addPass("exec", "init_buffer_borders", [](ade::passes::PassContext &ctx)
+     {
+         GModel::Graph g(ctx.graph);
+@@ -1176,7 +1137,7 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+         auto sorted = g.metadata().get<ade::passes::TopologicalSortData>().nodes();
+         for (auto node : sorted)
+         {
+-            if (fg.metadata(node).contains<FluidData>())
++            if (g.metadata(node).get<NodeType>().t == NodeType::DATA)
+             {
+                 auto &fd = fg.metadata(node).get<FluidData>();
+ 
+@@ -1184,7 +1145,7 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+ 
+                 // In/out data nodes are bound to user data directly,
+                 // so cannot be extended with a border
+-                if (fd.internal == true)
++                if (g.metadata(node).get<Data>().storage == Data::Storage::INTERNAL)
+                 {
+                     // For now border of the buffer's storage is the border
+                     // of the first reader whose border size is the same.
+@@ -1195,10 +1156,9 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+                     // on this criteria)
+                     auto readers = node->outNodes();
+                     const auto &candidate = ade::util::find_if(readers, [&](ade::NodeHandle nh) {
+-                        return fg.metadata(nh).contains<FluidUnit>() &&
+-                               fg.metadata(nh).get<FluidUnit>().border_size == fd.border_size;
++                        const auto &fu = fg.metadata(nh).get<FluidUnit>();
++                        return fu.border_size == fd.border_size;
+                     });
+-
+                     GAPI_Assert(candidate != readers.end());
+ 
+                     const auto &fu = fg.metadata(*candidate).get<FluidUnit>();
+@@ -1221,30 +1181,26 @@ void GFluidBackendImpl::addBackendPasses(ade::ExecutionEngineSetupContext &ectx)
+         GFluidModel fg(ctx.graph);
+         for (auto node : g.nodes())
+         {
+-            if (fg.metadata(node).contains<FluidData>())
++            if (g.metadata(node).get<NodeType>().t == NodeType::DATA)
+             {
+                 auto &fd = fg.metadata(node).get<FluidData>();
+                 for (auto out_edge : node->outEdges())
+                 {
+-                    const auto dstNode = out_edge->dstNode();
+-                    if (fg.metadata(dstNode).contains<FluidUnit>())
++                    const auto &fu = fg.metadata(out_edge->dstNode()).get<FluidUnit>();
++
++                    // There is no need in own storage for view if it's border is
++                    // the same as the buffer's (view can have equal or smaller border
++                    // size in this case)
++                    if (fu.border_size == 0 ||
++                        (fu.border && fd.border && (*fu.border == *fd.border)))
++                    {
++                        GAPI_Assert(fu.border_size <= fd.border_size);
++                        fg.metadata(out_edge).set(FluidUseOwnBorderBuffer{false});
++                    }
++                    else
+                     {
+-                        const auto &fu = fg.metadata(dstNode).get<FluidUnit>();
+-
+-                        // There is no need in own storage for view if it's border is
+-                        // the same as the buffer's (view can have equal or smaller border
+-                        // size in this case)
+-                        if (fu.border_size == 0 ||
+-                                (fu.border && fd.border && (*fu.border == *fd.border)))
+-                        {
+-                            GAPI_Assert(fu.border_size <= fd.border_size);
+-                            fg.metadata(out_edge).set(FluidUseOwnBorderBuffer{false});
+-                        }
+-                        else
+-                        {
+-                            fg.metadata(out_edge).set(FluidUseOwnBorderBuffer{true});
+-                            GModel::log(g, out_edge, "OwnBufferStorage: true");
+-                        }
++                        fg.metadata(out_edge).set(FluidUseOwnBorderBuffer{true});
++                        GModel::log(g, out_edge, "OwnBufferStorage: true");
+                     }
+                 }
+             }
+diff --git a/modules/gapi/src/backends/fluid/gfluidbackend.hpp b/modules/gapi/src/backends/fluid/gfluidbackend.hpp
+index e91a41b2c2..24ab39ba6e 100644
+--- a/modules/gapi/src/backends/fluid/gfluidbackend.hpp
++++ b/modules/gapi/src/backends/fluid/gfluidbackend.hpp
+@@ -21,7 +21,7 @@ namespace cv { namespace gimpl {
+ 
+ struct FluidUnit
+ {
+-    static const char *name() { return "FluidUnit"; }
++    static const char *name() { return "FluidKernel"; }
+     GFluidKernel k;
+     gapi::fluid::BorderOpt border;
+     int border_size;
+@@ -40,12 +40,11 @@ struct FluidData
+     static const char *name() { return "FluidData"; }
+ 
+     // FIXME: This structure starts looking like "FluidBuffer" meta
+-    int  latency         = 0;
+-    int  skew            = 0;
+-    int  max_consumption = 1;
+-    int  border_size     = 0;
+-    int  lpi_write       = 1;
+-    bool internal        = false; // is node internal to any fluid island
++    int latency         =  0;
++    int skew            =  0;
++    int max_consumption =  1;
++    int border_size     =  0;
++    int lpi_write       =  1;
+     gapi::fluid::BorderOpt border;
+ };
+ 
+@@ -99,7 +98,6 @@ class GFluidExecutable final: public GIslandExecutable
+ {
+     const ade::Graph &m_g;
+     GModel::ConstGraph m_gm;
+-    const std::vector<ade::NodeHandle> m_nodes;
+ 
+     std::vector<std::unique_ptr<FluidAgent>> m_agents;
+     std::vector<cv::gapi::fluid::Buffer> m_buffers;
+@@ -119,8 +117,6 @@ class GFluidExecutable final: public GIslandExecutable
+     void bindOutArg(const RcDesc &rc, const GRunArgP &arg);
+     void packArg   (GArg &in_arg, const GArg &op_arg);
+ 
+-    void initBufferRois(std::vector<int>& readStarts, std::vector<cv::gapi::own::Rect>& rois);
+-
+ public:
+     GFluidExecutable(const ade::Graph &g,
+                      const std::vector<ade::NodeHandle> &nodes,
+diff --git a/modules/gapi/src/backends/fluid/gfluidbuffer.cpp b/modules/gapi/src/backends/fluid/gfluidbuffer.cpp
+index b945cc41ed..83671b9202 100644
+--- a/modules/gapi/src/backends/fluid/gfluidbuffer.cpp
++++ b/modules/gapi/src/backends/fluid/gfluidbuffer.cpp
+@@ -20,6 +20,12 @@
+ 
+ namespace cv {
+ namespace gapi {
++
++//namespace own {
++//    class Mat;
++//    CV_EXPORTS cv::GMatDesc descr_of(const Mat &mat);
++//}//own
++
+ namespace fluid {
+ bool operator == (const fluid::Border& b1, const fluid::Border& b2)
+ {
+@@ -497,34 +503,38 @@ fluid::Buffer::Priv::Priv(int read_start, cv::gapi::own::Rect roi)
+ {}
+ 
+ void fluid::Buffer::Priv::init(const cv::GMatDesc &desc,
++                               int line_consumption,
++                               int border_size,
++                               int skew,
+                                int wlpi,
+                                int readStartPos,
+                                cv::gapi::own::Rect roi)
+ {
+-    m_writer_lpi = wlpi;
+-    m_desc       = desc;
+-    m_readStart  = readStartPos;
+-    m_roi = roi == cv::Rect{} ? cv::Rect{0, 0, desc.size.width, desc.size.height}
+-                              : roi;
++    GAPI_Assert(m_line_consumption == -1);
++    GAPI_Assert(line_consumption > 0);
++
++    m_line_consumption = line_consumption;
++    m_border_size      = border_size;
++    m_skew             = skew;
++    m_writer_lpi       = wlpi;
++    m_desc             = desc;
++    m_readStart        = readStartPos;
++    m_roi              = roi;
+ }
+ 
+-void fluid::Buffer::Priv::allocate(BorderOpt border,
+-                                   int border_size,
+-                                   int line_consumption,
+-                                   int skew)
++void fluid::Buffer::Priv::allocate(BorderOpt border)
+ {
+     GAPI_Assert(!m_storage);
+-    GAPI_Assert(line_consumption > 0);
+ 
+     // Init physical buffer
+ 
+     // FIXME? combine line_consumption with skew?
+-    auto data_height = std::max(line_consumption, skew) + m_writer_lpi - 1;
++    auto data_height = std::max(m_line_consumption, m_skew) + m_writer_lpi - 1;
+ 
+     m_storage = createStorage(data_height,
+                               m_desc.size.width,
+                               CV_MAKETYPE(m_desc.depth, m_desc.chan),
+-                              border_size,
++                              m_border_size,
+                               border);
+ 
+     // Finally, initialize carets
+@@ -534,15 +544,9 @@ void fluid::Buffer::Priv::allocate(BorderOpt border,
+ void fluid::Buffer::Priv::bindTo(const cv::gapi::own::Mat &data, bool is_input)
+ {
+     // FIXME: move all these fields into a separate structure
++    GAPI_Assert(m_skew == 0);
+     GAPI_Assert(m_desc == descr_of(data));
+-
+-    // Currently m_writer_lpi is obtained from metadata which is shared between islands
+-    // and this assert can trigger for slot which connects two fluid islands.
+-    // m_writer_lpi is used only in write-related functions and doesn't affect
+-    // buffer which is island's input so it's safe to skip this check.
+-    // FIXME:
+-    // Bring back this check when we move to 1 buffer <-> 1 metadata model
+-    // if (is_input) GAPI_Assert(m_writer_lpi == 1);
++    if ( is_input) GAPI_Assert(m_writer_lpi  == 1);
+ 
+     m_storage = createStorage(data, m_roi);
+ 
+@@ -634,8 +638,8 @@ fluid::Buffer::Buffer(const cv::GMatDesc &desc)
+     int lineConsumption = 1;
+     int border = 0, skew = 0, wlpi = 1, readStart = 0;
+     cv::gapi::own::Rect roi = {0, 0, desc.size.width, desc.size.height};
+-    m_priv->init(desc, wlpi, readStart, roi);
+-    m_priv->allocate({}, border, lineConsumption, skew);
++    m_priv->init(desc, lineConsumption, border, skew, wlpi, readStart, roi);
++    m_priv->allocate({});
+ }
+ 
+ fluid::Buffer::Buffer(const cv::GMatDesc &desc,
+@@ -648,16 +652,17 @@ fluid::Buffer::Buffer(const cv::GMatDesc &desc,
+ {
+     int readStart = 0;
+     cv::gapi::own::Rect roi = {0, 0, desc.size.width, desc.size.height};
+-    m_priv->init(desc, wlpi, readStart, roi);
+-    m_priv->allocate(border, border_size, max_line_consumption, skew);
++    m_priv->init(desc, max_line_consumption, border_size, skew, wlpi, readStart, roi);
++    m_priv->allocate(border);
+ }
+ 
+ fluid::Buffer::Buffer(const cv::gapi::own::Mat &data, bool is_input)
+     : m_priv(new Priv())
+ {
+-    int wlpi = 1, readStart = 0;
++    int lineConsumption = 1;
++    int border = 0, skew = 0, wlpi = 1, readStart = 0;
+     cv::gapi::own::Rect roi{0, 0, data.cols, data.rows};
+-    m_priv->init(descr_of(data), wlpi, readStart, roi);
++    m_priv->init(descr_of(data), lineConsumption, border, skew, wlpi, readStart, roi);
+     m_priv->bindTo(data, is_input);
+ }
+ 
+diff --git a/modules/gapi/src/backends/fluid/gfluidbuffer_priv.hpp b/modules/gapi/src/backends/fluid/gfluidbuffer_priv.hpp
+index 7057cbaf0e..d1f339b63b 100644
+--- a/modules/gapi/src/backends/fluid/gfluidbuffer_priv.hpp
++++ b/modules/gapi/src/backends/fluid/gfluidbuffer_priv.hpp
+@@ -11,8 +11,14 @@
+ #include <vector>
+ 
+ #include "opencv2/gapi/fluid/gfluidbuffer.hpp"
++#include "opencv2/gapi/own/convert.hpp" // cv::gapi::own::to_ocv
+ #include "opencv2/gapi/own/exports.hpp" // GAPI_EXPORTS
+ 
++namespace gapi { namespace own {
++    class Mat;
++    GAPI_EXPORTS cv::GMatDesc descr_of(const Mat &mat);
++}}//gapi::own
++
+ namespace cv {
+ namespace gapi {
+ namespace fluid {
+@@ -227,6 +233,9 @@ void debugBufferPriv(const Buffer& buffer, std::ostream &os);
+ // like readDone/writeDone in low-level tests
+ class GAPI_EXPORTS Buffer::Priv
+ {
++    int m_line_consumption = -1;
++    int m_border_size      = -1;
++    int m_skew             = -1;
+     int m_writer_lpi       =  1;
+ 
+     cv::GMatDesc m_desc    = cv::GMatDesc{-1,-1,{-1,-1}};
+@@ -253,11 +262,14 @@ public:
+ 
+     // API used by actors/backend
+     void init(const cv::GMatDesc &desc,
++              int line_consumption,
++              int border_size,
++              int skew,
+               int wlpi,
+               int readStart,
+               cv::gapi::own::Rect roi);
+ 
+-    void allocate(BorderOpt border, int border_size, int line_consumption, int skew);
++    void allocate(BorderOpt border);
+     void bindTo(const cv::gapi::own::Mat &data, bool is_input);
+ 
+     inline void addView(const View& view) { m_views.push_back(view); }
+diff --git a/modules/gapi/test/gapi_basic_hetero_tests.cpp b/modules/gapi/test/gapi_basic_hetero_tests.cpp
+index 62069d8650..0bf67b1290 100644
+--- a/modules/gapi/test/gapi_basic_hetero_tests.cpp
++++ b/modules/gapi/test/gapi_basic_hetero_tests.cpp
+@@ -31,22 +31,6 @@ namespace
+         }
+     };
+ 
+-    void FluidFooRow(const uint8_t* in, uint8_t* out, int length)
+-    {
+-        for (int i = 0; i < length; i++)
+-        {
+-            out[i] = in[i] + 3;
+-        }
+-    }
+-
+-    void FluidBarRow(const uint8_t* in1, const uint8_t* in2, uint8_t* out, int length)
+-    {
+-        for (int i = 0; i < length; i++)
+-        {
+-            out[i] = 3*(in1[i] + in2[i]);
+-        }
+-    }
+-
+     GAPI_FLUID_KERNEL(FFoo, I::Foo, false)
+     {
+         static const int Window = 1;
+@@ -54,7 +38,12 @@ namespace
+         static void run(const cv::gapi::fluid::View   &in,
+                               cv::gapi::fluid::Buffer &out)
+         {
+-            FluidFooRow(in.InLineB(0), out.OutLineB(), in.length());
++            const uint8_t* in_ptr = in.InLine<uint8_t>(0);
++            uint8_t *out_ptr = out.OutLine<uint8_t>();
++            for (int i = 0; i < in.length(); i++)
++            {
++                out_ptr[i] = in_ptr[i] + 3;
++            }
+         }
+     };
+ 
+@@ -66,88 +55,15 @@ namespace
+                         const cv::gapi::fluid::View   &in2,
+                               cv::gapi::fluid::Buffer &out)
+         {
+-            FluidBarRow(in1.InLineB(0), in2.InLineB(0), out.OutLineB(), in1.length());
+-        }
+-    };
+-
+-    G_TYPED_KERNEL(FluidFooI, <cv::GMat(cv::GMat)>, "test.kernels.fluid_foo")
+-    {
+-        static cv::GMatDesc outMeta(const cv::GMatDesc &in) { return in; }
+-    };
+-
+-    G_TYPED_KERNEL(FluidBarI, <cv::GMat(cv::GMat,cv::GMat)>, "test.kernels.fluid_bar")
+-    {
+-        static cv::GMatDesc outMeta(const cv::GMatDesc &in, const cv::GMatDesc &) { return in; }
+-    };
+-
+-    GAPI_FLUID_KERNEL(FluidFoo, FluidFooI, false)
+-    {
+-        static const int Window = 1;
+-
+-        static void run(const cv::gapi::fluid::View   &in,
+-                              cv::gapi::fluid::Buffer &out)
+-        {
+-            FluidFooRow(in.InLineB(0), out.OutLineB(), in.length());
+-        }
+-    };
+-
+-    GAPI_FLUID_KERNEL(FluidBar, FluidBarI, false)
+-    {
+-        static const int Window = 1;
+-
+-        static void run(const cv::gapi::fluid::View   &in1,
+-                        const cv::gapi::fluid::View   &in2,
+-                              cv::gapi::fluid::Buffer &out)
+-        {
+-            FluidBarRow(in1.InLineB(0), in2.InLineB(0), out.OutLineB(), in1.length());
+-        }
+-    };
+-
+-    GAPI_FLUID_KERNEL(FluidFoo2lpi, FluidFooI, false)
+-    {
+-        static const int Window = 1;
+-        static const int LPI    = 2;
+-
+-        static void run(const cv::gapi::fluid::View   &in,
+-                              cv::gapi::fluid::Buffer &out)
+-        {
+-            for (int l = 0; l < out.lpi(); l++)
++            const uint8_t* in1_ptr = in1.InLine<uint8_t>(0);
++            const uint8_t* in2_ptr = in2.InLine<uint8_t>(0);
++            uint8_t *out_ptr = out.OutLine<uint8_t>();
++            for (int i = 0; i < in1.length(); i++)
+             {
+-                FluidFooRow(in.InLineB(l), out.OutLineB(l), in.length());
++                out_ptr[i] = 3*(in1_ptr[i] + in2_ptr[i]);
+             }
+         }
+     };
+-
+-    cv::Mat ocvFoo(const cv::Mat &in)
+-    {
+-        cv::Mat out;
+-        OCVFoo::run(in, out);
+-        return out;
+-    }
+-    cv::Mat ocvBar(const cv::Mat &in1, const cv::Mat &in2)
+-    {
+-        cv::Mat out;
+-        OCVBar::run(in1, in2, out);
+-        return out;
+-    }
+-    cv::Mat fluidFoo(const cv::Mat &in)
+-    {
+-        cv::Mat out(in.rows, in.cols, in.type());
+-        for (int y = 0; y < in.rows; y++)
+-        {
+-            FluidFooRow(in.ptr(y), out.ptr(y), in.cols);
+-        }
+-        return out;
+-    }
+-    cv::Mat fluidBar(const cv::Mat &in1, const cv::Mat &in2)
+-    {
+-        cv::Mat out(in1.rows, in1.cols, in1.type());
+-        for (int y = 0; y < in1.rows; y++)
+-        {
+-            FluidBarRow(in1.ptr(y), in2.ptr(y), out.ptr(y), in1.cols);
+-        }
+-        return out;
+-    }
+ } // anonymous namespace
+ 
+ struct GAPIHeteroTest: public ::testing::Test
+@@ -182,7 +98,7 @@ TEST_F(GAPIHeteroTest, TestOCV)
+     EXPECT_TRUE(cv::gapi::cpu::backend() == m_ocv_kernels.lookup<I::Foo>());
+     EXPECT_TRUE(cv::gapi::cpu::backend() == m_ocv_kernels.lookup<I::Bar>());
+ 
+-    cv::Mat ref = ocvBar(ocvFoo(m_in_mat), ocvFoo(m_in_mat));
++    cv::Mat ref = 4*(m_in_mat+2 + m_in_mat+2);
+     EXPECT_NO_THROW(m_comp.apply(m_in_mat, m_out_mat, cv::compile_args(m_ocv_kernels)));
+     EXPECT_EQ(0, cv::countNonZero(ref != m_out_mat));
+ }
+@@ -192,121 +108,17 @@ TEST_F(GAPIHeteroTest, TestFluid)
+     EXPECT_TRUE(cv::gapi::fluid::backend() == m_fluid_kernels.lookup<I::Foo>());
+     EXPECT_TRUE(cv::gapi::fluid::backend() == m_fluid_kernels.lookup<I::Bar>());
+ 
+-    cv::Mat ref = fluidBar(fluidFoo(m_in_mat), fluidFoo(m_in_mat));
++    cv::Mat ref = 3*(m_in_mat+3 + m_in_mat+3);
+     EXPECT_NO_THROW(m_comp.apply(m_in_mat, m_out_mat, cv::compile_args(m_fluid_kernels)));
+     EXPECT_EQ(0, cv::countNonZero(ref != m_out_mat));
+ }
+ 
+-TEST_F(GAPIHeteroTest, TestBoth)
++TEST_F(GAPIHeteroTest, TestBoth_ExpectFailure)
+ {
+     EXPECT_TRUE(cv::gapi::cpu::backend()   == m_hetero_kernels.lookup<I::Foo>());
+     EXPECT_TRUE(cv::gapi::fluid::backend() == m_hetero_kernels.lookup<I::Bar>());
+-
+-    cv::Mat ref = fluidBar(ocvFoo(m_in_mat), ocvFoo(m_in_mat));
+-    EXPECT_NO_THROW(m_comp.apply(m_in_mat, m_out_mat, cv::compile_args(m_hetero_kernels)));
+-    EXPECT_EQ(0, cv::countNonZero(ref != m_out_mat));
++    EXPECT_ANY_THROW(m_comp.apply(m_in_mat, m_out_mat, cv::compile_args(m_hetero_kernels)));
+ }
+ 
+-struct GAPIBigHeteroTest : public ::testing::TestWithParam<std::array<int, 9>>
+-{
+-    cv::GComputation m_comp;
+-    cv::gapi::GKernelPackage m_kernels;
+-
+-    cv::Mat m_in_mat;
+-    cv::Mat m_out_mat1;
+-    cv::Mat m_out_mat2;
+-
+-    cv::Mat m_ref_mat1;
+-    cv::Mat m_ref_mat2;
+-
+-    GAPIBigHeteroTest();
+-};
+-
+-//                                    Foo7
+-//                .-> Foo2 -> Foo3 -<
+-//   Foo0 -> Foo1                     Bar -> Foo6
+-//                `-> Foo4 -> Foo5 -`
+-
+-GAPIBigHeteroTest::GAPIBigHeteroTest()
+-    : m_comp([&](){
+-        auto flags = GetParam();
+-        std::array<std::function<cv::GMat(cv::GMat)>, 8> foos;
+-
+-        for (int i = 0; i < 8; i++)
+-        {
+-            foos[i] = flags[i] ? &I::Foo::on : &FluidFooI::on;
+-        }
+-        auto bar = flags[8] ? &I::Bar::on : &FluidBarI::on;
+-
+-        cv::GMat in;
+-        auto foo1Out = foos[1](foos[0](in));
+-        auto foo3Out = foos[3](foos[2](foo1Out));
+-        auto foo6Out = foos[6](bar(foo3Out,
+-                               foos[5](foos[4](foo1Out))));
+-        auto foo7Out = foos[7](foo3Out);
+-
+-        return cv::GComputation(GIn(in), GOut(foo6Out, foo7Out));
+-    })
+-    , m_kernels(cv::gapi::kernels<OCVFoo, OCVBar, FluidFoo, FluidBar>())
+-    , m_in_mat(cv::Mat::eye(cv::Size(64, 64), CV_8UC1))
+-{
+-    auto flags = GetParam();
+-    std::array<std::function<cv::Mat(cv::Mat)>, 8> foos;
+-
+-    for (int i = 0; i < 8; i++)
+-    {
+-        foos[i] = flags[i] ? ocvFoo : fluidFoo;
+-    }
+-    auto bar = flags[8] ? ocvBar : fluidBar;
+-
+-    cv::Mat foo1OutMat = foos[1](foos[0](m_in_mat));
+-    cv::Mat foo3OutMat = foos[3](foos[2](foo1OutMat));
+-
+-    m_ref_mat1 = foos[6](bar(foo3OutMat,
+-                             foos[5](foos[4](foo1OutMat))));
+-
+-    m_ref_mat2 = foos[7](foo3OutMat);
+-}
+-
+-TEST_P(GAPIBigHeteroTest, Test)
+-{
+-    EXPECT_NO_THROW(m_comp.apply(gin(m_in_mat), gout(m_out_mat1, m_out_mat2), cv::compile_args(m_kernels)));
+-    EXPECT_EQ(0, cv::countNonZero(m_ref_mat1 != m_out_mat1));
+-    EXPECT_EQ(0, cv::countNonZero(m_ref_mat2 != m_out_mat2));
+-}
+-
+-static auto configurations = []()
+-{
+-    // Fill all possible configurations
+-    // from 000000000 to 111111111
+-    std::array<std::array<int, 9>, 512> arr;
+-    for (auto n = 0; n < 512; n++)
+-    {
+-        for (auto i = 0; i < 9; i++)
+-        {
+-            arr[n][i] = (n >> (8 - i)) & 1;
+-        }
+-    }
+-    return arr;
+-}();
+-
+-INSTANTIATE_TEST_CASE_P(GAPIBigHeteroTest, GAPIBigHeteroTest,
+-                        ::testing::ValuesIn(configurations));
+-
+-TEST(GAPIHeteroTestLPI, Test)
+-{
+-    cv::GMat in;
+-    auto mid = FluidFooI::on(in);
+-    auto out = FluidFooI::on(mid);
+-    cv::gapi::island("isl0", GIn(in),  GOut(mid));
+-    cv::gapi::island("isl1", GIn(mid), GOut(out));
+-    cv::GComputation c(in, out);
+-
+-    cv::Mat in_mat = cv::Mat::eye(cv::Size(64, 64), CV_8UC1);
+-    cv::Mat out_mat;
+-    EXPECT_NO_THROW(c.apply(in_mat, out_mat, cv::compile_args(cv::gapi::kernels<FluidFoo2lpi>())));
+-    cv::Mat ref = fluidFoo(fluidFoo(in_mat));
+-    EXPECT_EQ(0, cv::countNonZero(ref != out_mat));
+-}
+ 
+ }  // namespace opencv_test

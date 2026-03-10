@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CMake (required for building spdlog)
+# Install CMake build tool
 RUN apt-get update && apt-get install -y \
     cmake \
     && rm -rf /var/lib/apt/lists/*
@@ -25,12 +25,31 @@ RUN git clone https://github.com/gabime/spdlog.git src && \
 
 WORKDIR /app/src
 
-# Reset any tracked files before applying bug.patch
+# Build the project with CMake
+RUN mkdir -p build && \
+    cd build && \
+    cmake .. -DSPDLOG_BUILD_TESTS=ON && \
+    make -j$(nproc)
+
+# Reset any changes from build steps before applying bug.patch
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
+# First normalize line endings to unix format
+RUN apt-get update && apt-get install -y dos2unix && rm -rf /var/lib/apt/lists/*
+RUN find . -type f \( -name "*.txt" -o -name "*.cmake" -o -name ".gitignore" -o -name ".gitattributes" \) -exec dos2unix {} \;
+
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 --no-backup-if-mismatch --reject-file=- < /tmp/bug.patch || [ $? -eq 1 ] && rm /tmp/bug.patch
+
+# Rebuild after applying bug.patch (C++ is a compiled language)
+# Need to clean build directory since project structure changed
+# Disable examples since they expect spdlog to be installed
+RUN rm -rf build && \
+    mkdir -p build && \
+    cd build && \
+    cmake .. -DSPDLOG_BUILD_TESTS=ON -DSPDLOG_BUILD_EXAMPLES=OFF && \
+    make -j$(nproc)
 
 RUN rm -rf /app/src/.git
 

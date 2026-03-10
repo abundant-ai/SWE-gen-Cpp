@@ -1,0 +1,1558 @@
+diff --git a/modules/video/src/dis_flow.cpp b/modules/video/src/dis_flow.cpp
+index 806d6f1dda..85400c71ca 100644
+--- a/modules/video/src/dis_flow.cpp
++++ b/modules/video/src/dis_flow.cpp
+@@ -48,8 +48,7 @@ using namespace std;
+ #define EPS 0.001F
+ #define INF 1E+10F
+ 
+-namespace cv
+-{
++namespace cv {
+ 
+ class DISOpticalFlowImpl CV_FINAL : public DISOpticalFlow
+ {
+@@ -177,16 +176,10 @@ class DISOpticalFlowImpl CV_FINAL : public DISOpticalFlow
+     vector<UMat> u_I0xs; //!< Gaussian pyramid for the x gradient of the current frame
+     vector<UMat> u_I0ys; //!< Gaussian pyramid for the y gradient of the current frame
+ 
+-    vector<UMat> u_Ux; //!< x component of the flow vectors
+-    vector<UMat> u_Uy; //!< y component of the flow vectors
+-
+-    vector<UMat> u_initial_Ux; //!< x component of the initial flow field, if one was passed as an input
+-    vector<UMat> u_initial_Uy; //!< y component of the initial flow field, if one was passed as an input
+-
+-    UMat u_U; //!< a buffer for the merged flow
++    vector<UMat> u_U; //!< (x,y) component of the flow vectors (CV_32FC2)
++    vector<UMat> u_initial_U; //!< (x, y) components of the initial flow field, if one was passed as an input (CV_32FC2)
+ 
+-    UMat u_Sx; //!< intermediate sparse flow representation (x component)
+-    UMat u_Sy; //!< intermediate sparse flow representation (y component)
++    UMat u_S; //!< intermediate sparse flow representation (x,y components - CV_32FC2)
+ 
+     /* Structure tensor components: */
+     UMat u_I0xx_buf; //!< sum of squares of x gradient values
+@@ -206,16 +199,18 @@ class DISOpticalFlowImpl CV_FINAL : public DISOpticalFlow
+ 
+     bool ocl_precomputeStructureTensor(UMat &dst_I0xx, UMat &dst_I0yy, UMat &dst_I0xy,
+                                        UMat &dst_I0x, UMat &dst_I0y, UMat &I0x, UMat &I0y);
+-    void ocl_prepareBuffers(UMat &I0, UMat &I1, UMat &flow, bool use_flow);
++    void ocl_prepareBuffers(UMat &I0, UMat &I1, InputArray flow, bool use_flow);
+     bool ocl_calc(InputArray I0, InputArray I1, InputOutputArray flow);
+-    bool ocl_Densification(UMat &dst_Ux, UMat &dst_Uy, UMat &src_Sx, UMat &src_Sy, UMat &_I0, UMat &_I1);
+-    bool ocl_PatchInverseSearch(UMat &src_Ux, UMat &src_Uy,
++    bool ocl_Densification(UMat &dst_U, UMat &src_S, UMat &_I0, UMat &_I1);
++    bool ocl_PatchInverseSearch(UMat &src_U,
+                                 UMat &I0, UMat &I1, UMat &I0x, UMat &I0y, int num_iter, int pyr_level);
+ #endif
+ };
+ 
+ DISOpticalFlowImpl::DISOpticalFlowImpl()
+ {
++    CV_INSTRUMENT_REGION();
++
+     finest_scale = 2;
+     patch_size = 8;
+     patch_stride = 4;
+@@ -239,6 +234,8 @@ DISOpticalFlowImpl::DISOpticalFlowImpl()
+ 
+ void DISOpticalFlowImpl::prepareBuffers(Mat &I0, Mat &I1, Mat &flow, bool use_flow)
+ {
++    CV_INSTRUMENT_REGION();
++
+     I0s.resize(coarsest_scale + 1);
+     I1s.resize(coarsest_scale + 1);
+     I1s_ext.resize(coarsest_scale + 1);
+@@ -332,6 +329,8 @@ void DISOpticalFlowImpl::prepareBuffers(Mat &I0, Mat &I1, Mat &flow, bool use_fl
+ void DISOpticalFlowImpl::precomputeStructureTensor(Mat &dst_I0xx, Mat &dst_I0yy, Mat &dst_I0xy, Mat &dst_I0x,
+                                                    Mat &dst_I0y, Mat &I0x, Mat &I0y)
+ {
++    CV_INSTRUMENT_REGION();
++
+     float *I0xx_ptr = dst_I0xx.ptr<float>();
+     float *I0yy_ptr = dst_I0yy.ptr<float>();
+     float *I0xy_ptr = dst_I0xy.ptr<float>();
+@@ -596,8 +595,8 @@ inline float processPatch(float &dst_dUx, float &dst_dUy, uchar *I0_ptr, uchar *
+         SSD = v_reduce_sum(SSD_vec);
+     }
+     else
+-    {
+ #endif
++    {
+         dst_dUx = 0.0f;
+         dst_dUy = 0.0f;
+         float diff;
+@@ -612,9 +611,7 @@ inline float processPatch(float &dst_dUx, float &dst_dUy, uchar *I0_ptr, uchar *
+                 dst_dUx += diff * I0x_ptr[i * I0_stride + j];
+                 dst_dUy += diff * I0y_ptr[i * I0_stride + j];
+             }
+-#if CV_SIMD128
+     }
+-#endif
+     return SSD;
+ }
+ 
+@@ -668,8 +665,8 @@ inline float processPatchMeanNorm(float &dst_dUx, float &dst_dUy, uchar *I0_ptr,
+         sum_diff_sq = v_reduce_sum(sum_diff_sq_vec);
+     }
+     else
+-    {
+ #endif
++    {
+         float diff;
+         for (int i = 0; i < patch_sz; i++)
+             for (int j = 0; j < patch_sz; j++)
+@@ -684,9 +681,7 @@ inline float processPatchMeanNorm(float &dst_dUx, float &dst_dUy, uchar *I0_ptr,
+                 sum_I0x_mul += diff * I0x_ptr[i * I0_stride + j];
+                 sum_I0y_mul += diff * I0y_ptr[i * I0_stride + j];
+             }
+-#if CV_SIMD128
+     }
+-#endif
+     dst_dUx = sum_I0x_mul - sum_diff * x_grad_sum / n;
+     dst_dUy = sum_I0y_mul - sum_diff * y_grad_sum / n;
+     return sum_diff_sq - sum_diff * sum_diff / n;
+@@ -711,8 +706,8 @@ inline float computeSSD(uchar *I0_ptr, uchar *I1_ptr, int I0_stride, int I1_stri
+         SSD = v_reduce_sum(SSD_vec);
+     }
+     else
+-    {
+ #endif
++    {
+         float diff;
+         for (int i = 0; i < patch_sz; i++)
+             for (int j = 0; j < patch_sz; j++)
+@@ -722,9 +717,7 @@ inline float computeSSD(uchar *I0_ptr, uchar *I1_ptr, int I0_stride, int I1_stri
+                        I0_ptr[i * I0_stride + j];
+                 SSD += diff * diff;
+             }
+-#if CV_SIMD128
+     }
+-#endif
+     return SSD;
+ }
+ 
+@@ -777,6 +770,8 @@ inline float computeSSDMeanNorm(uchar *I0_ptr, uchar *I1_ptr, int I0_stride, int
+ 
+ void DISOpticalFlowImpl::PatchInverseSearch_ParBody::operator()(const Range &range) const
+ {
++    CV_INSTRUMENT_REGION();
++
+     // force separate processing of stripes if we are using spatial propagation:
+     if (dis->use_spatial_propagation && range.end > range.start + 1)
+     {
+@@ -828,14 +823,17 @@ void DISOpticalFlowImpl::PatchInverseSearch_ParBody::operator()(const Range &ran
+     float j_upper_limit = bsz + dis->w - 1.0f;
+     float dUx, dUy, i_I1, j_I1, w00, w01, w10, w11, dx, dy;
+ 
+-#define INIT_BILINEAR_WEIGHTS(Ux, Uy)                                                                                  \
+-    i_I1 = min(max(i + Uy + bsz, i_lower_limit), i_upper_limit);                                                       \
+-    j_I1 = min(max(j + Ux + bsz, j_lower_limit), j_upper_limit);                                                       \
+-                                                                                                                       \
+-    w11 = (i_I1 - floor(i_I1)) * (j_I1 - floor(j_I1));                                                                 \
+-    w10 = (i_I1 - floor(i_I1)) * (floor(j_I1) + 1 - j_I1);                                                             \
+-    w01 = (floor(i_I1) + 1 - i_I1) * (j_I1 - floor(j_I1));                                                             \
+-    w00 = (floor(i_I1) + 1 - i_I1) * (floor(j_I1) + 1 - j_I1);
++#define INIT_BILINEAR_WEIGHTS(Ux, Uy) \
++    i_I1 = min(max(i + Uy + bsz, i_lower_limit), i_upper_limit); \
++    j_I1 = min(max(j + Ux + bsz, j_lower_limit), j_upper_limit); \
++    { \
++        float di = i_I1 - floor(i_I1); \
++        float dj = j_I1 - floor(j_I1); \
++        w11 = di       * dj; \
++        w10 = di       * (1 - dj); \
++        w01 = (1 - di) * dj; \
++        w00 = (1 - di) * (1 - dj); \
++    }
+ 
+ #define COMPUTE_SSD(dst, Ux, Uy)                                                                                       \
+     INIT_BILINEAR_WEIGHTS(Ux, Uy);                                                                                     \
+@@ -951,14 +949,16 @@ void DISOpticalFlowImpl::PatchInverseSearch_ParBody::operator()(const Range &ran
+                 {
+                     INIT_BILINEAR_WEIGHTS(cur_Ux, cur_Uy);
+                     if (dis->use_mean_normalization)
+-                        SSD = processPatchMeanNorm(dUx, dUy, I0_ptr + i * dis->w + j,
+-                                                   I1_ptr + (int)i_I1 * w_ext + (int)j_I1, I0x_ptr + i * dis->w + j,
+-                                                   I0y_ptr + i * dis->w + j, dis->w, w_ext, w00, w01, w10, w11, psz,
+-                                                   x_grad_sum, y_grad_sum);
++                        SSD = processPatchMeanNorm(dUx, dUy,
++                                I0_ptr  + i * dis->w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
++                                I0x_ptr + i * dis->w + j, I0y_ptr + i * dis->w + j,
++                                dis->w, w_ext, w00, w01, w10, w11, psz,
++                                x_grad_sum, y_grad_sum);
+                     else
+-                        SSD = processPatch(dUx, dUy, I0_ptr + i * dis->w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
+-                                           I0x_ptr + i * dis->w + j, I0y_ptr + i * dis->w + j, dis->w, w_ext, w00, w01,
+-                                           w10, w11, psz);
++                        SSD = processPatch(dUx, dUy,
++                                I0_ptr  + i * dis->w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
++                                I0x_ptr + i * dis->w + j, I0y_ptr + i * dis->w + j,
++                                dis->w, w_ext, w00, w01, w10, w11, psz);
+ 
+                     dx = invH11 * dUx + invH12 * dUy;
+                     dy = invH12 * dUx + invH22 * dUy;
+@@ -1002,6 +1002,8 @@ DISOpticalFlowImpl::Densification_ParBody::Densification_ParBody(DISOpticalFlowI
+  */
+ void DISOpticalFlowImpl::Densification_ParBody::operator()(const Range &range) const
+ {
++    CV_INSTRUMENT_REGION();
++
+     int start_i = min(range.start * stripe_sz, h);
+     int end_i = min(range.end * stripe_sz, h);
+ 
+@@ -1087,117 +1089,100 @@ void DISOpticalFlowImpl::Densification_ParBody::operator()(const Range &range) c
+ }
+ 
+ #ifdef HAVE_OPENCL
+-bool DISOpticalFlowImpl::ocl_PatchInverseSearch(UMat &src_Ux, UMat &src_Uy,
+-                                                UMat &I0, UMat &I1, UMat &I0x, UMat &I0y, int num_iter, int pyr_level)
++bool DISOpticalFlowImpl::ocl_PatchInverseSearch(UMat &src_U,
++                                                UMat &I0, UMat &I1, UMat &I0x, UMat &I0y, int num_iter, int /*pyr_level*/)
+ {
++    CV_INSTRUMENT_REGION();
++    CV_INSTRUMENT_REGION_OPENCL();
++
+     size_t globalSize[] = {(size_t)ws, (size_t)hs};
+     size_t localSize[]  = {16, 16};
+-    int idx;
+     int num_inner_iter = (int)floor(grad_descent_iter / (float)num_iter);
+ 
+     String subgroups_build_options;
+     if (ocl::Device::getDefault().isExtensionSupported("cl_khr_subgroups"))
+-        subgroups_build_options = "-DCV_USE_SUBGROUPS=1";
++        subgroups_build_options = " -DCV_USE_SUBGROUPS=1";
+ 
++    String build_options = cv::format(
++                "-DDIS_BORDER_SIZE=%d -DDIS_PATCH_SIZE=%d -DDIS_PATCH_STRIDE=%d",
++                border_size, patch_size, patch_stride
++            ) + subgroups_build_options;
+ 
++#if 0 // OpenCL debug
++u_Sx = Scalar::all(0);
++u_Sy = Scalar::all(0);
++#endif
++
++    CV_Assert(num_iter == 2);
+     for (int iter = 0; iter < num_iter; iter++)
+     {
+         if (iter == 0)
+         {
+-            ocl::Kernel k1("dis_patch_inverse_search_fwd_1", ocl::video::dis_flow_oclsrc, subgroups_build_options);
++            ocl::Kernel k1("dis_patch_inverse_search_fwd_1", ocl::video::dis_flow_oclsrc, build_options);
+             size_t global_sz[] = {(size_t)hs * 8};
+             size_t local_sz[]  = {8};
+-            idx = 0;
+-
+-            idx = k1.set(idx, ocl::KernelArg::PtrReadOnly(src_Ux));
+-            idx = k1.set(idx, ocl::KernelArg::PtrReadOnly(src_Uy));
+-            idx = k1.set(idx, ocl::KernelArg::PtrReadOnly(I0));
+-            idx = k1.set(idx, ocl::KernelArg::PtrReadOnly(I1));
+-            idx = k1.set(idx, (int)border_size);
+-            idx = k1.set(idx, (int)patch_size);
+-            idx = k1.set(idx, (int)patch_stride);
+-            idx = k1.set(idx, (int)w);
+-            idx = k1.set(idx, (int)h);
+-            idx = k1.set(idx, (int)ws);
+-            idx = k1.set(idx, (int)hs);
+-            idx = k1.set(idx, (int)pyr_level);
+-            idx = k1.set(idx, ocl::KernelArg::PtrWriteOnly(u_Sx));
+-            idx = k1.set(idx, ocl::KernelArg::PtrWriteOnly(u_Sy));
++
++            k1.args(
++                ocl::KernelArg::PtrReadOnly(src_U),
++                ocl::KernelArg::PtrReadOnly(I0),
++                ocl::KernelArg::PtrReadOnly(I1),
++                (int)w, (int)h, (int)ws, (int)hs,
++                ocl::KernelArg::PtrWriteOnly(u_S)
++            );
+             if (!k1.run(1, global_sz, local_sz, false))
+                 return false;
+ 
+-            ocl::Kernel k2("dis_patch_inverse_search_fwd_2", ocl::video::dis_flow_oclsrc);
+-            idx = 0;
+-
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(src_Ux));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(src_Uy));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(I0));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(I1));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(I0x));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(I0y));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(u_I0xx_buf));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(u_I0yy_buf));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(u_I0xy_buf));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(u_I0x_buf));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadOnly(u_I0y_buf));
+-            idx = k2.set(idx, (int)border_size);
+-            idx = k2.set(idx, (int)patch_size);
+-            idx = k2.set(idx, (int)patch_stride);
+-            idx = k2.set(idx, (int)w);
+-            idx = k2.set(idx, (int)h);
+-            idx = k2.set(idx, (int)ws);
+-            idx = k2.set(idx, (int)hs);
+-            idx = k2.set(idx, (int)num_inner_iter);
+-            idx = k2.set(idx, (int)pyr_level);
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadWrite(u_Sx));
+-            idx = k2.set(idx, ocl::KernelArg::PtrReadWrite(u_Sy));
++            ocl::Kernel k2("dis_patch_inverse_search_fwd_2", ocl::video::dis_flow_oclsrc, build_options);
++
++            k2.args(
++                ocl::KernelArg::PtrReadOnly(src_U),
++                ocl::KernelArg::PtrReadOnly(I0),
++                ocl::KernelArg::PtrReadOnly(I1),
++                ocl::KernelArg::PtrReadOnly(I0x),
++                ocl::KernelArg::PtrReadOnly(I0y),
++                ocl::KernelArg::PtrReadOnly(u_I0xx_buf),
++                ocl::KernelArg::PtrReadOnly(u_I0yy_buf),
++                ocl::KernelArg::PtrReadOnly(u_I0xy_buf),
++                ocl::KernelArg::PtrReadOnly(u_I0x_buf),
++                ocl::KernelArg::PtrReadOnly(u_I0y_buf),
++                (int)w, (int)h, (int)ws, (int)hs,
++                (int)num_inner_iter,
++                ocl::KernelArg::PtrReadWrite(u_S)
++            );
+             if (!k2.run(2, globalSize, localSize, false))
+                 return false;
+         }
+         else
+         {
+-            ocl::Kernel k3("dis_patch_inverse_search_bwd_1", ocl::video::dis_flow_oclsrc, subgroups_build_options);
++            ocl::Kernel k3("dis_patch_inverse_search_bwd_1", ocl::video::dis_flow_oclsrc, build_options);
+             size_t global_sz[] = {(size_t)hs * 8};
+             size_t local_sz[]  = {8};
+-            idx = 0;
+-
+-            idx = k3.set(idx, ocl::KernelArg::PtrReadOnly(I0));
+-            idx = k3.set(idx, ocl::KernelArg::PtrReadOnly(I1));
+-            idx = k3.set(idx, (int)border_size);
+-            idx = k3.set(idx, (int)patch_size);
+-            idx = k3.set(idx, (int)patch_stride);
+-            idx = k3.set(idx, (int)w);
+-            idx = k3.set(idx, (int)h);
+-            idx = k3.set(idx, (int)ws);
+-            idx = k3.set(idx, (int)hs);
+-            idx = k3.set(idx, (int)pyr_level);
+-            idx = k3.set(idx, ocl::KernelArg::PtrReadWrite(u_Sx));
+-            idx = k3.set(idx, ocl::KernelArg::PtrReadWrite(u_Sy));
++
++            k3.args(
++                ocl::KernelArg::PtrReadOnly(I0),
++                ocl::KernelArg::PtrReadOnly(I1),
++                (int)w, (int)h, (int)ws, (int)hs,
++                ocl::KernelArg::PtrReadWrite(u_S)
++            );
+             if (!k3.run(1, global_sz, local_sz, false))
+                 return false;
+ 
+-            ocl::Kernel k4("dis_patch_inverse_search_bwd_2", ocl::video::dis_flow_oclsrc);
+-            idx = 0;
+-
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadOnly(I0));
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadOnly(I1));
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadOnly(I0x));
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadOnly(I0y));
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadOnly(u_I0xx_buf));
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadOnly(u_I0yy_buf));
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadOnly(u_I0xy_buf));
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadOnly(u_I0x_buf));
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadOnly(u_I0y_buf));
+-            idx = k4.set(idx, (int)border_size);
+-            idx = k4.set(idx, (int)patch_size);
+-            idx = k4.set(idx, (int)patch_stride);
+-            idx = k4.set(idx, (int)w);
+-            idx = k4.set(idx, (int)h);
+-            idx = k4.set(idx, (int)ws);
+-            idx = k4.set(idx, (int)hs);
+-            idx = k4.set(idx, (int)num_inner_iter);
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadWrite(u_Sx));
+-            idx = k4.set(idx, ocl::KernelArg::PtrReadWrite(u_Sy));
++            ocl::Kernel k4("dis_patch_inverse_search_bwd_2", ocl::video::dis_flow_oclsrc, build_options);
++
++            k4.args(
++                ocl::KernelArg::PtrReadOnly(I0),
++                ocl::KernelArg::PtrReadOnly(I1),
++                ocl::KernelArg::PtrReadOnly(I0x),
++                ocl::KernelArg::PtrReadOnly(I0y),
++                ocl::KernelArg::PtrReadOnly(u_I0xx_buf),
++                ocl::KernelArg::PtrReadOnly(u_I0yy_buf),
++                ocl::KernelArg::PtrReadOnly(u_I0xy_buf),
++                ocl::KernelArg::PtrReadOnly(u_I0x_buf),
++                ocl::KernelArg::PtrReadOnly(u_I0y_buf),
++                (int)w, (int)h,(int)ws, (int)hs,
++                (int)num_inner_iter,
++                ocl::KernelArg::PtrReadWrite(u_S)
++            );
+             if (!k4.run(2, globalSize, localSize, false))
+                 return false;
+         }
+@@ -1205,39 +1190,45 @@ bool DISOpticalFlowImpl::ocl_PatchInverseSearch(UMat &src_Ux, UMat &src_Uy,
+     return true;
+ }
+ 
+-bool DISOpticalFlowImpl::ocl_Densification(UMat &dst_Ux, UMat &dst_Uy, UMat &src_Sx, UMat &src_Sy, UMat &_I0, UMat &_I1)
++bool DISOpticalFlowImpl::ocl_Densification(UMat &dst_U, UMat &src_S, UMat &_I0, UMat &_I1)
+ {
++    CV_INSTRUMENT_REGION();
++    CV_INSTRUMENT_REGION_OPENCL();
++
+     size_t globalSize[] = {(size_t)w, (size_t)h};
+     size_t localSize[]  = {16, 16};
+ 
+-    ocl::Kernel kernel("dis_densification", ocl::video::dis_flow_oclsrc);
+-    kernel.args(ocl::KernelArg::PtrReadOnly(src_Sx),
+-                ocl::KernelArg::PtrReadOnly(src_Sy),
+-                ocl::KernelArg::PtrReadOnly(_I0),
+-                ocl::KernelArg::PtrReadOnly(_I1),
+-                (int)patch_size, (int)patch_stride,
+-                (int)w, (int)h, (int)ws,
+-                ocl::KernelArg::PtrWriteOnly(dst_Ux),
+-                ocl::KernelArg::PtrWriteOnly(dst_Uy));
++    String build_options = cv::format(
++                "-DDIS_PATCH_SIZE=%d -DDIS_PATCH_STRIDE=%d",
++                patch_size, patch_stride
++            );
++
++    ocl::Kernel kernel("dis_densification", ocl::video::dis_flow_oclsrc, build_options);
++    kernel.args(
++        ocl::KernelArg::PtrReadOnly(src_S),
++        ocl::KernelArg::PtrReadOnly(_I0),
++        ocl::KernelArg::PtrReadOnly(_I1),
++        (int)w, (int)h, (int)ws,
++        ocl::KernelArg::PtrWriteOnly(dst_U)
++    );
+     return kernel.run(2, globalSize, localSize, false);
+ }
+ 
+-void DISOpticalFlowImpl::ocl_prepareBuffers(UMat &I0, UMat &I1, UMat &flow, bool use_flow)
++void DISOpticalFlowImpl::ocl_prepareBuffers(UMat &I0, UMat &I1, InputArray flow, bool use_flow)
+ {
++    CV_INSTRUMENT_REGION();
++    // not pure OpenCV code: CV_INSTRUMENT_REGION_OPENCL();
++
+     u_I0s.resize(coarsest_scale + 1);
+     u_I1s.resize(coarsest_scale + 1);
+     u_I1s_ext.resize(coarsest_scale + 1);
+     u_I0xs.resize(coarsest_scale + 1);
+     u_I0ys.resize(coarsest_scale + 1);
+-    u_Ux.resize(coarsest_scale + 1);
+-    u_Uy.resize(coarsest_scale + 1);
++    u_U.resize(coarsest_scale + 1);
+ 
+-    vector<UMat> flow_uv(2);
+     if (use_flow)
+     {
+-        split(flow, flow_uv);
+-        u_initial_Ux.resize(coarsest_scale + 1);
+-        u_initial_Uy.resize(coarsest_scale + 1);
++        u_initial_U.resize(coarsest_scale + 1);
+     }
+ 
+     int fraction = 1;
+@@ -1245,6 +1236,7 @@ void DISOpticalFlowImpl::ocl_prepareBuffers(UMat &I0, UMat &I1, UMat &flow, bool
+ 
+     for (int i = 0; i <= coarsest_scale; i++)
+     {
++        CV_TRACE_REGION("coarsest_scale_iteration");
+         /* Avoid initializing the pyramid levels above the finest scale, as they won't be used anyway */
+         if (i == finest_scale)
+         {
+@@ -1256,8 +1248,7 @@ void DISOpticalFlowImpl::ocl_prepareBuffers(UMat &I0, UMat &I1, UMat &flow, bool
+             resize(I1, u_I1s[i], u_I1s[i].size(), 0.0, 0.0, INTER_AREA);
+ 
+             /* These buffers are reused in each scale so we initialize them once on the finest scale: */
+-            u_Sx.create(cur_rows / patch_stride, cur_cols / patch_stride, CV_32FC1);
+-            u_Sy.create(cur_rows / patch_stride, cur_cols / patch_stride, CV_32FC1);
++            u_S.create(cur_rows / patch_stride, cur_cols / patch_stride, CV_32FC2);
+             u_I0xx_buf.create(cur_rows / patch_stride, cur_cols / patch_stride, CV_32FC1);
+             u_I0yy_buf.create(cur_rows / patch_stride, cur_cols / patch_stride, CV_32FC1);
+             u_I0xy_buf.create(cur_rows / patch_stride, cur_cols / patch_stride, CV_32FC1);
+@@ -1269,8 +1260,6 @@ void DISOpticalFlowImpl::ocl_prepareBuffers(UMat &I0, UMat &I1, UMat &flow, bool
+             u_I0xy_buf_aux.create(cur_rows, cur_cols / patch_stride, CV_32FC1);
+             u_I0x_buf_aux.create(cur_rows, cur_cols / patch_stride, CV_32FC1);
+             u_I0y_buf_aux.create(cur_rows, cur_cols / patch_stride, CV_32FC1);
+-
+-            u_U.create(cur_rows, cur_cols, CV_32FC2);
+         }
+         else if (i > finest_scale)
+         {
+@@ -1289,8 +1278,7 @@ void DISOpticalFlowImpl::ocl_prepareBuffers(UMat &I0, UMat &I1, UMat &flow, bool
+             u_I0xs[i].create(cur_rows, cur_cols, CV_16SC1);
+             u_I0ys[i].create(cur_rows, cur_cols, CV_16SC1);
+             spatialGradient(u_I0s[i], u_I0xs[i], u_I0ys[i]);
+-            u_Ux[i].create(cur_rows, cur_cols, CV_32FC1);
+-            u_Uy[i].create(cur_rows, cur_cols, CV_32FC1);
++            u_U[i].create(cur_rows, cur_cols, CV_32FC2);
+             variational_refinement_processors[i]->setAlpha(variational_refinement_alpha);
+             variational_refinement_processors[i]->setDelta(variational_refinement_delta);
+             variational_refinement_processors[i]->setGamma(variational_refinement_gamma);
+@@ -1299,10 +1287,10 @@ void DISOpticalFlowImpl::ocl_prepareBuffers(UMat &I0, UMat &I1, UMat &flow, bool
+ 
+             if (use_flow)
+             {
+-                resize(flow_uv[0], u_initial_Ux[i], Size(cur_cols, cur_rows));
+-                divide(u_initial_Ux[i], static_cast<float>(fraction), u_initial_Ux[i]);
+-                resize(flow_uv[1], u_initial_Uy[i], Size(cur_cols, cur_rows));
+-                divide(u_initial_Uy[i], static_cast<float>(fraction), u_initial_Uy[i]);
++                UMat resized_flow;
++                resize(flow, resized_flow, Size(cur_cols, cur_rows));
++                float scale = 1.0f / fraction;
++                resized_flow.convertTo(u_initial_U[i], CV_32FC2, scale, 0.0f);
+             }
+         }
+ 
+@@ -1313,51 +1301,74 @@ void DISOpticalFlowImpl::ocl_prepareBuffers(UMat &I0, UMat &I1, UMat &flow, bool
+ bool DISOpticalFlowImpl::ocl_precomputeStructureTensor(UMat &dst_I0xx, UMat &dst_I0yy, UMat &dst_I0xy,
+                                                        UMat &dst_I0x, UMat &dst_I0y, UMat &I0x, UMat &I0y)
+ {
++    CV_INSTRUMENT_REGION();
++    CV_INSTRUMENT_REGION_OPENCL();
++
+     size_t globalSizeX[] = {(size_t)h};
+     size_t localSizeX[]  = {16};
+ 
+-    ocl::Kernel kernelX("dis_precomputeStructureTensor_hor", ocl::video::dis_flow_oclsrc);
+-    kernelX.args(ocl::KernelArg::PtrReadOnly(I0x),
+-                 ocl::KernelArg::PtrReadOnly(I0y),
+-                 (int)patch_size, (int)patch_stride,
+-                 (int)w, (int)h, (int)ws,
+-                 ocl::KernelArg::PtrWriteOnly(u_I0xx_buf_aux),
+-                 ocl::KernelArg::PtrWriteOnly(u_I0yy_buf_aux),
+-                 ocl::KernelArg::PtrWriteOnly(u_I0xy_buf_aux),
+-                 ocl::KernelArg::PtrWriteOnly(u_I0x_buf_aux),
+-                 ocl::KernelArg::PtrWriteOnly(u_I0y_buf_aux));
++#if 0 // OpenCL debug
++    u_I0xx_buf_aux = Scalar::all(0);
++    u_I0yy_buf_aux = Scalar::all(0);
++    u_I0xy_buf_aux = Scalar::all(0);
++    u_I0x_buf_aux = Scalar::all(0);
++    u_I0y_buf_aux = Scalar::all(0);
++    dst_I0xx = Scalar::all(0);
++    dst_I0yy = Scalar::all(0);
++    dst_I0xy = Scalar::all(0);
++    dst_I0x = Scalar::all(0);
++    dst_I0y = Scalar::all(0);
++#endif
++
++    String build_options = cv::format(
++                "-DDIS_PATCH_SIZE=%d -DDIS_PATCH_STRIDE=%d",
++                patch_size, patch_stride
++            );
++
++    ocl::Kernel kernelX("dis_precomputeStructureTensor_hor", ocl::video::dis_flow_oclsrc, build_options);
++    kernelX.args(
++        ocl::KernelArg::PtrReadOnly(I0x),
++        ocl::KernelArg::PtrReadOnly(I0y),
++        (int)w, (int)h, (int)ws,
++        ocl::KernelArg::PtrWriteOnly(u_I0xx_buf_aux),
++        ocl::KernelArg::PtrWriteOnly(u_I0yy_buf_aux),
++        ocl::KernelArg::PtrWriteOnly(u_I0xy_buf_aux),
++        ocl::KernelArg::PtrWriteOnly(u_I0x_buf_aux),
++        ocl::KernelArg::PtrWriteOnly(u_I0y_buf_aux)
++    );
+     if (!kernelX.run(1, globalSizeX, localSizeX, false))
+         return false;
+ 
+     size_t globalSizeY[] = {(size_t)ws};
+     size_t localSizeY[]  = {16};
+ 
+-    ocl::Kernel kernelY("dis_precomputeStructureTensor_ver", ocl::video::dis_flow_oclsrc);
+-    kernelY.args(ocl::KernelArg::PtrReadOnly(u_I0xx_buf_aux),
+-                 ocl::KernelArg::PtrReadOnly(u_I0yy_buf_aux),
+-                 ocl::KernelArg::PtrReadOnly(u_I0xy_buf_aux),
+-                 ocl::KernelArg::PtrReadOnly(u_I0x_buf_aux),
+-                 ocl::KernelArg::PtrReadOnly(u_I0y_buf_aux),
+-                 (int)patch_size, (int)patch_stride,
+-                 (int)w, (int)h, (int)ws,
+-                 ocl::KernelArg::PtrWriteOnly(dst_I0xx),
+-                 ocl::KernelArg::PtrWriteOnly(dst_I0yy),
+-                 ocl::KernelArg::PtrWriteOnly(dst_I0xy),
+-                 ocl::KernelArg::PtrWriteOnly(dst_I0x),
+-                 ocl::KernelArg::PtrWriteOnly(dst_I0y));
++    ocl::Kernel kernelY("dis_precomputeStructureTensor_ver", ocl::video::dis_flow_oclsrc, build_options);
++    kernelY.args(
++        ocl::KernelArg::PtrReadOnly(u_I0xx_buf_aux),
++        ocl::KernelArg::PtrReadOnly(u_I0yy_buf_aux),
++        ocl::KernelArg::PtrReadOnly(u_I0xy_buf_aux),
++        ocl::KernelArg::PtrReadOnly(u_I0x_buf_aux),
++        ocl::KernelArg::PtrReadOnly(u_I0y_buf_aux),
++        (int)w, (int)h, (int)ws,
++        ocl::KernelArg::PtrWriteOnly(dst_I0xx),
++        ocl::KernelArg::PtrWriteOnly(dst_I0yy),
++        ocl::KernelArg::PtrWriteOnly(dst_I0xy),
++        ocl::KernelArg::PtrWriteOnly(dst_I0x),
++        ocl::KernelArg::PtrWriteOnly(dst_I0y)
++    );
+     return kernelY.run(1, globalSizeY, localSizeY, false);
+ }
+ 
+ bool DISOpticalFlowImpl::ocl_calc(InputArray I0, InputArray I1, InputOutputArray flow)
+ {
++    CV_INSTRUMENT_REGION();
++    // not pure OpenCV code: CV_INSTRUMENT_REGION_OPENCL();
++
+     UMat I0Mat = I0.getUMat();
+     UMat I1Mat = I1.getUMat();
+     bool use_input_flow = false;
+     if (flow.sameSize(I0) && flow.depth() == CV_32F && flow.channels() == 2)
+         use_input_flow = true;
+-    else
+-        flow.create(I1Mat.size(), CV_32FC2);
+-    UMat &u_flowMat = flow.getUMatRef();
+     coarsest_scale = min((int)(log(max(I0Mat.cols, I0Mat.rows) / (4.0 * patch_size)) / log(2.0) + 0.5), /* Original code search for maximal movement of width/4 */
+                          (int)(log(min(I0Mat.cols, I0Mat.rows) / patch_size) / log(2.0)));              /* Deepest pyramid level greater or equal than patch*/
+ 
+@@ -1372,12 +1383,12 @@ bool DISOpticalFlowImpl::ocl_calc(InputArray I0, InputArray I1, InputOutputArray
+         autoSelectPatchSizeAndScales(original_img_width);
+     }
+ 
+-    ocl_prepareBuffers(I0Mat, I1Mat, u_flowMat, use_input_flow);
+-    u_Ux[coarsest_scale].setTo(0.0f);
+-    u_Uy[coarsest_scale].setTo(0.0f);
++    ocl_prepareBuffers(I0Mat, I1Mat, flow, use_input_flow);
++    u_U[coarsest_scale].setTo(0.0f);
+ 
+     for (int i = coarsest_scale; i >= finest_scale; i--)
+     {
++        CV_TRACE_REGION("coarsest_scale_iteration");
+         w = u_I0s[i].cols;
+         h = u_I0s[i].rows;
+         ws = 1 + (w - patch_size) / patch_stride;
+@@ -1387,30 +1398,32 @@ bool DISOpticalFlowImpl::ocl_calc(InputArray I0, InputArray I1, InputOutputArray
+                                            u_I0x_buf, u_I0y_buf, u_I0xs[i], u_I0ys[i]))
+             return false;
+ 
+-        if (!ocl_PatchInverseSearch(u_Ux[i], u_Uy[i], u_I0s[i], u_I1s_ext[i], u_I0xs[i], u_I0ys[i], 2, i))
++        if (!ocl_PatchInverseSearch(u_U[i], u_I0s[i], u_I1s_ext[i], u_I0xs[i], u_I0ys[i], 2, i))
+             return false;
+ 
+-        if (!ocl_Densification(u_Ux[i], u_Uy[i], u_Sx, u_Sy, u_I0s[i], u_I1s[i]))
++        if (!ocl_Densification(u_U[i], u_S, u_I0s[i], u_I1s[i]))
+             return false;
+ 
+         if (variational_refinement_iter > 0)
++        {
++            std::vector<Mat> U_channels;
++            split(u_U[i], U_channels); CV_Assert(U_channels.size() == 2);
+             variational_refinement_processors[i]->calcUV(u_I0s[i], u_I1s[i],
+-                                                         u_Ux[i].getMat(ACCESS_WRITE), u_Uy[i].getMat(ACCESS_WRITE));
++                    U_channels[0], U_channels[1]);
++            merge(U_channels, u_U[i]);
++        }
+ 
+         if (i > finest_scale)
+         {
+-            resize(u_Ux[i], u_Ux[i - 1], u_Ux[i - 1].size());
+-            resize(u_Uy[i], u_Uy[i - 1], u_Uy[i - 1].size());
+-            multiply(u_Ux[i - 1], 2, u_Ux[i - 1]);
+-            multiply(u_Uy[i - 1], 2, u_Uy[i - 1]);
++            UMat resized;
++            resize(u_U[i], resized, u_U[i - 1].size());
++            multiply(resized, 2, u_U[i - 1]);
+         }
+     }
+-    vector<UMat> uxy(2);
+-    uxy[0] = u_Ux[finest_scale];
+-    uxy[1] = u_Uy[finest_scale];
+-    merge(uxy, u_U);
+-    resize(u_U, u_flowMat, u_flowMat.size());
+-    multiply(u_flowMat, 1 << finest_scale, u_flowMat);
++
++    UMat resized_flow;
++    resize(u_U[finest_scale], resized_flow, I1Mat.size());
++    multiply(resized_flow, 1 << finest_scale, flow);
+ 
+     return true;
+ }
+@@ -1418,6 +1431,8 @@ bool DISOpticalFlowImpl::ocl_calc(InputArray I0, InputArray I1, InputOutputArray
+ 
+ void DISOpticalFlowImpl::calc(InputArray I0, InputArray I1, InputOutputArray flow)
+ {
++    CV_INSTRUMENT_REGION();
++
+     CV_Assert(!I0.empty() && I0.depth() == CV_8U && I0.channels() == 1);
+     CV_Assert(!I1.empty() && I1.depth() == CV_8U && I1.channels() == 1);
+     CV_Assert(I0.sameSize(I1));
+@@ -1458,6 +1473,7 @@ void DISOpticalFlowImpl::calc(InputArray I0, InputArray I1, InputOutputArray flo
+ 
+     for (int i = coarsest_scale; i >= finest_scale; i--)
+     {
++        CV_TRACE_REGION("coarsest_scale_iteration");
+         w = I0s[i].cols;
+         h = I0s[i].rows;
+         ws = 1 + (w - patch_size) / patch_stride;
+@@ -1500,6 +1516,8 @@ void DISOpticalFlowImpl::calc(InputArray I0, InputArray I1, InputOutputArray flo
+ 
+ void DISOpticalFlowImpl::collectGarbage()
+ {
++    CV_INSTRUMENT_REGION();
++
+     I0s.clear();
+     I1s.clear();
+     I1s_ext.clear();
+@@ -1523,11 +1541,8 @@ void DISOpticalFlowImpl::collectGarbage()
+     u_I1s_ext.clear();
+     u_I0xs.clear();
+     u_I0ys.clear();
+-    u_Ux.clear();
+-    u_Uy.clear();
+-    u_U.release();
+-    u_Sx.release();
+-    u_Sy.release();
++    u_U.clear();
++    u_S.release();
+     u_I0xx_buf.release();
+     u_I0yy_buf.release();
+     u_I0xy_buf.release();
+@@ -1543,6 +1558,8 @@ void DISOpticalFlowImpl::collectGarbage()
+ 
+ Ptr<DISOpticalFlow> DISOpticalFlow::create(int preset)
+ {
++    CV_INSTRUMENT_REGION();
++
+     Ptr<DISOpticalFlow> dis = makePtr<DISOpticalFlowImpl>();
+     dis->setPatchSize(8);
+     if (preset == DISOpticalFlow::PRESET_ULTRAFAST)
+@@ -1569,4 +1586,6 @@ Ptr<DISOpticalFlow> DISOpticalFlow::create(int preset)
+ 
+     return dis;
+ }
+-}
++
++
++} // namespace
+diff --git a/modules/video/src/opencl/dis_flow.cl b/modules/video/src/opencl/dis_flow.cl
+index 77f724bc56..472a1f67f1 100644
+--- a/modules/video/src/opencl/dis_flow.cl
++++ b/modules/video/src/opencl/dis_flow.cl
+@@ -7,9 +7,16 @@
+ #define EPS 0.001f
+ #define INF 1E+10F
+ 
++//#define DIS_BORDER_SIZE xxx
++//#define DIS_PATCH_SIZE xxx
++//#define DIS_PATCH_STRIDE xxx
++
++#define DIS_PATCH_SIZE_HALF (DIS_PATCH_SIZE / 2)
++
++#ifndef DIS_BORDER_SIZE
++
+ __kernel void dis_precomputeStructureTensor_hor(__global const short *I0x,
+                                                 __global const short *I0y,
+-                                                int patch_size, int patch_stride,
+                                                 int w, int h, int ws,
+                                                 __global float *I0xx_aux_ptr,
+                                                 __global float *I0yy_aux_ptr,
+@@ -41,18 +48,18 @@ __kernel void dis_precomputeStructureTensor_hor(__global const short *I0x,
+     I0y_aux_ptr[i * ws] = sum_y;
+ 
+     int js = 1;
+-    for (int j = patch_size; j < w; j++)
++    for (int j = DIS_PATCH_SIZE; j < w; j++)
+     {
+         short x_val1 = x_row[j];
+-        short x_val2 = x_row[j - patch_size];
++        short x_val2 = x_row[j - DIS_PATCH_SIZE];
+         short y_val1 = y_row[j];
+-        short y_val2 = y_row[j - patch_size];
++        short y_val2 = y_row[j - DIS_PATCH_SIZE];
+         sum_xx += (x_val1 * x_val1 - x_val2 * x_val2);
+         sum_yy += (y_val1 * y_val1 - y_val2 * y_val2);
+         sum_xy += (x_val1 * y_val1 - x_val2 * y_val2);
+         sum_x += (x_val1 - x_val2);
+         sum_y += (y_val1 - y_val2);
+-        if ((j - patch_size + 1) % patch_stride == 0)
++        if ((j - DIS_PATCH_SIZE + 1) % DIS_PATCH_STRIDE == 0)
+         {
+             int index = i * ws + js;
+             I0xx_aux_ptr[index] = sum_xx;
+@@ -70,7 +77,6 @@ __kernel void dis_precomputeStructureTensor_ver(__global const float *I0xx_aux_p
+                                                 __global const float *I0xy_aux_ptr,
+                                                 __global const float *I0x_aux_ptr,
+                                                 __global const float *I0y_aux_ptr,
+-                                                int patch_size, int patch_stride,
+                                                 int w, int h, int ws,
+                                                 __global float *I0xx_ptr,
+                                                 __global float *I0yy_ptr,
+@@ -85,7 +91,7 @@ __kernel void dis_precomputeStructureTensor_ver(__global const float *I0xx_aux_p
+     float sum_xx, sum_yy, sum_xy, sum_x, sum_y;
+     sum_xx = sum_yy = sum_xy = sum_x = sum_y = 0.0f;
+ 
+-    for (int i = 0; i < patch_size; i++)
++    for (int i = 0; i < DIS_PATCH_SIZE; i++)
+     {
+         sum_xx += I0xx_aux_ptr[i * ws + j];
+         sum_yy += I0yy_aux_ptr[i * ws + j];
+@@ -100,15 +106,15 @@ __kernel void dis_precomputeStructureTensor_ver(__global const float *I0xx_aux_p
+     I0y_ptr[j] = sum_y;
+ 
+     int is = 1;
+-    for (int i = patch_size; i < h; i++)
++    for (int i = DIS_PATCH_SIZE; i < h; i++)
+     {
+-        sum_xx += (I0xx_aux_ptr[i * ws + j] - I0xx_aux_ptr[(i - patch_size) * ws + j]);
+-        sum_yy += (I0yy_aux_ptr[i * ws + j] - I0yy_aux_ptr[(i - patch_size) * ws + j]);
+-        sum_xy += (I0xy_aux_ptr[i * ws + j] - I0xy_aux_ptr[(i - patch_size) * ws + j]);
+-        sum_x  += (I0x_aux_ptr[i * ws + j] - I0x_aux_ptr[(i - patch_size) * ws + j]);
+-        sum_y  += (I0y_aux_ptr[i * ws + j] - I0y_aux_ptr[(i - patch_size) * ws + j]);
++        sum_xx += (I0xx_aux_ptr[i * ws + j] - I0xx_aux_ptr[(i - DIS_PATCH_SIZE) * ws + j]);
++        sum_yy += (I0yy_aux_ptr[i * ws + j] - I0yy_aux_ptr[(i - DIS_PATCH_SIZE) * ws + j]);
++        sum_xy += (I0xy_aux_ptr[i * ws + j] - I0xy_aux_ptr[(i - DIS_PATCH_SIZE) * ws + j]);
++        sum_x  += (I0x_aux_ptr[i * ws + j] - I0x_aux_ptr[(i - DIS_PATCH_SIZE) * ws + j]);
++        sum_y  += (I0y_aux_ptr[i * ws + j] - I0y_aux_ptr[(i - DIS_PATCH_SIZE) * ws + j]);
+ 
+-        if ((i - patch_size + 1) % patch_stride == 0)
++        if ((i - DIS_PATCH_SIZE + 1) % DIS_PATCH_STRIDE == 0)
+         {
+             I0xx_ptr[is * ws + j] = sum_xx;
+             I0yy_ptr[is * ws + j] = sum_yy;
+@@ -120,11 +126,10 @@ __kernel void dis_precomputeStructureTensor_ver(__global const float *I0xx_aux_p
+     }
+ }
+ 
+-__kernel void dis_densification(__global const float *sx, __global const float *sy,
++__kernel void dis_densification(__global const float2 *S_ptr,
+                                 __global const uchar *i0, __global const uchar *i1,
+-                                int psz, int pstr,
+                                 int w, int h, int ws,
+-                                __global float *ux, __global float *uy)
++                                __global float2 *U_ptr)
+ {
+     int x = get_global_id(0);
+     int y = get_global_id(1);
+@@ -135,17 +140,16 @@ __kernel void dis_densification(__global const float *sx, __global const float *
+     int start_is, end_is;
+     int start_js, end_js;
+ 
+-    end_is = min(y / pstr, (h - psz) / pstr);
+-    start_is = max(0, y - psz + pstr) / pstr;
++    end_is = min(y / DIS_PATCH_STRIDE, (h - DIS_PATCH_SIZE) / DIS_PATCH_STRIDE);
++    start_is = max(0, y - DIS_PATCH_SIZE + DIS_PATCH_STRIDE) / DIS_PATCH_STRIDE;
+     start_is = min(start_is, end_is);
+ 
+-    end_js = min(x / pstr, (w - psz) / pstr);
+-    start_js = max(0, x - psz + pstr) / pstr;
++    end_js = min(x / DIS_PATCH_STRIDE, (w - DIS_PATCH_SIZE) / DIS_PATCH_STRIDE);
++    start_js = max(0, x - DIS_PATCH_SIZE + DIS_PATCH_STRIDE) / DIS_PATCH_STRIDE;
+     start_js = min(start_js, end_js);
+ 
+-    float coef, sum_coef = 0.0f;
+-    float sum_Ux = 0.0f;
+-    float sum_Uy = 0.0f;
++    float sum_coef = 0.0f;
++    float2 sum_U = (float2)(0.0f, 0.0f);
+ 
+     int i_l, i_u;
+     int j_l, j_u;
+@@ -158,12 +162,11 @@ __kernel void dis_densification(__global const float *sx, __global const float *
+     for (int is = start_is; is <= end_is; is++)
+         for (int js = start_js; js <= end_js; js++)
+         {
+-            float sx_val = sx[is * ws + js];
+-            float sy_val = sy[is * ws + js];
++            float2 s_val = S_ptr[is * ws + js];
+             uchar2 i1_vec1, i1_vec2;
+ 
+-            j_m = min(max(j + sx_val, 0.0f), w - 1.0f - EPS);
+-            i_m = min(max(i + sy_val, 0.0f), h - 1.0f - EPS);
++            j_m = min(max(j + s_val.x, 0.0f), w - 1.0f - EPS);
++            i_m = min(max(i + s_val.y, 0.0f), h - 1.0f - EPS);
+             j_l = (int)j_m;
+             j_u = j_l + 1;
+             i_l = (int)i_m;
+@@ -174,35 +177,39 @@ __kernel void dis_densification(__global const float *sx, __global const float *
+                    (j_u - j_m) * (i_m - i_l) * i1_vec1.x +
+                    (j_m - j_l) * (i_u - i_m) * i1_vec2.y +
+                    (j_u - j_m) * (i_u - i_m) * i1_vec2.x - i0[i * w + j];
+-            coef = 1 / max(1.0f, fabs(diff));
+-            sum_Ux += coef * sx_val;
+-            sum_Uy += coef * sy_val;
++            float coef = 1.0f / max(1.0f, fabs(diff));
++            sum_U += coef * s_val;
+             sum_coef += coef;
+         }
+ 
+-    ux[i * w + j] = sum_Ux / sum_coef;
+-    uy[i * w + j] = sum_Uy / sum_coef;
++    float inv_sum_coef = 1.0 / sum_coef;
++    U_ptr[i * w + j] = sum_U * inv_sum_coef;
+ }
+ 
+-#define INIT_BILINEAR_WEIGHTS(Ux, Uy)                                                                                  \
+-    i_I1 = min(max(i + Uy + bsz, i_lower_limit), i_upper_limit);                                                       \
+-    j_I1 = min(max(j + Ux + bsz, j_lower_limit), j_upper_limit);                                                       \
+-                                                                                                                       \
+-    w11 = (i_I1 - floor(i_I1)) * (j_I1 - floor(j_I1));                                                                 \
+-    w10 = (i_I1 - floor(i_I1)) * (floor(j_I1) + 1 - j_I1);                                                             \
+-    w01 = (floor(i_I1) + 1 - i_I1) * (j_I1 - floor(j_I1));                                                             \
+-    w00 = (floor(i_I1) + 1 - i_I1) * (floor(j_I1) + 1 - j_I1);
++#else // DIS_BORDER_SIZE
++
++#define INIT_BILINEAR_WEIGHTS(Ux, Uy) \
++    i_I1 = clamp(i + Uy + DIS_BORDER_SIZE, i_lower_limit, i_upper_limit); \
++    j_I1 = clamp(j + Ux + DIS_BORDER_SIZE, j_lower_limit, j_upper_limit); \
++    { \
++        float di = i_I1 - floor(i_I1); \
++        float dj = j_I1 - floor(j_I1); \
++        w11 = di       * dj; \
++        w10 = di       * (1 - dj); \
++        w01 = (1 - di) * dj; \
++        w00 = (1 - di) * (1 - dj); \
++    }
+ 
+ float computeSSDMeanNorm(const __global uchar *I0_ptr, const __global uchar *I1_ptr,
+                          int I0_stride, int I1_stride,
+-                         float w00, float w01, float w10, float w11, int patch_sz, int i
++                         float w00, float w01, float w10, float w11, int i
+ #ifndef CV_USE_SUBGROUPS
+                          , __local float2 *smem /*[8]*/
+ #endif
+ )
+ {
+     float sum_diff = 0.0f, sum_diff_sq = 0.0f;
+-    int n = patch_sz * patch_sz;
++    int n = DIS_PATCH_SIZE * DIS_PATCH_SIZE;
+ 
+     uchar8 I1_vec1, I1_vec2, I0_vec;
+     uchar I1_val1, I1_val2;
+@@ -245,33 +252,26 @@ float computeSSDMeanNorm(const __global uchar *I0_ptr, const __global uchar *I1_
+ }
+ 
+ __attribute__((reqd_work_group_size(8, 1, 1)))
+-__kernel void dis_patch_inverse_search_fwd_1(__global const float *Ux_ptr, __global const float *Uy_ptr,
++__kernel void dis_patch_inverse_search_fwd_1(__global const float2 *U_ptr,
+                                              __global const uchar *I0_ptr, __global const uchar *I1_ptr,
+-                                             int border_size, int patch_size, int patch_stride,
+-                                             int w, int h, int ws, int hs, int pyr_level,
+-                                             __global float *Sx_ptr, __global float *Sy_ptr)
++                                             int w, int h, int ws, int hs,
++                                             __global float2 *S_ptr)
+ {
+     int id = get_global_id(0);
+     int is = get_group_id(0);
+ 
+-    int i = is * patch_stride;
++    int i = is * DIS_PATCH_STRIDE;
+     int j = 0;
+-    int psz = patch_size;
+-    int psz2 = psz / 2;
+-    int w_ext = w + 2 * border_size;
+-    int bsz = border_size;
+-
+-    float i_lower_limit = bsz - psz + 1.0f;
+-    float i_upper_limit = bsz + h - 1.0f;
+-    float j_lower_limit = bsz - psz + 1.0f;
+-    float j_upper_limit = bsz + w - 1.0f;
+-    float i_I1, j_I1, w00, w01, w10, w11;
+-
+-    float prev_Ux = Ux_ptr[(i + psz2) * w + j + psz2];
+-    float prev_Uy = Uy_ptr[(i + psz2) * w + j + psz2];
+-    Sx_ptr[is * ws] = prev_Ux;
+-    Sy_ptr[is * ws] = prev_Uy;
+-    j += patch_stride;
++    int w_ext = w + 2 * DIS_BORDER_SIZE;
++
++    float i_lower_limit = DIS_BORDER_SIZE - DIS_PATCH_SIZE + 1.0f;
++    float i_upper_limit = DIS_BORDER_SIZE + h - 1.0f;
++    float j_lower_limit = DIS_BORDER_SIZE - DIS_PATCH_SIZE + 1.0f;
++    float j_upper_limit = DIS_BORDER_SIZE + w - 1.0f;
++
++    float2 prev_U = U_ptr[(i + DIS_PATCH_SIZE_HALF) * w + j + DIS_PATCH_SIZE_HALF];
++    S_ptr[is * ws] = prev_U;
++    j += DIS_PATCH_STRIDE;
+ 
+ #ifdef CV_USE_SUBGROUPS
+     int sid = get_sub_group_local_id();
+@@ -281,45 +281,44 @@ __kernel void dis_patch_inverse_search_fwd_1(__global const float *Ux_ptr, __glo
+     int sid = get_local_id(0);
+ #define EXTRA_ARGS_computeSSDMeanNorm sid, smem
+ #endif
+-    for (int js = 1; js < ws; js++, j += patch_stride)
++    for (int js = 1; js < ws; js++, j += DIS_PATCH_STRIDE)
+     {
+-        float min_SSD, cur_SSD;
+-        float Ux = Ux_ptr[(i + psz2) * w + j + psz2];
+-        float Uy = Uy_ptr[(i + psz2) * w + j + psz2];
+-
+-        INIT_BILINEAR_WEIGHTS(Ux, Uy);
+-        min_SSD = computeSSDMeanNorm(I0_ptr + i * w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
+-                                     w, w_ext, w00, w01, w10, w11, psz, EXTRA_ARGS_computeSSDMeanNorm);
+-
+-        INIT_BILINEAR_WEIGHTS(prev_Ux, prev_Uy);
+-        cur_SSD = computeSSDMeanNorm(I0_ptr + i * w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
+-                                     w, w_ext, w00, w01, w10, w11, psz, EXTRA_ARGS_computeSSDMeanNorm);
+-        if (cur_SSD < min_SSD)
+-        {
+-            Ux = prev_Ux;
+-            Uy = prev_Uy;
+-        }
++        float2 U = U_ptr[(i + DIS_PATCH_SIZE_HALF) * w + j + DIS_PATCH_SIZE_HALF];
+ 
+-        prev_Ux = Ux;
+-        prev_Uy = Uy;
+-        Sx_ptr[is * ws + js] = Ux;
+-        Sy_ptr[is * ws + js] = Uy;
++        float i_I1, j_I1, w00, w01, w10, w11;
++
++        INIT_BILINEAR_WEIGHTS(U.x, U.y);
++        float min_SSD = computeSSDMeanNorm(
++                I0_ptr + i * w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
++                w, w_ext, w00, w01, w10, w11, EXTRA_ARGS_computeSSDMeanNorm);
++
++        INIT_BILINEAR_WEIGHTS(prev_U.x, prev_U.y);
++        float cur_SSD = computeSSDMeanNorm(
++                I0_ptr + i * w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
++                w, w_ext, w00, w01, w10, w11, EXTRA_ARGS_computeSSDMeanNorm);
++
++        prev_U = (cur_SSD < min_SSD) ? prev_U : U;
++        S_ptr[is * ws + js] = prev_U;
+     }
++
+ #undef EXTRA_ARGS_computeSSDMeanNorm
+ }
++#endif // DIS_BORDER_SIZE
+ 
+-float3 processPatchMeanNorm(const __global uchar *I0_ptr, const __global uchar *I1_ptr,
++float4 processPatchMeanNorm(const __global uchar *I0_ptr, const __global uchar *I1_ptr,
+                             const __global short *I0x_ptr, const __global short *I0y_ptr,
+                             int I0_stride, int I1_stride, float w00, float w01, float w10,
+-                            float w11, int patch_sz, float x_grad_sum, float y_grad_sum)
++                            float w11, float x_grad_sum, float y_grad_sum)
+ {
++    const float inv_n = 1.0f / (float)(DIS_PATCH_SIZE * DIS_PATCH_SIZE);
++
+     float sum_diff = 0.0, sum_diff_sq = 0.0;
+     float sum_I0x_mul = 0.0, sum_I0y_mul = 0.0;
+-    int n = patch_sz * patch_sz;
++
+     uchar8 I1_vec1;
+     uchar8 I1_vec2 = vload8(0, I1_ptr);
+     uchar I1_val1;
+-    uchar I1_val2 = I1_ptr[patch_sz];
++    uchar I1_val2 = I1_ptr[DIS_PATCH_SIZE];
+ 
+     for (int i = 0; i < 8; i++)
+     {
+@@ -328,7 +327,7 @@ float3 processPatchMeanNorm(const __global uchar *I0_ptr, const __global uchar *
+         I1_vec1 = I1_vec2;
+         I1_vec2 = vload8(0, I1_ptr + (i + 1) * I1_stride);
+         I1_val1 = I1_val2;
+-        I1_val2 = I1_ptr[(i + 1) * I1_stride + patch_sz];
++        I1_val2 = I1_ptr[(i + 1) * I1_stride + DIS_PATCH_SIZE];
+ 
+         float8 vec = w00 * convert_float8(I1_vec1) + w01 * convert_float8((uchar8)(I1_vec1.s123, I1_vec1.s4567, I1_val1)) +
+                      w10 * convert_float8(I1_vec2) + w11 * convert_float8((uchar8)(I1_vec2.s123, I1_vec2.s4567, I1_val2)) -
+@@ -346,112 +345,98 @@ float3 processPatchMeanNorm(const __global uchar *I0_ptr, const __global uchar *
+         sum_I0y_mul += dot(vec.hi, convert_float4(I0y_vec.hi));
+     }
+ 
+-    float dst_dUx = sum_I0x_mul - sum_diff * x_grad_sum / n;
+-    float dst_dUy = sum_I0y_mul - sum_diff * y_grad_sum / n;
+-    float SSD = sum_diff_sq - sum_diff * sum_diff / n;
++    float dst_dUx = sum_I0x_mul - sum_diff * x_grad_sum * inv_n;
++    float dst_dUy = sum_I0y_mul - sum_diff * y_grad_sum * inv_n;
++    float SSD = sum_diff_sq - sum_diff * sum_diff * inv_n;
+ 
+-    return (float3)(SSD, dst_dUx, dst_dUy);
++    return (float4)(SSD, dst_dUx, dst_dUy, 0);
+ }
+ 
+-__kernel void dis_patch_inverse_search_fwd_2(__global const float *Ux_ptr, __global const float *Uy_ptr,
++#ifdef DIS_BORDER_SIZE
++__kernel void dis_patch_inverse_search_fwd_2(__global const float2 *U_ptr,
+                                              __global const uchar *I0_ptr, __global const uchar *I1_ptr,
+                                              __global const short *I0x_ptr, __global const short *I0y_ptr,
+                                              __global const float *xx_ptr, __global const float *yy_ptr,
+                                              __global const float *xy_ptr,
+                                              __global const float *x_ptr, __global const float *y_ptr,
+-                                             int border_size, int patch_size, int patch_stride,
+-                                             int w, int h, int ws, int hs, int num_inner_iter, int pyr_level,
+-                                             __global float *Sx_ptr, __global float *Sy_ptr)
++                                             int w, int h, int ws, int hs, int num_inner_iter,
++                                             __global float2 *S_ptr)
+ {
+     int js = get_global_id(0);
+     int is = get_global_id(1);
+-    int i = is * patch_stride;
+-    int j = js * patch_stride;
+-    int psz = patch_size;
+-    int psz2 = psz / 2;
+-    int w_ext = w + 2 * border_size;
+-    int bsz = border_size;
++    int i = is * DIS_PATCH_STRIDE;
++    int j = js * DIS_PATCH_STRIDE;
++    const int psz = DIS_PATCH_SIZE;
++    int w_ext = w + 2 * DIS_BORDER_SIZE;
+     int index = is * ws + js;
+ 
+     if (js >= ws || is >= hs) return;
+ 
+-    float Ux = Sx_ptr[index];
+-    float Uy = Sy_ptr[index];
+-    float cur_Ux = Ux;
+-    float cur_Uy = Uy;
++    float2 U0 = S_ptr[index];
++    float2 cur_U = U0;
+     float cur_xx = xx_ptr[index];
+     float cur_yy = yy_ptr[index];
+     float cur_xy = xy_ptr[index];
+     float detH = cur_xx * cur_yy - cur_xy * cur_xy;
+ 
+-    if (fabs(detH) < EPS) detH = EPS;
++    float inv_detH = (fabs(detH) < EPS) ? 1.0 / EPS : 1.0 / detH;
++    float invH11 = cur_yy * inv_detH;
++    float invH12 = -cur_xy * inv_detH;
++    float invH22 = cur_xx * inv_detH;
+ 
+-    float invH11 = cur_yy / detH;
+-    float invH12 = -cur_xy / detH;
+-    float invH22 = cur_xx / detH;
+-    float prev_SSD = INF, SSD;
++    float prev_SSD = INF;
+     float x_grad_sum = x_ptr[index];
+     float y_grad_sum = y_ptr[index];
+ 
+-    float i_lower_limit = bsz - psz + 1.0f;
+-    float i_upper_limit = bsz + h - 1.0f;
+-    float j_lower_limit = bsz - psz + 1.0f;
+-    float j_upper_limit = bsz + w - 1.0f;
+-    float dUx, dUy, i_I1, j_I1, w00, w01, w10, w11, dx, dy;
+-    float3 res;
++    const float i_lower_limit = DIS_BORDER_SIZE - DIS_PATCH_SIZE + 1.0f;
++    const float i_upper_limit = DIS_BORDER_SIZE + h - 1.0f;
++    const float j_lower_limit = DIS_BORDER_SIZE - DIS_PATCH_SIZE + 1.0f;
++    const float j_upper_limit = DIS_BORDER_SIZE + w - 1.0f;
+ 
+     for (int t = 0; t < num_inner_iter; t++)
+     {
+-        INIT_BILINEAR_WEIGHTS(cur_Ux, cur_Uy);
+-        res = processPatchMeanNorm(I0_ptr + i * w + j,
+-                                   I1_ptr + (int)i_I1 * w_ext + (int)j_I1, I0x_ptr + i * w + j,
+-                                   I0y_ptr + i * w + j, w, w_ext, w00, w01, w10, w11, psz,
+-                                   x_grad_sum, y_grad_sum);
+-
+-        SSD = res.x;
+-        dUx = res.y;
+-        dUy = res.z;
+-        dx = invH11 * dUx + invH12 * dUy;
+-        dy = invH12 * dUx + invH22 * dUy;
+-
+-        cur_Ux -= dx;
+-        cur_Uy -= dy;
++        float i_I1, j_I1, w00, w01, w10, w11;
++        INIT_BILINEAR_WEIGHTS(cur_U.x, cur_U.y);
++        float4 res = processPatchMeanNorm(
++                I0_ptr  + i * w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
++                I0x_ptr + i * w + j, I0y_ptr + i * w + j,
++                w, w_ext, w00, w01, w10, w11,
++                x_grad_sum, y_grad_sum);
++
++        float SSD = res.x;
++        float dUx = res.y;
++        float dUy = res.z;
++        float dx = invH11 * dUx + invH12 * dUy;
++        float dy = invH12 * dUx + invH22 * dUy;
++
++        cur_U -= (float2)(dx, dy);
+ 
+         if (SSD >= prev_SSD)
+             break;
+         prev_SSD = SSD;
+     }
+ 
+-    float2 vec = (float2)(cur_Ux - Ux, cur_Uy - Uy);
+-    if (dot(vec, vec) <= (float)(psz * psz))
+-    {
+-        Sx_ptr[index] = cur_Ux;
+-        Sy_ptr[index] = cur_Uy;
+-    }
++    float2 vec = cur_U - U0;
++    S_ptr[index] = (dot(vec, vec) <= (float)(DIS_PATCH_SIZE * DIS_PATCH_SIZE)) ? cur_U : U0;
+ }
+ 
+ __attribute__((reqd_work_group_size(8, 1, 1)))
+ __kernel void dis_patch_inverse_search_bwd_1(__global const uchar *I0_ptr, __global const uchar *I1_ptr,
+-                                             int border_size, int patch_size, int patch_stride,
+-                                             int w, int h, int ws, int hs, int pyr_level,
+-                                             __global float *Sx_ptr, __global float *Sy_ptr)
++                                             int w, int h, int ws, int hs,
++                                             __global float2 *S_ptr)
+ {
+     int id = get_global_id(0);
+     int is = get_group_id(0);
+ 
+     is = (hs - 1 - is);
+-    int i = is * patch_stride;
+-    int j = (ws - 2) * patch_stride;
+-    int psz = patch_size;
+-    int psz2 = psz / 2;
+-    int w_ext = w + 2 * border_size;
+-    int bsz = border_size;
+-
+-    float i_lower_limit = bsz - psz + 1.0f;
+-    float i_upper_limit = bsz + h - 1.0f;
+-    float j_lower_limit = bsz - psz + 1.0f;
+-    float j_upper_limit = bsz + w - 1.0f;
+-    float i_I1, j_I1, w00, w01, w10, w11;
++    int i = is * DIS_PATCH_STRIDE;
++    int j = (ws - 2) * DIS_PATCH_STRIDE;
++    const int w_ext = w + 2 * DIS_BORDER_SIZE;
++
++    const float i_lower_limit = DIS_BORDER_SIZE - DIS_PATCH_SIZE + 1.0f;
++    const float i_upper_limit = DIS_BORDER_SIZE + h - 1.0f;
++    const float j_lower_limit = DIS_BORDER_SIZE - DIS_PATCH_SIZE + 1.0f;
++    const float j_upper_limit = DIS_BORDER_SIZE + w - 1.0f;
+ 
+ #ifdef CV_USE_SUBGROUPS
+     int sid = get_sub_group_local_id();
+@@ -461,25 +446,27 @@ __kernel void dis_patch_inverse_search_bwd_1(__global const uchar *I0_ptr, __glo
+     int sid = get_local_id(0);
+ #define EXTRA_ARGS_computeSSDMeanNorm sid, smem
+ #endif
+-    for (int js = (ws - 2); js > -1; js--, j -= patch_stride)
++
++    for (int js = (ws - 2); js > -1; js--, j -= DIS_PATCH_STRIDE)
+     {
+-        float min_SSD, cur_SSD;
+-        float2 Ux = vload2(0, Sx_ptr + is * ws + js);
+-        float2 Uy = vload2(0, Sy_ptr + is * ws + js);
+-
+-        INIT_BILINEAR_WEIGHTS(Ux.x, Uy.x);
+-        min_SSD = computeSSDMeanNorm(I0_ptr + i * w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
+-                                     w, w_ext, w00, w01, w10, w11, psz, EXTRA_ARGS_computeSSDMeanNorm);
+-
+-        INIT_BILINEAR_WEIGHTS(Ux.y, Uy.y);
+-        cur_SSD = computeSSDMeanNorm(I0_ptr + i * w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
+-                                     w, w_ext, w00, w01, w10, w11, psz, EXTRA_ARGS_computeSSDMeanNorm);
+-        if (cur_SSD < min_SSD)
+-        {
+-            Sx_ptr[is * ws + js] = Ux.y;
+-            Sy_ptr[is * ws + js] = Uy.y;
+-        }
++        float2 U0 = S_ptr[is * ws + js];
++        float2 U1 = S_ptr[is * ws + js + 1];
++
++        float i_I1, j_I1, w00, w01, w10, w11;
++
++        INIT_BILINEAR_WEIGHTS(U0.x, U0.y);
++        float min_SSD = computeSSDMeanNorm(
++                I0_ptr + i * w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
++                w, w_ext, w00, w01, w10, w11, EXTRA_ARGS_computeSSDMeanNorm);
++
++        INIT_BILINEAR_WEIGHTS(U1.x, U1.y);
++        float cur_SSD = computeSSDMeanNorm(
++                I0_ptr + i * w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
++                w, w_ext, w00, w01, w10, w11, EXTRA_ARGS_computeSSDMeanNorm);
++
++        S_ptr[is * ws + js] = (cur_SSD < min_SSD) ? U1 : U0;
+     }
++
+ #undef EXTRA_ARGS_computeSSDMeanNorm
+ }
+ 
+@@ -488,9 +475,8 @@ __kernel void dis_patch_inverse_search_bwd_2(__global const uchar *I0_ptr, __glo
+                                              __global const float *xx_ptr, __global const float *yy_ptr,
+                                              __global const float *xy_ptr,
+                                              __global const float *x_ptr, __global const float *y_ptr,
+-                                             int border_size, int patch_size, int patch_stride,
+                                              int w, int h, int ws, int hs, int num_inner_iter,
+-                                             __global float *Sx_ptr, __global float *Sy_ptr)
++                                             __global float2 *S_ptr)
+ {
+     int js = get_global_id(0);
+     int is = get_global_id(1);
+@@ -499,65 +485,56 @@ __kernel void dis_patch_inverse_search_bwd_2(__global const uchar *I0_ptr, __glo
+     js = (ws - 1 - js);
+     is = (hs - 1 - is);
+ 
+-    int j = js * patch_stride;
+-    int i = is * patch_stride;
+-    int psz = patch_size;
+-    int psz2 = psz / 2;
+-    int w_ext = w + 2 * border_size;
+-    int bsz = border_size;
++    int j = js * DIS_PATCH_STRIDE;
++    int i = is * DIS_PATCH_STRIDE;
++    int w_ext = w + 2 * DIS_BORDER_SIZE;
+     int index = is * ws + js;
+ 
+-    float Ux = Sx_ptr[index];
+-    float Uy = Sy_ptr[index];
+-    float cur_Ux = Ux;
+-    float cur_Uy = Uy;
++    float2 U0 = S_ptr[index];
++    float2 cur_U = U0;
+     float cur_xx = xx_ptr[index];
+     float cur_yy = yy_ptr[index];
+     float cur_xy = xy_ptr[index];
+     float detH = cur_xx * cur_yy - cur_xy * cur_xy;
+ 
+-    if (fabs(detH) < EPS) detH = EPS;
++    float inv_detH = (fabs(detH) < EPS) ? 1.0 / EPS : 1.0 / detH;
++    float invH11 = cur_yy * inv_detH;
++    float invH12 = -cur_xy * inv_detH;
++    float invH22 = cur_xx * inv_detH;
+ 
+-    float invH11 = cur_yy / detH;
+-    float invH12 = -cur_xy / detH;
+-    float invH22 = cur_xx / detH;
+-    float prev_SSD = INF, SSD;
++    float prev_SSD = INF;
+     float x_grad_sum = x_ptr[index];
+     float y_grad_sum = y_ptr[index];
+ 
+-    float i_lower_limit = bsz - psz + 1.0f;
+-    float i_upper_limit = bsz + h - 1.0f;
+-    float j_lower_limit = bsz - psz + 1.0f;
+-    float j_upper_limit = bsz + w - 1.0f;
+-    float dUx, dUy, i_I1, j_I1, w00, w01, w10, w11, dx, dy;
+-    float3 res;
++    const float i_lower_limit = DIS_BORDER_SIZE - DIS_PATCH_SIZE + 1.0f;
++    const float i_upper_limit = DIS_BORDER_SIZE + h - 1.0f;
++    const float j_lower_limit = DIS_BORDER_SIZE - DIS_PATCH_SIZE + 1.0f;
++    const float j_upper_limit = DIS_BORDER_SIZE + w - 1.0f;
+ 
+     for (int t = 0; t < num_inner_iter; t++)
+     {
+-        INIT_BILINEAR_WEIGHTS(cur_Ux, cur_Uy);
+-        res = processPatchMeanNorm(I0_ptr + i * w + j,
+-                                   I1_ptr + (int)i_I1 * w_ext + (int)j_I1, I0x_ptr + i * w + j,
+-                                   I0y_ptr + i * w + j, w, w_ext, w00, w01, w10, w11, psz,
+-                                   x_grad_sum, y_grad_sum);
+-
+-        SSD = res.x;
+-        dUx = res.y;
+-        dUy = res.z;
+-        dx = invH11 * dUx + invH12 * dUy;
+-        dy = invH12 * dUx + invH22 * dUy;
+-
+-        cur_Ux -= dx;
+-        cur_Uy -= dy;
++        float i_I1, j_I1, w00, w01, w10, w11;
++        INIT_BILINEAR_WEIGHTS(cur_U.x, cur_U.y);
++        float4 res = processPatchMeanNorm(
++                I0_ptr  + i * w + j, I1_ptr + (int)i_I1 * w_ext + (int)j_I1,
++                I0x_ptr + i * w + j, I0y_ptr + i * w + j,
++                w, w_ext, w00, w01, w10, w11,
++                x_grad_sum, y_grad_sum);
++
++        float SSD = res.x;
++        float dUx = res.y;
++        float dUy = res.z;
++        float dx = invH11 * dUx + invH12 * dUy;
++        float dy = invH12 * dUx + invH22 * dUy;
++
++        cur_U -= (float2)(dx, dy);
+ 
+         if (SSD >= prev_SSD)
+             break;
+         prev_SSD = SSD;
+     }
+ 
+-    float2 vec = (float2)(cur_Ux - Ux, cur_Uy - Uy);
+-    if ((dot(vec, vec)) <= (float)(psz * psz))
+-    {
+-        Sx_ptr[index] = cur_Ux;
+-        Sy_ptr[index] = cur_Uy;
+-    }
++    float2 vec = cur_U - U0;
++    S_ptr[index] = ((dot(vec, vec)) <= (float)(DIS_PATCH_SIZE * DIS_PATCH_SIZE)) ? cur_U : U0;
+ }
++#endif // DIS_BORDER_SIZE
+diff --git a/modules/video/src/variational_refinement.cpp b/modules/video/src/variational_refinement.cpp
+index 5bde55aca8..cca30f1ce7 100644
+--- a/modules/video/src/variational_refinement.cpp
++++ b/modules/video/src/variational_refinement.cpp
+@@ -133,20 +133,28 @@ class VariationalRefinementImpl CV_FINAL : public VariationalRefinement
+     };
+     void gradHorizAndSplitOp(void *src, void *dst, void *dst_split)
+     {
++        CV_INSTRUMENT_REGION();
++
+         Sobel(*(Mat *)src, *(Mat *)dst, -1, 1, 0, 1, 1, 0.00, BORDER_REPLICATE);
+         splitCheckerboard(*(RedBlackBuffer *)dst_split, *(Mat *)dst);
+     }
+     void gradVertAndSplitOp(void *src, void *dst, void *dst_split)
+     {
++        CV_INSTRUMENT_REGION();
++
+         Sobel(*(Mat *)src, *(Mat *)dst, -1, 0, 1, 1, 1, 0.00, BORDER_REPLICATE);
+         splitCheckerboard(*(RedBlackBuffer *)dst_split, *(Mat *)dst);
+     }
+     void averageOp(void *src1, void *src2, void *dst)
+     {
++        CV_INSTRUMENT_REGION();
++
+         addWeighted(*(Mat *)src1, 0.5, *(Mat *)src2, 0.5, 0.0, *(Mat *)dst, CV_32F);
+     }
+     void subtractOp(void *src1, void *src2, void *dst)
+     {
++        CV_INSTRUMENT_REGION();
++
+         subtract(*(Mat *)src1, *(Mat *)src2, *(Mat *)dst, noArray(), CV_32F);
+     }
+ 
+@@ -206,6 +214,8 @@ class VariationalRefinementImpl CV_FINAL : public VariationalRefinement
+ 
+ VariationalRefinementImpl::VariationalRefinementImpl()
+ {
++    CV_INSTRUMENT_REGION();
++
+     fixedPointIterations = 5;
+     sorIterations = 5;
+     alpha = 20.0f;
+@@ -222,6 +232,8 @@ VariationalRefinementImpl::VariationalRefinementImpl()
+  */
+ void VariationalRefinementImpl::splitCheckerboard(RedBlackBuffer &dst, Mat &src)
+ {
++    CV_INSTRUMENT_REGION();
++
+     int buf_j, j;
+     int buf_w = (int)ceil(src.cols / 2.0) + 2; //!< max width of red/black buffers with borders
+ 
+@@ -288,6 +300,8 @@ void VariationalRefinementImpl::splitCheckerboard(RedBlackBuffer &dst, Mat &src)
+  */
+ void VariationalRefinementImpl::mergeCheckerboard(Mat &dst, RedBlackBuffer &src)
+ {
++    CV_INSTRUMENT_REGION();
++
+     int buf_j, j;
+     for (int i = 0; i < dst.rows; i++)
+     {
+@@ -326,6 +340,8 @@ void VariationalRefinementImpl::mergeCheckerboard(Mat &dst, RedBlackBuffer &src)
+  */
+ void VariationalRefinementImpl::updateRepeatedBorders(RedBlackBuffer &dst)
+ {
++    CV_INSTRUMENT_REGION();
++
+     int buf_w = dst.red.cols;
+     for (int i = 0; i < dst.red.rows - 2; i++)
+     {
+@@ -369,10 +385,14 @@ void VariationalRefinementImpl::updateRepeatedBorders(RedBlackBuffer &dst)
+ 
+ VariationalRefinementImpl::RedBlackBuffer::RedBlackBuffer()
+ {
++    CV_INSTRUMENT_REGION();
++
+     release();
+ }
+ void VariationalRefinementImpl::RedBlackBuffer::create(Size s)
+ {
++    CV_INSTRUMENT_REGION();
++
+     /* Allocate enough memory to include borders */
+     int w = (int)ceil(s.width / 2.0) + 2;
+     red.create(s.height + 2, w);
+@@ -389,6 +409,8 @@ void VariationalRefinementImpl::RedBlackBuffer::create(Size s)
+ 
+ void VariationalRefinementImpl::RedBlackBuffer::release()
+ {
++    CV_INSTRUMENT_REGION();
++
+     red.release();
+     black.release();
+     red_even_len = red_odd_len = black_even_len = black_odd_len = 0;
+@@ -403,12 +425,16 @@ VariationalRefinementImpl::ParallelOp_ParBody::ParallelOp_ParBody(VariationalRef
+ 
+ void VariationalRefinementImpl::ParallelOp_ParBody::operator()(const Range &range) const
+ {
++    CV_INSTRUMENT_REGION();
++
+     for (int i = range.start; i < range.end; i++)
+         (var->*ops[i])(op1s[i], op2s[i], op3s[i]);
+ }
+ 
+ void VariationalRefinementImpl::warpImage(Mat &dst, Mat &src, Mat &flow_u, Mat &flow_v)
+ {
++    CV_INSTRUMENT_REGION();
++
+     for (int i = 0; i < flow_u.rows; i++)
+     {
+         float *pFlowU = flow_u.ptr<float>(i);
+@@ -426,6 +452,8 @@ void VariationalRefinementImpl::warpImage(Mat &dst, Mat &src, Mat &flow_u, Mat &
+ 
+ void VariationalRefinementImpl::prepareBuffers(Mat &I0, Mat &I1, Mat &W_u, Mat &W_v)
+ {
++    CV_INSTRUMENT_REGION();
++
+     Size s = I0.size();
+     A11.create(s);
+     A12.create(s);
+@@ -550,6 +578,8 @@ VariationalRefinementImpl::ComputeDataTerm_ParBody::ComputeDataTerm_ParBody(Vari
+  */
+ void VariationalRefinementImpl::ComputeDataTerm_ParBody::operator()(const Range &range) const
+ {
++    CV_INSTRUMENT_REGION();
++
+     int start_i = min(range.start * stripe_sz, h);
+     int end_i = min(range.end * stripe_sz, h);
+ 
+@@ -709,6 +739,8 @@ VariationalRefinementImpl::ComputeSmoothnessTermHorPass_ParBody::ComputeSmoothne
+  */
+ void VariationalRefinementImpl::ComputeSmoothnessTermHorPass_ParBody::operator()(const Range &range) const
+ {
++    CV_INSTRUMENT_REGION();
++
+     int start_i = min(range.start * stripe_sz, h);
+     int end_i = min(range.end * stripe_sz, h);
+ 
+@@ -873,6 +905,8 @@ VariationalRefinementImpl::ComputeSmoothnessTermVertPass_ParBody::ComputeSmoothn
+ /* This function adds the last remaining terms to the linear system coefficients A11,A22,b1,b1. */
+ void VariationalRefinementImpl::ComputeSmoothnessTermVertPass_ParBody::operator()(const Range &range) const
+ {
++    CV_INSTRUMENT_REGION();
++
+     int start_i = min(range.start * stripe_sz, h);
+     int end_i = min(range.end * stripe_sz, h);
+ 
+@@ -965,6 +999,8 @@ VariationalRefinementImpl::RedBlackSOR_ParBody::RedBlackSOR_ParBody(VariationalR
+  */
+ void VariationalRefinementImpl::RedBlackSOR_ParBody::operator()(const Range &range) const
+ {
++    CV_INSTRUMENT_REGION();
++
+     int start = min(range.start * stripe_sz, h);
+     int end = min(range.end * stripe_sz, h);
+ 
+@@ -1079,6 +1115,8 @@ void VariationalRefinementImpl::RedBlackSOR_ParBody::operator()(const Range &ran
+ 
+ void VariationalRefinementImpl::calc(InputArray I0, InputArray I1, InputOutputArray flow)
+ {
++    CV_INSTRUMENT_REGION();
++
+     CV_Assert(!I0.empty() && I0.channels() == 1);
+     CV_Assert(!I1.empty() && I1.channels() == 1);
+     CV_Assert(I0.sameSize(I1));
+@@ -1095,6 +1133,8 @@ void VariationalRefinementImpl::calc(InputArray I0, InputArray I1, InputOutputAr
+ 
+ void VariationalRefinementImpl::calcUV(InputArray I0, InputArray I1, InputOutputArray flow_u, InputOutputArray flow_v)
+ {
++    CV_INSTRUMENT_REGION();
++
+     CV_Assert(!I0.empty() && I0.channels() == 1);
+     CV_Assert(!I1.empty() && I1.channels() == 1);
+     CV_Assert(I0.sameSize(I1));
+@@ -1124,6 +1164,8 @@ void VariationalRefinementImpl::calcUV(InputArray I0, InputArray I1, InputOutput
+ 
+     for (int i = 0; i < fixedPointIterations; i++)
+     {
++        CV_TRACE_REGION("fixedPoint_iteration");
++
+         parallel_for_(Range(0, num_stripes), ComputeDataTerm_ParBody(*this, num_stripes, I0Mat.rows, dW_u, dW_v, true));
+         parallel_for_(Range(0, num_stripes), ComputeDataTerm_ParBody(*this, num_stripes, I0Mat.rows, dW_u, dW_v, false));
+ 
+@@ -1139,6 +1181,7 @@ void VariationalRefinementImpl::calcUV(InputArray I0, InputArray I1, InputOutput
+ 
+         for (int j = 0; j < sorIterations; j++)
+         {
++            CV_TRACE_REGION("SOR_iteration");
+             parallel_for_(Range(0, num_stripes), RedBlackSOR_ParBody(*this, num_stripes, I0Mat.rows, dW_u, dW_v, true));
+             parallel_for_(Range(0, num_stripes), RedBlackSOR_ParBody(*this, num_stripes, I0Mat.rows, dW_u, dW_v, false));
+         }
+@@ -1155,6 +1198,8 @@ void VariationalRefinementImpl::calcUV(InputArray I0, InputArray I1, InputOutput
+ }
+ void VariationalRefinementImpl::collectGarbage()
+ {
++    CV_INSTRUMENT_REGION();
++
+     Ix.release();
+     Iy.release();
+     Iz.release();

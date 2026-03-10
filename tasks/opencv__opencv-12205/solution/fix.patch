@@ -1,0 +1,401 @@
+diff --git a/modules/dnn/misc/quantize_face_detector.py b/modules/dnn/misc/quantize_face_detector.py
+index 8a8b88d181..6dae0266ee 100644
+--- a/modules/dnn/misc/quantize_face_detector.py
++++ b/modules/dnn/misc/quantize_face_detector.py
+@@ -104,8 +104,12 @@ def l2norm(x, name):
+ inp = tf.placeholder(dtype, [1, 300, 300, 3], 'data')
+ data_bn = batch_norm(inp, 'data_bn')
+ data_scale = scale(data_bn, 'data_scale')
+-data_scale = tf.pad(data_scale, [[0, 0], [3, 3], [3, 3], [0, 0]])
++
++# Instead of tf.pad we use tf.space_to_batch_nd layers which override convolution's padding strategy to explicit numbers
++# data_scale = tf.pad(data_scale, [[0, 0], [3, 3], [3, 3], [0, 0]])
++data_scale = tf.space_to_batch_nd(data_scale, [1, 1], [[3, 3], [3, 3]], name='Pad')
+ conv1_h = conv(data_scale, stride=2, pad='VALID', name='conv1_h')
++
+ conv1_bn_h = batch_norm(conv1_h, 'conv1_bn_h')
+ conv1_scale_h = scale(conv1_bn_h, 'conv1_scale_h')
+ conv1_relu = tf.nn.relu(conv1_scale_h)
+@@ -133,8 +137,11 @@ layer_128_1_sum = layer_128_1_conv2 + layer_128_1_conv_expand_h
+ layer_256_1_bn1 = batch_norm(layer_128_1_sum, 'layer_256_1_bn1')
+ layer_256_1_scale1 = scale(layer_256_1_bn1, 'layer_256_1_scale1')
+ layer_256_1_relu1 = tf.nn.relu(layer_256_1_scale1)
+-layer_256_1_conv1 = tf.pad(layer_256_1_relu1, [[0, 0], [1, 1], [1, 1], [0, 0]])
++
++# layer_256_1_conv1 = tf.pad(layer_256_1_relu1, [[0, 0], [1, 1], [1, 1], [0, 0]])
++layer_256_1_conv1 = tf.space_to_batch_nd(layer_256_1_relu1, [1, 1], [[1, 1], [1, 1]], name='Pad_1')
+ layer_256_1_conv1 = conv(layer_256_1_conv1, stride=2, pad='VALID', name='layer_256_1_conv1')
++
+ layer_256_1_bn2 = batch_norm(layer_256_1_conv1, 'layer_256_1_bn2')
+ layer_256_1_scale2 = scale(layer_256_1_bn2, 'layer_256_1_scale2')
+ layer_256_1_relu2 = tf.nn.relu(layer_256_1_scale2)
+@@ -160,8 +167,11 @@ fc7 = tf.nn.relu(last_scale_h, name='last_relu')
+ conv6_1_h = conv(fc7, 'conv6_1_h', activ=tf.nn.relu)
+ conv6_2_h = conv(conv6_1_h, stride=2, name='conv6_2_h', activ=tf.nn.relu)
+ conv7_1_h = conv(conv6_2_h, 'conv7_1_h', activ=tf.nn.relu)
+-conv7_2_h = tf.pad(conv7_1_h, [[0, 0], [1, 1], [1, 1], [0, 0]])
++
++# conv7_2_h = tf.pad(conv7_1_h, [[0, 0], [1, 1], [1, 1], [0, 0]])
++conv7_2_h = tf.space_to_batch_nd(conv7_1_h, [1, 1], [[1, 1], [1, 1]], name='Pad_2')
+ conv7_2_h = conv(conv7_2_h, stride=2, pad='VALID', name='conv7_2_h', activ=tf.nn.relu)
++
+ conv8_1_h = conv(conv7_2_h, pad='SAME', name='conv8_1_h', activ=tf.nn.relu)
+ conv8_2_h = conv(conv8_1_h, pad='SAME', name='conv8_2_h', activ=tf.nn.relu)
+ conv9_1_h = conv(conv8_2_h, 'conv9_1_h', activ=tf.nn.relu)
+@@ -201,6 +211,7 @@ with tf.Session() as sess:
+     inputData = np.random.standard_normal([1, 3, 300, 300]).astype(np.float32)
+ 
+     cvNet.setInput(inputData)
++    cvNet.setPreferableBackend(cv.dnn.DNN_BACKEND_OPENCV)
+     outDNN = cvNet.forward(out_nodes)
+ 
+     outTF = sess.run([mbox_loc, mbox_conf_flatten], feed_dict={inp: inputData.transpose(0, 2, 3, 1)})
+@@ -254,7 +265,7 @@ for i in reversed(range(len(graph_def.node))):
+         del graph_def.node[i]
+     for attr in ['T', 'data_format', 'Tshape', 'N', 'Tidx', 'Tdim',
+                  'use_cudnn_on_gpu', 'Index', 'Tperm', 'is_training',
+-                 'Tpaddings']:
++                 'Tpaddings', 'Tblock_shape', 'Tcrops']:
+         if attr in graph_def.node[i].attr:
+             del graph_def.node[i].attr[attr]
+ 
+diff --git a/modules/dnn/src/layers/normalize_bbox_layer.cpp b/modules/dnn/src/layers/normalize_bbox_layer.cpp
+index 86a56915a2..70d9b7385a 100644
+--- a/modules/dnn/src/layers/normalize_bbox_layer.cpp
++++ b/modules/dnn/src/layers/normalize_bbox_layer.cpp
+@@ -63,9 +63,18 @@ public:
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+-        return backendId == DNN_BACKEND_OPENCV ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE && haveInfEngine() &&
+-               pnorm == 2 && !blobs.empty();
++        if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
++        {
++            if (pnorm != 2)
++                return false;
++            if (!blobs.empty())
++                return true;
++            if (preferableTarget == DNN_TARGET_MYRIAD)
++                return !acrossSpatial;
++            return startAxis == 1 && (!acrossSpatial || endAxis > 1);
++        }
++        else
++            return backendId == DNN_BACKEND_OPENCV;
+     }
+ 
+     bool getMemoryShapes(const std::vector<MatShape> &inputs,
+@@ -80,6 +89,14 @@ public:
+         return true;
+     }
+ 
++    void finalize(const std::vector<Mat*> &inputs, std::vector<Mat> &outputs) CV_OVERRIDE
++    {
++        CV_Assert(inputs.size() == 1);
++        endAxis = endAxis == -1 ? (inputs[0]->dims - 1) : endAxis;
++        startAxis = startAxis == -1 ? (inputs[0]->dims - 1) : startAxis;
++        acrossSpatial = (startAxis == 1 && endAxis == inputs[0]->dims - 1);
++    }
++
+ #ifdef HAVE_OPENCL
+     bool forward_ocl(InputArrayOfArrays inputs_, OutputArrayOfArrays outputs_, OutputArrayOfArrays internals_)
+     {
+@@ -240,24 +257,52 @@ public:
+         }
+     }
+ 
+-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
++    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >& inputs) CV_OVERRIDE
+     {
+ #ifdef HAVE_INF_ENGINE
++        InferenceEngine::DataPtr input = infEngineDataNode(inputs[0]);
++
+         InferenceEngine::LayerParams lp;
+         lp.name = name;
+-        lp.type = "Normalize";
+         lp.precision = InferenceEngine::Precision::FP32;
+-        std::shared_ptr<InferenceEngine::CNNLayer> ieLayer(new InferenceEngine::CNNLayer(lp));
+-
+-        CV_Assert(!blobs.empty());
+ 
+-        ieLayer->params["eps"] = format("%f", epsilon);
+-        ieLayer->params["across_spatial"] = acrossSpatial ? "1" : "0";
+-        ieLayer->params["channel_shared"] = blobs[0].total() == 1 ? "1" : "0";
++        if (input->dims.size() == 4)
++        {
++            const int numChannels = input->dims[2];  // NOTE: input->dims are reversed (whcn)
+ 
+-        const size_t numChannels = blobs[0].total();
+-        ieLayer->blobs["weights"] = wrapToInfEngineBlob(blobs[0], {numChannels}, InferenceEngine::Layout::C);
+-        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
++            lp.type = "Normalize";
++            std::shared_ptr<InferenceEngine::CNNLayer> ieLayer(new InferenceEngine::CNNLayer(lp));
++            if (blobs.empty())
++            {
++                auto weights = InferenceEngine::make_shared_blob<float>(InferenceEngine::Precision::FP32,
++                                                                        InferenceEngine::Layout::C,
++                                                                        {numChannels});
++                weights->allocate();
++                std::vector<float> ones(numChannels, 1);
++                weights->set(ones);
++                ieLayer->blobs["weights"] = weights;
++                ieLayer->params["channel_shared"] = "0";
++            }
++            else
++            {
++                CV_Assert(numChannels == blobs[0].total());
++                ieLayer->blobs["weights"] = wrapToInfEngineBlob(blobs[0], {numChannels}, InferenceEngine::Layout::C);
++                ieLayer->params["channel_shared"] = blobs[0].total() == 1 ? "1" : "0";
++            }
++            ieLayer->params["eps"] = format("%f", epsilon);
++            ieLayer->params["across_spatial"] = acrossSpatial ? "1" : "0";
++            return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
++        }
++        else
++        {
++            InferenceEngine::LayerParams lp;
++            lp.name = name;
++            lp.type = "GRN";
++            lp.precision = InferenceEngine::Precision::FP32;
++            std::shared_ptr<InferenceEngine::CNNLayer> ieLayer(new InferenceEngine::CNNLayer(lp));
++            ieLayer->params["bias"] = format("%f", epsilon);
++            return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
++        }
+ #endif  // HAVE_INF_ENGINE
+         return Ptr<BackendNode>();
+     }
+diff --git a/modules/dnn/src/tensorflow/tf_importer.cpp b/modules/dnn/src/tensorflow/tf_importer.cpp
+index 66c03a777e..13df37102c 100644
+--- a/modules/dnn/src/tensorflow/tf_importer.cpp
++++ b/modules/dnn/src/tensorflow/tf_importer.cpp
+@@ -529,7 +529,8 @@ const tensorflow::TensorProto& TFImporter::getConstBlob(const tensorflow::NodeDe
+ 
+     Pin kernel_inp = parsePin(layer.input(input_blob_index));
+     if (const_layers.find(kernel_inp.name) == const_layers.end())
+-        CV_Error(Error::StsError, "Const kernel input not found");
++        CV_Error(Error::StsError, "Input [" + layer.input(input_blob_index) +
++                                  "] for node [" + layer.name() + "] not found");
+     if (kernel_inp.blobIndex != 0)
+         CV_Error(Error::StsError, "Unsupported kernel input");
+ 
+@@ -867,13 +868,13 @@ void TFImporter::populateNet(Net dstNet)
+             layerParams.set("num_output", layerParams.blobs[0].size[0]);
+ 
+             setStrides(layerParams, layer);
+-            setPadding(layerParams, layer);
++            if (!layerParams.has("pad_w") && !layerParams.has("pad_h"))
++                setPadding(layerParams, layer);
+ 
+             // The final node of dilated convolution subgraph.
+             next_layers = getNextLayers(net, name, "BatchToSpaceND");
+             if (!next_layers.empty())
+             {
+-                layerParams.set("pad_mode", "");  // We use padding values.
+                 CV_Assert(next_layers.size() == 1);
+                 ExcludeLayer(net, next_layers[0].second, 0, false);
+                 layers_to_ignore.insert(next_layers[0].first);
+diff --git a/samples/dnn/face_detector/opencv_face_detector.pbtxt b/samples/dnn/face_detector/opencv_face_detector.pbtxt
+index e537e006bc..5f498aad50 100644
+--- a/samples/dnn/face_detector/opencv_face_detector.pbtxt
++++ b/samples/dnn/face_detector/opencv_face_detector.pbtxt
+@@ -35,11 +35,55 @@ node {
+   input: "data_scale/Mul"
+   input: "data_scale/add"
+ }
++node {
++  name: "SpaceToBatchND/block_shape"
++  op: "Const"
++  attr {
++    key: "value"
++    value {
++      tensor {
++        dtype: DT_INT32
++        tensor_shape {
++          dim {
++            size: 2
++          }
++        }
++        int_val: 1
++        int_val: 1
++      }
++    }
++  }
++}
++node {
++  name: "SpaceToBatchND/paddings"
++  op: "Const"
++  attr {
++    key: "value"
++    value {
++      tensor {
++        dtype: DT_INT32
++        tensor_shape {
++          dim {
++            size: 2
++          }
++          dim {
++            size: 2
++          }
++        }
++        int_val: 3
++        int_val: 3
++        int_val: 3
++        int_val: 3
++      }
++    }
++  }
++}
+ node {
+   name: "Pad"
+-  op: "Pad"
++  op: "SpaceToBatchND"
+   input: "data_scale/BiasAdd"
+-  input: "Pad/paddings"
++  input: "SpaceToBatchND/block_shape"
++  input: "SpaceToBatchND/paddings"
+ }
+ node {
+   name: "conv1_h/Conv2D"
+@@ -81,10 +125,15 @@ node {
+   input: "conv1_h/Conv2D"
+   input: "conv1_h/bias"
+ }
++node {
++  name: "BatchToSpaceND"
++  op: "BatchToSpaceND"
++  input: "conv1_h/BiasAdd"
++}
+ node {
+   name: "conv1_bn_h/FusedBatchNorm"
+   op: "FusedBatchNorm"
+-  input: "conv1_h/BiasAdd"
++  input: "BatchToSpaceND"
+   input: "conv1_bn_h/gamma"
+   input: "conv1_bn_h/beta"
+   input: "conv1_bn_h/mean"
+@@ -439,10 +488,28 @@ node {
+   input: "layer_256_1_scale1/BiasAdd"
+ }
+ node {
+-  name: "Pad_1"
+-  op: "Pad"
+-  input: "Relu_4"
+-  input: "Pad_1/paddings"
++  name: "SpaceToBatchND_1/paddings"
++  op: "Const"
++  attr {
++    key: "value"
++    value {
++      tensor {
++        dtype: DT_INT32
++        tensor_shape {
++          dim {
++            size: 2
++          }
++          dim {
++            size: 2
++          }
++        }
++        int_val: 1
++        int_val: 1
++        int_val: 1
++        int_val: 1
++      }
++    }
++  }
+ }
+ node {
+   name: "layer_256_1_conv_expand/Conv2D"
+@@ -580,6 +647,13 @@ node {
+   op: "Flatten"
+   input: "conv4_3_norm_mbox_conf/BiasAdd"
+ }
++node {
++  name: "Pad_1"
++  op: "SpaceToBatchND"
++  input: "Relu_4"
++  input: "SpaceToBatchND/block_shape"
++  input: "SpaceToBatchND_1/paddings"
++}
+ node {
+   name: "layer_256_1_conv1/Conv2D"
+   op: "Conv2D"
+@@ -620,10 +694,15 @@ node {
+   input: "layer_256_1_conv1/Conv2D"
+   input: "layer_256_1_conv1/Conv2D_bn_offset"
+ }
++node {
++  name: "BatchToSpaceND_1"
++  op: "BatchToSpaceND"
++  input: "layer_256_1_bn2/FusedBatchNorm"
++}
+ node {
+   name: "layer_256_1_scale2/Mul"
+   op: "Mul"
+-  input: "layer_256_1_bn2/FusedBatchNorm"
++  input: "BatchToSpaceND_1"
+   input: "layer_256_1_scale2/mul"
+ }
+ node {
+@@ -806,12 +885,6 @@ node {
+   input: "Relu_7"
+   input: "layer_512_1_conv2_h/convolution/SpaceToBatchND/block_shape"
+   input: "layer_512_1_conv2_h/convolution/SpaceToBatchND/paddings"
+-  attr {
+-    key: "Tblock_shape"
+-    value {
+-      type: DT_INT32
+-    }
+-  }
+ }
+ node {
+   name: "layer_512_1_conv2_h/convolution"
+@@ -853,18 +926,6 @@ node {
+   input: "layer_512_1_conv2_h/convolution"
+   input: "layer_512_1_conv2_h/convolution/BatchToSpaceND/block_shape"
+   input: "layer_512_1_conv2_h/convolution/BatchToSpaceND/crops"
+-  attr {
+-    key: "Tblock_shape"
+-    value {
+-      type: DT_INT32
+-    }
+-  }
+-  attr {
+-    key: "Tcrops"
+-    value {
+-      type: DT_INT32
+-    }
+-  }
+ }
+ node {
+   name: "add_3"
+@@ -1041,9 +1102,10 @@ node {
+ }
+ node {
+   name: "Pad_2"
+-  op: "Pad"
++  op: "SpaceToBatchND"
+   input: "conv7_1_h/Relu"
+-  input: "Pad_2/paddings"
++  input: "SpaceToBatchND/block_shape"
++  input: "SpaceToBatchND_1/paddings"
+ }
+ node {
+   name: "conv7_2_h/Conv2D"
+@@ -1085,10 +1147,15 @@ node {
+   input: "conv7_2_h/Conv2D"
+   input: "conv7_2_h/bias"
+ }
++node {
++  name: "BatchToSpaceND_2"
++  op: "BatchToSpaceND"
++  input: "conv7_2_h/BiasAdd"
++}
+ node {
+   name: "conv7_2_h/Relu"
+   op: "Relu"
+-  input: "conv7_2_h/BiasAdd"
++  input: "BatchToSpaceND_2"
+ }
+ node {
+   name: "conv8_1_h/Conv2D"

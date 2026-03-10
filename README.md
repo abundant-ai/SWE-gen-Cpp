@@ -6,7 +6,7 @@
   </a>
 </p>
 
-> X C++ tasks generated from Y open-source GitHub repos using [SWE-gen](https://github.com/abundant-ai/SWE-gen).
+> 1000 C++ tasks generated from 17 open-source GitHub repos using [SWE-gen](https://github.com/abundant-ai/SWE-gen).
 
 ## Each task
 - is a merged GitHub PR with 1-10 source files edited

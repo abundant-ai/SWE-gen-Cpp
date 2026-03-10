@@ -1,0 +1,159 @@
+diff --git a/modules/dnn/src/layers/crop_layer.cpp b/modules/dnn/src/layers/crop_layer.cpp
+index 3572b88337..8b56f6f439 100644
+--- a/modules/dnn/src/layers/crop_layer.cpp
++++ b/modules/dnn/src/layers/crop_layer.cpp
+@@ -41,7 +41,6 @@
+ //M*/
+ 
+ #include "../precomp.hpp"
+-#include "../op_inf_engine.hpp"
+ #include "layers_common.hpp"
+ 
+ namespace cv
+@@ -65,12 +64,6 @@ public:
+         }
+     }
+ 
+-    virtual bool supportBackend(int backendId) CV_OVERRIDE
+-    {
+-        return backendId == DNN_BACKEND_OPENCV ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE && crop_ranges.size() == 4;
+-    }
+-
+     bool getMemoryShapes(const std::vector<MatShape> &inputs,
+                          const int requiredOutputs,
+                          std::vector<MatShape> &outputs,
+@@ -116,11 +109,7 @@ public:
+                 offset_final[i] = offset[i - start_axis];
+         }
+ 
+-        crop_ranges.resize(dims);
+-        for (int i = 0; i < start_axis; i++)
+-        {
+-            crop_ranges[i] = Range(0, inpBlob.size[i]);
+-        }
++        crop_ranges.resize(dims, Range::all());
+         for (int i = start_axis; i < dims; i++)
+         {
+             if (offset_final[i] < 0 || offset_final[i] + inpSzBlob.size[i] > inpBlob.size[i])
+@@ -149,38 +138,6 @@ public:
+         input(&crop_ranges[0]).copyTo(output);
+     }
+ 
+-    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
+-    {
+-#ifdef HAVE_INF_ENGINE
+-        InferenceEngine::LayerParams lp;
+-        lp.name = name;
+-        lp.type = "Crop";
+-        lp.precision = InferenceEngine::Precision::FP32;
+-        std::shared_ptr<InferenceEngine::CropLayer> ieLayer(new InferenceEngine::CropLayer(lp));
+-
+-        CV_Assert(crop_ranges.size() == 4);
+-
+-        ieLayer->axis.push_back(0);  // batch
+-        ieLayer->offset.push_back(crop_ranges[0].start);
+-        ieLayer->dim.push_back(crop_ranges[0].end - crop_ranges[0].start);
+-
+-        ieLayer->axis.push_back(1);  // channels
+-        ieLayer->offset.push_back(crop_ranges[1].start);
+-        ieLayer->dim.push_back(crop_ranges[1].end - crop_ranges[1].start);
+-
+-        ieLayer->axis.push_back(3);  // height
+-        ieLayer->offset.push_back(crop_ranges[2].start);
+-        ieLayer->dim.push_back(crop_ranges[2].end - crop_ranges[2].start);
+-
+-        ieLayer->axis.push_back(2);  // width
+-        ieLayer->offset.push_back(crop_ranges[3].start);
+-        ieLayer->dim.push_back(crop_ranges[3].end - crop_ranges[3].start);
+-
+-        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+-#endif  // HAVE_INF_ENGINE
+-        return Ptr<BackendNode>();
+-    }
+-
+     std::vector<Range> crop_ranges;
+ };
+ 
+diff --git a/modules/dnn/src/layers/fully_connected_layer.cpp b/modules/dnn/src/layers/fully_connected_layer.cpp
+index e40f8c6bdd..d17ca27383 100644
+--- a/modules/dnn/src/layers/fully_connected_layer.cpp
++++ b/modules/dnn/src/layers/fully_connected_layer.cpp
+@@ -350,33 +350,17 @@ public:
+             inshape = shape(outerSize, innerSize);
+             outshape = shape(outerSize, numOutput);
+ 
+-            UMat srcMat, dstMat, srcMat_fp32, dstMat_fp32;
++            UMat srcMat, dstMat;
+             srcMat = inputs[i].reshape(1, inshape.size(), &inshape[0]);
+             dstMat = outputs[i].reshape(1, outshape.size(), &outshape[0]);
+ 
+-            if (use_half)
+-            {
+-                convertFp16(srcMat, srcMat_fp32);
+-                convertFp16(dstMat, dstMat_fp32);
+-            }
+-            else
+-            {
+-                srcMat_fp32 = srcMat;
+-                dstMat_fp32 = dstMat;
+-            }
+-
+-            cv::gemm(srcMat_fp32, weights, 1, noArray(), 0, dstMat_fp32, GEMM_2_T);
++            cv::gemm(srcMat, weights, 1, noArray(), 0, dstMat, GEMM_2_T);
+ 
+             if (bias)
+             {
+                 UMat biasOnesMat = UMat::ones(outerSize, 1, umat_blobs[0].type());
+                 UMat& biases = umat_blobs[1];
+-                cv::gemm(biasOnesMat, biases, 1, dstMat_fp32, 1, dstMat_fp32, 0);
+-            }
+-            if (use_half)
+-            {
+-                convertFp16(srcMat_fp32, srcMat);
+-                convertFp16(dstMat_fp32, dstMat);
++                cv::gemm(biasOnesMat, biases, 1, dstMat, 1, dstMat, 0);
+             }
+         }
+ 
+diff --git a/modules/dnn/test/test_caffe_importer.cpp b/modules/dnn/test/test_caffe_importer.cpp
+index 640cb945be..4491fde5a9 100644
+--- a/modules/dnn/test/test_caffe_importer.cpp
++++ b/modules/dnn/test/test_caffe_importer.cpp
+@@ -490,7 +490,8 @@ INSTANTIATE_TEST_CASE_P(Test_Caffe, opencv_face_detector,
+ 
+ TEST_P(Test_Caffe_nets, FasterRCNN_vgg16)
+ {
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
++    if ((backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD) ||
++        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
+         throw SkipTestException("");
+     static Mat ref = (Mat_<float>(3, 7) << 0, 2, 0.949398, 99.2454, 210.141, 601.205, 462.849,
+                                            0, 7, 0.997022, 481.841, 92.3218, 722.685, 175.953,
+@@ -501,7 +502,8 @@ TEST_P(Test_Caffe_nets, FasterRCNN_vgg16)
+ TEST_P(Test_Caffe_nets, FasterRCNN_zf)
+ {
+     if ((backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16) ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD))
++        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD) ||
++        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
+         throw SkipTestException("");
+     static Mat ref = (Mat_<float>(3, 7) << 0, 2, 0.90121, 120.407, 115.83, 570.586, 528.395,
+                                            0, 7, 0.988779, 469.849, 75.1756, 718.64, 186.762,
+@@ -512,13 +514,12 @@ TEST_P(Test_Caffe_nets, FasterRCNN_zf)
+ TEST_P(Test_Caffe_nets, RFCN)
+ {
+     if ((backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16) ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD))
++        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD) ||
++        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
+         throw SkipTestException("");
+-    double scoreDiff = (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16) ? 4e-3 : default_l1;
+-    double iouDiff = (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16) ? 8e-2 : default_lInf;
+     static Mat ref = (Mat_<float>(2, 7) << 0, 7, 0.991359, 491.822, 81.1668, 702.573, 178.234,
+                                            0, 12, 0.94786, 132.093, 223.903, 338.077, 566.16);
+-    testFaster("rfcn_pascal_voc_resnet50.prototxt", "resnet50_rfcn_final.caffemodel", ref, scoreDiff, iouDiff);
++    testFaster("rfcn_pascal_voc_resnet50.prototxt", "resnet50_rfcn_final.caffemodel", ref);
+ }
+ 
+ INSTANTIATE_TEST_CASE_P(/**/, Test_Caffe_nets, dnnBackendsAndTargets());

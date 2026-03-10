@@ -2,26 +2,20 @@
 
 cd /app/src
 
-# The buggy state has a compilation error (missing #include <algorithm> in src/node_data.cpp)
-# Apply minimal fix to make the code compile before testing
-sed -i '1i #include <algorithm>' src/node_data.cpp
-
 # Copy HEAD test files from /tests (overwrites BASE state)
 mkdir -p "test/integration"
 cp "/tests/integration/load_node_test.cpp" "test/integration/load_node_test.cpp"
 
-# Rebuild the test executable with the updated test file
-cmake --build build --config Debug 2>&1
-rebuild_status=$?
-
-if [ $rebuild_status -ne 0 ]; then
-  echo "Rebuild failed with status $rebuild_status" >&2
+# Rebuild the test binary with the updated test file
+cd build
+if ! make -j2 yaml-cpp-tests; then
+  echo "ERROR: Failed to build tests with HEAD test file" >&2
   echo 0 > /logs/verifier/reward.txt
-  exit $rebuild_status
+  exit 1
 fi
 
-# Run only the LoadNodeTest tests from load_node_test.cpp
-./build/test/yaml-cpp-tests --gtest_filter=LoadNodeTest.*
+# Run only tests from LoadNodeTest suite (from load_node_test.cpp)
+./test/yaml-cpp-tests --gtest_filter="LoadNodeTest.*"
 test_status=$?
 
 if [ $test_status -eq 0 ]; then

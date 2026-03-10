@@ -1,0 +1,81 @@
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index b83630a67f..92975a7560 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -2600,7 +2600,7 @@ Net Net::readFromModelOptimizer(const String& xml, const String& bin)
+     backendNode->net = Ptr<InfEngineBackendNet>(new InfEngineBackendNet(ieNet));
+     for (auto& it : ieNet.getOutputsInfo())
+     {
+-        Ptr<Layer> cvLayer(new InfEngineBackendLayer(it.second));
++        Ptr<Layer> cvLayer(new InfEngineBackendLayer(ieNet));
+         InferenceEngine::CNNLayerPtr ieLayer = ieNet.getLayerByName(it.first.c_str());
+         CV_Assert(ieLayer);
+ 
+diff --git a/modules/dnn/src/op_inf_engine.cpp b/modules/dnn/src/op_inf_engine.cpp
+index 658ffd0a2e..6d46f304f5 100644
+--- a/modules/dnn/src/op_inf_engine.cpp
++++ b/modules/dnn/src/op_inf_engine.cpp
+@@ -718,19 +718,33 @@ Mat infEngineBlobToMat(const InferenceEngine::Blob::Ptr& blob)
+     return Mat(size, CV_32F, (void*)blob->buffer());
+ }
+ 
+-InfEngineBackendLayer::InfEngineBackendLayer(const InferenceEngine::DataPtr& output_)
+-{
+-    output = output_;
+-}
+-
+ bool InfEngineBackendLayer::getMemoryShapes(const std::vector<MatShape> &inputs,
+                                             const int requiredOutputs,
+                                             std::vector<MatShape> &outputs,
+                                             std::vector<MatShape> &internals) const
+ {
+-    std::vector<size_t> dims = output->dims;
+-    std::vector<int> shape(dims.rbegin(), dims.rend());
+-    outputs.assign(1, shape);
++    InferenceEngine::ICNNNetwork::InputShapes inShapes = t_net.getInputShapes();
++    InferenceEngine::ICNNNetwork::InputShapes::iterator itr;
++    bool equal_flag = true;
++    size_t i = 0;
++    for (itr = inShapes.begin(); itr != inShapes.end(); ++itr)
++    {
++        InferenceEngine::SizeVector currentInShape(inputs[i].begin(), inputs[i].end());
++        if (itr->second != currentInShape)
++        {
++            itr->second = currentInShape;
++            equal_flag = false;
++        }
++        i++;
++    }
++
++    if (!equal_flag)
++    {
++        InferenceEngine::CNNNetwork curr_t_net(t_net);
++        curr_t_net.reshape(inShapes);
++    }
++    std::vector<size_t> dims = t_net.getOutputsInfo()[name]->getDims();
++    outputs.push_back(MatShape(dims.begin(), dims.end()));
+     return false;
+ }
+ 
+diff --git a/modules/dnn/src/op_inf_engine.hpp b/modules/dnn/src/op_inf_engine.hpp
+index 122de51659..89e3e339cf 100644
+--- a/modules/dnn/src/op_inf_engine.hpp
++++ b/modules/dnn/src/op_inf_engine.hpp
+@@ -260,7 +260,7 @@ InferenceEngine::TBlob<int16_t>::Ptr convertFp16(const InferenceEngine::Blob::Pt
+ class InfEngineBackendLayer : public Layer
+ {
+ public:
+-    InfEngineBackendLayer(const InferenceEngine::DataPtr& output);
++    InfEngineBackendLayer(const InferenceEngine::CNNNetwork &t_net_) : t_net(t_net_) {};
+ 
+     virtual bool getMemoryShapes(const std::vector<MatShape> &inputs,
+                                  const int requiredOutputs,
+@@ -273,7 +273,7 @@ public:
+     virtual bool supportBackend(int backendId) CV_OVERRIDE;
+ 
+ private:
+-    InferenceEngine::DataPtr output;
++    InferenceEngine::CNNNetwork t_net;
+ };
+ 
+ #endif  // HAVE_INF_ENGINE

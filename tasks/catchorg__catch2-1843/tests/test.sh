@@ -25,60 +25,36 @@ cp "/tests/SelfTest/Baselines/xml.sw.approved.txt" "tests/SelfTest/Baselines/xml
 mkdir -p "tests/SelfTest/UsageTests"
 cp "/tests/SelfTest/UsageTests/Matchers.tests.cpp" "tests/SelfTest/UsageTests/Matchers.tests.cpp"
 
-# Verify that template matchers files exist
-if [ ! -f "src/catch2/catch_matchers_templates.hpp" ]; then
-    echo "FAIL: Missing catch_matchers_templates.hpp - fix not applied"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
+# The PR adds support for generic matchers (MatcherGenericBase).
+# We need to rebuild with the updated test file and verify the generic matchers work correctly.
 
-if [ ! -f "src/catch2/catch_matchers_templates.cpp" ]; then
-    echo "FAIL: Missing catch_matchers_templates.cpp - fix not applied"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-# Verify that CMakeLists.txt includes the template matchers header and source
-if ! grep -q 'catch_matchers_templates.hpp' src/CMakeLists.txt; then
-    echo "FAIL: CMakeLists.txt missing catch_matchers_templates.hpp - fix not applied"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-if ! grep -q 'catch_matchers_templates.cpp' src/CMakeLists.txt; then
-    echo "FAIL: CMakeLists.txt missing catch_matchers_templates.cpp - fix not applied"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-# Verify that catch_capture_matchers uses move semantics
-if ! grep -q 'ArgT &&' src/catch2/catch_capture_matchers.h; then
-    echo "FAIL: catch_capture_matchers.h missing move semantics - fix not applied"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-# Reconfigure CMake
+# Reconfigure CMake to pick up the updated test file
 if ! cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
     -DCATCH_BUILD_TESTING=ON \
-    -DCATCH_BUILD_EXTRA_TESTS=ON \
-    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
+    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator -Wno-error=unused-but-set-variable" \
     -G Ninja 2>&1; then
     echo "FAIL: CMake reconfiguration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Rebuild to verify that code compiles
+# Rebuild to include the updated test file
 if ! cmake --build build 2>&1; then
-    echo "FAIL: Build failed"
+    echo "FAIL: Build with updated test file failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-echo "SUCCESS: Fix properly applied"
+# Run the specific test for templated/generic matchers
+if ! ./build/tests/SelfTest "[matchers][templated]" 2>&1; then
+    echo "FAIL: Generic matchers test failed"
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+echo "SUCCESS: Generic matchers work correctly"
 test_status=0
 
 if [ $test_status -eq 0 ]; then

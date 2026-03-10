@@ -10,54 +10,90 @@ cp "/tests/harness/cases/repeated.proto" "tests/harness/cases/repeated.proto"
 mkdir -p "tests/harness/executor"
 cp "/tests/harness/executor/cases.go" "tests/harness/executor/cases.go"
 
-# Verify that the protobuf dependency update is correctly applied
-# For NOP: Code is in buggy state (old protobuf v1.3.1), tests fail (reward=0)
-# For Oracle: solve.sh applies fix.patch, protobuf v1.4.2 is restored, tests pass (reward=1)
+# PR #371 fixes validation rule merging for repeated fields with multiple constraints
+# The bug: when multiple repeated rules are specified separately (e.g., min_items and max_items),
+# only the last one is respected and earlier ones are silently dropped
+# The fix: properly merge all repeated field rules (collection-level + item-level)
 
-echo "Checking if protobuf dependency is correctly updated..."
+echo "Testing repeated field validation with multiple constraints..." >&2
 
-# Check if go.mod has the correct protobuf version
-if grep -q 'github.com/golang/protobuf v1.4.2' go.mod; then
-    echo "✓ go.mod has correct protobuf version (v1.4.2)"
-    go_mod_correct=0
+# Test 1: Check if RepeatedMinAndMaxItemLen message exists in proto
+echo "Checking if RepeatedMinAndMaxItemLen message exists in proto..." >&2
+if grep -q "RepeatedMinAndMaxItemLen" tests/harness/cases/repeated.proto; then
+    echo "PASS: RepeatedMinAndMaxItemLen message present in proto file" >&2
+    has_proto_message=1
 else
-    echo "✗ go.mod has incorrect protobuf version"
-    go_mod_correct=1
+    echo "FAIL: RepeatedMinAndMaxItemLen message missing in proto file" >&2
+    has_proto_message=0
 fi
 
-# Check if RepeatedMinAndMaxItemLen message is present in the proto file
-if grep -q 'message RepeatedMinAndMaxItemLen' tests/harness/cases/repeated.proto; then
-    echo "✓ RepeatedMinAndMaxItemLen message found in repeated.proto"
-    proto_message=0
+# Test 2: Check if test cases exist for RepeatedMinAndMaxItemLen
+echo "Checking if test cases exist for RepeatedMinAndMaxItemLen..." >&2
+if grep -q "repeated - min and max items len - valid" tests/harness/executor/cases.go && \
+   grep -q "repeated - min and max items len - invalid (min_len)" tests/harness/executor/cases.go && \
+   grep -q "repeated - min and max items len - invalid (max_len)" tests/harness/executor/cases.go; then
+    echo "PASS: All test cases present for RepeatedMinAndMaxItemLen" >&2
+    has_test_cases=1
 else
-    echo "✗ RepeatedMinAndMaxItemLen message not found in repeated.proto"
-    proto_message=1
+    echo "FAIL: Some test cases missing for RepeatedMinAndMaxItemLen" >&2
+    has_test_cases=0
 fi
 
-# Check if the test cases for RepeatedMinAndMaxItemLen are present in cases.go
-if grep -q 'repeated - min and max items len - valid' tests/harness/executor/cases.go; then
-    echo "✓ Test cases for RepeatedMinAndMaxItemLen found in cases.go"
-    test_cases=0
+# Test 3: Verify the proto definition has both min_items and max_items constraints
+echo "Checking if proto defines both min_items and max_items..." >&2
+if grep -A 1 "message RepeatedMinAndMaxItemLen" tests/harness/cases/repeated.proto | grep -q "repeated.min_items" && \
+   grep -A 1 "message RepeatedMinAndMaxItemLen" tests/harness/cases/repeated.proto | grep -q "repeated.max_items"; then
+    echo "PASS: Proto definition includes both min_items and max_items constraints" >&2
+    has_both_constraints=1
 else
-    echo "✗ Test cases for RepeatedMinAndMaxItemLen not found in cases.go"
-    test_cases=1
+    echo "FAIL: Proto definition missing min_items or max_items constraint" >&2
+    has_both_constraints=0
 fi
 
-# Try to rebuild to verify dependencies work
-echo "Attempting to rebuild with updated dependencies..."
-if make build 2>&1; then
-    echo "✓ Build succeeded with updated dependencies"
-    build_success=0
+# Test 4: Check the test case expectations
+echo "Checking test case structure..." >&2
+if grep -q 'RepeatedMinAndMaxItemLen{Val: \[\]string{"aaa", "bbb"}}.*true' tests/harness/executor/cases.go; then
+    echo "PASS: Valid test case (2 items) expects success" >&2
+    has_valid_test=1
 else
-    echo "✗ Build failed with current dependencies"
-    build_success=1
+    echo "FAIL: Valid test case not found or incorrect" >&2
+    has_valid_test=0
 fi
 
-if [ $go_mod_correct -eq 0 ] && [ $proto_message -eq 0 ] && [ $test_cases -eq 0 ] && [ $build_success -eq 0 ]; then
-    echo "All tests passed!"
+if grep -q 'RepeatedMinAndMaxItemLen{}.*false' tests/harness/executor/cases.go; then
+    echo "PASS: Empty array test case expects failure (violates min_items)" >&2
+    has_min_test=1
+else
+    echo "FAIL: Min items test case not found or incorrect" >&2
+    has_min_test=0
+fi
+
+if grep -q 'RepeatedMinAndMaxItemLen{Val: \[\]string{"aaa", "bbb", "ccc", "ddd"}}.*false' tests/harness/executor/cases.go; then
+    echo "PASS: Too many items test case expects failure (violates max_items)" >&2
+    has_max_test=1
+else
+    echo "FAIL: Max items test case not found or incorrect" >&2
+    has_max_test=0
+fi
+
+# Test 5: Verify go.mod has the correct protobuf version (v1.4.2 after fix)
+echo "Checking go.mod for correct protobuf version..." >&2
+if grep -q "github.com/golang/protobuf v1.4.2" go.mod; then
+    echo "PASS: go.mod has correct protobuf version (v1.4.2)" >&2
+    has_correct_version=1
+else
+    echo "FAIL: go.mod has incorrect protobuf version (should be v1.4.2)" >&2
+    has_correct_version=0
+fi
+
+# All checks must pass
+if [ $has_proto_message -eq 1 ] && [ $has_test_cases -eq 1 ] && [ $has_both_constraints -eq 1 ] && \
+   [ $has_valid_test -eq 1 ] && [ $has_min_test -eq 1 ] && [ $has_max_test -eq 1 ] && \
+   [ $has_correct_version -eq 1 ]; then
+    echo "PASS: All PR #371 fixes are present - repeated field rules properly merged" >&2
     test_status=0
 else
-    echo "Some tests failed!"
+    echo "FAIL: Some PR #371 fixes are missing" >&2
     test_status=1
 fi
 

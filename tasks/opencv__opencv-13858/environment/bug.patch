@@ -1,0 +1,737 @@
+diff --git a/modules/gapi/include/opencv2/gapi/fluid/gfluidbuffer.hpp b/modules/gapi/include/opencv2/gapi/fluid/gfluidbuffer.hpp
+index 8a723128bf..8965ec75b6 100644
+--- a/modules/gapi/include/opencv2/gapi/fluid/gfluidbuffer.hpp
++++ b/modules/gapi/include/opencv2/gapi/fluid/gfluidbuffer.hpp
+@@ -53,10 +53,6 @@ public:
+ 
+         inline const uint8_t* linePtr(int index) const
+         {
+-            // "out_of_window" check:
+-            // user must not request the lines which are outside of specified kernel window
+-            GAPI_DbgAssert(index >= -m_border_size
+-                        && index <  -m_border_size + static_cast<int>(m_linePtrs.size()));
+             return m_linePtrs[index + m_border_size];
+         }
+     };
+diff --git a/modules/gapi/include/opencv2/gapi/fluid/gfluidkernel.hpp b/modules/gapi/include/opencv2/gapi/fluid/gfluidkernel.hpp
+index b6adf9e115..c71c5aa2cc 100644
+--- a/modules/gapi/include/opencv2/gapi/fluid/gfluidkernel.hpp
++++ b/modules/gapi/include/opencv2/gapi/fluid/gfluidkernel.hpp
+@@ -49,8 +49,7 @@ public:
+     enum class Kind
+     {
+         Filter,
+-        Resize,
+-        NV12toRGB
++        Resize
+     };
+ 
+     // This function is a generic "doWork" callback
+diff --git a/modules/gapi/src/backends/fluid/gfluidbackend.cpp b/modules/gapi/src/backends/fluid/gfluidbackend.cpp
+index b45b9b34ae..b05081c506 100644
+--- a/modules/gapi/src/backends/fluid/gfluidbackend.cpp
++++ b/modules/gapi/src/backends/fluid/gfluidbackend.cpp
+@@ -67,7 +67,7 @@ namespace
+         {
+             GFluidModel fm(graph);
+             auto fluid_impl = cv::util::any_cast<cv::GFluidKernel>(impl.opaque);
+-            fm.metadata(op_node).set(cv::gimpl::FluidUnit{fluid_impl, {}, 0, {}, 0.0});
++            fm.metadata(op_node).set(cv::gimpl::FluidUnit{fluid_impl, {}, 0, 0, 0.0});
+         }
+ 
+         virtual EPtr compile(const ade::Graph &graph,
+@@ -138,8 +138,8 @@ private:
+ struct FluidFilterAgent : public FluidAgent
+ {
+ private:
+-    virtual int firstWindow(std::size_t inPort) const override;
+-    virtual std::pair<int,int> linesReadAndnextWindow(std::size_t inPort) const override;
++    virtual int firstWindow() const override;
++    virtual std::pair<int,int> linesReadAndnextWindow() const override;
+     virtual void setRatio(double) override { /* nothing */ }
+ public:
+     using FluidAgent::FluidAgent;
+@@ -148,24 +148,14 @@ public:
+ struct FluidResizeAgent : public FluidAgent
+ {
+ private:
+-    virtual int firstWindow(std::size_t inPort) const override;
+-    virtual std::pair<int,int> linesReadAndnextWindow(std::size_t inPort) const override;
++    virtual int firstWindow() const override;
++    virtual std::pair<int,int> linesReadAndnextWindow() const override;
+     virtual void setRatio(double ratio) override;
+ 
+     std::unique_ptr<FluidMapper> m_mapper;
+ public:
+     using FluidAgent::FluidAgent;
+ };
+-
+-struct FluidNV12toRGBAgent : public FluidAgent
+-{
+-private:
+-    virtual int firstWindow(std::size_t inPort) const override;
+-    virtual std::pair<int,int> linesReadAndnextWindow(std::size_t inPort) const override;
+-    virtual void setRatio(double) override { /* nothing */ }
+-public:
+-    using FluidAgent::FluidAgent;
+-};
+ }} // namespace cv::gimpl
+ 
+ cv::gimpl::FluidAgent::FluidAgent(const ade::Graph &g, ade::NodeHandle nh)
+@@ -192,13 +182,11 @@ void cv::gimpl::FluidAgent::reset()
+ {
+     m_producedLines = 0;
+ 
+-    for (const auto& it : ade::util::indexed(in_views))
++    auto lines = firstWindow();
++    for (auto &v : in_views)
+     {
+-        auto& v = ade::util::value(it);
+         if (v)
+         {
+-            auto idx = ade::util::index(it);
+-            auto lines = firstWindow(idx);
+             v.priv().reset(lines);
+         }
+     }
+@@ -252,7 +240,7 @@ static int calcResizeWindow(int inH, int outH)
+     }
+ }
+ 
+-static int maxLineConsumption(const cv::GFluidKernel& k, int inH, int outH, int lpi, std::size_t inPort)
++static int maxLineConsumption(const cv::GFluidKernel& k, int inH, int outH, int lpi)
+ {
+     switch (k.m_kind)
+     {
+@@ -272,7 +260,6 @@ static int maxLineConsumption(const cv::GFluidKernel& k, int inH, int outH, int
+             return (inH == 1) ? 1 : 2 + lpi - 1;
+         }
+     } break;
+-    case cv::GFluidKernel::Kind::NV12toRGB: return inPort == 0 ? 2 : 1; break;
+     default: GAPI_Assert(false); return 0;
+     }
+ }
+@@ -284,7 +271,6 @@ static int borderSize(const cv::GFluidKernel& k)
+     case cv::GFluidKernel::Kind::Filter: return (k.m_window - 1) / 2; break;
+     // Resize never reads from border pixels
+     case cv::GFluidKernel::Kind::Resize: return 0; break;
+-    case cv::GFluidKernel::Kind::NV12toRGB: return 0; break;
+     default: GAPI_Assert(false); return 0;
+     }
+ }
+@@ -368,43 +354,31 @@ std::pair<int,int> cv::gimpl::FluidUpscaleMapper::linesReadAndNextWindow(int out
+     return std::make_pair(lines_read, next_window);
+ }
+ 
+-int cv::gimpl::FluidFilterAgent::firstWindow(std::size_t) const
++int cv::gimpl::FluidFilterAgent::firstWindow() const
+ {
+     return k.m_window + k.m_lpi - 1;
+ }
+ 
+-std::pair<int,int> cv::gimpl::FluidFilterAgent::linesReadAndnextWindow(std::size_t) const
++std::pair<int,int> cv::gimpl::FluidFilterAgent::linesReadAndnextWindow() const
+ {
+     int lpi = std::min(k.m_lpi, m_outputLines - m_producedLines - k.m_lpi);
+     return std::make_pair(k.m_lpi, k.m_window - 1 + lpi);
+ }
+ 
+-int cv::gimpl::FluidResizeAgent::firstWindow(std::size_t) const
++int cv::gimpl::FluidResizeAgent::firstWindow() const
+ {
+     auto outIdx = out_buffers[0]->priv().y();
+     auto lpi = std::min(m_outputLines - m_producedLines, k.m_lpi);
+     return m_mapper->firstWindow(outIdx, lpi);
+ }
+ 
+-std::pair<int,int> cv::gimpl::FluidResizeAgent::linesReadAndnextWindow(std::size_t) const
++std::pair<int,int> cv::gimpl::FluidResizeAgent::linesReadAndnextWindow() const
+ {
+     auto outIdx = out_buffers[0]->priv().y();
+     auto lpi = std::min(m_outputLines - m_producedLines - k.m_lpi, k.m_lpi);
+     return m_mapper->linesReadAndNextWindow(outIdx, lpi);
+ }
+ 
+-int cv::gimpl::FluidNV12toRGBAgent::firstWindow(std::size_t inPort) const
+-{
+-    // 2 lines for Y, 1 for UV
+-    return inPort == 0 ? 2 : 1;
+-}
+-
+-std::pair<int,int> cv::gimpl::FluidNV12toRGBAgent::linesReadAndnextWindow(std::size_t inPort) const
+-{
+-    // 2 lines for Y, 1 for UV
+-    return inPort == 0 ? std::make_pair(2, 2) : std::make_pair(1, 1);
+-}
+-
+ void cv::gimpl::FluidResizeAgent::setRatio(double ratio)
+ {
+     if (ratio >= 1.0)
+@@ -464,14 +438,11 @@ void cv::gimpl::FluidAgent::doWork()
+ 
+     k.m_f(in_args, out_buffers);
+ 
+-    for (const auto& it : ade::util::indexed(in_views))
++    for (auto& in_view : in_views)
+     {
+-        auto& in_view = ade::util::value(it);
+-
+         if (in_view)
+         {
+-            auto idx = ade::util::index(it);
+-            auto pair = linesReadAndnextWindow(idx);
++            auto pair = linesReadAndnextWindow();
+             in_view.priv().readDone(pair.first, pair.second);
+         };
+     }
+@@ -583,15 +554,14 @@ void cv::gimpl::GFluidExecutable::initBufferRois(std::vector<int>& readStarts,
+             // only GMats participate in the process so it's valid to obtain GMatDesc
+             const auto& meta = util::get<GMatDesc>(data.meta);
+ 
+-            for (const auto& in_edge : oh->inEdges())
++            for (const auto& inNode : oh->inNodes())
+             {
+-                const auto& in_node = in_edge->srcNode();
+-                const auto& in_data = m_gm.metadata(in_node).get<Data>();
++                const auto& in_data = m_gm.metadata(inNode).get<Data>();
+ 
+-                if (in_data.shape == GShape::GMAT && fg.metadata(in_node).contains<FluidData>())
++                if (in_data.shape == GShape::GMAT && fg.metadata(inNode).contains<FluidData>())
+                 {
+                     const auto& in_meta = util::get<GMatDesc>(in_data.meta);
+-                    const auto& fd = fg.metadata(in_node).get<FluidData>();
++                    const auto& fd = fg.metadata(inNode).get<FluidData>();
+ 
+                     auto adjFilterRoi = [](cv::gapi::own::Rect produced, int b, int max_height) {
+                         // Extend with border roi which should be produced, crop to logical image size
+@@ -629,29 +599,13 @@ void cv::gimpl::GFluidExecutable::initBufferRois(std::vector<int>& readStarts,
+                         return roi;
+                     };
+ 
+-                    auto adjNV12Roi = [&](cv::gapi::own::Rect produced, std::size_t port) {
+-                        GAPI_Assert(produced.x % 2 == 0);
+-                        GAPI_Assert(produced.y % 2 == 0);
+-                        GAPI_Assert(produced.width % 2 == 0);
+-                        GAPI_Assert(produced.height % 2 == 0);
+-
+-                        cv::gapi::own::Rect roi;
+-                        switch (port) {
+-                        case 0: roi = produced; break;
+-                        case 1: roi = cv::gapi::own::Rect{ produced.x/2, produced.y/2, produced.width/2, produced.height/2 }; break;
+-                        default: GAPI_Assert(false);
+-                        }
+-                        return roi;
+-                    };
+-
+                     cv::gapi::own::Rect produced = rois[m_id_map.at(data.rc)];
+ 
+                     cv::gapi::own::Rect resized;
+                     switch (fg.metadata(oh).get<FluidUnit>().k.m_kind)
+                     {
+-                    case GFluidKernel::Kind::Filter:    resized = produced; break;
+-                    case GFluidKernel::Kind::Resize:    resized = adjResizeRoi(produced, in_meta.size, meta.size); break;
+-                    case GFluidKernel::Kind::NV12toRGB: resized = adjNV12Roi(produced, m_gm.metadata(in_edge).get<Input>().port); break;
++                    case GFluidKernel::Kind::Filter: resized = produced; break;
++                    case GFluidKernel::Kind::Resize: resized = adjResizeRoi(produced, in_meta.size, meta.size); break;
+                     default: GAPI_Assert(false);
+                     }
+ 
+@@ -664,7 +618,7 @@ void cv::gimpl::GFluidExecutable::initBufferRois(std::vector<int>& readStarts,
+                         readStarts[in_id] = readStart;
+                         rois[in_id] = roi;
+                         // Continue traverse on internal (w.r.t Island) data nodes only.
+-                        if (fd.internal) nodesToVisit.push(in_node);
++                        if (fd.internal) nodesToVisit.push(inNode);
+                     }
+                     else
+                     {
+@@ -672,7 +626,7 @@ void cv::gimpl::GFluidExecutable::initBufferRois(std::vector<int>& readStarts,
+                         GAPI_Assert(rois[in_id] == roi);
+                     }
+                 } // if (in_data.shape == GShape::GMAT)
+-            } // for (const auto& in_edge : oh->inEdges())
++            } // for (const auto& inNode : oh->inNodes())
+         } // if (!startNode->inNodes().empty())
+     } // while (!nodesToVisit.empty())
+ }
+@@ -712,9 +666,8 @@ cv::gimpl::GFluidExecutable::GFluidExecutable(const ade::Graph &g,
+             const auto& fu = fg.metadata(nh).get<FluidUnit>();
+             switch (fu.k.m_kind)
+             {
+-            case GFluidKernel::Kind::Filter:    m_agents.emplace_back(new FluidFilterAgent(m_g, nh));    break;
+-            case GFluidKernel::Kind::Resize:    m_agents.emplace_back(new FluidResizeAgent(m_g, nh));    break;
+-            case GFluidKernel::Kind::NV12toRGB: m_agents.emplace_back(new FluidNV12toRGBAgent(m_g, nh)); break;
++            case GFluidKernel::Kind::Filter: m_agents.emplace_back(new FluidFilterAgent(m_g, nh)); break;
++            case GFluidKernel::Kind::Resize: m_agents.emplace_back(new FluidResizeAgent(m_g, nh)); break;
+             default: GAPI_Assert(false);
+             }
+             // NB.: in_buffer_ids size is equal to Arguments size, not Edges size!!!
+@@ -896,35 +849,21 @@ namespace
+                     }
+                 }
+ 
+-                auto &fu = fg.metadata(node).get<FluidUnit>();
+-
+-                GAPI_Assert((out_ws.size() == 1 && out_hs.size() == 1) &&
+-                            ((in_hs.size() == 1) ||
+-                            ((in_hs.size() == 2) && fu.k.m_kind == cv::GFluidKernel::Kind::NV12toRGB)));
+-
+-                const auto &op = g.metadata(node).get<Op>();
+-                fu.line_consumption.resize(op.args.size(), 0);
++                GAPI_Assert(in_hs.size() == 1 && out_ws.size() == 1 && out_hs.size() == 1);
+ 
+                 auto in_h  = *in_hs .cbegin();
+                 auto out_h = *out_hs.cbegin();
+ 
++                auto &fu = fg.metadata(node).get<FluidUnit>();
+                 fu.ratio = (double)in_h / out_h;
+ 
+-                // Set line consumption for each image (GMat) input
+-                for (const auto& in_edge : node->inEdges())
+-                {
+-                    const auto& d = g.metadata(in_edge->srcNode()).get<Data>();
+-                    if (d.shape == cv::GShape::GMAT)
+-                    {
+-                        auto port = g.metadata(in_edge).get<Input>().port;
+-                        fu.line_consumption[port] = maxLineConsumption(fu.k, in_h, out_h, fu.k.m_lpi, port);
++                int line_consumption = maxLineConsumption(fu.k, in_h, out_h, fu.k.m_lpi);
++                int border_size = borderSize(fu.k);
+ 
+-                        GModel::log(g, node, "Line consumption (port " + std::to_string(port) + "): "
+-                                    + std::to_string(fu.line_consumption[port]));
+-                    }
+-                }
++                fu.border_size = border_size;
++                fu.line_consumption = line_consumption;
+ 
+-                fu.border_size = borderSize(fu.k);
++                GModel::log(g, node, "Line consumption: " + std::to_string(fu.line_consumption));
+                 GModel::log(g, node, "Border size: " + std::to_string(fu.border_size));
+             }
+         }
+@@ -945,20 +884,17 @@ namespace
+             {
+                 const auto &fu = fg.metadata(node).get<FluidUnit>();
+ 
+-                for (const auto &in_edge : node->inEdges())
++                for (const auto &in_data_node : node->inNodes())
+                 {
+-                    const auto &in_data_node = in_edge->srcNode();
+-                    auto port = g.metadata(in_edge).get<Input>().port;
+-
+                     auto &fd = fg.metadata(in_data_node).get<FluidData>();
+ 
+                     // Update (not Set) fields here since a single data node may be
+                     // accessed by multiple consumers
+-                    fd.max_consumption = std::max(fu.line_consumption[port], fd.max_consumption);
++                    fd.max_consumption = std::max(fu.line_consumption, fd.max_consumption);
+                     fd.border_size     = std::max(fu.border_size, fd.border_size);
+ 
+                     GModel::log(g, in_data_node, "Line consumption: " + std::to_string(fd.max_consumption)
+-                                + " (upd by " + std::to_string(fu.line_consumption[port]) + ")", node);
++                                + " (upd by " + std::to_string(fu.line_consumption) + ")", node);
+                     GModel::log(g, in_data_node, "Border size: " + std::to_string(fd.border_size), node);
+                 }
+             }
+@@ -978,18 +914,17 @@ namespace
+             {
+                 const auto &fu = fg.metadata(node).get<FluidUnit>();
+ 
++                const int own_latency = fu.line_consumption - fu.border_size;
+                 GModel::log(g, node, "LPI: " + std::to_string(fu.k.m_lpi));
+ 
+                 // Output latency is max(input_latency) + own_latency
+-                int out_latency = 0;
+-                for (const auto &in_edge: node->inEdges())
++                int in_latency = 0;
++                for (const auto &in_data_node : node->inNodes())
+                 {
+                     // FIXME: ASSERT(DATA), ASSERT(FLUIDDATA)
+-                    const auto port = g.metadata(in_edge).get<Input>().port;
+-                    const auto own_latency = fu.line_consumption[port] - fu.border_size;
+-                    const auto in_latency = fg.metadata(in_edge->srcNode()).get<FluidData>().latency;
+-                    out_latency = std::max(out_latency, in_latency + own_latency);
++                    in_latency = std::max(in_latency, fg.metadata(in_data_node).get<FluidData>().latency);
+                 }
++                const int out_latency = in_latency + own_latency;
+ 
+                 for (const auto &out_data_node : node->outNodes())
+                 {
+@@ -1083,7 +1018,7 @@ void cv::gimpl::GFluidExecutable::makeReshape(const std::vector<gapi::own::Rect>
+ 
+             if (buf_idx >= 0)
+             {
+-                agent->in_views[in_idx].priv().allocate(fu.line_consumption[in_idx], fu.border);
++                agent->in_views[in_idx].priv().allocate(fu.line_consumption, fu.border);
+             }
+         }
+ 
+diff --git a/modules/gapi/src/backends/fluid/gfluidbackend.hpp b/modules/gapi/src/backends/fluid/gfluidbackend.hpp
+index d540999783..ba8b9771f8 100644
+--- a/modules/gapi/src/backends/fluid/gfluidbackend.hpp
++++ b/modules/gapi/src/backends/fluid/gfluidbackend.hpp
+@@ -4,12 +4,10 @@
+ //
+ // Copyright (C) 2018 Intel Corporation
+ 
++
+ #ifndef OPENCV_GAPI_FLUID_BACKEND_HPP
+ #define OPENCV_GAPI_FLUID_BACKEND_HPP
+ 
+-// FIXME? Actually gfluidbackend.hpp is not included anywhere
+-// and can be placed in gfluidbackend.cpp
+-
+ #include "opencv2/gapi/garg.hpp"
+ #include "opencv2/gapi/gproto.hpp"
+ #include "opencv2/gapi/fluid/gfluidkernel.hpp"
+@@ -27,7 +25,7 @@ struct FluidUnit
+     GFluidKernel k;
+     gapi::fluid::BorderOpt border;
+     int border_size;
+-    std::vector<int> line_consumption;
++    int line_consumption;
+     double ratio;
+ };
+ 
+@@ -92,8 +90,8 @@ public:
+ private:
+     // FIXME!!!
+     // move to another class
+-    virtual int firstWindow(std::size_t inPort) const = 0;
+-    virtual std::pair<int,int> linesReadAndnextWindow(std::size_t inPort) const = 0;
++    virtual int firstWindow() const = 0;
++    virtual std::pair<int,int> linesReadAndnextWindow() const = 0;
+ };
+ 
+ class GFluidExecutable final: public GIslandExecutable
+diff --git a/modules/gapi/src/backends/fluid/gfluidbuffer.cpp b/modules/gapi/src/backends/fluid/gfluidbuffer.cpp
+index 0bfdd66349..6672ea2724 100644
+--- a/modules/gapi/src/backends/fluid/gfluidbuffer.cpp
++++ b/modules/gapi/src/backends/fluid/gfluidbuffer.cpp
+@@ -402,6 +402,20 @@ fluid::ViewPrivWithoutOwnBorder::ViewPrivWithoutOwnBorder(const Buffer *parent,
+     m_border_size = borderSize;
+ }
+ 
++const uint8_t* fluid::ViewPrivWithoutOwnBorder::InLineB(int index) const
++{
++    GAPI_DbgAssert(m_p);
++
++    const auto &p_priv = m_p->priv();
++
++    GAPI_DbgAssert(index >= -m_border_size
++                && index <  -m_border_size + m_lines_next_iter);
++
++    const int log_idx = m_read_caret + index;
++
++    return p_priv.storage().inLineB(log_idx, m_p->meta().size.height);
++}
++
+ void fluid::ViewPrivWithoutOwnBorder::allocate(int lineConsumption, BorderOpt)
+ {
+     initCache(lineConsumption);
+@@ -461,6 +475,17 @@ std::size_t fluid::ViewPrivWithOwnBorder::size() const
+     return m_own_storage.size();
+ }
+ 
++const uint8_t* fluid::ViewPrivWithOwnBorder::InLineB(int index) const
++{
++    GAPI_DbgAssert(m_p);
++    GAPI_DbgAssert(index >= -m_border_size
++                && index <  -m_border_size + m_lines_next_iter);
++
++    const int log_idx = m_read_caret + index;
++
++    return m_own_storage.inLineB(log_idx, m_p->meta().size.height);
++}
++
+ bool fluid::View::ready() const
+ {
+     return m_priv->ready();
+@@ -519,9 +544,6 @@ void fluid::Buffer::Priv::allocate(BorderOpt border,
+     // Init physical buffer
+ 
+     // FIXME? combine line_consumption with skew?
+-    // FIXME? This formula serves general case to avoid possible deadlock,
+-    // in some cases this value can be smaller:
+-    // 2 lines produced, 2 consumed, data_height can be 2, not 3
+     auto data_height = std::max(line_consumption, skew) + m_writer_lpi - 1;
+ 
+     m_storage = createStorage(data_height,
+@@ -619,6 +641,13 @@ int fluid::Buffer::Priv::linesReady() const
+     }
+ }
+ 
++uint8_t* fluid::Buffer::Priv::OutLineB(int index)
++{
++    GAPI_DbgAssert(index >= 0 && index < m_writer_lpi);
++
++    return m_storage->ptr(m_write_caret + index);
++}
++
+ int fluid::Buffer::Priv::lpi() const
+ {
+     // FIXME:
+diff --git a/modules/gapi/src/backends/fluid/gfluidbuffer_priv.hpp b/modules/gapi/src/backends/fluid/gfluidbuffer_priv.hpp
+index 5925489ddf..1f3eadc114 100644
+--- a/modules/gapi/src/backends/fluid/gfluidbuffer_priv.hpp
++++ b/modules/gapi/src/backends/fluid/gfluidbuffer_priv.hpp
+@@ -197,6 +197,9 @@ public:
+ 
+     // Does the view have enough unread lines for next iteration
+     bool ready() const;
++
++    // API used (indirectly) by user code
++    virtual const uint8_t* InLineB(int index) const = 0;
+ };
+ 
+ class ViewPrivWithoutOwnBorder final : public View::Priv
+@@ -209,6 +212,9 @@ public:
+     virtual void prepareToRead() override;
+ 
+     inline virtual std::size_t size() const override { return 0; }
++
++    // API used (indirectly) by user code
++    virtual const uint8_t* InLineB(int index) const override;
+ };
+ 
+ class ViewPrivWithOwnBorder final : public View::Priv
+@@ -222,6 +228,9 @@ public:
+     virtual void allocate(int lineConsumption, BorderOpt border) override;
+     virtual void prepareToRead() override;
+     virtual std::size_t size() const override;
++
++    // API used (indirectly) by user code
++    virtual const uint8_t* InLineB(int index) const override;
+ };
+ 
+ void debugBufferPriv(const Buffer& buffer, std::ostream &os);
+@@ -281,6 +290,7 @@ public:
+     inline int writer_lpi()     const { return m_writer_lpi; }
+ 
+     // API used (indirectly) by user code
++    uint8_t* OutLineB(int index = 0);
+     int lpi() const;
+ 
+     inline int readStart()   const { return m_readStart; }
+diff --git a/modules/gapi/test/gapi_fluid_resize_test.cpp b/modules/gapi/test/gapi_fluid_resize_test.cpp
+index dbffd394bc..bc0b991e66 100644
+--- a/modules/gapi/test/gapi_fluid_resize_test.cpp
++++ b/modules/gapi/test/gapi_fluid_resize_test.cpp
+@@ -717,77 +717,4 @@ INSTANTIATE_TEST_CASE_P(ResizeTestCPU, BlursAfterResizeTest,
+                                        std::make_tuple(cv::Size{64,64},
+                                                        cv::Size{49,49}, cv::Rect{0,39,49,10}))));
+ 
+-struct NV12PlusResizeTest : public TestWithParam <std::tuple<cv::Size, cv::Size, cv::Rect>> {};
+-TEST_P(NV12PlusResizeTest, Test)
+-{
+-    cv::Size y_sz, out_sz;
+-    cv::Rect roi;
+-    std::tie(y_sz, out_sz, roi) = GetParam();
+-    int interp = cv::INTER_LINEAR;
+-
+-    cv::Size uv_sz(y_sz.width / 2, y_sz.height / 2);
+-    cv::Size in_sz(y_sz.width, y_sz.height*3/2);
+-
+-    cv::Mat in_mat = cv::Mat(in_sz, CV_8UC1);
+-
+-    cv::Scalar mean   = cv::Scalar(127.0f);
+-    cv::Scalar stddev = cv::Scalar(40.f);
+-    cv::randn(in_mat, mean, stddev);
+-
+-    cv::Mat y_mat  = cv::Mat(y_sz, CV_8UC1, in_mat.data);
+-    cv::Mat uv_mat = cv::Mat(uv_sz, CV_8UC2, in_mat.data + in_mat.step1() * y_sz.height);
+-    cv::Mat out_mat, out_mat_ocv;
+-
+-    cv::GMat y, uv;
+-    auto rgb = cv::gapi::NV12toRGB(y, uv);
+-    auto out = cv::gapi::resize(rgb, out_sz, 0, 0, interp);
+-    cv::GComputation c(cv::GIn(y, uv), cv::GOut(out));
+-
+-    auto pkg = cv::gapi::combine(fluidTestPackage, cv::gapi::core::fluid::kernels(), cv::unite_policy::KEEP);
+-
+-    c.apply(cv::gin(y_mat, uv_mat), cv::gout(out_mat)
+-           ,cv::compile_args(pkg, cv::GFluidOutputRois{{to_own(roi)}}));
+-
+-    cv::Mat rgb_mat;
+-    cv::cvtColor(in_mat, rgb_mat, cv::COLOR_YUV2RGB_NV12);
+-    cv::resize(rgb_mat, out_mat_ocv, out_sz, 0, 0, interp);
+-
+-    EXPECT_EQ(0, cv::countNonZero(out_mat(roi) != out_mat_ocv(roi)));
+-}
+-
+-INSTANTIATE_TEST_CASE_P(Fluid, NV12PlusResizeTest,
+-                        Values(std::make_tuple(cv::Size{8, 8},
+-                                               cv::Size{4, 4}, cv::Rect{0, 0, 4, 4})
+-                              ,std::make_tuple(cv::Size{8, 8},
+-                                               cv::Size{4, 4}, cv::Rect{0, 0, 4, 1})
+-                              ,std::make_tuple(cv::Size{8, 8},
+-                                               cv::Size{4, 4}, cv::Rect{0, 1, 4, 2})
+-                              ,std::make_tuple(cv::Size{8, 8},
+-                                               cv::Size{4, 4}, cv::Rect{0, 2, 4, 2})
+-                              ,std::make_tuple(cv::Size{64, 64},
+-                                               cv::Size{49, 49}, cv::Rect{0,  0, 49, 49})
+-                              ,std::make_tuple(cv::Size{64, 64},
+-                                               cv::Size{49, 49}, cv::Rect{0,  0, 49, 12})
+-                              ,std::make_tuple(cv::Size{64, 64},
+-                                               cv::Size{49, 49}, cv::Rect{0, 11, 49, 15})
+-                              ,std::make_tuple(cv::Size{64, 64},
+-                                               cv::Size{49, 49}, cv::Rect{0, 39, 49, 10})
+-                              ,std::make_tuple(cv::Size{1920, 1080},
+-                                               cv::Size{ 320,  256}, cv::Rect{0, 0, 320, 64})
+-                              ,std::make_tuple(cv::Size{1920, 1080},
+-                                               cv::Size{ 320,  256}, cv::Rect{0, 64, 320, 64})
+-                              ,std::make_tuple(cv::Size{1920, 1080},
+-                                               cv::Size{ 320,  256}, cv::Rect{0, 128, 320, 64})
+-                              ,std::make_tuple(cv::Size{1920, 1080},
+-                                               cv::Size{ 320,  256}, cv::Rect{0, 192, 320, 64})
+-                              ,std::make_tuple(cv::Size{256, 400},
+-                                               cv::Size{ 32,  64}, cv::Rect{0,  0, 32, 16})
+-                              ,std::make_tuple(cv::Size{256, 400},
+-                                               cv::Size{ 32,  64}, cv::Rect{0, 16, 32, 16})
+-                              ,std::make_tuple(cv::Size{256, 400},
+-                                               cv::Size{ 32,  64}, cv::Rect{0, 32, 32, 16})
+-                              ,std::make_tuple(cv::Size{256, 400},
+-                                               cv::Size{ 32,  64}, cv::Rect{0, 48, 32, 16})
+-                               ));
+-
+ } // namespace opencv_test
+diff --git a/modules/gapi/test/gapi_fluid_test.cpp b/modules/gapi/test/gapi_fluid_test.cpp
+index 0f5a58e0a9..5b3501175e 100644
+--- a/modules/gapi/test/gapi_fluid_test.cpp
++++ b/modules/gapi/test/gapi_fluid_test.cpp
+@@ -710,46 +710,4 @@ TEST(FluidTwoIslands, SanityTest)
+     EXPECT_EQ(0, countNonZero(in_mat2 != out_mat2));
+ }
+ 
+-struct NV12RoiTest : public TestWithParam <std::pair<cv::Size, cv::Rect>> {};
+-TEST_P(NV12RoiTest, Test)
+-{
+-    cv::Size y_sz;
+-    cv::Rect roi;
+-    std::tie(y_sz, roi) = GetParam();
+-
+-    cv::Size uv_sz(y_sz.width / 2, y_sz.height / 2);
+-    cv::Size in_sz(y_sz.width, y_sz.height*3/2);
+-
+-    cv::Mat in_mat = cv::Mat(in_sz, CV_8UC1);
+-
+-    cv::Scalar mean   = cv::Scalar(127.0f);
+-    cv::Scalar stddev = cv::Scalar(40.f);
+-    cv::randn(in_mat, mean, stddev);
+-
+-    cv::Mat y_mat  = cv::Mat(y_sz, CV_8UC1, in_mat.data);
+-    cv::Mat uv_mat = cv::Mat(uv_sz, CV_8UC2, in_mat.data + in_mat.step1() * y_sz.height);
+-    cv::Mat out_mat, out_mat_ocv;
+-
+-    cv::GMat y, uv;
+-    auto rgb = cv::gapi::NV12toRGB(y, uv);
+-    cv::GComputation c(cv::GIn(y, uv), cv::GOut(rgb));
+-
+-    c.apply(cv::gin(y_mat, uv_mat), cv::gout(out_mat), cv::compile_args(fluidTestPackage, cv::GFluidOutputRois{{to_own(roi)}}));
+-
+-    cv::cvtColor(in_mat, out_mat_ocv, cv::COLOR_YUV2RGB_NV12);
+-
+-    EXPECT_EQ(0, cv::countNonZero(out_mat(roi) != out_mat_ocv(roi)));
+-}
+-
+-INSTANTIATE_TEST_CASE_P(Fluid, NV12RoiTest,
+-                        Values(std::make_pair(cv::Size{8, 8}, cv::Rect{0, 0, 8, 2})
+-                              ,std::make_pair(cv::Size{8, 8}, cv::Rect{0, 2, 8, 2})
+-                              ,std::make_pair(cv::Size{8, 8}, cv::Rect{0, 4, 8, 2})
+-                              ,std::make_pair(cv::Size{8, 8}, cv::Rect{0, 6, 8, 2})
+-                              ,std::make_pair(cv::Size{1920, 1080}, cv::Rect{0,   0, 1920, 270})
+-                              ,std::make_pair(cv::Size{1920, 1080}, cv::Rect{0, 270, 1920, 270})
+-                              ,std::make_pair(cv::Size{1920, 1080}, cv::Rect{0, 540, 1920, 270})
+-                              ,std::make_pair(cv::Size{1920, 1080}, cv::Rect{0, 710, 1920, 270})
+-                              ));
+-
+ } // namespace opencv_test
+diff --git a/modules/gapi/test/gapi_fluid_test_kernels.cpp b/modules/gapi/test/gapi_fluid_test_kernels.cpp
+index d490bafe2c..6bd06fe271 100644
+--- a/modules/gapi/test/gapi_fluid_test_kernels.cpp
++++ b/modules/gapi/test/gapi_fluid_test_kernels.cpp
+@@ -416,76 +416,6 @@ GAPI_FLUID_KERNEL(FSum2MatsAndScalar, TSum2MatsAndScalar, false)
+     }
+ };
+ 
+-static const int ITUR_BT_601_CY = 1220542;
+-static const int ITUR_BT_601_CUB = 2116026;
+-static const int ITUR_BT_601_CUG = -409993;
+-static const int ITUR_BT_601_CVG = -852492;
+-static const int ITUR_BT_601_CVR = 1673527;
+-static const int ITUR_BT_601_SHIFT = 20;
+-
+-static inline void uvToRGBuv(const uchar u, const uchar v, int& ruv, int& guv, int& buv)
+-{
+-    int uu, vv;
+-    uu = int(u) - 128;
+-    vv = int(v) - 128;
+-
+-    ruv = (1 << (ITUR_BT_601_SHIFT - 1)) + ITUR_BT_601_CVR * vv;
+-    guv = (1 << (ITUR_BT_601_SHIFT - 1)) + ITUR_BT_601_CVG * vv + ITUR_BT_601_CUG * uu;
+-    buv = (1 << (ITUR_BT_601_SHIFT - 1)) + ITUR_BT_601_CUB * uu;
+-}
+-
+-static inline void yRGBuvToRGB(const uchar vy, const int ruv, const int guv, const int buv,
+-                                uchar& r, uchar& g, uchar& b)
+-{
+-    int y = std::max(0, vy - 16) * ITUR_BT_601_CY;
+-    r = saturate_cast<uchar>((y + ruv) >> ITUR_BT_601_SHIFT);
+-    g = saturate_cast<uchar>((y + guv) >> ITUR_BT_601_SHIFT);
+-    b = saturate_cast<uchar>((y + buv) >> ITUR_BT_601_SHIFT);
+-}
+-
+-GAPI_FLUID_KERNEL(FNV12toRGB, cv::gapi::imgproc::GNV12toRGB, false)
+-{
+-    static const int Window = 1;
+-    static const int LPI    = 2;
+-    static const auto Kind = GFluidKernel::Kind::NV12toRGB;
+-
+-    static void run(const cv::gapi::fluid::View   &in1,
+-                    const cv::gapi::fluid::View   &in2,
+-                          cv::gapi::fluid::Buffer &out)
+-    {
+-        const auto w = out.length();
+-
+-        GAPI_Assert(w % 2 == 0);
+-        GAPI_Assert(out.lpi() == 2);
+-
+-        const uchar* uv_row = in2.InLineB(0);
+-        const uchar*   y_rows[] = {in1. InLineB(0), in1. InLineB(1)};
+-              uchar* out_rows[] = {out.OutLineB(0), out.OutLineB(1)};
+-
+-        for (int i = 0; i < w/2; i++)
+-        {
+-            uchar u = uv_row[2*i];
+-            uchar v = uv_row[2*i + 1];
+-            int ruv, guv, buv;
+-            uvToRGBuv(u, v, ruv, guv, buv);
+-
+-            for (int y = 0; y < 2; y++)
+-            {
+-                for (int x = 0; x < 2; x++)
+-                {
+-                    uchar vy = y_rows[y][2*i + x];
+-                    uchar r, g, b;
+-                    yRGBuvToRGB(vy, ruv, guv, buv, r, g, b);
+-
+-                    out_rows[y][3*(2*i + x)]     = r;
+-                    out_rows[y][3*(2*i + x) + 1] = g;
+-                    out_rows[y][3*(2*i + x) + 2] = b;
+-                }
+-            }
+-        }
+-    }
+-};
+-
+ cv::gapi::GKernelPackage fluidTestPackage = cv::gapi::kernels
+         <FAddSimple
+         ,FAddCSimple
+@@ -498,7 +428,6 @@ cv::gapi::GKernelPackage fluidTestPackage = cv::gapi::kernels
+         ,FBlur5x5_2lpi
+         ,FIdentity
+         ,FId7x7
+-        ,FNV12toRGB
+         ,FPlusRow0
+         ,FSum2MatsAndScalar
+         ,FTestSplit3

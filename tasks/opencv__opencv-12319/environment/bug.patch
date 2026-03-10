@@ -1,0 +1,551 @@
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index bc18695521..ad4741d008 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -699,9 +699,9 @@ public:
+         }
+     }
+ 
+-    void reuseOrCreate(const MatShape& shape, const LayerPin& lp, Mat& dst, bool use_half)
++    void reuseOrCreate(const MatShape& shape, const LayerPin& lp, Mat& dst, bool forceCreate, bool use_half)
+     {
+-        if (!DNN_DISABLE_MEMORY_OPTIMIZATIONS)
++        if (!DNN_DISABLE_MEMORY_OPTIMIZATIONS && !forceCreate)
+         {
+             Mat bestBlob;
+             LayerPin bestBlobPin;
+@@ -747,7 +747,7 @@ public:
+ 
+     void allocateBlobsForLayer(LayerData &ld, const LayerShapes& layerShapes,
+                                std::vector<LayerPin>& pinsForInternalBlobs,
+-                               bool use_half = false)
++                               bool forceCreate = false, bool use_half = false)
+     {
+         CV_TRACE_FUNCTION();
+ 
+@@ -818,7 +818,7 @@ public:
+                         reuse(ld.inputBlobsId[0], blobPin);
+                     }
+                     else
+-                        reuseOrCreate(shapes[index], blobPin, *blobs[index], use_half);
++                        reuseOrCreate(shapes[index], blobPin, *blobs[index], forceCreate, use_half);
+                 }
+             }
+         }
+@@ -1607,6 +1607,7 @@ struct Net::Impl
+ 
+         std::vector<LayerPin> pinsForInternalBlobs;
+         blobManager.allocateBlobsForLayer(ld, layerShapesIt->second, pinsForInternalBlobs,
++                                          preferableBackend == DNN_BACKEND_INFERENCE_ENGINE,
+                                           preferableBackend == DNN_BACKEND_OPENCV &&
+                                           preferableTarget == DNN_TARGET_OPENCL_FP16);
+         ld.outputBlobsWrappers.resize(ld.outputBlobs.size());
+diff --git a/modules/dnn/src/layers/convolution_layer.cpp b/modules/dnn/src/layers/convolution_layer.cpp
+index 169e280840..02f5ac8d60 100644
+--- a/modules/dnn/src/layers/convolution_layer.cpp
++++ b/modules/dnn/src/layers/convolution_layer.cpp
+@@ -81,7 +81,6 @@ public:
+ 
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+-#ifdef HAVE_INF_ENGINE
+         if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+         {
+             if (type == "Convolution")
+@@ -92,19 +91,13 @@ public:
+                 const int outGroupCn = blobs[0].size[1];  // Weights are in IOHW layout
+                 const int group = numOutput / outGroupCn;
+                 if (group != 1)
+-                {
+-#if INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2018R3)
+-                    return preferableTarget == DNN_TARGET_CPU;
+-#endif
+                     return false;
+-                }
+                 if (preferableTarget == DNN_TARGET_OPENCL || preferableTarget == DNN_TARGET_OPENCL_FP16)
+                     return dilation.width == 1 && dilation.height == 1;
+                 return true;
+             }
+         }
+         else
+-#endif  // HAVE_INF_ENGINE
+             return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+     }
+ 
+diff --git a/modules/dnn/src/layers/elementwise_layers.cpp b/modules/dnn/src/layers/elementwise_layers.cpp
+index 0a5ed54ca8..c95bdcd509 100644
+--- a/modules/dnn/src/layers/elementwise_layers.cpp
++++ b/modules/dnn/src/layers/elementwise_layers.cpp
+@@ -599,8 +599,7 @@ struct ELUFunctor
+ 
+     bool supportBackend(int backendId, int)
+     {
+-        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE;
++        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+     }
+ 
+     void apply(const float* srcptr, float* dstptr, int len, size_t planeSize, int cn0, int cn1) const
+@@ -654,8 +653,8 @@ struct ELUFunctor
+ #ifdef HAVE_INF_ENGINE
+     InferenceEngine::CNNLayerPtr initInfEngine(InferenceEngine::LayerParams& lp)
+     {
+-        lp.type = "ELU";
+-        return InferenceEngine::CNNLayerPtr(new InferenceEngine::CNNLayer(lp));
++        CV_Error(Error::StsNotImplemented, "ELU");
++        return InferenceEngine::CNNLayerPtr();
+     }
+ #endif  // HAVE_INF_ENGINE
+ 
+diff --git a/modules/dnn/src/layers/lrn_layer.cpp b/modules/dnn/src/layers/lrn_layer.cpp
+index 8d9f28dbb3..8ff8390bea 100644
+--- a/modules/dnn/src/layers/lrn_layer.cpp
++++ b/modules/dnn/src/layers/lrn_layer.cpp
+@@ -91,8 +91,8 @@ public:
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+         return backendId == DNN_BACKEND_OPENCV ||
+-               backendId == DNN_BACKEND_HALIDE ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE && (preferableTarget != DNN_TARGET_MYRIAD || type == CHANNEL_NRM);
++               backendId == DNN_BACKEND_HALIDE && haveHalide() ||
++               backendId == DNN_BACKEND_INFERENCE_ENGINE && haveInfEngine();
+     }
+ 
+ #ifdef HAVE_OPENCL
+diff --git a/modules/dnn/src/op_inf_engine.hpp b/modules/dnn/src/op_inf_engine.hpp
+index 841cb13e13..a811f4eae7 100644
+--- a/modules/dnn/src/op_inf_engine.hpp
++++ b/modules/dnn/src/op_inf_engine.hpp
+@@ -24,7 +24,6 @@
+ 
+ #define INF_ENGINE_RELEASE_2018R1 2018010000
+ #define INF_ENGINE_RELEASE_2018R2 2018020000
+-#define INF_ENGINE_RELEASE_2018R3 2018030000
+ 
+ #ifndef INF_ENGINE_RELEASE
+ #warning("IE version have not been provided via command-line. Using 2018R2 by default")
+@@ -32,7 +31,6 @@
+ #endif
+ 
+ #define INF_ENGINE_VER_MAJOR_GT(ver) (((INF_ENGINE_RELEASE) / 10000) > ((ver) / 10000))
+-#define INF_ENGINE_VER_MAJOR_GE(ver) (((INF_ENGINE_RELEASE) / 10000) >= ((ver) / 10000))
+ 
+ #endif  // HAVE_INF_ENGINE
+ 
+diff --git a/modules/dnn/src/tensorflow/tf_importer.cpp b/modules/dnn/src/tensorflow/tf_importer.cpp
+index 264d3cbc86..97701a1826 100644
+--- a/modules/dnn/src/tensorflow/tf_importer.cpp
++++ b/modules/dnn/src/tensorflow/tf_importer.cpp
+@@ -737,18 +737,11 @@ void TFImporter::populateNet(Net dstNet)
+         int predictedLayout = predictOutputDataLayout(net, layer, data_layouts);
+         data_layouts[name] = predictedLayout;
+ 
+-        if (type == "Conv2D" || type == "SpaceToBatchND" || type == "DepthwiseConv2dNative" || type == "Pad")
++        if (type == "Conv2D" || type == "SpaceToBatchND" || type == "DepthwiseConv2dNative")
+         {
+             // The first node of dilated convolution subgraph.
+             // Extract input node, dilation rate and paddings.
+             std::string input = layer.input(0);
+-            StrIntVector next_layers;
+-            if (type == "SpaceToBatchND" || type == "Pad")
+-            {
+-                next_layers = getNextLayers(net, name, "Conv2D");
+-                if (next_layers.empty())
+-                    next_layers = getNextLayers(net, name, "DepthwiseConv2dNative");
+-            }
+             if (type == "SpaceToBatchND")
+             {
+                 // op: "SpaceToBatchND"
+@@ -769,57 +762,17 @@ void TFImporter::populateNet(Net dstNet)
+                 layerParams.set("pad_h", paddings.at<float>(0));
+                 layerParams.set("pad_w", paddings.at<float>(2));
+ 
++                StrIntVector next_layers = getNextLayers(net, name, "Conv2D");
++                if (next_layers.empty())
++                {
++                    next_layers = getNextLayers(net, name, "DepthwiseConv2dNative");
++                }
+                 CV_Assert(next_layers.size() == 1);
+                 layer = net.node(next_layers[0].second);
+                 layers_to_ignore.insert(next_layers[0].first);
+                 name = layer.name();
+                 type = layer.op();
+             }
+-            else if (type == "Pad")
+-            {
+-                Mat paddings = getTensorContent(getConstBlob(layer, value_id, 1));
+-                CV_Assert(paddings.type() == CV_32SC1);
+-                if (paddings.total() == 8)
+-                {
+-                    // Perhabs, we have NHWC padding dimensions order.
+-                    //  N    H    W    C
+-                    // 0 1  2 3  4 5  6 7
+-                    std::swap(paddings.at<int32_t>(2), paddings.at<int32_t>(6));
+-                    std::swap(paddings.at<int32_t>(3), paddings.at<int32_t>(7));
+-                    //  N    C    W    H
+-                    // 0 1  2 3  4 5  6 7
+-                    std::swap(paddings.at<int32_t>(4), paddings.at<int32_t>(6));
+-                    std::swap(paddings.at<int32_t>(5), paddings.at<int32_t>(7));
+-                    //  N    C    H    W
+-                    // 0 1  2 3  4 5  6 7
+-                }
+-                if (next_layers.empty() || paddings.total() != 8 ||
+-                    paddings.at<int32_t>(4) != paddings.at<int32_t>(5) ||
+-                    paddings.at<int32_t>(6) != paddings.at<int32_t>(7))
+-                {
+-                    // Just a single padding layer.
+-                    layerParams.set("paddings", DictValue::arrayInt<int*>((int*)paddings.data, paddings.total()));
+-
+-                    int id = dstNet.addLayer(name, "Padding", layerParams);
+-                    layer_id[name] = id;
+-
+-                    connect(layer_id, dstNet, parsePin(input), id, 0);
+-                    continue;
+-                }
+-                else
+-                {
+-                    // Merge with subsequent convolutional layer.
+-                    CV_Assert(next_layers.size() == 1);
+-
+-                    layerParams.set("pad_h", paddings.at<int32_t>(4));
+-                    layerParams.set("pad_w", paddings.at<int32_t>(6));
+-
+-                    layer = net.node(next_layers[0].second);
+-                    layers_to_ignore.insert(next_layers[0].first);
+-                    name = layer.name();
+-                    type = layer.op();
+-                }
+-            }
+ 
+             // For the object detection networks, TensorFlow Object Detection API
+             // predicts deltas for bounding boxes in yxYX (ymin, xmin, ymax, xmax)
+@@ -831,7 +784,7 @@ void TFImporter::populateNet(Net dstNet)
+             layerParams.set("bias_term", false);
+             layerParams.blobs.resize(1);
+ 
+-            next_layers = getNextLayers(net, name, "BiasAdd");
++            StrIntVector next_layers = getNextLayers(net, name, "BiasAdd");
+             if (next_layers.size() == 1) {
+                 layerParams.set("bias_term", true);
+                 layerParams.blobs.resize(2);
+@@ -1463,6 +1416,31 @@ void TFImporter::populateNet(Net dstNet)
+                 }
+             }
+         }
++        else if (type == "Pad")
++        {
++            Mat paddings = getTensorContent(getConstBlob(layer, value_id, 1));
++            CV_Assert(paddings.type() == CV_32SC1);
++            if (paddings.total() == 8)
++            {
++                // Perhabs, we have NHWC padding dimensions order.
++                //  N    H    W    C
++                // 0 1  2 3  4 5  6 7
++                std::swap(*paddings.ptr<int32_t>(0, 2), *paddings.ptr<int32_t>(0, 6));
++                std::swap(*paddings.ptr<int32_t>(0, 3), *paddings.ptr<int32_t>(0, 7));
++                //  N    C    W    H
++                // 0 1  2 3  4 5  6 7
++                std::swap(*paddings.ptr<int32_t>(0, 4), *paddings.ptr<int32_t>(0, 6));
++                std::swap(*paddings.ptr<int32_t>(0, 5), *paddings.ptr<int32_t>(0, 7));
++                //  N    C    H    W
++                // 0 1  2 3  4 5  6 7
++            }
++            layerParams.set("paddings", DictValue::arrayInt<int*>((int*)paddings.data, paddings.total()));
++
++            int id = dstNet.addLayer(name, "Padding", layerParams);
++            layer_id[name] = id;
++
++            connect(layer_id, dstNet, parsePin(layer.input(0)), id, 0);
++        }
+         else if (type == "FusedBatchNorm")
+         {
+             // op: "FusedBatchNorm"
+diff --git a/modules/dnn/test/test_backends.cpp b/modules/dnn/test/test_backends.cpp
+index 309f0010e4..60beca272b 100644
+--- a/modules/dnn/test/test_backends.cpp
++++ b/modules/dnn/test/test_backends.cpp
+@@ -222,12 +222,9 @@ TEST_P(DNNTestNetwork, OpenPose_pose_mpi_faster_4_stages)
+ 
+ TEST_P(DNNTestNetwork, OpenFace)
+ {
+-#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE < 2018030000
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+-        throw SkipTestException("Test is enabled starts from OpenVINO 2018R3");
+-#endif
+     if (backend == DNN_BACKEND_HALIDE ||
+-        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16))
++        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16) ||
++        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD))
+         throw SkipTestException("");
+     processNet("dnn/openface_nn4.small2.v1.t7", "", Size(96, 96), "");
+ }
+@@ -256,19 +253,12 @@ TEST_P(DNNTestNetwork, Inception_v2_SSD_TensorFlow)
+ 
+ TEST_P(DNNTestNetwork, DenseNet_121)
+ {
+-    if (backend == DNN_BACKEND_HALIDE)
++    if ((backend == DNN_BACKEND_HALIDE) ||
++        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16) ||
++        (backend == DNN_BACKEND_INFERENCE_ENGINE && (target == DNN_TARGET_OPENCL_FP16 ||
++                                                     target == DNN_TARGET_MYRIAD)))
+         throw SkipTestException("");
+-
+-    float l1 = 0.0, lInf = 0.0;
+-    if (target == DNN_TARGET_OPENCL_FP16)
+-    {
+-        l1 = 9e-3; lInf = 5e-2;
+-    }
+-    else if (target == DNN_TARGET_MYRIAD)
+-    {
+-        l1 = 6e-2; lInf = 0.27;
+-    }
+-    processNet("dnn/DenseNet_121.caffemodel", "dnn/DenseNet_121.prototxt", Size(224, 224), "", "", l1, lInf);
++    processNet("dnn/DenseNet_121.caffemodel", "dnn/DenseNet_121.prototxt", Size(224, 224), "", "caffe");
+ }
+ 
+ TEST_P(DNNTestNetwork, FastNeuralStyle_eccv16)
+diff --git a/modules/dnn/test/test_caffe_importer.cpp b/modules/dnn/test/test_caffe_importer.cpp
+index 4491fde5a9..b957b8caf4 100644
+--- a/modules/dnn/test/test_caffe_importer.cpp
++++ b/modules/dnn/test/test_caffe_importer.cpp
+@@ -374,6 +374,14 @@ TEST(Reproducibility_GoogLeNet_fp16, Accuracy)
+ TEST_P(Test_Caffe_nets, Colorization)
+ {
+     checkBackend();
++    if ((backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16) ||
++        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD) ||
++        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
++        throw SkipTestException("");
++
++    const float l1 = 4e-4;
++    const float lInf = 3e-3;
++
+     Mat inp = blobFromNPY(_tf("colorization_inp.npy"));
+     Mat ref = blobFromNPY(_tf("colorization_out.npy"));
+     Mat kernel = blobFromNPY(_tf("colorization_pts_in_hull.npy"));
+@@ -390,15 +398,11 @@ TEST_P(Test_Caffe_nets, Colorization)
+     net.setInput(inp);
+     Mat out = net.forward();
+ 
+-    // Reference output values are in range [-29.1, 69.5]
+-    const double l1 = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.21 : 4e-4;
+-    const double lInf = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 5.3 : 3e-3;
+     normAssert(out, ref, "", l1, lInf);
+ }
+ 
+-TEST_P(Test_Caffe_nets, DenseNet_121)
++TEST(Reproducibility_DenseNet_121, Accuracy)
+ {
+-    checkBackend();
+     const string proto = findDataFile("dnn/DenseNet_121.prototxt", false);
+     const string model = findDataFile("dnn/DenseNet_121.caffemodel", false);
+ 
+@@ -407,23 +411,12 @@ TEST_P(Test_Caffe_nets, DenseNet_121)
+     Mat ref = blobFromNPY(_tf("densenet_121_output.npy"));
+ 
+     Net net = readNetFromCaffe(proto, model);
+-    net.setPreferableBackend(backend);
+-    net.setPreferableTarget(target);
++    net.setPreferableBackend(DNN_BACKEND_OPENCV);
+ 
+     net.setInput(inp);
+     Mat out = net.forward();
+ 
+-    // Reference is an array of 1000 values from a range [-6.16, 7.9]
+-    float l1 = default_l1, lInf = default_lInf;
+-    if (target == DNN_TARGET_OPENCL_FP16)
+-    {
+-        l1 = 0.017; lInf = 0.067;
+-    }
+-    else if (target == DNN_TARGET_MYRIAD)
+-    {
+-        l1 = 0.097; lInf = 0.52;
+-    }
+-    normAssert(out, ref, "", l1, lInf);
++    normAssert(out, ref);
+ }
+ 
+ TEST(Test_Caffe, multiple_inputs)
+diff --git a/modules/dnn/test/test_ie_models.cpp b/modules/dnn/test/test_ie_models.cpp
+index 9fefe4fd04..9013ce9774 100644
+--- a/modules/dnn/test/test_ie_models.cpp
++++ b/modules/dnn/test/test_ie_models.cpp
+@@ -177,8 +177,7 @@ TEST_P(DNNTestOpenVINO, models)
+     Target target = (dnn::Target)(int)get<0>(GetParam());
+     std::string modelName = get<1>(GetParam());
+ 
+-    if ((modelName == "semantic-segmentation-adas-0001" && target == DNN_TARGET_OPENCL_FP16) ||
+-        (modelName == "vehicle-license-plate-detection-barrier-0106"))
++    if (modelName == "semantic-segmentation-adas-0001" && target == DNN_TARGET_OPENCL_FP16)
+         throw SkipTestException("");
+ 
+     std::string precision = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? "FP16" : "FP32";
+diff --git a/modules/dnn/test/test_layers.cpp b/modules/dnn/test/test_layers.cpp
+index a31ce85d0f..93840fa20f 100644
+--- a/modules/dnn/test/test_layers.cpp
++++ b/modules/dnn/test/test_layers.cpp
+@@ -127,9 +127,15 @@ TEST_P(Test_Caffe_layers, Softmax)
+     testLayerUsingCaffeModels("layer_softmax");
+ }
+ 
+-TEST_P(Test_Caffe_layers, LRN)
++TEST_P(Test_Caffe_layers, LRN_spatial)
+ {
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
++        throw SkipTestException("");
+     testLayerUsingCaffeModels("layer_lrn_spatial");
++}
++
++TEST_P(Test_Caffe_layers, LRN_channels)
++{
+     testLayerUsingCaffeModels("layer_lrn_channels");
+ }
+ 
+diff --git a/modules/dnn/test/test_tf_importer.cpp b/modules/dnn/test/test_tf_importer.cpp
+index d95f6f5081..29cbf67a76 100644
+--- a/modules/dnn/test/test_tf_importer.cpp
++++ b/modules/dnn/test/test_tf_importer.cpp
+@@ -399,10 +399,8 @@ TEST_P(Test_TensorFlow_nets, opencv_face_detector_uint8)
+ TEST_P(Test_TensorFlow_nets, EAST_text_detection)
+ {
+     checkBackend();
+-#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE < 2018030000
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+-        throw SkipTestException("Test is enabled starts from OpenVINO 2018R3");
+-#endif
++    if (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD)
++        throw SkipTestException("");
+ 
+     std::string netPath = findDataFile("dnn/frozen_east_text_detection.pb", false);
+     std::string imgPath = findDataFile("cv/ximgproc/sources/08.png", false);
+@@ -427,25 +425,8 @@ TEST_P(Test_TensorFlow_nets, EAST_text_detection)
+     Mat scores = outs[0];
+     Mat geometry = outs[1];
+ 
+-    // Scores are in range [0, 1]. Geometry values are in range [-0.23, 290]
+-    double l1_scores = default_l1, lInf_scores = default_lInf;
+-    double l1_geometry = default_l1, lInf_geometry = default_lInf;
+-    if (target == DNN_TARGET_OPENCL_FP16)
+-    {
+-        lInf_scores = 0.11;
+-        l1_geometry = 0.28; lInf_geometry = 5.94;
+-    }
+-    else if (target == DNN_TARGET_MYRIAD)
+-    {
+-        lInf_scores = 0.214;
+-        l1_geometry = 0.47; lInf_geometry = 15.34;
+-    }
+-    else
+-    {
+-        l1_geometry = 1e-4, lInf_geometry = 3e-3;
+-    }
+-    normAssert(scores, blobFromNPY(refScoresPath), "scores", l1_scores, lInf_scores);
+-    normAssert(geometry, blobFromNPY(refGeometryPath), "geometry", l1_geometry, lInf_geometry);
++    normAssert(scores, blobFromNPY(refScoresPath), "scores");
++    normAssert(geometry, blobFromNPY(refGeometryPath), "geometry", 1e-4, 3e-3);
+ }
+ 
+ INSTANTIATE_TEST_CASE_P(/**/, Test_TensorFlow_nets, dnnBackendsAndTargets());
+diff --git a/modules/dnn/test/test_torch_importer.cpp b/modules/dnn/test/test_torch_importer.cpp
+index 13e3ddeacb..c07c5b39d8 100644
+--- a/modules/dnn/test/test_torch_importer.cpp
++++ b/modules/dnn/test/test_torch_importer.cpp
+@@ -242,23 +242,15 @@ TEST_P(Test_Torch_layers, net_residual)
+     runTorchNet("net_residual", "", false, true);
+ }
+ 
+-class Test_Torch_nets : public DNNTestLayer {};
++typedef testing::TestWithParam<Target> Test_Torch_nets;
+ 
+ TEST_P(Test_Torch_nets, OpenFace_accuracy)
+ {
+-#if defined(INF_ENGINE_RELEASE) && INF_ENGINE_RELEASE < 2018030000
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD)
+-        throw SkipTestException("Test is enabled starts from OpenVINO 2018R3");
+-#endif
+-    checkBackend();
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16)
+-        throw SkipTestException("");
+-
+     const string model = findDataFile("dnn/openface_nn4.small2.v1.t7", false);
+     Net net = readNetFromTorch(model);
+ 
+-    net.setPreferableBackend(backend);
+-    net.setPreferableTarget(target);
++    net.setPreferableBackend(DNN_BACKEND_OPENCV);
++    net.setPreferableTarget(GetParam());
+ 
+     Mat sample = imread(findDataFile("cv/shared/lena.png", false));
+     Mat sampleF32(sample.size(), CV_32FC3);
+@@ -272,16 +264,11 @@ TEST_P(Test_Torch_nets, OpenFace_accuracy)
+     Mat out = net.forward();
+ 
+     Mat outRef = readTorchBlob(_tf("net_openface_output.dat"), true);
+-    normAssert(out, outRef, "", default_l1, default_lInf);
++    normAssert(out, outRef);
+ }
+ 
+ TEST_P(Test_Torch_nets, ENet_accuracy)
+ {
+-    checkBackend();
+-    if (backend == DNN_BACKEND_INFERENCE_ENGINE ||
+-        (backend == DNN_BACKEND_OPENCV && target == DNN_TARGET_OPENCL_FP16))
+-        throw SkipTestException("");
+-
+     Net net;
+     {
+         const string model = findDataFile("dnn/Enet-model-best.net", false);
+@@ -289,8 +276,8 @@ TEST_P(Test_Torch_nets, ENet_accuracy)
+         ASSERT_TRUE(!net.empty());
+     }
+ 
+-    net.setPreferableBackend(backend);
+-    net.setPreferableTarget(target);
++    net.setPreferableBackend(DNN_BACKEND_OPENCV);
++    net.setPreferableTarget(GetParam());
+ 
+     Mat sample = imread(_tf("street.png", false));
+     Mat inputBlob = blobFromImage(sample, 1./255);
+@@ -327,7 +314,6 @@ TEST_P(Test_Torch_nets, ENet_accuracy)
+ //   -model models/instance_norm/feathers.t7
+ TEST_P(Test_Torch_nets, FastNeuralStyle_accuracy)
+ {
+-    checkBackend();
+     std::string models[] = {"dnn/fast_neural_style_eccv16_starry_night.t7",
+                             "dnn/fast_neural_style_instance_norm_feathers.t7"};
+     std::string targets[] = {"dnn/lena_starry_night.png", "dnn/lena_feathers.png"};
+@@ -337,8 +323,8 @@ TEST_P(Test_Torch_nets, FastNeuralStyle_accuracy)
+         const string model = findDataFile(models[i], false);
+         Net net = readNetFromTorch(model);
+ 
+-        net.setPreferableBackend(backend);
+-        net.setPreferableTarget(target);
++        net.setPreferableBackend(DNN_BACKEND_OPENCV);
++        net.setPreferableTarget(GetParam());
+ 
+         Mat img = imread(findDataFile("dnn/googlenet_1.png", false));
+         Mat inputBlob = blobFromImage(img, 1.0, Size(), Scalar(103.939, 116.779, 123.68), false);
+@@ -355,20 +341,12 @@ TEST_P(Test_Torch_nets, FastNeuralStyle_accuracy)
+         Mat ref = imread(findDataFile(targets[i]));
+         Mat refBlob = blobFromImage(ref, 1.0, Size(), Scalar(), false);
+ 
+-        if (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD)
+-        {
+-            double normL1 = cvtest::norm(refBlob, out, cv::NORM_L1) / refBlob.total();
+-            if (target == DNN_TARGET_MYRIAD)
+-                EXPECT_LE(normL1, 4.0f);
+-            else
+-                EXPECT_LE(normL1, 0.6f);
+-        }
+-        else
+-            normAssert(out, refBlob, "", 0.5, 1.1);
++        normAssert(out, refBlob, "", 0.5, 1.1);
+     }
+ }
+ 
+-INSTANTIATE_TEST_CASE_P(/**/, Test_Torch_nets, dnnBackendsAndTargets());
++INSTANTIATE_TEST_CASE_P(/**/, Test_Torch_nets, availableDnnTargets());
++
+ 
+ // Test a custom layer
+ // https://github.com/torch/nn/blob/master/doc/convolution.md#nn.SpatialUpSamplingNearest

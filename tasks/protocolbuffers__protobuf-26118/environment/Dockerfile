@@ -9,18 +9,30 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Java 11 (required by Bazel and rules_jvm_external)
+# Install Python (required by Bazel build system)
 RUN apt-get update && apt-get install -y \
-    openjdk-11-jdk \
-    unzip \
-    zip \
+    python3 \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Bazelisk (manages Bazel versions automatically)
-RUN curl -fsSL https://github.com/bazelbuild/bazelisk/releases/download/v1.24.1/bazelisk-linux-amd64 -o /usr/local/bin/bazel && \
-    chmod +x /usr/local/bin/bazel
+# Install Java (required for Java tests)
+RUN apt-get update && apt-get install -y \
+    openjdk-21-jdk \
+    && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+# Install Bazel for building and testing C++ code
+RUN apt-get update && apt-get install -y \
+    wget \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Bazelisk (Bazel version manager)
+RUN wget -O /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64 \
+    && chmod +x /usr/local/bin/bazel
+
+# Install Rust (required for Rust tests)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.90.0
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 
@@ -33,21 +45,30 @@ RUN git clone https://github.com/protocolbuffers/protobuf.git src && \
 
 WORKDIR /app/src
 
-# Bazel needs these env vars for reproducible builds
+# Set environment variables for Bazel
 ENV CI=true
+ENV USE_BAZEL_VERSION=8.0.1
 
-# Clean Bazel cache before applying patches
-RUN bazel clean --expunge || true
+# Add BUILD target for generator_test (missing from repository)
+# This is needed so we can build the test during pre-build phase
+COPY add_build_target.patch /tmp/add_build_target.patch
+RUN patch -p1 < /tmp/add_build_target.patch && rm /tmp/add_build_target.patch
 
-# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
+# Pre-build the test to cache Bazel compilation (speeds up test execution significantly)
+RUN bazel build //src/google/protobuf/compiler/rust:generator_test || true
+
+# Reset any tracked files that may have been modified during build
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Clean Bazel cache again after applying bug patch
-RUN bazel clean --expunge || true
+# Re-apply BUILD target patch (was removed by git reset)
+COPY add_build_target.patch /tmp/add_build_target.patch
+RUN patch -p1 < /tmp/add_build_target.patch && rm /tmp/add_build_target.patch
+
+# Note: We don't rebuild after applying bug.patch - Bazel will rebuild as needed during test
 
 RUN rm -rf /app/src/.git
 

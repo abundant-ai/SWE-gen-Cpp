@@ -1,0 +1,293 @@
+diff --git a/.clang-format b/.clang-format
+deleted file mode 100755
+index c2a2c20..0000000
+--- a/.clang-format
++++ /dev/null
+@@ -1,16 +0,0 @@
+----
+-Language:        Cpp
+-AccessModifierOffset: -2
+-ColumnLimit: 100
+-DerivePointerAlignment: false
+-PointerAlignment: Left
+-SortIncludes: false
+-...
+-
+----
+-Language: Proto
+-ColumnLimit: 100
+-SpacesInContainerLiterals: false
+-AllowShortFunctionsOnASingleLine: false
+-ReflowComments: false
+-...
+diff --git a/templates/cc/message.go b/templates/cc/message.go
+index 7445d60..a92cf3e 100644
+--- a/templates/cc/message.go
++++ b/templates/cc/message.go
+@@ -8,7 +8,7 @@ const messageTpl = `
+ 	{{ else }}
+ 	{
+ 		pgv::ValidationMsg inner_err;
+-		if ({{ hasAccessor .}} && !pgv::BaseValidator::AbstractCheckMessage({{ accessor . }}, &inner_err)) {
++		if ({{ hasAccessor .}} && !pgv::Validator<{{ ctype $f.Type }}>::CheckMessage({{ accessor . }}, &inner_err)) {
+ 			{{ errCause . "inner_err" "embedded message failed validation" }}
+ 		}
+ 	}
+diff --git a/tests/harness/cc/BUILD b/tests/harness/cc/BUILD
+index 929a826..6dceed6 100644
+--- a/tests/harness/cc/BUILD
++++ b/tests/harness/cc/BUILD
+@@ -1,5 +1,4 @@
+-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_proto_library", "cc_test")
+-load("@rules_proto//proto:defs.bzl", "proto_library")
++load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+ 
+ MSVC_C_OPTS = [
+     "-WX",
+@@ -37,29 +36,6 @@ cc_binary(
+     ],
+ )
+ 
+-proto_library(
+-    name = "other_proto",
+-    srcs = ["other.proto"],
+-)
+-
+-cc_proto_library(
+-    name = "other_cc_proto",
+-    deps = ["other_proto"],
+-)
+-
+-cc_test(
+-    name = "polymorphic_test",
+-    srcs = ["polymorphic_test.cc"],
+-    copts = select({
+-        ":windows_x86_64": MSVC_C_OPTS,
+-        "//conditions:default": POSIX_C_OPTS,
+-    }),
+-    deps = [
+-        ":other_cc_proto",
+-        "//tests/harness/cases:cc",
+-    ],
+-)
+-
+ # Ensure that if the headers are included in multiple libraries, those libraries
+ # can be linked without conflicts.
+ cc_test(
+diff --git a/tests/harness/cc/diamond_test.cc b/tests/harness/cc/diamond_test.cc
+index 991c6f9..c138322 100644
+--- a/tests/harness/cc/diamond_test.cc
++++ b/tests/harness/cc/diamond_test.cc
+@@ -25,4 +25,9 @@
+ #include "tests/harness/cases/wkt_wrappers.pb.h"
+ #include "tests/harness/cases/wkt_wrappers.pb.validate.h"
+ 
+-int main() { return EXIT_SUCCESS; }
++int main(int argc, char **argv) {
++  (void)argc;
++  (void)argv;
++
++  return EXIT_SUCCESS;
++}
+diff --git a/tests/harness/cc/other.proto b/tests/harness/cc/other.proto
+deleted file mode 100644
+index 87fb94a..0000000
+--- a/tests/harness/cc/other.proto
++++ /dev/null
+@@ -1,5 +0,0 @@
+-syntax = "proto3";
+-
+-package tests.harness.cc;
+-
+-message Foo {}
+diff --git a/tests/harness/cc/polymorphic_test.cc b/tests/harness/cc/polymorphic_test.cc
+deleted file mode 100644
+index 4744e56..0000000
+--- a/tests/harness/cc/polymorphic_test.cc
++++ /dev/null
+@@ -1,21 +0,0 @@
+-#include "tests/harness/cases/bool.pb.h"
+-#include "tests/harness/cc/other.pb.h"
+-#include "validate/validate.h"
+-
+-int main() {
+-  tests::harness::cc::Foo foo;
+-
+-  // This does not have an associated validator but should still pass.
+-  std::string err;
+-  if (!pgv::BaseValidator::AbstractCheckMessage(foo, &err)) {
+-    return EXIT_FAILURE;
+-  }
+-
+-  tests::harness::cases::BoolConstTrue bool_const_true;
+-  bool_const_true.set_val(false);
+-  if (pgv::BaseValidator::AbstractCheckMessage(bool_const_true, &err)) {
+-    return EXIT_FAILURE;
+-  }
+-
+-  return EXIT_SUCCESS;
+-}
+diff --git a/validate/validate.h b/validate/validate.h
+index 190272e..8ad4c8b 100644
+--- a/validate/validate.h
++++ b/validate/validate.h
+@@ -5,8 +5,8 @@
+ #include <regex>
+ #include <stdexcept>
+ #include <string>
+-#include <typeindex>
+ #include <typeinfo>
++#include <typeindex>
+ #include <unordered_map>
+ 
+ #if !defined(_WIN32)
+@@ -27,7 +27,6 @@
+ 
+ #endif
+ 
+-#include "google/protobuf/message.h"
+ #include "google/protobuf/stubs/strutil.h" // for UTF8Len
+ 
+ namespace pgv {
+@@ -43,78 +42,68 @@ public:
+ using ValidationMsg = std::string;
+ 
+ class BaseValidator {
+-public:
+-  /**
+-   * Validate/check a generic message object with a registered validator for the concrete message
+-   * type.
+-   * @param m supplies the message to check.
+-   * @param err supplies the place to return error information.
+-   * @return true if the validation passes OR there is no registered validator for the concrete
+-   *         message type. false is returned if validation explicitly fails.
+-   */
+-  static bool AbstractCheckMessage(const google::protobuf::Message& m, ValidationMsg* err) {
+-    // Polymorphic lookup is used to see if there is a matching concrete validator. If so, call it.
+-    // Otherwise return success.
+-    auto it = abstractValidators().find(std::type_index(typeid(m)));
+-    if (it == abstractValidators().end()) {
+-      return true;
+-    }
+-    return it->second(m, err);
+-  }
+-
+ protected:
+-  // Used to implement AbstractCheckMessage() above. Every message that is linked into the binary
+-  // will register itself by type_index, allowing for polymorphic lookup later.
+-  static std::unordered_map<std::type_index,
+-                            std::function<bool(const google::protobuf::Message&, ValidationMsg*)>>&
+-  abstractValidators() {
+-    static auto* validator_map = new std::unordered_map<
+-        std::type_index, std::function<bool(const google::protobuf::Message&, ValidationMsg*)>>();
++  static std::unordered_map<std::type_index, BaseValidator*>& validators() {
++    static auto* validator_map = new std::unordered_map<std::type_index, BaseValidator*>();
+     return *validator_map;
+   }
+ };
+ 
+-template <typename T> class Validator : public BaseValidator {
++template <typename T>
++class Validator : public BaseValidator {
+ public:
+-  Validator(std::function<bool(const T&, ValidationMsg*)> check) : check_(check) {
+-    abstractValidators()[std::type_index(typeid(T))] = [this](const google::protobuf::Message& m,
+-                                                              ValidationMsg* err) -> bool {
+-      return check_(dynamic_cast<const T&>(m), err);
+-    };
++  Validator(std::function<bool(const T&, ValidationMsg*)> check) : check_(check)
++  {
++    validators()[std::type_index(typeid(T))] = this;
++  }
++
++  static bool CheckMessage(const T& m, ValidationMsg* err)
++  {
++    // Run typeid() on the variable vs. the type to allow polymorphic lookup of the validator.
++    auto val = static_cast<Validator<T>*>(validators()[std::type_index(typeid(m))]);
++    if (val) {
++      return val->check_(m, err);
++    }
++    return true;
+   }
+ 
+ private:
+   std::function<bool(const T&, ValidationMsg*)> check_;
+ };
+ 
+-static inline std::string String(const ValidationMsg& msg) { return std::string(msg); }
++static inline std::string String(const ValidationMsg& msg)
++{
++  return std::string(msg);
++}
+ 
+-static inline bool IsPrefix(const string& maybe_prefix, const string& search_in) {
++static inline bool IsPrefix(const string& maybe_prefix, const string& search_in)
++{
+   return search_in.compare(0, maybe_prefix.size(), maybe_prefix) == 0;
+ }
+ 
+-static inline bool IsSuffix(const string& maybe_suffix, const string& search_in) {
+-  return maybe_suffix.size() <= search_in.size() &&
+-         search_in.compare(search_in.size() - maybe_suffix.size(), maybe_suffix.size(),
+-                           maybe_suffix) == 0;
++static inline bool IsSuffix(const string& maybe_suffix, const string& search_in)
++{
++  return maybe_suffix.size() <= search_in.size() && search_in.compare(search_in.size() - maybe_suffix.size(), maybe_suffix.size(), maybe_suffix) == 0;
+ }
+ 
+-static inline bool Contains(const string& search_in, const string& to_find) {
++static inline bool Contains(const string& search_in, const string& to_find)
++{
+   return search_in.find(to_find) != string::npos;
+ }
+ 
+-static inline bool NotContains(const string& search_in, const string& to_find) {
++static inline bool NotContains(const string& search_in, const string& to_find)
++{
+   return !Contains(search_in, to_find);
+ }
+ 
+ static inline bool IsIpv4(const string& to_validate) {
+-  struct sockaddr_in sa;
+-  return !(inet_pton(AF_INET, to_validate.c_str(), &sa.sin_addr) < 1);
++	struct sockaddr_in sa;
++	return !(inet_pton(AF_INET, to_validate.c_str(), &sa.sin_addr) < 1);
+ }
+ 
+ static inline bool IsIpv6(const string& to_validate) {
+   struct sockaddr_in6 sa_six;
+-  return !(inet_pton(AF_INET6, to_validate.c_str(), &sa_six.sin6_addr) < 1);
++	return !(inet_pton(AF_INET6, to_validate.c_str(), &sa_six.sin6_addr) < 1);
+ }
+ 
+ static inline bool IsIp(const string& to_validate) {
+@@ -130,7 +119,7 @@ static inline bool IsHostname(const string& to_validate) {
+   const auto iter_end = std::sregex_token_iterator();
+   auto iter = std::sregex_token_iterator(to_validate.begin(), to_validate.end(), dot_regex, -1);
+   for (; iter != iter_end; ++iter) {
+-    const std::string& part = *iter;
++    const std::string &part = *iter;
+     if (part.empty() || part.length() > 63) {
+       return false;
+     }
+@@ -140,9 +129,8 @@ static inline bool IsHostname(const string& to_validate) {
+     if (part.at(part.length() - 1) == '-') {
+       return false;
+     }
+-    for (const auto& character : part) {
+-      if ((character < 'A' || character > 'Z') && (character < 'a' || character > 'z') &&
+-          (character < '0' || character > '9') && character != '-') {
++    for (const auto &character : part) {
++      if ((character < 'A' || character > 'Z') && (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-') {
+         return false;
+       }
+     }
+@@ -152,7 +140,7 @@ static inline bool IsHostname(const string& to_validate) {
+ }
+ 
+ static inline size_t Utf8Len(const string& narrow_string) {
+-  const char* str_char = narrow_string.c_str();
++  const char *str_char = narrow_string.c_str();
+   ptrdiff_t byte_len = narrow_string.length();
+   size_t unicode_len = 0;
+   int char_len = 1;

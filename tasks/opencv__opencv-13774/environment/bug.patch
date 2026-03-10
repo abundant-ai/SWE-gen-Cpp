@@ -1,0 +1,94 @@
+diff --git a/modules/dnn/perf/perf_net.cpp b/modules/dnn/perf/perf_net.cpp
+index 54388fda34..d06689a7fb 100644
+--- a/modules/dnn/perf/perf_net.cpp
++++ b/modules/dnn/perf/perf_net.cpp
+@@ -124,7 +124,8 @@ PERF_TEST_P_(DNNTestNetwork, SSD)
+ PERF_TEST_P_(DNNTestNetwork, OpenFace)
+ {
+     if (backend == DNN_BACKEND_HALIDE ||
+-       (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD))
++        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16) ||
++        (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_MYRIAD))
+         throw SkipTestException("");
+     processNet("dnn/openface_nn4.small2.v1.t7", "", "",
+             Mat(cv::Size(96, 96), CV_32FC3));
+diff --git a/modules/dnn/src/layers/lrn_layer.cpp b/modules/dnn/src/layers/lrn_layer.cpp
+index 145793959b..f34faff338 100644
+--- a/modules/dnn/src/layers/lrn_layer.cpp
++++ b/modules/dnn/src/layers/lrn_layer.cpp
+@@ -92,7 +92,7 @@ public:
+     {
+         return backendId == DNN_BACKEND_OPENCV ||
+                backendId == DNN_BACKEND_HALIDE ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE;
++               (backendId == DNN_BACKEND_INFERENCE_ENGINE && (preferableTarget != DNN_TARGET_MYRIAD || type == CHANNEL_NRM));
+     }
+ 
+ #ifdef HAVE_OPENCL
+diff --git a/modules/dnn/src/layers/normalize_bbox_layer.cpp b/modules/dnn/src/layers/normalize_bbox_layer.cpp
+index 9a3162859a..4766f1704e 100644
+--- a/modules/dnn/src/layers/normalize_bbox_layer.cpp
++++ b/modules/dnn/src/layers/normalize_bbox_layer.cpp
+@@ -67,10 +67,14 @@ public:
+         {
+             if (pnorm != 2)
+                 return false;
+-
+-            return preferableTarget == DNN_TARGET_MYRIAD ? !acrossSpatial : startAxis == 1;
++            if (!blobs.empty())
++                return true;
++            if (preferableTarget == DNN_TARGET_MYRIAD)
++                return !acrossSpatial;
++            return startAxis == 1 && (!acrossSpatial || endAxis > 1);
+         }
+-        return backendId == DNN_BACKEND_OPENCV;
++        else
++            return backendId == DNN_BACKEND_OPENCV;
+     }
+ 
+     bool getMemoryShapes(const std::vector<MatShape> &inputs,
+diff --git a/modules/dnn/src/layers/resize_layer.cpp b/modules/dnn/src/layers/resize_layer.cpp
+index 249b689341..03d806ad2c 100644
+--- a/modules/dnn/src/layers/resize_layer.cpp
++++ b/modules/dnn/src/layers/resize_layer.cpp
+@@ -54,11 +54,12 @@ public:
+ #ifdef HAVE_INF_ENGINE
+         if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+         {
+-            return (interpolation == "nearest" && scaleWidth == scaleHeight) ||
++            return (interpolation == "nearest" && preferableTarget != DNN_TARGET_MYRIAD) ||
+                    (interpolation == "bilinear" && INF_ENGINE_VER_MAJOR_GE(INF_ENGINE_RELEASE_2018R4));
+         }
++        else
+ #endif
+-        return backendId == DNN_BACKEND_OPENCV;
++            return backendId == DNN_BACKEND_OPENCV;
+     }
+ 
+     virtual void finalize(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr) CV_OVERRIDE
+diff --git a/modules/dnn/test/test_tf_importer.cpp b/modules/dnn/test/test_tf_importer.cpp
+index b722ffc964..7ddda7f03a 100644
+--- a/modules/dnn/test/test_tf_importer.cpp
++++ b/modules/dnn/test/test_tf_importer.cpp
+@@ -558,6 +558,8 @@ TEST_P(Test_TensorFlow_layers, split)
+ 
+ TEST_P(Test_TensorFlow_layers, resize_nearest_neighbor)
+ {
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target != DNN_TARGET_MYRIAD)
++        throw SkipTestException("");
+     runTensorFlowNet("resize_nearest_neighbor");
+     runTensorFlowNet("keras_upsampling2d");
+ }
+diff --git a/modules/dnn/test/test_torch_importer.cpp b/modules/dnn/test/test_torch_importer.cpp
+index 547e9f775e..046bd65b86 100644
+--- a/modules/dnn/test/test_torch_importer.cpp
++++ b/modules/dnn/test/test_torch_importer.cpp
+@@ -277,6 +277,8 @@ TEST_P(Test_Torch_nets, OpenFace_accuracy)
+         throw SkipTestException("");
+ #endif
+     checkBackend();
++    if (backend == DNN_BACKEND_INFERENCE_ENGINE && target == DNN_TARGET_OPENCL_FP16)
++        throw SkipTestException("");
+ 
+     const string model = findDataFile("dnn/openface_nn4.small2.v1.t7", false);
+     Net net = readNetFromTorch(model);

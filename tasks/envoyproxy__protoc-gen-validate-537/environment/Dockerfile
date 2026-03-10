@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-# Base system packages
+# Base system packages (common to all languages)
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -9,20 +9,21 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Go 1.19
-RUN curl -fsSL https://go.dev/dl/go1.19.13.linux-amd64.tar.gz | tar -C /usr/local -xzf - && \
+# Install Go (version 1.21+ as required by go.mod)
+RUN curl -fsSL https://go.dev/dl/go1.21.13.linux-amd64.tar.gz | tar -C /usr/local -xzf - && \
     ln -s /usr/local/go/bin/go /usr/local/bin/go && \
     ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 
-# Install Bazel
-RUN curl -fsSL https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64 -o /usr/local/bin/bazel && \
-    chmod +x /usr/local/bin/bazel
-
-# Install Python and unzip
+# Install Python and unzip (required for protoc and Bazel)
 RUN apt-get update && apt-get install -y \
-    python3 python3-pip \
+    python3 \
+    python3-pip \
     unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Bazel (required for building Bazel-based project)
+RUN curl -fsSL https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64 -o /usr/local/bin/bazel && \
+    chmod +x /usr/local/bin/bazel
 
 WORKDIR /app
 
@@ -35,42 +36,31 @@ RUN git clone https://github.com/bufbuild/protoc-gen-validate.git src && \
 
 WORKDIR /app/src
 
-# Download protoc
-RUN mkdir -p /tmp/protoc && \
-    curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v22.2/protoc-22.2-linux-x86_64.zip -o /tmp/protoc.zip && \
-    unzip -q /tmp/protoc.zip -d /tmp/protoc && \
-    mv /tmp/protoc/bin/protoc /usr/local/bin/protoc && \
-    mv /tmp/protoc/include/* /usr/local/include/ && \
-    rm -rf /tmp/protoc /tmp/protoc.zip
+# Install protoc
+RUN PROTOC_VERSION=$(grep -oP 'protoc-\K[0-9]+\.[0-9]+\.[0-9]+' Dockerfile 2>/dev/null || echo "28.3") && \
+    curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip -o /tmp/protoc.zip && \
+    unzip -q /tmp/protoc.zip -d /usr/local && \
+    rm /tmp/protoc.zip
 
-# Install Go dependencies
+# Download Go dependencies
 RUN go mod download
 
-# Install Python dependencies
-RUN pip3 install --break-system-packages --ignore-installed -r requirements.txt
+# Create .bazelrc to disable bzlmod (Bazel 9.0 uses MODULE.bazel by default)
+RUN echo "common --enable_bzlmod=false" > .bazelrc
 
-# Install Python package dependencies (with fallback for validate_email)
-RUN pip3 install --break-system-packages setuptools Jinja2>=2.11.1 protobuf==3.20.2 astunparse>=1.6.3 validate_email 2>/dev/null || \
-    pip3 install --break-system-packages setuptools Jinja2>=2.11.1 protobuf==3.20.2 astunparse>=1.6.3 py3-validate-email
+# Initialize Bazel and fetch all external dependencies (including rules_proto and rules_cc)
+# This ensures dependencies are available even if not used in the current build
+RUN bazel fetch @rules_proto//... @rules_cc//... 2>/dev/null || bazel fetch //... 2>/dev/null || true
 
-# Install protoc-gen-go
-RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.30.0
-ENV PATH="/root/go/bin:${PATH}"
-ENV GOPATH="/root/go"
+ENV CI=true
 
-# Build the protoc-gen-validate plugin
-RUN make build
-
-# Reset to clean state before applying bug.patch
+# If install/build steps touched tracked files, reset them so bug.patch applies cleanly,
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
 
-# Rebuild with buggy templates
-RUN make build
-
-RUN rm -rf /app/src/.git
+RUN rm -rf .git
 
 WORKDIR /app/src

@@ -1,0 +1,180 @@
+diff --git a/modules/dnn/src/dnn.cpp b/modules/dnn/src/dnn.cpp
+index 0177b31a47..469951cccf 100644
+--- a/modules/dnn/src/dnn.cpp
++++ b/modules/dnn/src/dnn.cpp
+@@ -2729,9 +2729,9 @@ void Layer::applyHalideScheduler(Ptr<BackendNode>& node, const std::vector<Mat*>
+     }
+     else if (targetId == DNN_TARGET_OPENCL)
+     {
+-        int c_split = outC > 8 ? (outC > 16 ? 8 : 4) : outC;
+         if (outW == 1 && outH == 1)
+         {
++            int c_split = outC > 8 ? (outC > 16 ? 8 : 4) : outC;
+             top.split(c, co, ci, c_split)
+                .fuse(x, y, tile).fuse(co, tile, tile).fuse(n, tile, tile)
+                .gpu_blocks(tile)
+@@ -2741,6 +2741,8 @@ void Layer::applyHalideScheduler(Ptr<BackendNode>& node, const std::vector<Mat*>
+         {
+             int x_split = outW > 8 ? (outW >= 32 ? 16 : 8) : outW;
+             int y_split = outH > 8 ? (outH >= 32 ? 16 : 8) : outH;
++            // Supported vectorization widths: 2, 3, 4, 8, 16
++            int c_split = outC > 8 ? (outC > 16 ? 8 : 4) : std::min(4, outC);
+             top.split(x, xo, xi, x_split).split(y, yo, yi, y_split)
+                .split(c, co, ci, c_split)
+                .gpu_blocks(xo, yo, co)
+diff --git a/modules/dnn/src/layers/convolution_layer.cpp b/modules/dnn/src/layers/convolution_layer.cpp
+index 27818e5e7c..61489e741e 100644
+--- a/modules/dnn/src/layers/convolution_layer.cpp
++++ b/modules/dnn/src/layers/convolution_layer.cpp
+@@ -82,7 +82,21 @@ public:
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+         if (backendId == DNN_BACKEND_INFERENCE_ENGINE)
+-            return preferableTarget != DNN_TARGET_MYRIAD || type != "Deconvolution" || adjustPad == Size();
++        {
++            if (type == "Convolution")
++                return preferableTarget != DNN_TARGET_MYRIAD || dilation.width == dilation.height;
++            else
++            {
++                CV_Assert(type == "Deconvolution");
++                const int outGroupCn = blobs[0].size[1];  // Weights are in IOHW layout
++                const int group = numOutput / outGroupCn;
++                if (group != 1)
++                    return false;
++                if (preferableTarget == DNN_TARGET_OPENCL || preferableTarget == DNN_TARGET_OPENCL_FP16)
++                    return dilation.width == 1 && dilation.height == 1;
++                return true;
++            }
++        }
+         else
+             return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_HALIDE;
+     }
+diff --git a/modules/dnn/src/layers/eltwise_layer.cpp b/modules/dnn/src/layers/eltwise_layer.cpp
+index 07a7f60228..8eb3ff4a68 100644
+--- a/modules/dnn/src/layers/eltwise_layer.cpp
++++ b/modules/dnn/src/layers/eltwise_layer.cpp
+@@ -97,8 +97,8 @@ public:
+     virtual bool supportBackend(int backendId) CV_OVERRIDE
+     {
+         return backendId == DNN_BACKEND_OPENCV ||
+-               backendId == DNN_BACKEND_HALIDE && haveHalide() ||
+-               backendId == DNN_BACKEND_INFERENCE_ENGINE && haveInfEngine();
++               backendId == DNN_BACKEND_HALIDE ||
++               backendId == DNN_BACKEND_INFERENCE_ENGINE && (op != SUM || coeffs.empty());
+     }
+ 
+     bool getMemoryShapes(const std::vector<MatShape> &inputs,
+diff --git a/modules/dnn/src/layers/reorg_layer.cpp b/modules/dnn/src/layers/reorg_layer.cpp
+index 102f29874a..89b6f1d85b 100644
+--- a/modules/dnn/src/layers/reorg_layer.cpp
++++ b/modules/dnn/src/layers/reorg_layer.cpp
+@@ -41,9 +41,9 @@
+ //M*/
+ 
+ #include "../precomp.hpp"
++#include "../op_inf_engine.hpp"
+ #include <opencv2/dnn/shape_utils.hpp>
+ #include <opencv2/dnn/all_layers.hpp>
+-#include <iostream>
+ 
+ #ifdef HAVE_OPENCL
+ #include "opencl_kernels_dnn.hpp"
+@@ -85,6 +85,11 @@ public:
+         return false;
+     }
+ 
++    virtual bool supportBackend(int backendId) CV_OVERRIDE
++    {
++        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_INFERENCE_ENGINE;
++    }
++
+ #ifdef HAVE_OPENCL
+     bool forward_ocl(InputArrayOfArrays inps, OutputArrayOfArrays outs, OutputArrayOfArrays internals)
+     {
+@@ -169,6 +174,20 @@ public:
+         }
+     }
+ 
++    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
++    {
++#ifdef HAVE_INF_ENGINE
++        InferenceEngine::LayerParams lp;
++        lp.name = name;
++        lp.type = "ReorgYolo";
++        lp.precision = InferenceEngine::Precision::FP32;
++        std::shared_ptr<InferenceEngine::CNNLayer> ieLayer(new InferenceEngine::CNNLayer(lp));
++        ieLayer->params["stride"] = format("%d", reorgStride);
++        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
++#endif  // HAVE_INF_ENGINE
++        return Ptr<BackendNode>();
++    }
++
+     virtual int64 getFLOPS(const std::vector<MatShape> &inputs,
+                            const std::vector<MatShape> &outputs) const CV_OVERRIDE
+     {
+diff --git a/modules/dnn/src/layers/resize_layer.cpp b/modules/dnn/src/layers/resize_layer.cpp
+index 358ee8dd99..4bf7b506a5 100644
+--- a/modules/dnn/src/layers/resize_layer.cpp
++++ b/modules/dnn/src/layers/resize_layer.cpp
+@@ -192,6 +192,11 @@ public:
+         return (outputs[0][2] == inputs[0][2]) && (outputs[0][3] == inputs[0][3]);
+     }
+ 
++    virtual bool supportBackend(int backendId) CV_OVERRIDE
++    {
++        return backendId == DNN_BACKEND_OPENCV || backendId == DNN_BACKEND_INFERENCE_ENGINE;
++    }
++
+     virtual void finalize(const std::vector<Mat*>& inputs, std::vector<Mat> &outputs) CV_OVERRIDE
+     {
+         if (!outWidth && !outHeight)
+@@ -204,6 +209,22 @@ public:
+         scaleHeight = (outHeight > 1) ? (static_cast<float>(inpHeight - 1) / (outHeight - 1)) : 0.f;
+         scaleWidth = (outWidth > 1) ? (static_cast<float>(inpWidth - 1) / (outWidth - 1)) : 0.f;
+     }
++
++    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
++    {
++#ifdef HAVE_INF_ENGINE
++        InferenceEngine::LayerParams lp;
++        lp.name = name;
++        lp.type = "Interp";
++        lp.precision = InferenceEngine::Precision::FP32;
++
++        std::shared_ptr<InferenceEngine::CNNLayer> ieLayer(new InferenceEngine::CNNLayer(lp));
++        ieLayer->params["pad_beg"] = "0";
++        ieLayer->params["pad_end"] = "0";
++        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
++#endif  // HAVE_INF_ENGINE
++        return Ptr<BackendNode>();
++    }
+ };
+ 
+ Ptr<Layer> InterpLayer::create(const LayerParams& params)
+diff --git a/modules/dnn/src/layers/slice_layer.cpp b/modules/dnn/src/layers/slice_layer.cpp
+index f6f4109c61..e4c723e3bf 100644
+--- a/modules/dnn/src/layers/slice_layer.cpp
++++ b/modules/dnn/src/layers/slice_layer.cpp
+@@ -266,7 +266,21 @@ public:
+         std::shared_ptr<InferenceEngine::CropLayer> ieLayer(new InferenceEngine::CropLayer(lp));
+ 
+         CV_Assert(sliceRanges.size() == 1);
+-        for (int i = sliceRanges[0].size() - 1; i >= 0; --i)
++
++        int from, to, step;
++        if (preferableTarget == DNN_TARGET_MYRIAD)
++        {
++            from = 1;
++            to = sliceRanges[0].size() + 1;
++            step = 1;
++        }
++        else
++        {
++            from = sliceRanges[0].size() - 1;
++            to = -1;
++            step = -1;
++        }
++        for (int i = from; i != to; i += step)
+         {
+             ieLayer->axis.push_back(i);
+             ieLayer->offset.push_back(sliceRanges[0][i].start);

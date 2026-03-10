@@ -1,5 +1,6 @@
 FROM ubuntu:24.04
 
+# Install base system packages
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -19,18 +20,12 @@ RUN git clone https://github.com/uNetworking/uWebSockets.git src && \
 
 WORKDIR /app/src
 
-# Build the project and submodules
-RUN make
-
-# Reset tracked files so bug.patch applies cleanly
+# Reset any modified files before applying bug.patch
 RUN git reset --hard
 
 # Apply bug.patch to revert to buggy state (BASE)
 COPY bug.patch /tmp/bug.patch
 RUN patch -p1 < /tmp/bug.patch && rm /tmp/bug.patch
-
-# Rebuild after applying bug.patch
-RUN make
 
 RUN rm -rf /app/src/.git
 

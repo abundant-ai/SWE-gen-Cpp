@@ -1,0 +1,75 @@
+diff --git a/modules/imgproc/src/color.hpp b/modules/imgproc/src/color.hpp
+index 70e7844277..a327aafefd 100644
+--- a/modules/imgproc/src/color.hpp
++++ b/modules/imgproc/src/color.hpp
+@@ -22,11 +22,15 @@ const float R2YF = 0.299f;
+ 
+ enum
+ {
++    gray_shift = 15,
+     yuv_shift = 14,
+     xyz_shift = 12,
+     R2Y = 4899, // == R2YF*16384
+     G2Y = 9617, // == G2YF*16384
+     B2Y = 1868, // == B2YF*16384
++    RY15 =  9798, // == R2YF*32768 + 0.5
++    GY15 = 19235, // == G2YF*32768 + 0.5
++    BY15 =  3735, // == B2YF*32768 + 0.5
+     BLOCK_SIZE = 256
+ };
+ 
+diff --git a/modules/imgproc/src/color_rgb.cpp b/modules/imgproc/src/color_rgb.cpp
+index 87aabb7d9e..ee3e36bf87 100644
+--- a/modules/imgproc/src/color_rgb.cpp
++++ b/modules/imgproc/src/color_rgb.cpp
+@@ -717,10 +717,10 @@ template<> struct RGB2Gray<uchar>
+ 
+     RGB2Gray(int _srccn, int blueIdx, const int* coeffs) : srccn(_srccn)
+     {
+-        const int coeffs0[] = { R2Y, G2Y, B2Y };
++        const int coeffs0[] = { RY15, GY15, BY15 };
+         if(!coeffs) coeffs = coeffs0;
+ 
+-        int b = 0, g = 0, r = (1 << (yuv_shift-1));
++        int b = 0, g = 0, r = (1 << (gray_shift-1));
+         int db = coeffs[blueIdx^2], dg = coeffs[1], dr = coeffs[blueIdx];
+ 
+         for( int i = 0; i < 256; i++, b += db, g += dg, r += dr )
+@@ -735,7 +735,7 @@ template<> struct RGB2Gray<uchar>
+         int scn = srccn;
+         const int* _tab = tab;
+         for(int i = 0; i < n; i++, src += scn)
+-            dst[i] = (uchar)((_tab[src[0]] + _tab[src[1]+256] + _tab[src[2]+512]) >> yuv_shift);
++            dst[i] = (uchar)((_tab[src[0]] + _tab[src[1]+256] + _tab[src[2]+512]) >> gray_shift);
+     }
+     int srccn;
+     int tab[256*3];
+diff --git a/modules/imgproc/src/opencl/color_rgb.cl b/modules/imgproc/src/opencl/color_rgb.cl
+index b4041f40c8..42ea4acd65 100644
+--- a/modules/imgproc/src/opencl/color_rgb.cl
++++ b/modules/imgproc/src/opencl/color_rgb.cl
+@@ -75,10 +75,14 @@
+ 
+ enum
+ {
++    gray_shift = 15,
+     yuv_shift  = 14,
+     R2Y        = 4899,
+     G2Y        = 9617,
+-    B2Y        = 1868
++    B2Y        = 1868,
++    RY15 = 9798,  // == R2YF*32768 + 0.5
++    GY15 = 19235, // == G2YF*32768 + 0.5
++    BY15 = 3735   // == B2YF*32768 + 0.5
+ };
+ 
+ //constants for conversion from/to RGB and Gray, YUV, YCrCb according to BT.601
+@@ -129,6 +133,8 @@ __kernel void RGB2Gray(__global const uchar * srcptr, int src_step, int src_offs
+                 DATA_TYPE_3 src_pix = vload3(0, src);
+ #ifdef DEPTH_5
+                 dst[0] = fma(src_pix.B_COMP, B2YF, fma(src_pix.G_COMP, G2YF, src_pix.R_COMP * R2YF));
++#elif defined(DEPTH_0)
++                dst[0] = (DATA_TYPE)CV_DESCALE(mad24(src_pix.B_COMP, BY15, mad24(src_pix.G_COMP, GY15, mul24(src_pix.R_COMP, RY15))), gray_shift);
+ #else
+                 dst[0] = (DATA_TYPE)CV_DESCALE(mad24(src_pix.B_COMP, B2Y, mad24(src_pix.G_COMP, G2Y, mul24(src_pix.R_COMP, R2Y))), yuv_shift);
+ #endif

@@ -1,0 +1,173 @@
+diff --git a/cmake/OpenCVCompilerOptions.cmake b/cmake/OpenCVCompilerOptions.cmake
+index 082debf195..30e4a00a3f 100644
+--- a/cmake/OpenCVCompilerOptions.cmake
++++ b/cmake/OpenCVCompilerOptions.cmake
+@@ -125,8 +125,8 @@ if(CV_GCC OR CV_CLANG)
+     )
+       add_extra_compiler_option(-Wimplicit-fallthrough=3)
+     endif()
+-    if(CV_GCC AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 7.0)
+-      add_extra_compiler_option(-Wno-strict-overflow) # Issue appears when compiling surf.cpp from opencv_contrib/modules/xfeatures2d
++    if(CV_GCC AND CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 7.2.0)
++      add_extra_compiler_option(-Wno-strict-overflow) # Issue is fixed in GCC 7.2.1
+     endif()
+   endif()
+   add_extra_compiler_option(-fdiagnostics-show-option)
+diff --git a/modules/calib3d/perf/perf_pnp.cpp b/modules/calib3d/perf/perf_pnp.cpp
+index 7c7254a0df..d3d6076252 100644
+--- a/modules/calib3d/perf/perf_pnp.cpp
++++ b/modules/calib3d/perf/perf_pnp.cpp
+@@ -52,8 +52,8 @@ PERF_TEST_P(PointsNum_Algo, solvePnP,
+         cv::solvePnP(points3d, points2d, intrinsics, distortion, rvec, tvec, false, algo);
+     }
+ 
+-    SANITY_CHECK(rvec, 1e-4);
+-    SANITY_CHECK(tvec, 1e-4);
++    SANITY_CHECK(rvec, 1e-6);
++    SANITY_CHECK(tvec, 1e-6);
+ }
+ 
+ PERF_TEST_P(PointsNum_Algo, solvePnPSmallPoints,
+diff --git a/modules/calib3d/test/test_affine3.cpp b/modules/calib3d/test/test_affine3.cpp
+index a69978b1e5..b0efecaa9f 100644
+--- a/modules/calib3d/test/test_affine3.cpp
++++ b/modules/calib3d/test/test_affine3.cpp
+@@ -47,15 +47,16 @@ namespace opencv_test { namespace {
+ 
+ TEST(Calib3d_Affine3f, accuracy)
+ {
+-    const double eps = 1e-5;
+     cv::Vec3d rvec(0.2, 0.5, 0.3);
+     cv::Affine3d affine(rvec);
+ 
+     cv::Mat expected;
+     cv::Rodrigues(rvec, expected);
+ 
+-    ASSERT_LE(cvtest::norm(cv::Mat(affine.matrix, false).colRange(0, 3).rowRange(0, 3), expected, cv::NORM_L2), eps);
+-    ASSERT_LE(cvtest::norm(cv::Mat(affine.linear()), expected, cv::NORM_L2), eps);
++
++    ASSERT_EQ(0, cvtest::norm(cv::Mat(affine.matrix, false).colRange(0, 3).rowRange(0, 3) != expected, cv::NORM_L2));
++    ASSERT_EQ(0, cvtest::norm(cv::Mat(affine.linear()) != expected, cv::NORM_L2));
++
+ 
+     cv::Matx33d R = cv::Matx33d::eye();
+ 
+diff --git a/modules/core/include/opencv2/core/hal/intrin_avx.hpp b/modules/core/include/opencv2/core/hal/intrin_avx.hpp
+index c21b46a58f..36c7c0f1a1 100644
+--- a/modules/core/include/opencv2/core/hal/intrin_avx.hpp
++++ b/modules/core/include/opencv2/core/hal/intrin_avx.hpp
+@@ -234,15 +234,7 @@ struct v_uint64x4
+     { val = _mm256_setr_epi64x((int64)v0, (int64)v1, (int64)v2, (int64)v3); }
+     v_uint64x4() : val(_mm256_setzero_si256()) {}
+     uint64 get0() const
+-    {
+-    #if defined __x86_64__ || defined _M_X64
+-        return (uint64)_mm_cvtsi128_si64(_mm256_castsi256_si128(val));
+-    #else
+-        int a = _mm_cvtsi128_si32(_mm256_castsi256_si128(val));
+-        int b = _mm_cvtsi128_si32(_mm256_castsi256_si128(_mm256_srli_epi64(val, 32)));
+-        return (unsigned)a | ((uint64)(unsigned)b << 32);
+-    #endif
+-    }
++    { return (uint64)_mm_cvtsi128_si64(_mm256_castsi256_si128(val)); }
+ };
+ 
+ struct v_int64x4
+@@ -255,17 +247,7 @@ struct v_int64x4
+     v_int64x4(int64 v0, int64 v1, int64 v2, int64 v3)
+     { val = _mm256_setr_epi64x(v0, v1, v2, v3); }
+     v_int64x4() : val(_mm256_setzero_si256()) {}
+-
+-    int64 get0() const
+-    {
+-    #if defined __x86_64__ || defined _M_X64
+-        return (int64)_mm_cvtsi128_si64(_mm256_castsi256_si128(val));
+-    #else
+-        int a = _mm_cvtsi128_si32(_mm256_castsi256_si128(val));
+-        int b = _mm_cvtsi128_si32(_mm256_castsi256_si128(_mm256_srli_epi64(val, 32)));
+-        return (int64)((unsigned)a | ((uint64)(unsigned)b << 32));
+-    #endif
+-    }
++    int64 get0() const { return (int64)_mm_cvtsi128_si64(_mm256_castsi256_si128(val)); }
+ };
+ 
+ struct v_float64x4
+diff --git a/modules/core/perf/opencl/perf_arithm.cpp b/modules/core/perf/opencl/perf_arithm.cpp
+index 9f5f6e9e77..7556041c94 100644
+--- a/modules/core/perf/opencl/perf_arithm.cpp
++++ b/modules/core/perf/opencl/perf_arithm.cpp
+@@ -117,7 +117,7 @@ OCL_PERF_TEST_P(LogFixture, Log, ::testing::Combine(
+     OCL_TEST_CYCLE() cv::log(src, dst);
+ 
+     if (CV_MAT_DEPTH(type) >= CV_32F)
+-        SANITY_CHECK(dst, 2e-4, ERROR_RELATIVE);
++        SANITY_CHECK(dst, 1e-5, ERROR_RELATIVE);
+     else
+         SANITY_CHECK(dst, 1);
+ }
+diff --git a/modules/core/perf/perf_split.cpp b/modules/core/perf/perf_split.cpp
+index 2cbc0b289c..d1d66a10bb 100644
+--- a/modules/core/perf/perf_split.cpp
++++ b/modules/core/perf/perf_split.cpp
+@@ -27,7 +27,11 @@ PERF_TEST_P( Size_Depth_Channels, split,
+     int runs = (sz.width <= 640) ? 8 : 1;
+     TEST_CYCLE_MULTIRUN(runs) split(m, (vector<Mat>&)mv);
+ 
++#if defined (__aarch64__)
+     SANITY_CHECK(mv, 2e-5);
++#else
++    SANITY_CHECK(mv, 1e-12);
++#endif
+ }
+ 
+ } // namespace
+diff --git a/modules/dnn/test/test_caffe_importer.cpp b/modules/dnn/test/test_caffe_importer.cpp
+index 85ff7ace21..33f2fa1f22 100644
+--- a/modules/dnn/test/test_caffe_importer.cpp
++++ b/modules/dnn/test/test_caffe_importer.cpp
+@@ -391,7 +391,7 @@ TEST_P(Test_Caffe_nets, Colorization)
+     Mat out = net.forward();
+ 
+     // Reference output values are in range [-29.1, 69.5]
+-    const double l1 = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.25 : 4e-4;
++    const double l1 = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 0.21 : 4e-4;
+     const double lInf = (target == DNN_TARGET_OPENCL_FP16 || target == DNN_TARGET_MYRIAD) ? 5.3 : 3e-3;
+     normAssert(out, ref, "", l1, lInf);
+ }
+diff --git a/modules/dnn/test/test_torch_importer.cpp b/modules/dnn/test/test_torch_importer.cpp
+index 390b731776..88742c68cc 100644
+--- a/modules/dnn/test/test_torch_importer.cpp
++++ b/modules/dnn/test/test_torch_importer.cpp
+@@ -313,14 +313,14 @@ TEST_P(Test_Torch_nets, ENet_accuracy)
+     // Due to numerical instability in Pooling-Unpooling layers (indexes jittering)
+     // thresholds for ENet must be changed. Accuracy of results was checked on
+     // Cityscapes dataset and difference in mIOU with Torch is 10E-4%
+-    normAssert(ref, out, "", 0.00044, /*target == DNN_TARGET_CPU ? 0.453 : */0.5);
++    normAssert(ref, out, "", 0.00044, target == DNN_TARGET_CPU ? 0.453 : 0.44);
+ 
+     const int N = 3;
+     for (int i = 0; i < N; i++)
+     {
+         net.setInput(inputBlob, "");
+         Mat out = net.forward();
+-        normAssert(ref, out, "", 0.00044, /*target == DNN_TARGET_CPU ? 0.453 : */0.5);
++        normAssert(ref, out, "", 0.00044, target == DNN_TARGET_CPU ? 0.453 : 0.44);
+     }
+ }
+ 
+diff --git a/modules/photo/test/test_hdr.cpp b/modules/photo/test/test_hdr.cpp
+index fd4797fac7..c4bf536278 100644
+--- a/modules/photo/test/test_hdr.cpp
++++ b/modules/photo/test/test_hdr.cpp
+@@ -213,7 +213,11 @@ TEST(Photo_MergeRobertson, regression)
+     loadImage(test_path + "merge/robertson.hdr", expected);
+     merge->process(images, result, times);
+ 
++#if defined(__aarch64__) || defined(__PPC64__)
+     const float eps = 6.f;
++#else
++    const float eps = 5.f;
++#endif
+     checkEqual(expected, result, eps, "MergeRobertson");
+ }
+ 

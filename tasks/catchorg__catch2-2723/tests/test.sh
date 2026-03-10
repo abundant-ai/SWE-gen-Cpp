@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eo pipefail
 
 cd /app/src
 
@@ -44,41 +45,35 @@ cp "/tests/SelfTest/IntrospectiveTests/AssertionHandler.tests.cpp" "tests/SelfTe
 mkdir -p "tests/SelfTest/UsageTests"
 cp "/tests/SelfTest/UsageTests/Misc.tests.cpp" "tests/SelfTest/UsageTests/Misc.tests.cpp"
 
-# Reconfigure CMake to pick up the updated test files
+# Reconfigure CMake with testing enabled
 if ! cmake -Bbuild -H. \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCATCH_DEVELOPMENT_BUILD=ON \
     -DCATCH_BUILD_TESTING=ON \
-    -DCATCH_BUILD_EXTRA_TESTS=OFF \
-    -DCMAKE_CXX_FLAGS="-Wno-error=dangling-reference" \
+    -DCATCH_BUILD_EXTRA_TESTS=ON \
+    -DCMAKE_CXX_FLAGS="-Wno-error=deprecated-literal-operator" \
     -G Ninja 2>&1; then
     echo "FAIL: CMake reconfiguration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Rebuild with the updated test files
+# Rebuild to verify that code compiles
 if ! cmake --build build 2>&1; then
     echo "FAIL: Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Run the AssertionHandler tests to verify they pass
-if ! ./build/tests/SelfTest "[assertion-handler]" 2>&1; then
-    echo "FAIL: AssertionHandler tests did not pass"
+# Run the test suite (this PR changes test count and output baselines)
+# The fix re-adds tests that were removed, so we verify the tests compile and run
+if ! ./build/tests/SelfTest '~[!nonportable]' '~[!benchmark]' '~[approvals]' 2>&1; then
+    echo "FAIL: Tests failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 fi
 
-# Run the checked-if tests to verify they properly catch exceptions
-if ! ./build/tests/SelfTest "[checked-if]" 2>&1; then
-    echo "FAIL: checked-if tests did not pass"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-echo "SUCCESS: All checks passed"
+echo "SUCCESS: All tests passed"
 test_status=0
 
 if [ $test_status -eq 0 ]; then

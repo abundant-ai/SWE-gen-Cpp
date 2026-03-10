@@ -14,38 +14,23 @@ cp "/tests/test_fmt_helper.cpp" "tests/test_fmt_helper.cpp"
 mkdir -p "tests"
 cp "/tests/test_pattern_formatter.cpp" "tests/test_pattern_formatter.cpp"
 
-# Rebuild to incorporate the new test files
-rm -rf build
+# Build and run tests for specific tags
 mkdir -p build
 cd build
-
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_STANDARD=11 \
-    -DSPDLOG_BUILD_TESTS=ON \
-    -DSPDLOG_BUILD_TESTS_HO=OFF \
-    -DSPDLOG_BUILD_EXAMPLE=OFF || {
+cmake -DSPDLOG_BUILD_TESTS=ON .. 2>&1 || {
     echo "CMake configuration failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-make -j2 2>&1 || {
+cmake --build . --target spdlog-utests 2>&1 || {
     echo "Build failed"
     echo 0 > /logs/verifier/reward.txt
     exit 1
 }
 
-# Check if test binary was built successfully
-if [ ! -f tests/spdlog-utests ]; then
-    echo "Build failed"
-    echo 0 > /logs/verifier/reward.txt
-    exit 1
-fi
-
-cd ..
-# Run only the tests for this PR (daily_logger, errors, fmt_helper, pattern_formatter)
-./build/tests/spdlog-utests "[daily_logger],[daily_file_sink],[rotating_file_sink],[errors],[fmt_helper],[pattern_formatter]"
+# Run tests for all relevant tags
+./tests/spdlog-utests "[daily_logger][rotating_file_sink][daily_file_sink][errors][fmt_helper][pattern_formatter]" 2>&1
 test_status=$?
 
 if [ $test_status -eq 0 ]; then
