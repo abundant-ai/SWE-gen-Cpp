@@ -1,4 +1,4 @@
-# SWE-gen-C++ (work in progress) 
+# SWE-gen-C++
 
 <p align="center">
   <a href="https://github.com/abundant-ai/SWE-gen-Cpp">
